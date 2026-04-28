@@ -36,11 +36,40 @@ def execute_generate_pairs_from_task(args):
         from wisent.core.primitives.contrastive_pairs.core.buliders import (
             from_phrase_pairs,
         )
-        cached = load_pair_texts_from_hf(
-            args.task_name,
-            limit=getattr(args, "limit", 0) or 0,
-            use_cache=True,
-        )
+        import time as _time
+        import random as _random
+
+        cached = None
+        # Retry the cache fetch on 429 with jittered exponential backoff.
+        # If we fall through to build_contrastive_pairs we hit the SAME
+        # rate-limited endpoint via lm-eval, so giving up too early
+        # converts a transient 429 into a permanent NoDocsAvailableError.
+        for _attempt in range(8):
+            try:
+                cached = load_pair_texts_from_hf(
+                    args.task_name,
+                    limit=getattr(args, "limit", 0) or 0,
+                    use_cache=True,
+                )
+                break
+            except Exception as _exc:
+                _msg = str(_exc).lower()
+                _is_429 = "429" in _msg or "too many requests" in _msg or "rate limit" in _msg
+                _is_404 = "404" in _msg or "not found" in _msg or "entrynotfounderror" in _msg
+                if _is_404:
+                    print(f"   ⚠ pair_texts cache MISS (404) for '{args.task_name}'; "
+                          f"will fresh-build", flush=True)
+                    cached = None
+                    break
+                if _is_429 and _attempt < 7:
+                    _base = 30 * (2 ** min(_attempt, 5))
+                    _time.sleep(min(_base + _random.uniform(0, _base), 600))
+                    continue
+                print(f"   ⚠ pair_texts cache fetch failed for '{args.task_name}': {_exc}",
+                      flush=True)
+                cached = None
+                break
+
         if cached:
             print(f"   ✓ Loaded {len(cached)} pre-computed pairs from HF cache")
             phrase_pairs = [
@@ -52,7 +81,7 @@ def execute_generate_pairs_from_task(args):
             cps = from_phrase_pairs(phrase_pairs)
             pairs = list(cps.pairs)
     except Exception as exc:
-        print(f"   ⚠ HF pair_texts cache miss for '{args.task_name}': {exc}; "
+        print(f"   ⚠ HF pair_texts cache fast-path crashed for '{args.task_name}': {exc}; "
               f"falling back to fresh build", flush=True)
 
     try:
