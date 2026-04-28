@@ -43,7 +43,13 @@ def get_component_hook_points(
     
     Different model architectures use different naming conventions.
     """
-    if "llama" in model_type.lower() or "mistral" in model_type.lower():
+    # gpt_oss (and similar modern decoder-only families) use Llama-style
+    # `model.layers.{i}.self_attn.{q,k,v,o}_proj` paths despite their
+    # model_type containing 'gpt'. Verified via the model.safetensors.index
+    # weight_map for openai/gpt-oss-20b which references model.layers.0.*.
+    # Match these BEFORE the generic 'gpt' branch (which is GPT-2 style).
+    mt = model_type.lower()
+    if "llama" in mt or "mistral" in mt or "gpt_oss" in mt or "gptoss" in mt:
         base = f"model.layers.{layer}"
         mapping = {
             TransformerComponent.RESIDUAL: [base],

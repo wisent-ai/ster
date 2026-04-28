@@ -58,8 +58,16 @@ def get_all_docs_from_task(task: Any) -> Tuple[List[Dict[str, Any]], Dict[str, i
                 break
             except Exception as exc:
                 msg = str(exc)
-                is_429 = "429" in msg or "Too Many Requests" in msg or "rate limit" in msg.lower()
-                if is_429 and attempt < 4:
+                lower = msg.lower()
+                is_transient = (
+                    "429" in msg
+                    or "too many requests" in lower
+                    or "rate limit" in lower
+                    or "couldn't find cache" in lower
+                    or "couldn't reach" in lower
+                    or "connection" in lower and ("timed out" in lower or "reset" in lower)
+                )
+                if is_transient and attempt < 4:
                     time.sleep(15 + attempt * 30)
                     continue
                 break
