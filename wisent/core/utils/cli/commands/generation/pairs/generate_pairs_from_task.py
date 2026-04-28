@@ -22,17 +22,48 @@ def execute_generate_pairs_from_task(args):
 
     print(f"\n📊 Generating contrastive pairs from task: {args.task_name}")
 
+    pairs = None
+    pairs_task_name = args.task_name
+    # Fast path: pull pre-computed pair_texts from wisent-ai/activations on HF
+    # (uploaded once by upload_pair_texts) before falling back to the lm-eval
+    # path that hits HF dataset_info per task and gets 429-throttled when
+    # multiple agents run in parallel. Cache miss / network error falls
+    # through to the fresh-build path.
     try:
-        print(f"\n🔄 Loading task '{args.task_name}'...")
-        print(f"   🔨 Building contrastive pairs...")
-        
-        # Use unified loader - handles HF, lm-eval, and group tasks automatically
-        pairs = build_contrastive_pairs(
-            task_name=args.task_name,
-            limit=getattr(args, 'limit', None),
-            train_ratio=args.train_ratio,
+        from wisent.core.reading.modules.utilities.data.sources.hf.hf_loaders import (
+            load_pair_texts_from_hf,
         )
-        pairs_task_name = args.task_name
+        from wisent.core.primitives.contrastive_pairs.core.buliders import (
+            from_phrase_pairs,
+        )
+        cached = load_pair_texts_from_hf(
+            args.task_name,
+            limit=getattr(args, "limit", 0) or 0,
+            use_cache=True,
+        )
+        if cached:
+            print(f"   ✓ Loaded {len(cached)} pre-computed pairs from HF cache")
+            phrase_pairs = [
+                {"prompt": v.get("prompt", ""),
+                 "positive": v.get("positive", ""),
+                 "negative": v.get("negative", "")}
+                for v in cached.values()
+            ]
+            cps = from_phrase_pairs(phrase_pairs)
+            pairs = list(cps.pairs)
+    except Exception as exc:
+        print(f"   ⚠ HF pair_texts cache miss for '{args.task_name}': {exc}; "
+              f"falling back to fresh build", flush=True)
+
+    try:
+        if pairs is None:
+            print(f"\n🔄 Loading task '{args.task_name}'...")
+            print(f"   🔨 Building contrastive pairs...")
+            pairs = build_contrastive_pairs(
+                task_name=args.task_name,
+                limit=getattr(args, 'limit', None),
+                train_ratio=args.train_ratio,
+            )
 
         print(f"   ✓ Generated {len(pairs)} contrastive pairs")
 
