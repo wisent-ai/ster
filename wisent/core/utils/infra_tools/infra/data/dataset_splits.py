@@ -37,15 +37,15 @@ def get_all_docs_from_task(task: Any) -> Tuple[List[Dict[str, Any]], Dict[str, i
     ]
 
     import time
+    import random
     for docs_method, has_method in split_methods:
         if not hasattr(task, has_method):
             continue
-        # Retry on HF 429 rate limits — the wisent batch fleet has 20+
-        # parallel agents that hit dataset_info on every job, blowing the
-        # 1000-req/5-min free-tier ceiling. Without retry, a single 429
-        # cascades to NoDocsAvailableError(task='NoneType') and the whole
-        # job is marked failed even though the task is fine.
-        for attempt in range(5):
+        # Retry transients: the wisent fleet's 20+ parallel agents
+        # saturate HF's 1000-req-per-5-min ceiling. Jittered backoff so
+        # 20 agents that all 429'd at the same instant don't all wake at
+        # the same instant for the next attempt — that just re-saturates.
+        for attempt in range(8):
             try:
                 has_docs = getattr(task, has_method)
                 if callable(has_docs) and has_docs():
@@ -67,8 +67,10 @@ def get_all_docs_from_task(task: Any) -> Tuple[List[Dict[str, Any]], Dict[str, i
                     or "couldn't reach" in lower
                     or "connection" in lower and ("timed out" in lower or "reset" in lower)
                 )
-                if is_transient and attempt < 4:
-                    time.sleep(15 + attempt * 30)
+                if is_transient and attempt < 7:
+                    base = 30 * (2 ** min(attempt, 5))  # 30,60,120,240,480,960,960,960
+                    jitter = random.uniform(0, base)
+                    time.sleep(min(base + jitter, 600))
                     continue
                 break
 
