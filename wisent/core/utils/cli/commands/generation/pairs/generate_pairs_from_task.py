@@ -25,31 +25,29 @@ def execute_generate_pairs_from_task(args):
     pairs = None
     pairs_task_name = args.task_name
     # Fast path: pull pre-computed pair_texts from wisent-ai/activations on HF
-    # (uploaded once by upload_pair_texts) before falling back to the lm-eval
-    # path that hits HF dataset_info per task and gets 429-throttled when
-    # multiple agents run in parallel. Cache miss / network error falls
-    # through to the fresh-build path.
+    # before falling back to the lm-eval path that hits HF dataset_info per
+    # task and gets 429-throttled when multiple agents run in parallel. The
+    # uploaded file already matches this command's OUTPUT schema
+    # ({task_name, num_pairs, pairs:[pair.to_dict(),...]}), so we copy it
+    # straight to args.output instead of round-tripping through
+    # ContrastivePair construction. Cache miss / network error falls
+    # through to the fresh-build path. 429 retries with jittered
+    # exponential backoff because falling through hits the SAME rate-
+    # limited token bucket via lm-eval.
     try:
-        from wisent.core.reading.modules.utilities.data.sources.hf.hf_loaders import (
-            load_pair_texts_from_hf,
-        )
-        from wisent.core.primitives.contrastive_pairs.core.buliders import (
-            from_phrase_pairs,
-        )
+        from huggingface_hub import hf_hub_download
+        import shutil as _shutil
         import time as _time
         import random as _random
 
-        cached = None
-        # Retry the cache fetch on 429 with jittered exponential backoff.
-        # If we fall through to build_contrastive_pairs we hit the SAME
-        # rate-limited endpoint via lm-eval, so giving up too early
-        # converts a transient 429 into a permanent NoDocsAvailableError.
+        cached_path = None
         for _attempt in range(8):
             try:
-                cached = load_pair_texts_from_hf(
-                    args.task_name,
-                    limit=getattr(args, "limit", 0) or 0,
-                    use_cache=True,
+                cached_path = hf_hub_download(
+                    repo_id="wisent-ai/activations",
+                    repo_type="dataset",
+                    filename=f"pair_texts/{args.task_name}.json",
+                    token=os.environ.get("HF_TOKEN") or None,
                 )
                 break
             except Exception as _exc:
@@ -59,7 +57,7 @@ def execute_generate_pairs_from_task(args):
                 if _is_404:
                     print(f"   ⚠ pair_texts cache MISS (404) for '{args.task_name}'; "
                           f"will fresh-build", flush=True)
-                    cached = None
+                    cached_path = None
                     break
                 if _is_429 and _attempt < 7:
                     _base = 30 * (2 ** min(_attempt, 5))
@@ -67,19 +65,18 @@ def execute_generate_pairs_from_task(args):
                     continue
                 print(f"   ⚠ pair_texts cache fetch failed for '{args.task_name}': {_exc}",
                       flush=True)
-                cached = None
+                cached_path = None
                 break
 
-        if cached:
-            print(f"   ✓ Loaded {len(cached)} pre-computed pairs from HF cache")
-            phrase_pairs = [
-                {"prompt": v.get("prompt", ""),
-                 "positive": v.get("positive", ""),
-                 "negative": v.get("negative", "")}
-                for v in cached.values()
-            ]
-            cps = from_phrase_pairs(name=args.task_name, phrase_pairs=phrase_pairs)
-            pairs = list(cps.pairs)
+        if cached_path:
+            os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+            _shutil.copyfile(cached_path, args.output)
+            with open(cached_path, "r") as _f:
+                _doc = json.load(_f)
+            _n = _doc.get("num_pairs", len(_doc.get("pairs", [])))
+            print(f"   ✓ Copied {_n} pre-computed pairs from HF cache to {args.output}")
+            print(f"\n✅ Contrastive pairs generation completed successfully!\n")
+            return
     except Exception as exc:
         print(f"   ⚠ HF pair_texts cache fast-path crashed for '{args.task_name}': {exc}; "
               f"falling back to fresh build", flush=True)
