@@ -78,7 +78,7 @@ def execute_generate_pairs_from_task(args):
                  "negative": v.get("negative", "")}
                 for v in cached.values()
             ]
-            cps = from_phrase_pairs(phrase_pairs)
+            cps = from_phrase_pairs(name=args.task_name, phrase_pairs=phrase_pairs)
             pairs = list(cps.pairs)
     except Exception as exc:
         print(f"   ⚠ HF pair_texts cache fast-path crashed for '{args.task_name}': {exc}; "
