@@ -85,11 +85,29 @@ def execute_generate_pairs_from_task(args):
         if pairs is None:
             print(f"\n🔄 Loading task '{args.task_name}'...")
             print(f"   🔨 Building contrastive pairs...")
-            pairs = build_contrastive_pairs(
-                task_name=args.task_name,
-                limit=getattr(args, 'limit', None),
-                train_ratio=args.train_ratio,
-            )
+            # Retry on 429 here too: lm-eval's task instantiation
+            # (loader.load_lm_eval_task -> get_task_dict) hits HF
+            # dataset_info BEFORE the per-split docs fetch the
+            # dataset_splits.get_all_docs_from_task retry handles, so a
+            # 429 at task-load time never reaches that retry layer.
+            import time as _t, random as _r
+            for _attempt in range(8):
+                try:
+                    pairs = build_contrastive_pairs(
+                        task_name=args.task_name,
+                        limit=getattr(args, 'limit', None),
+                        train_ratio=args.train_ratio,
+                    )
+                    break
+                except Exception as _exc:
+                    _msg = str(_exc).lower()
+                    _is_429 = ("429" in _msg or "too many requests" in _msg
+                               or "rate limit" in _msg)
+                    if _is_429 and _attempt < 7:
+                        _base = 30 * (2 ** min(_attempt, 5))
+                        _t.sleep(min(_base + _r.uniform(0, _base), 600))
+                        continue
+                    raise
 
         print(f"   ✓ Generated {len(pairs)} contrastive pairs")
 
