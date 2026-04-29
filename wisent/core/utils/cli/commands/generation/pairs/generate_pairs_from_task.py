@@ -7,6 +7,25 @@ import os
 from wisent.core.utils.config_tools.constants import JSON_INDENT
 
 
+def _is_rate_limit_exc(exc):
+    """True if exc OR any link in its __cause__/__context__ chain is a 429.
+
+    wisent.extractors.lm_eval.lm_task_pairs_generation has bare
+    'except Exception:' blocks that swallow HF 429s into a downstream
+    NoDocsAvailableError. The 429 is preserved on __context__, so walk
+    the chain so the retry below sees through the wrap.
+    """
+    seen = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        msg = str(cur).lower()
+        if "429" in msg or "too many requests" in msg or "rate limit" in msg:
+            return True
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return False
+
+
 def execute_generate_pairs_from_task(args):
     """Execute the generate-pairs-from-task command - load and save contrastive pairs from a task."""
     # Expand task if it's a skill or risk name
@@ -52,7 +71,7 @@ def execute_generate_pairs_from_task(args):
                 break
             except Exception as _exc:
                 _msg = str(_exc).lower()
-                _is_429 = "429" in _msg or "too many requests" in _msg or "rate limit" in _msg
+                _is_429 = _is_rate_limit_exc(_exc)
                 _is_404 = "404" in _msg or "not found" in _msg or "entrynotfounderror" in _msg
                 if _is_404:
                     print(f"   ⚠ pair_texts cache MISS (404) for '{args.task_name}'; "
@@ -100,9 +119,7 @@ def execute_generate_pairs_from_task(args):
                     )
                     break
                 except Exception as _exc:
-                    _msg = str(_exc).lower()
-                    _is_429 = ("429" in _msg or "too many requests" in _msg
-                               or "rate limit" in _msg)
+                    _is_429 = _is_rate_limit_exc(_exc)
                     if _is_429 and _attempt < 7:
                         _base = 30 * (2 ** min(_attempt, 5))
                         _t.sleep(min(_base + _r.uniform(0, _base), 600))
