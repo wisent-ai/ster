@@ -45,15 +45,13 @@ def execute_generate_pairs_from_task(args):
     pairs_task_name = args.task_name
     # Fast path: pull pre-computed pair_texts from wisent-ai/activations on HF
     # before falling back to the lm-eval path that hits HF dataset_info per
-    # task and gets 429-throttled when multiple agents run in parallel. The
-    # uploaded file already matches this command's OUTPUT schema
-    # ({task_name, num_pairs, pairs:[pair.to_dict(),...]}), so we copy it
-    # straight to args.output instead of round-tripping through
-    # ContrastivePair construction. Cache miss / network error falls
-    # through to the fresh-build path. 429 retries with jittered
-    # exponential backoff because falling through hits the SAME rate-
-    # limited token bucket via lm-eval.
+    # task and gets 429-throttled when multiple agents run in parallel.
+    # WISENT_DISABLE_PAIR_CACHE: skip this fast path so re-runs always
+    # produce a fresh organic extraction (no cache pollution).
+    _skip_fast_path = bool(os.environ.get("WISENT_DISABLE_PAIR_CACHE"))
     try:
+        if _skip_fast_path:
+            raise RuntimeError("WISENT_DISABLE_PAIR_CACHE set; skipping HF fast path")
         from huggingface_hub import hf_hub_download
         import shutil as _shutil
         import time as _time
@@ -88,14 +86,21 @@ def execute_generate_pairs_from_task(args):
                 break
 
         if cached_path:
-            os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-            _shutil.copyfile(cached_path, args.output)
             with open(cached_path, "r") as _f:
                 _doc = json.load(_f)
             _n = _doc.get("num_pairs", len(_doc.get("pairs", [])))
-            print(f"   ✓ Copied {_n} pre-computed pairs from HF cache to {args.output}")
-            print(f"\n✅ Contrastive pairs generation completed successfully!\n")
-            return
+            # Stale empty cache entries (uploaded by an earlier crashed run)
+            # otherwise propagate as "Loaded 0 pairs" downstream and the
+            # whole job exits non-zero with no useful output.
+            if _n <= 0:
+                print(f"   ⚠ HF cache for '{args.task_name}' has 0 pairs; "
+                      f"forcing fresh build", flush=True)
+            else:
+                os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+                _shutil.copyfile(cached_path, args.output)
+                print(f"   ✓ Copied {_n} pre-computed pairs from HF cache to {args.output}")
+                print(f"\n✅ Contrastive pairs generation completed successfully!\n")
+                return
     except Exception as exc:
         print(f"   ⚠ HF pair_texts cache fast-path crashed for '{args.task_name}': {exc}; "
               f"falling back to fresh build", flush=True)
