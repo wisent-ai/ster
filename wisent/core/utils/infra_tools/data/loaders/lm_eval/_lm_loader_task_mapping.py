@@ -323,6 +323,7 @@ GROUP_TASK_EXPANSIONS = {
     # NOTE: pile benchmark is DISABLED - dataset files hosted on the-eye.eu are unavailable
     # scrolls group expansion removed - lazy multiprocessing crashes; use direct contractnli mapping
     "super_glue": ["super_glue-boolq-t5-prompt", "super_glue-cb-t5-prompt", "super_glue-copa-t5-prompt", "super_glue-multirc-t5-prompt", "super_glue-record-t5-prompt", "super_glue-rte-t5-prompt", "super_glue-wic-t5-prompt", "super_glue-wsc-t5-prompt"],
+    "super_glue_t5_prompt": ["super_glue-boolq-t5-prompt", "super_glue-cb-t5-prompt", "super_glue-copa-t5-prompt", "super_glue-multirc-t5-prompt", "super_glue-record-t5-prompt", "super_glue-rte-t5-prompt", "super_glue-wic-t5-prompt", "super_glue-wsc-t5-prompt"],
     # siqa: mapped via TASK_NAME_MAPPING to social_iqa (not catalan siqa_ca)
     "score": ["score_non_greedy_robustness_agieval", "score_non_greedy_robustness_math", "score_non_greedy_robustness_mmlu_pro", "score_option_order_robustness_agieval", "score_option_order_robustness_mmlu_pro", "score_prompt_robustness_agieval", "score_prompt_robustness_math", "score_prompt_robustness_mmlu_pro", "score_robustness", "score_robustness_agieval", "score_robustness_math", "score_robustness_mmlu_pro"],
     # tiny* tasks
