@@ -92,6 +92,42 @@ def _retry_on_hf_rate_limit(
     raise last_err
 
 
+def _load_cache_first(
+    fn: Callable[..., Any], model_name: str, **kwargs: Any
+) -> Any:
+    """Try loading from local HF cache without any network calls; on miss
+    fall through to network with HF-429 retry.
+
+    This is the single biggest lever we have for cutting HF Hub traffic on a
+    fleet of agent VMs: once a VM has fetched a given model once, every
+    subsequent job on that VM avoids ALL HF Hub calls (no model_info, no
+    file metadata, no etag refresh, no shard listing). Without this, every
+    job's WisentModel.__init__ hammers HF Hub even when the files are
+    already on local disk — and at 50+ concurrent VMs that exceeds the
+    1000-req/5min anonymous+free-tier ceiling.
+
+    Phase 1 sets local_files_only=True so transformers/huggingface_hub stay
+    fully offline. Any failure (cache miss, partial cache, malformed cache)
+    propagates as some flavor of OSError / LocalEntryNotFoundError /
+    HFValidationError; we swallow all of those and try Phase 2 on the
+    network. Phase 2 is the same call without local_files_only, wrapped in
+    our existing 429 backoff. If the model genuinely doesn't exist on the
+    Hub, Phase 2 will surface the real error.
+    """
+    if kwargs.get("local_files_only"):
+        return _retry_on_hf_rate_limit(fn, model_name, **kwargs)
+    try:
+        return fn(model_name, local_files_only=True, **kwargs)
+    except Exception as e:
+        # Surface 429 immediately so we don't double-hammer the Hub: the
+        # local-only path can't hit 429 itself, but defensively if anything
+        # in the cache layer ever emits a 429-shaped message we want our
+        # retry path to handle it instead of falling through unconditionally.
+        if _is_hf_rate_limit_exc(e):
+            return _retry_on_hf_rate_limit(fn, model_name, **kwargs)
+    return _retry_on_hf_rate_limit(fn, model_name, **kwargs)
+
+
 
 from wisent.core.primitives.models.core.atoms import SteeringPlan, SteeringVector, HookHandleGroup, GenerationStats, TopLogits
 from wisent.core.primitives.model_interface.core.activations.core.atoms import RawActivationMap
@@ -195,7 +231,7 @@ class WisentModel:
         else:
             load_kwargs["device_map"] = None
 
-        self.hf_model: PreTrainedModel = hf_model or _retry_on_hf_rate_limit(
+        self.hf_model: PreTrainedModel = hf_model or _load_cache_first(
             AutoModelForCausalLM.from_pretrained,
             model_name,
             **load_kwargs,
@@ -207,7 +243,7 @@ class WisentModel:
         if device_map_used is None:
             self.hf_model.to(self.device)
 
-        self.tokenizer: PreTrainedTokenizerBase = _retry_on_hf_rate_limit(
+        self.tokenizer: PreTrainedTokenizerBase = _load_cache_first(
             AutoTokenizer.from_pretrained,
             model_name,
             use_fast=True,
