@@ -3,8 +3,10 @@ from __future__ import annotations
 from wisent.core.primitives.models.layer import extract_token_ids
 
 import logging
+import random
+import time
 from contextlib import contextmanager
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import torch
 import torch.nn as nn
@@ -15,6 +17,66 @@ from transformers import (
     PreTrainedTokenizerBase,
     TextIteratorStreamer
 )
+
+
+# HF Hub returns 429 on the public 1000-req-per-5-min ceiling once enough
+# concurrent VMs are loading the same model. AutoTokenizer.from_pretrained
+# silently calls model_info() (via is_base_mistral) and AutoModelForCausalLM
+# .from_pretrained does its own metadata calls; both raise HfHubHTTPError 429
+# directly. We chain-walk the cause/context tree because the same exception
+# can be re-wrapped by transformers' tokenization_utils_base around the raw
+# huggingface_hub error.
+_HF_RETRY_MAX_ATTEMPTS = 8
+_HF_RETRY_BASE_WAIT_S = 15.0
+_HF_RETRY_CAP_S = 600.0
+
+
+def _is_hf_rate_limit_exc(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        msg = str(cur)
+        if (
+            "429" in msg
+            or "Too Many Requests" in msg
+            or "rate limit" in msg.lower()
+            or "rate-limit" in msg.lower()
+        ):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _retry_on_hf_rate_limit(
+    fn: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
+    """Call fn, retry only on HF 429 with exponential backoff + jitter.
+
+    Non-429 exceptions propagate immediately (we are not a generic catch-all).
+    Backoff capped at _HF_RETRY_CAP_S so a long outage isn't stuck waiting
+    hours.
+    """
+    last_err: BaseException | None = None
+    for attempt in range(_HF_RETRY_MAX_ATTEMPTS):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if not _is_hf_rate_limit_exc(e):
+                raise
+            last_err = e
+            wait = min(
+                _HF_RETRY_CAP_S,
+                _HF_RETRY_BASE_WAIT_S * (2 ** attempt) + random.uniform(0, 5),
+            )
+            print(
+                f"[hf-retry] attempt {attempt + 1}/{_HF_RETRY_MAX_ATTEMPTS} "
+                f"hit HF 429 in {fn.__name__}; sleeping {wait:.0f}s",
+                flush=True,
+            )
+            time.sleep(wait)
+    assert last_err is not None
+    raise last_err
 
 
 
@@ -120,9 +182,10 @@ class WisentModel:
         else:
             load_kwargs["device_map"] = None
 
-        self.hf_model: PreTrainedModel = hf_model or AutoModelForCausalLM.from_pretrained(
+        self.hf_model: PreTrainedModel = hf_model or _retry_on_hf_rate_limit(
+            AutoModelForCausalLM.from_pretrained,
             model_name,
-            **load_kwargs
+            **load_kwargs,
         )
 
         device_map_used = load_kwargs.get("device_map")
@@ -131,8 +194,11 @@ class WisentModel:
         if device_map_used is None:
             self.hf_model.to(self.device)
 
-        self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
-            model_name, use_fast=True, trust_remote_code=True
+        self.tokenizer: PreTrainedTokenizerBase = _retry_on_hf_rate_limit(
+            AutoTokenizer.from_pretrained,
+            model_name,
+            use_fast=True,
+            trust_remote_code=True,
         )
 
         if not self._is_chat_tokenizer():
