@@ -32,16 +32,29 @@ _HF_RETRY_CAP_S = 600.0
 
 
 def _is_hf_rate_limit_exc(exc: BaseException) -> bool:
+    """Match any of:
+    - HfHubHTTPError 429 directly (msg contains '429' or 'Too Many Requests')
+    - HF Hub's English rate-limit response ('We had to rate limit you...')
+    - transformers' aggregated cached_files OSError 'does not appear to have
+      files named (...)' — that error swallows per-shard HfHubHTTPError 429s
+      and re-raises a non-429 OSError, so we treat the *shape* of the message
+      as a strong signal of a transient HF 429 burst whenever we know the
+      repo exists. False positives only fire for genuinely-missing files;
+      worst case is wait_total ~= sum(backoff)*8 ~= 35min before failing.
+    """
     seen: set[int] = set()
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
         msg = str(cur)
+        msg_l = msg.lower()
         if (
             "429" in msg
-            or "Too Many Requests" in msg
-            or "rate limit" in msg.lower()
-            or "rate-limit" in msg.lower()
+            or "too many requests" in msg_l
+            or "rate limit" in msg_l
+            or "rate-limit" in msg_l
+            or "we had to rate limit" in msg_l
+            or "does not appear to have files named" in msg
         ):
             return True
         cur = cur.__cause__ or cur.__context__
