@@ -55,6 +55,14 @@ def _is_hf_rate_limit_exc(exc: BaseException) -> bool:
             or "rate-limit" in msg_l
             or "we had to rate limit" in msg_l
             or "does not appear to have files named" in msg
+            # transformers 4.x's per-shard cached_files() raises this
+            # singular variant when a HEAD probe to HF fails (most common
+            # cause: rate-limited 429 disguised as a "missing file" error).
+            # Confirmed live on 2026-05-01 with Qwen/Qwen3-8B
+            # model-00005-of-00005.safetensors after the file was verified
+            # present on the Hub. Without this, one rate-limited HEAD on
+            # one shard fails the entire job.
+            or "does not appear to have a file named" in msg
         ):
             return True
         cur = cur.__cause__ or cur.__context__
