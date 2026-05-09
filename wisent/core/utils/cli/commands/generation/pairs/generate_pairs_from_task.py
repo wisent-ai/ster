@@ -95,6 +95,62 @@ def execute_generate_pairs_from_task(args):
             if _n <= 0:
                 print(f"   ⚠ HF cache for '{args.task_name}' has 0 pairs; "
                       f"forcing fresh build", flush=True)
+            elif (
+                getattr(args, 'limit', None) is not None
+                and args.limit > 0
+                and _n < args.limit
+            ):
+                # Cache file has fewer pairs than the requested --limit.
+                # For LEAF tasks this is fine (the source dataset itself
+                # is small) — but for GROUP tasks (bigbench, mmlu_prox,
+                # leaderboard, etc.) it means the cache is a sparse
+                # sample, NOT the full subtask union, and the activation
+                # extractor would run on too few pairs. Detect "group"
+                # by counting unique subtask identifiers across the
+                # cache; any value > 1 means multi-subtask data and
+                # forces a fresh lm-eval-harness build that enumerates
+                # all subtasks and returns up to `limit` pairs
+                # distributed across them.
+                _pairs = _doc.get("pairs", [])
+                _unique_subtasks: set = set()
+                for _p in _pairs:
+                    _md = _p.get("metadata") if isinstance(_p, dict) else None
+                    if not isinstance(_md, dict):
+                        _md = {}
+                    _k = (
+                        _p.get("trait_label")
+                        or _p.get("task_name")
+                        or _p.get("subtask")
+                        or _md.get("source_task")
+                        or _md.get("task")
+                        or _md.get("subtask")
+                    )
+                    if _k:
+                        _unique_subtasks.add(_k)
+                if len(_unique_subtasks) > 1:
+                    print(
+                        f"   ⚠ HF cache for '{args.task_name}' has only {_n} pairs "
+                        f"across {len(_unique_subtasks)} subtasks (limit={args.limit}); "
+                        f"forcing fresh lm-eval build to enumerate full subtask tree",
+                        flush=True,
+                    )
+                    # Don't return; fall through to the lm-eval build
+                    # path at line 158 (same control-flow as _n <= 0).
+                else:
+                    # Genuine small-leaf case: the source dataset just
+                    # doesn't have more pairs. Keep the cache as-is.
+                    os.makedirs(
+                        os.path.dirname(os.path.abspath(args.output)),
+                        exist_ok=True,
+                    )
+                    _shutil.copyfile(cached_path, args.output)
+                    print(
+                        f"   ✓ Copied {_n} pre-computed pairs from HF cache to "
+                        f"{args.output} (single-subtask leaf, {_n} < limit "
+                        f"{args.limit} is intrinsic)"
+                    )
+                    print(f"\n✅ Contrastive pairs generation completed successfully!\n")
+                    return
             else:
                 # Apply --limit to cached pairs. Earlier this used
                 # _shutil.copyfile which blindly copied the entire cache file
