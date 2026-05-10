@@ -20,7 +20,68 @@ for _entry in sorted(os.listdir(_base)):
     if os.path.isdir(_path) and not _entry.startswith((".", "_")):
         __path__.append(_path)
 
-__version__ = "0.11.22"
+__version__ = "0.11.32"
+
+
+def _wisent_install_hf_rate_limit_global() -> None:
+    """Monkey-patch huggingface_hub.HfApi at top-level wisent import.
+
+    Earlier the patch lived in wisent/core/reading/modules/utilities/data/
+    sources/hf/__init__.py — but callers import that subpackage as
+    `from wisent...hf.hf_writers import X`, which loads hf_writers.py
+    directly without touching the subpackage's __init__.py. The
+    monkey-patch never ran. Confirmed live on 2026-05-07: GCS token
+    bucket showed 999/1000 tokens (untouched) while every job hit
+    HF 429 errors. Installing here at top-level wisent guarantees the
+    patch runs on first import of anything from the wisent package.
+    """
+    try:
+        from huggingface_hub import HfApi
+        from wisent_compute.providers.local.hf_rate import wait_for_hf_token
+    except Exception:
+        return
+    if getattr(HfApi, "_wisent_rate_limit_installed", False):
+        return
+    for _m in ("upload_file", "upload_folder", "list_repo_tree",
+               "preupload_lfs_files", "create_commit",
+               # The download/info path: model_info, dataset_info, and
+               # hf_hub_download (HfApi method) are what from_pretrained
+               # calls under the hood. Not patching them here let every
+               # agent's pip/transformers .from_pretrained() bypass the
+               # fleet-wide GCS token bucket — confirmed by 429s in the
+               # 'from_pretrained' call site of agent extraction logs
+               # (c69fa5e3 et al, 2026-05-10).
+               "model_info", "dataset_info", "repo_info",
+               "list_repo_files", "hf_hub_download"):
+        _orig = getattr(HfApi, _m, None)
+        if _orig is None:
+            continue
+        def _make(_o):
+            def _w(self, *a, **k):
+                wait_for_hf_token()
+                return _o(self, *a, **k)
+            return _w
+        setattr(HfApi, _m, _make(_orig))
+    HfApi._wisent_rate_limit_installed = True
+    # Also wrap the MODULE-level huggingface_hub.hf_hub_download (and
+    # snapshot_download) — transformers/datasets call those by import,
+    # not by HfApi method, so HfApi-only patching misses them.
+    try:
+        import huggingface_hub as _hh
+        for _fn in ("hf_hub_download", "snapshot_download"):
+            _orig = getattr(_hh, _fn, None)
+            if _orig is None or getattr(_orig, "_wisent_rate_limit_installed", False):
+                continue
+            def _make_mod(_o):
+                def _w(*a, **k):
+                    wait_for_hf_token()
+                    return _o(*a, **k)
+                _w._wisent_rate_limit_installed = True
+                return _w
+            setattr(_hh, _fn, _make_mod(_orig))
+    except Exception:
+        pass
+_wisent_install_hf_rate_limit_global()
 
 from wisent.core.control.tasks.base.diversity_processors import (
     OpenerPenaltyProcessor,
@@ -31,6 +92,7 @@ from wisent.core.control.tasks.base.diversity_processors import (
 from wisent.core.primitives.model_interface.adapters import (
     AudioAdapter,
     BaseAdapter,
+    ImageAdapter,
     MultimodalAdapter,
     RoboticsAdapter,
     TextAdapter,
@@ -78,6 +140,7 @@ __all__ = [
     "BaseAdapter",
     "TextAdapter",
     "AudioAdapter",
+    "ImageAdapter",
     "VideoAdapter",
     "RoboticsAdapter",
     "MultimodalAdapter",
