@@ -19,121 +19,15 @@ from transformers import (
 )
 
 
-# HF Hub returns 429 on the public 1000-req-per-5-min ceiling once enough
-# concurrent VMs are loading the same model. AutoTokenizer.from_pretrained
-# silently calls model_info() (via is_base_mistral) and AutoModelForCausalLM
-# .from_pretrained does its own metadata calls; both raise HfHubHTTPError 429
-# directly. We chain-walk the cause/context tree because the same exception
-# can be re-wrapped by transformers' tokenization_utils_base around the raw
-# huggingface_hub error.
-_HF_RETRY_MAX_ATTEMPTS = 8
-_HF_RETRY_BASE_WAIT_S = 15.0
-_HF_RETRY_CAP_S = 600.0
-
-
-def _is_hf_rate_limit_exc(exc: BaseException) -> bool:
-    """Match any of:
-    - HfHubHTTPError 429 directly (msg contains '429' or 'Too Many Requests')
-    - HF Hub's English rate-limit response ('We had to rate limit you...')
-    - transformers' aggregated cached_files OSError 'does not appear to have
-      files named (...)' — that error swallows per-shard HfHubHTTPError 429s
-      and re-raises a non-429 OSError, so we treat the *shape* of the message
-      as a strong signal of a transient HF 429 burst whenever we know the
-      repo exists. False positives only fire for genuinely-missing files;
-      worst case is wait_total ~= sum(backoff)*8 ~= 35min before failing.
-    """
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        msg = str(cur)
-        msg_l = msg.lower()
-        if (
-            "429" in msg
-            or "too many requests" in msg_l
-            or "rate limit" in msg_l
-            or "rate-limit" in msg_l
-            or "we had to rate limit" in msg_l
-            or "does not appear to have files named" in msg
-            # transformers 4.x's per-shard cached_files() raises this
-            # singular variant when a HEAD probe to HF fails (most common
-            # cause: rate-limited 429 disguised as a "missing file" error).
-            # Confirmed live on 2026-05-01 with Qwen/Qwen3-8B
-            # model-00005-of-00005.safetensors after the file was verified
-            # present on the Hub. Without this, one rate-limited HEAD on
-            # one shard fails the entire job.
-            or "does not appear to have a file named" in msg
-        ):
-            return True
-        cur = cur.__cause__ or cur.__context__
-    return False
-
-
-def _retry_on_hf_rate_limit(
-    fn: Callable[..., Any], *args: Any, **kwargs: Any
-) -> Any:
-    """Call fn, retry only on HF 429 with exponential backoff + jitter.
-
-    Non-429 exceptions propagate immediately (we are not a generic catch-all).
-    Backoff capped at _HF_RETRY_CAP_S so a long outage isn't stuck waiting
-    hours.
-    """
-    last_err: BaseException | None = None
-    for attempt in range(_HF_RETRY_MAX_ATTEMPTS):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            if not _is_hf_rate_limit_exc(e):
-                raise
-            last_err = e
-            wait = min(
-                _HF_RETRY_CAP_S,
-                _HF_RETRY_BASE_WAIT_S * (2 ** attempt) + random.uniform(0, 5),
-            )
-            print(
-                f"[hf-retry] attempt {attempt + 1}/{_HF_RETRY_MAX_ATTEMPTS} "
-                f"hit HF 429 in {fn.__name__}; sleeping {wait:.0f}s",
-                flush=True,
-            )
-            time.sleep(wait)
-    assert last_err is not None
-    raise last_err
-
-
-def _load_cache_first(
-    fn: Callable[..., Any], model_name: str, **kwargs: Any
-) -> Any:
-    """Try loading from local HF cache without any network calls; on miss
-    fall through to network with HF-429 retry.
-
-    This is the single biggest lever we have for cutting HF Hub traffic on a
-    fleet of agent VMs: once a VM has fetched a given model once, every
-    subsequent job on that VM avoids ALL HF Hub calls (no model_info, no
-    file metadata, no etag refresh, no shard listing). Without this, every
-    job's WisentModel.__init__ hammers HF Hub even when the files are
-    already on local disk — and at 50+ concurrent VMs that exceeds the
-    1000-req/5min anonymous+free-tier ceiling.
-
-    Phase 1 sets local_files_only=True so transformers/huggingface_hub stay
-    fully offline. Any failure (cache miss, partial cache, malformed cache)
-    propagates as some flavor of OSError / LocalEntryNotFoundError /
-    HFValidationError; we swallow all of those and try Phase 2 on the
-    network. Phase 2 is the same call without local_files_only, wrapped in
-    our existing 429 backoff. If the model genuinely doesn't exist on the
-    Hub, Phase 2 will surface the real error.
-    """
-    if kwargs.get("local_files_only"):
-        return _retry_on_hf_rate_limit(fn, model_name, **kwargs)
-    try:
-        return fn(model_name, local_files_only=True, **kwargs)
-    except Exception as e:
-        # Surface 429 immediately so we don't double-hammer the Hub: the
-        # local-only path can't hit 429 itself, but defensively if anything
-        # in the cache layer ever emits a 429-shaped message we want our
-        # retry path to handle it instead of falling through unconditionally.
-        if _is_hf_rate_limit_exc(e):
-            return _retry_on_hf_rate_limit(fn, model_name, **kwargs)
-    return _retry_on_hf_rate_limit(fn, model_name, **kwargs)
+# HF Hub load helpers extracted to ._hf 2026-05-10. The 8-attempt 429
+# retry was removed at the same time — wait_for_hf_token (installed
+# at top-level wisent import) covers every HfApi method that touches
+# the network in 0.11.35, so 429s should never reach this layer.
+from wisent.core.primitives.models.core._hf import (
+    _is_hf_rate_limit_exc,
+    _retry_on_hf_rate_limit,
+    _load_cache_first,
+)
 
 
 
