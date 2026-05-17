@@ -180,6 +180,15 @@ TASK_NAME_MAPPING = {
     "ceval_valid": "ceval-valid",
     "code_x_glue": "code2text_python",
     "darija_bench": "darija_sentiment",
+    "darija_bench_darija_summarization": "darija_summarization_task",  # lm-eval leaf; prefix-strip fallback never reaches it
+    "darija_bench_darija_translation": "darija_translation",  # lm-eval group (all 4 translation sources); flattened by dict-handling
+    "darija_bench_darija_sentiment": "darija_sentiment",  # lm-eval group (5 sentiment datasets); flattened by dict-handling, MC choice branch
+    "darija_bench_darija_transliteration": "darija_transliteration",  # lm-eval group; flattened by dict-handling, direct-answer branch
+    "alghafa_copa_ar": "copa_ar",  # AlGhafa COPA Arabic; lm-eval task copa_ar (Hennara/copa_ar)
+    "alghafa_piqa_ar": "piqa_ar",  # AlGhafa PIQA Arabic; lm-eval task piqa_ar (Hennara/pica_ar)
+    "benchmarks_multimedqa": "multimedqa",  # lm-eval group (pubmedqa/medmcqa/medqa_4options/mmlu_* med subtasks); dict-handling flattens, per-leaf extractors
+    "socialiqa": "social_iqa",  # SocialIQa; lm-eval task social_iqa (siqa.yaml), mirrors siqa mapping
+    "noreval_ask_gec": "ask_gec",  # NorEval ASK-GEC; lm-eval tag ask_gec (ask_gec_p0..p4), NorevalGenerationExtractor
     "eus_exams": "eus_exams_es",
     "evalita_llm": "evalita-mp",
     "evalita_sp": "evalita-sp_sum_task_fp_p1",
@@ -194,6 +203,7 @@ TASK_NAME_MAPPING = {
     # Case-sensitivity fixes
     "tinyarc": "tinyArc",
     "tinygsm8k": "tinyGSM8k",
+    "tinygsm": "tinyGSM8k",  # tinyGSM8k (tinyBenchmarks); mirrors tinygsm8k mapping, Tinygsm8kExtractor
     "tinyhellaswag": "tinyHellaswag",
     "tinymmlu": "tinyMMLU",
     "tinytruthfulqa": "tinyTruthfulQA",
