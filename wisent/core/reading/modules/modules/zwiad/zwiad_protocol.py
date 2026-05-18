@@ -4,7 +4,13 @@ from typing import Any, Dict, List, Optional
 import torch
 import numpy as np
 from wisent.core import constants as _C
-from wisent.core.utils.config_tools.constants import ROUNDING_PRECISION, STAT_ALPHA, DIAGNOSTICS_TOTAL_CHECKS
+from wisent.core.utils.config_tools.constants import (
+    ROUNDING_PRECISION, STAT_ALPHA, DIAGNOSTICS_TOTAL_CHECKS,
+    LINEARITY_GAP_THRESHOLD, LINEARITY_P_THRESHOLD, LINEARITY_RESIDUAL_THRESHOLD,
+    LINEARITY_RAMSEY_THRESHOLD, LINEARITY_N_BOOTSTRAP, LINEARITY_CV_FOLDS,
+    LINEARITY_CONFIDENCE_HIGH, LINEARITY_CONFIDENCE_LOW,
+    LINEARITY_CROSS_CONTEXT_THRESHOLD,
+)
 from .zwiad_config import adaptive_gap_threshold, adaptive_min_silhouette, ZwiadProtocolConfig
 
 @dataclass
@@ -98,7 +104,17 @@ def test_signal(
 def test_geometry(pos: torch.Tensor, neg: torch.Tensor, diagnostics_total_checks: int) -> GeometryTestResult:
     """Step two: Test if geometry is linear or nonlinear."""
     from ..analysis.is_linear import test_linearity
-    r = test_linearity(pos, neg, diagnostics_total_checks=diagnostics_total_checks)
+    r = test_linearity(
+        pos, neg, diagnostics_total_checks=diagnostics_total_checks,
+        cv_folds=LINEARITY_CV_FOLDS, gap_threshold=LINEARITY_GAP_THRESHOLD,
+        p_threshold=LINEARITY_P_THRESHOLD,
+        residual_threshold=LINEARITY_RESIDUAL_THRESHOLD,
+        ramsey_threshold=LINEARITY_RAMSEY_THRESHOLD,
+        n_bootstrap=LINEARITY_N_BOOTSTRAP,
+        linearity_confidence_high=LINEARITY_CONFIDENCE_HIGH,
+        linearity_confidence_low=LINEARITY_CONFIDENCE_LOW,
+        linearity_cross_context_threshold=LINEARITY_CROSS_CONTEXT_THRESHOLD,
+    )
     return GeometryTestResult(
         linear_accuracy=r.linear_accuracy, nonlinear_accuracy=r.nonlinear_accuracy,
         gap=r.gap, diagnosis=r.diagnosis, confidence=r.confidence, p_value=r.p_value,

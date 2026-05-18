@@ -6,7 +6,13 @@ using Cohen's d effect size by comparing outputs before and after steering.
 from typing import Dict, List, Optional, Any
 import numpy as np
 import torch
-from wisent.core.utils.config_tools.constants import ZERO_THRESHOLD, EFFECT_SIZE_MEDIUM, DIAGNOSTICS_TOTAL_CHECKS
+from wisent.core.utils.config_tools.constants import (
+    ZERO_THRESHOLD, EFFECT_SIZE_MEDIUM, DIAGNOSTICS_TOTAL_CHECKS,
+    LINEARITY_GAP_THRESHOLD, LINEARITY_P_THRESHOLD, LINEARITY_RESIDUAL_THRESHOLD,
+    LINEARITY_RAMSEY_THRESHOLD, LINEARITY_N_BOOTSTRAP, LINEARITY_CV_FOLDS,
+    LINEARITY_CONFIDENCE_HIGH, LINEARITY_CONFIDENCE_LOW,
+    LINEARITY_CROSS_CONTEXT_THRESHOLD,
+)
 from wisent.core.primitives.models.config import get_generate_kwargs
 
 
@@ -164,7 +170,17 @@ def run_full_validation(
         mlp_probe_max_iter=mlp_probe_max_iter)
     signal_z, signal_p, _ = compute_aggregate_signal(signal_metrics, correction="bonferroni")
 
-    linearity = test_linearity(pos, neg, diagnostics_total_checks=DIAGNOSTICS_TOTAL_CHECKS)
+    linearity = test_linearity(
+        pos, neg, diagnostics_total_checks=DIAGNOSTICS_TOTAL_CHECKS,
+        cv_folds=LINEARITY_CV_FOLDS, gap_threshold=LINEARITY_GAP_THRESHOLD,
+        p_threshold=LINEARITY_P_THRESHOLD,
+        residual_threshold=LINEARITY_RESIDUAL_THRESHOLD,
+        ramsey_threshold=LINEARITY_RAMSEY_THRESHOLD,
+        n_bootstrap=LINEARITY_N_BOOTSTRAP,
+        linearity_confidence_high=LINEARITY_CONFIDENCE_HIGH,
+        linearity_confidence_low=LINEARITY_CONFIDENCE_LOW,
+        linearity_cross_context_threshold=LINEARITY_CROSS_CONTEXT_THRESHOLD,
+    )
     geometry_diagnosis = linearity.diagnosis
 
     eff_dim = compute_effective_dimensions_vs_null(pos, neg, n_bootstrap=n_bootstrap)

@@ -33,6 +33,19 @@ CI_PERCENTILE_LOW = 2.5  # lower tail of 95 % CI
 CI_PERCENTILE_HIGH = 97.5  # upper tail of 95 % CI
 STABILITY_Z_MARGIN = 1.96  # same z_{0.025} used for stability bands
 NULL_TEST_SIGNIFICANCE_THRESHOLD = 0.05  # p < 0.05 convention
+
+# --- Linearity test (Zwiad Step-2 geometry) standards ---
+# Recovered canonical values for is_linear.test_linearity, formerly the
+# LINEARITY_TEST_* / LINEARITY_* module constants.
+LINEARITY_GAP_THRESHOLD = 0.05  # min linear-vs-nonlinear acc gap to be meaningful
+LINEARITY_P_THRESHOLD = 0.05  # significance level for the paired gap t-test
+LINEARITY_RESIDUAL_THRESHOLD = 0.3  # silhouette cut for linear-residual clustering
+LINEARITY_RAMSEY_THRESHOLD = 0.03  # min Ramsey RESET improvement to reject linearity
+LINEARITY_N_BOOTSTRAP = 30  # bootstrap iterations for the gap CI
+LINEARITY_CV_FOLDS = 5  # stratified CV folds for the probes
+LINEARITY_CONFIDENCE_HIGH = 0.8  # confidence at/above which diagnosis is "linear"
+LINEARITY_CONFIDENCE_LOW = 0.2  # confidence at/below which diagnosis is "nonlinear"
+LINEARITY_CROSS_CONTEXT_THRESHOLD = 0.7  # transfer acc above which signal generalizes
 NULL_TEST_Z_SCORE_SIGNIFICANT = 2.0  # |z| >= 2 rule of thumb
 Z_SCORE_SIGNIFICANCE = 2.0  # alias in part12
 POWER_ADEQUATE_THRESHOLD = 0.8  # Cohen's adequate power
