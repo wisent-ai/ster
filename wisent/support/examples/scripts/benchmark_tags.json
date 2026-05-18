@@ -1538,11 +1538,6 @@
       "reasoning"
     ]
   },
-  "ner": {
-    "tags": [
-      "reasoning"
-    ]
-  },
   "openllm": {
     "tags": [
       "general knowledge",
@@ -1568,21 +1563,6 @@
   "openbookqa_fact": {
     "tags": [
       "science",
-      "reasoning"
-    ]
-  },
-  "pgeval": {
-    "tags": [
-      "coding"
-    ]
-  },
-  "plurals": {
-    "tags": [
-      "reasoning"
-    ]
-  },
-  "presencemindqa": {
-    "tags": [
       "reasoning"
     ]
   },
@@ -1669,12 +1649,6 @@
   "humaneval_plus": {
     "tags": [
       "coding"
-    ]
-  },
-  "multiple": {
-    "tags": [
-      "coding",
-      "multilingual"
     ]
   },
   "recode": {
