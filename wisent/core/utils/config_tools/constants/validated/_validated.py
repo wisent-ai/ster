@@ -53,6 +53,7 @@ AUDIO_SAMPLE_RATE = 16000  # 16 kHz standard for speech models
 DEFAULT_AUDIO_SAMPLE_RATE = 16000  # alias
 VIZ_N_COMPONENTS_2D = 2  # 2-D projection by definition
 N_COMPONENTS_2D = 2  # alias
+VIZ_N_COMPONENTS_3D = 3  # 3-D projection by definition
 SCORE_RANGE_MIN = 0.0  # normalized score lower bound
 SCORE_RANGE_MAX = 1.0  # normalized score upper bound
 SCORE_SCALE_100 = 99.0  # maps [0,1] to [1,100]: score * 99 + 1

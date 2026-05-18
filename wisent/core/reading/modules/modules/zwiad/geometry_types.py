@@ -32,6 +32,7 @@ class GeometryTypeFine(Enum):
     LINEAR_MULTIDIR = "linear_multidir"
     LOW_LINEAR_UNSTABLE = "low_linear_unstable"
     MANY_CONCEPT_CURVED = "many_concept_curved"
+    SPHERICAL_NORMALIZED = "spherical_normalized"
     RAW = "raw"
 
 
@@ -44,6 +45,7 @@ SHAPE_MAP = {
     GeometryTypeFine.DIFFUSE_CURVED: "manifold",
     GeometryTypeFine.LOW_LINEAR_UNSTABLE: "sparse",
     GeometryTypeFine.MANY_CONCEPT_CURVED: "manifold",
+    GeometryTypeFine.SPHERICAL_NORMALIZED: "sphere",
 }
 
 PROFILE_METRICS = [
