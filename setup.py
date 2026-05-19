@@ -57,6 +57,7 @@ setup(
             "support/parameters/evaluator_methodologies/*/*.json",
             "support/parameters/evaluator_methodologies/*/*/*.json",
             "support/parameters/evaluator_methodologies/*/*/*/*.json",
+            "support/examples/scripts/*.json",
             "core/control/steering_methods/configs/*.json",
         ],
     },
@@ -109,6 +110,12 @@ setup(
         "antlr4-python3-runtime==4.11",
         "langdetect>=1.0.9",
         "immutabledict>=4.2.0",
+        # Required by lm-eval-harness `ruler` task (lm_eval/tasks/ruler/cwe_utils.py
+        # imports `wonderwords` at module load time). Not listed by lm-eval itself,
+        # so installing wisent alone left ruler import-failing on the agents:
+        # `ModuleNotFoundError: No module named 'wonderwords'`
+        # (job 8ecff4a2 / ruler, 2026-05-19T05:42:47Z, local@ubuntu-server).
+        "wonderwords>=2.2.0",
     ],
     extras_require={
         "harness": [
