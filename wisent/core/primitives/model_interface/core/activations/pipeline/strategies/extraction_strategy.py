@@ -203,7 +203,7 @@ def extract_activation(
     answer_text: str,
     tokenizer,
     prompt_len: int,
-    weighted_decay: float = None,
+    weighted_decay: float = 0.1,
 ) -> torch.Tensor:
     """
     Extract the activation vector based on strategy.
@@ -246,8 +246,6 @@ def extract_activation(
         return hidden_states[-1]
 
     elif strategy == ExtractionStrategy.CHAT_WEIGHTED:
-        if weighted_decay is None:
-            raise ValueError("weighted_decay is required for CHAT_WEIGHTED strategy")
         if num_answer_tokens > 0 and seq_len > num_answer_tokens:
             answer_hidden = hidden_states[-num_answer_tokens-1:-1]
             weights = torch.exp(-torch.arange(answer_hidden.shape[0], dtype=answer_hidden.dtype, device=answer_hidden.device) * weighted_decay)
