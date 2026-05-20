@@ -20,7 +20,7 @@ for _entry in sorted(os.listdir(_base)):
     if os.path.isdir(_path) and not _entry.startswith((".", "_")):
         __path__.append(_path)
 
-__version__ = "0.11.46"
+__version__ = "0.11.47"
 
 
 def _wisent_install_hf_rate_limit_global() -> None:
@@ -92,12 +92,25 @@ from wisent.core.control.tasks.base.diversity_processors import (
 from wisent.core.primitives.model_interface.adapters import (
     AudioAdapter,
     BaseAdapter,
-    ImageAdapter,
     MultimodalAdapter,
     RoboticsAdapter,
     TextAdapter,
     VideoAdapter,
 )
+# Optional: ImageAdapter ships separately. Some wheels (e.g. 0.11.36, 0.11.46)
+# left the top-level import in place while the implementation/_image_helpers
+# tree was unshipped, producing `ImportError: cannot import name 'ImageAdapter'
+# from 'wisent.core.primitives.model_interface.adapters'` at every `import
+# wisent`. That broke the wisent-compute agent's wisent_import_ok smoke-test,
+# locking the workstation into a crash-restart loop on
+# pip_upgrade_and_exec → reinstall same broken wheel → crash. Guarding the
+# import keeps the top-level `wisent` package importable when ImageAdapter
+# is not present in the installed wheel; the symbol is then absent from
+# `wisent.*` rather than blowing up the whole import surface.
+try:
+    from wisent.core.primitives.model_interface.adapters import ImageAdapter
+except ImportError:
+    ImageAdapter = None
 
 # Multi-modal support
 from wisent.core.primitives.model_interface.core.wisent import TraitConfig, Wisent

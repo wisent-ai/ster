@@ -18,6 +18,15 @@ from wisent.core.primitives.model_interface.adapters import AudioAdapter
 from wisent.core.primitives.model_interface.adapters import VideoAdapter
 from wisent.core.primitives.model_interface.adapters import RoboticsAdapter
 from wisent.core.primitives.model_interface.adapters import MultimodalAdapter
+# ImageAdapter ships separately and is absent from some published wheels
+# (0.11.36, 0.11.46). Guard the import so `core.wisent.Wisent` is still
+# constructible for text/audio/video/robotics; image-modality construction
+# below will raise a clear error at call time instead of crashing every
+# `import wisent` consumer through this transitive import.
+try:
+    from wisent.core.primitives.model_interface.adapters import ImageAdapter
+except ImportError:
+    ImageAdapter = None
 from wisent.core.utils.infra_tools.errors import UnknownTypeError, NoTrainedVectorsError
 from wisent.core.primitives.models.modalities import (
     Modality,
@@ -249,6 +258,35 @@ class Wisent(WisentPairsMixin, WisentTrainingMixin, WisentIOMixin):
             Configured Wisent instance
         """
         adapter = MultimodalAdapter(model_name=model_name, device=device, **kwargs)
+        return cls(adapter)
+
+    @classmethod
+    def for_image(
+        cls,
+        model_name: str,
+        device: str | None = None,
+        **kwargs: Any,
+    ) -> "Wisent":
+        """
+        Create a Wisent instance for text-to-image diffusion model steering.
+
+        Args:
+            model_name: HuggingFace diffusers pipeline identifier
+                (e.g. "Tongyi-MAI/Z-Image-Turbo", "stabilityai/stable-diffusion-xl-base-1.0")
+            device: Target device
+            **kwargs: Additional adapter arguments forwarded to DiffusionPipeline.from_pretrained
+
+        Returns:
+            Configured Wisent instance
+        """
+        if ImageAdapter is None:
+            raise ImportError(
+                "ImageAdapter is not available in the installed wisent wheel. "
+                "Install a wisent build that ships "
+                "wisent.core.primitives.model_interface.adapters.modalities.extended.image "
+                "to use image modality."
+            )
+        adapter = ImageAdapter(model_name=model_name, device=device, **kwargs)
         return cls(adapter)
 
     # ==================== Pair Management ====================
