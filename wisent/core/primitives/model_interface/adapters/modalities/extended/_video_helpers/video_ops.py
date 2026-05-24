@@ -17,7 +17,7 @@ from wisent.core.primitives.model_interface.adapters.base import (
 from wisent.core.primitives.models.modalities import VideoContent
 from wisent.core.utils.infra_tools.errors import UnknownTypeError
 from wisent.core.primitives.model_interface.core.activations.core.atoms import LayerActivations
-from wisent.core.primitives.model_interface.adapters.modalities._video_helpers.video_core import VideoSteeringConfig
+from wisent.core.primitives.model_interface.adapters.modalities.extended._video_helpers.video_core import VideoSteeringConfig
 from wisent.core.utils.config_tools.constants import NORM_EPS, TEMPORAL_RAMP_MAX
 
 

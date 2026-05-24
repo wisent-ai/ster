@@ -95,12 +95,36 @@ class SteeringHookMixin:
 
         def hook(module: nn.Module, input: tuple, output: torch.Tensor) -> torch.Tensor:
             if method is not None:
-                if output.dim() >= 3:
+                # Non-linear method.transform path. Honors temporal_mode the
+                # same way the linear path below does, so non-text modalities
+                # (image patches, audio frames, video tokens) can opt into
+                # per_step (broadcast across all positions) instead of being
+                # silently confined to the last sequence position.
+                if output.dim() < 3:
+                    return method.transform(output)
+                if config.temporal_mode == "last":
                     steered = output.clone()
                     steered[:, -1] = method.transform(output[:, -1])
                     return steered
-                return method.transform(output)
-            # Default: linear steering
+                if config.temporal_mode == "first":
+                    steered = output.clone()
+                    steered[:, 0] = method.transform(output[:, 0])
+                    return steered
+                if config.temporal_mode == "per_step":
+                    B, S = output.shape[0], output.shape[1]
+                    tail = output.shape[2:]
+                    flat = output.reshape(B * S, *tail)
+                    transformed = method.transform(flat)
+                    return transformed.reshape(output.shape)
+                # Backward-compatible default for callers (predominantly text)
+                # that did not set temporal_mode and relied on last-position
+                # semantics. Modality adapters whose intervention points have
+                # no last-token meaning should set temporal_mode explicitly
+                # (ImageAdapter.forward_with_steering does this).
+                steered = output.clone()
+                steered[:, -1] = method.transform(output[:, -1])
+                return steered
+            # Linear steering (no method): unchanged.
             v = vector.to(output.device, output.dtype)
             if config.normalize:
                 v = v / (v.norm(dim=-1, keepdim=True) + NORM_EPS)
@@ -126,6 +150,59 @@ class SteeringHookMixin:
     def num_layers(self) -> int:
         """Get the number of steerable layers."""
         return len(self.get_intervention_points())
+
+    def build_pair_set(
+        self,
+        positive_contents: list,
+        negative_contents: list,
+        layers: list[str] | None = None,
+        name: str = "contrastive_pairs",
+        task_type: str | None = None,
+    ):
+        """
+        Build a ContrastivePairSet from parallel positive/negative content
+        lists by running self.extract_activations on each entry. The pair's
+        prompt is taken from a TextContent.text field when present, otherwise
+        synthesized as f"<{modality}-pair-{i}>" so the upstream non-empty
+        string check on ContrastivePair.prompt passes for non-text modalities.
+
+        Output is fed directly to any wisent steering method (CAA, GROM,
+        NURT, OSTRZE, MLP, TECZA, TETNO, SZLAK, WICHER, PRZELOM):
+            method = CAAMethod(); vectors = method.train(pair_set)
+        """
+        from wisent.core.primitives.contrastive_pairs.core.io.response import (
+            PositiveResponse, NegativeResponse,
+        )
+        from wisent.core.primitives.contrastive_pairs.core.pair import ContrastivePair
+        from wisent.core.primitives.contrastive_pairs.core.set import ContrastivePairSet
+
+        if len(positive_contents) != len(negative_contents):
+            raise ValueError(
+                f"positive_contents (len={len(positive_contents)}) and "
+                f"negative_contents (len={len(negative_contents)}) must be parallel"
+            )
+
+        pairs = []
+        for i, (pos, neg) in enumerate(zip(positive_contents, negative_contents)):
+            pos_acts = self.extract_activations(pos, layers)
+            neg_acts = self.extract_activations(neg, layers)
+            pos_text = getattr(pos, "text", None)
+            modality_name = getattr(getattr(pos, "modality", None), "name", "unknown").lower()
+            prompt = pos_text if isinstance(pos_text, str) and pos_text.strip() else f"<{modality_name}-pair-{i}>"
+            pair = ContrastivePair(
+                prompt=prompt,
+                positive_response=PositiveResponse(
+                    model_response=pos,
+                    layers_activations=pos_acts,
+                ),
+                negative_response=NegativeResponse(
+                    model_response=neg,
+                    layers_activations=neg_acts,
+                ),
+            )
+            pairs.append(pair)
+
+        return ContrastivePairSet(name=name, pairs=pairs, task_type=task_type)
 
     @classmethod
     def list_registered(cls) -> Dict[str, type]:

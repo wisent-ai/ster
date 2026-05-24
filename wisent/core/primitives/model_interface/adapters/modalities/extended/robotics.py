@@ -12,12 +12,12 @@ _helpers/robotics_ops.py to keep files under 300 lines.
 """
 from __future__ import annotations
 
-from wisent.core.primitives.model_interface.adapters.modalities._helpers.robotics_core import (
+from wisent.core.primitives.model_interface.adapters.modalities.extended._helpers.robotics_core import (
     RoboticsSteeringConfig,
     InputType,
     RoboticsAdapterCore,
 )
-from wisent.core.primitives.model_interface.adapters.modalities._helpers.robotics_ops import (
+from wisent.core.primitives.model_interface.adapters.modalities.extended._helpers.robotics_ops import (
     RoboticsOpsMixin,
 )
 

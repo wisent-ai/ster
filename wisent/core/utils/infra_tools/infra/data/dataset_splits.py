@@ -68,6 +68,27 @@ def get_all_docs_from_task(task: Any) -> Tuple[List[Dict[str, Any]], Dict[str, i
                     or "connection" in lower and ("timed out" in lower or "reset" in lower)
                 )
                 if is_transient and attempt < 7:
+                    # When the error is "Couldn't find cache for <repo> for config
+                    # <X>. Available configs in the cache: [<Y>]", retrying does
+                    # nothing — the cache state itself is wrong. Nuke the cache
+                    # directory for that dataset so the next attempt fetches all
+                    # configs from HF. Confirmed live on 2026-05-06: hundreds of
+                    # OALL/Arabic_MMLU jobs failed with stale-cache state where
+                    # only one config was downloaded but a different one was
+                    # requested by the task.
+                    if "couldn't find cache" in lower:
+                        import os as _os, re as _re, shutil as _shutil
+                        m = _re.search(r"for ([\w\-./]+) for config", msg)
+                        if m:
+                            ds = m.group(1).replace("/", "___")
+                            cache_root = _os.environ.get(
+                                "HF_DATASETS_CACHE",
+                                _os.path.expanduser("~/.cache/huggingface/datasets"),
+                            )
+                            for sub in (ds, ds.lower()):
+                                p = _os.path.join(cache_root, sub)
+                                if _os.path.isdir(p):
+                                    _shutil.rmtree(p, ignore_errors=True)
                     base = 30 * (2 ** min(attempt, 5))  # 30,60,120,240,480,960,960,960
                     jitter = random.uniform(0, base)
                     time.sleep(min(base + jitter, 600))

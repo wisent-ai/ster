@@ -24,7 +24,7 @@ from wisent.core.primitives.models.modalities import (
 from wisent.core.utils.infra_tools.errors import UnknownTypeError
 from wisent.core.primitives.model_interface.core.activations.core.atoms import LayerActivations
 from wisent.core.utils.config_tools.constants import TEMPORAL_RAMP_MAX
-from wisent.core.primitives.model_interface.adapters.modalities._helpers.robotics_core import (
+from wisent.core.primitives.model_interface.adapters.modalities.extended._helpers.robotics_core import (
     RoboticsSteeringConfig,
     InputType,
 )

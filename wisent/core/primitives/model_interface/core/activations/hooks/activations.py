@@ -13,7 +13,7 @@ class Activations:
     features for classifier input based on the specified extraction strategy.
     """
 
-    def __init__(self, tensor: torch.Tensor, layer: Any, extraction_strategy: ExtractionStrategy = ExtractionStrategy.default(), weighted_decay: float = None):
+    def __init__(self, tensor: torch.Tensor, layer: Any, extraction_strategy: ExtractionStrategy = ExtractionStrategy.default(), weighted_decay: float = 0.1):
         """Initialize Activations wrapper.
 
         Args:
@@ -59,8 +59,6 @@ class Activations:
             max_idx = torch.argmax(norms, dim=1)
             features = tensor[0, max_idx[0], :]
         elif strategy == ExtractionStrategy.CHAT_WEIGHTED:
-            if self.weighted_decay is None:
-                raise ValueError("weighted_decay is required for CHAT_WEIGHTED strategy")
             seq_len = tensor.shape[1]
             weights = torch.exp(-torch.arange(seq_len, dtype=tensor.dtype, device=tensor.device) * self.weighted_decay)
             weights = weights / weights.sum()

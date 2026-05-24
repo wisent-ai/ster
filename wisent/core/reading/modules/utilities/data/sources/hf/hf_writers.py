@@ -51,9 +51,14 @@ def upload_activation_shard(
     pair_ids: List[int],
     dry_run: bool = False,
     staging_dir: Optional[str] = None,
+    stable_ids: Optional[List[str]] = None,
 ) -> str:
     """Upload a single layer's activations as a safetensors file.
-    If staging_dir is set, save locally instead of uploading (for batch mode)."""
+    If staging_dir is set, save locally instead of uploading (for batch mode).
+    If stable_ids is provided, MERGE with existing shard at this path: download
+    existing, drop rows whose stable_id is also in the new batch (refresh), and
+    concat-stack the new rows. Re-runs partially extending coverage no longer
+    overwrite older work."""
     from safetensors.torch import save_file
 
     hf_path = activation_hf_path(model_name, benchmark, strategy, layer)
@@ -64,11 +69,20 @@ def upload_activation_shard(
         print(f"  [DRY RUN] Would upload {hf_path} ({n_pairs} pairs, dim={dim})")
         return hf_path
 
+    if stable_ids is not None and not staging_dir:
+        merged = _merge_existing_shard(hf_path, pos_activations, neg_activations,
+                                       stable_ids, pair_ids)
+        if merged is not None:
+            pos_activations, neg_activations, pair_ids, stable_ids = merged
+            n_pairs = pos_activations.shape[0]
+
     tensors = {
         "pos_activations": pos_activations,
         "neg_activations": neg_activations,
     }
     metadata = {"pair_ids": json.dumps(pair_ids)}
+    if stable_ids is not None:
+        metadata["stable_ids"] = json.dumps(stable_ids)
 
     if staging_dir:
         out_path = Path(staging_dir) / hf_path
@@ -316,3 +330,57 @@ def upload_test_results(benchmark: str, results: dict) -> str:
     finally:
         Path(tmp_path).unlink(missing_ok=True)
     return hf_path
+
+
+
+def _merge_existing_shard(
+    hf_path: str,
+    new_pos,
+    new_neg,
+    new_stable_ids,
+    new_pair_ids,
+):
+    """Download existing shard at hf_path; merge new rows by stable_id.
+    Returns (pos, neg, pair_ids, stable_ids) tuple after merge, or None if
+    no existing shard. New rows replace old rows with same stable_id."""
+    import torch
+    from safetensors.torch import load_file
+    try:
+        from huggingface_hub import hf_hub_download
+        local = hf_hub_download(
+            repo_id=HF_REPO_ID, repo_type=HF_REPO_TYPE,
+            filename=hf_path, token=_get_hf_token(),
+        )
+    except Exception:
+        return None
+    try:
+        loaded = load_file(local)
+        with open(local, "rb") as f:
+            from safetensors import safe_open
+            with safe_open(local, framework="pt") as so:
+                meta = so.metadata() or {}
+        old_stable = json.loads(meta.get("stable_ids", "[]"))
+        old_pair_ids = json.loads(meta.get("pair_ids", "[]"))
+        old_pos = loaded.get("pos_activations")
+        old_neg = loaded.get("neg_activations")
+    except Exception:
+        return None
+    if old_pos is None or old_neg is None or not old_stable:
+        return None
+    new_set = set(new_stable_ids)
+    keep_idx = [i for i, sid in enumerate(old_stable) if sid not in new_set]
+    if keep_idx:
+        kept_pos = old_pos[keep_idx]
+        kept_neg = old_neg[keep_idx]
+        kept_stable = [old_stable[i] for i in keep_idx]
+        kept_pair_ids = [old_pair_ids[i] if i < len(old_pair_ids) else -1 for i in keep_idx]
+    else:
+        kept_pos = old_pos[:0]
+        kept_neg = old_neg[:0]
+        kept_stable = []
+        kept_pair_ids = []
+    merged_pos = torch.cat([kept_pos, new_pos], dim=0)
+    merged_neg = torch.cat([kept_neg, new_neg], dim=0)
+    merged_stable = kept_stable + list(new_stable_ids)
+    merged_pair_ids = kept_pair_ids + list(new_pair_ids)
+    return merged_pos, merged_neg, merged_pair_ids, merged_stable

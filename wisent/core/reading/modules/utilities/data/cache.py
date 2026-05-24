@@ -31,14 +31,29 @@ def get_cache_path(task_name: str, cache_type: str, **kwargs) -> Path:
 
 
 def load_pair_texts_cache(task_name: str, limit: int = None):
-    """Load pair texts from cache if available."""
+    """Load pair texts from cache if available.
+
+    Returns None for any cache miss, including corrupt JSON (truncated
+    writes from a prior ENOSPC) or read errors. Without this defense the
+    JSONDecodeError propagated to the CLI and the whole job failed
+    instead of rebuilding from the upstream task. The corrupt file is
+    unlinked so the next run can write a clean one.
+    """
     cache_path = get_cache_path(task_name, "pair_texts")
     if not cache_path.exists():
         return None
 
     print(f"  Loading pair texts from cache: {cache_path}")
-    with open(cache_path, 'r') as f:
-        cached_data = json.load(f)
+    try:
+        with open(cache_path, 'r') as f:
+            cached_data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"  pair_texts cache unreadable ({exc!r}); removing and rebuilding")
+        try:
+            cache_path.unlink()
+        except OSError:
+            pass
+        return None
     pairs = {int(k): v for k, v in cached_data.items()}
 
     if limit and len(pairs) > limit:
@@ -48,11 +63,25 @@ def load_pair_texts_cache(task_name: str, limit: int = None):
 
 
 def save_pair_texts_cache(task_name: str, pairs: dict):
-    """Save pair texts to cache."""
+    """Save pair texts to cache.
+
+    Best-effort: if /home is full (ENOSPC=28) the write is skipped with
+    a warning instead of crashing the job. The truncated partial file
+    is removed so the next read won't trip JSONDecodeError. The dataset
+    is still available from the upstream HF dataset, so a missed cache
+    write is recoverable on the next invocation.
+    """
     cache_path = get_cache_path(task_name, "pair_texts")
     print(f"  Caching {len(pairs)} pair texts to: {cache_path}")
-    with open(cache_path, 'w') as f:
-        json.dump(pairs, f)
+    try:
+        with open(cache_path, 'w') as f:
+            json.dump(pairs, f)
+    except OSError as exc:
+        print(f"  pair_texts cache write failed ({exc!r}); continuing without cache")
+        try:
+            cache_path.unlink()
+        except OSError:
+            pass
 
 
 def load_activations_cache(task_name: str, model_name: str, layer: int, pair_ids=None, limit=None):

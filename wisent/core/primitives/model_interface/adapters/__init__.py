@@ -8,6 +8,7 @@ from wisent.core.primitives.model_interface.adapters.base import BaseAdapter, Ad
 from wisent.core.primitives.model_interface.adapters.text import TextAdapter
 from wisent.core.primitives.model_interface.adapters.modalities import (
     AudioAdapter,
+    ImageAdapter,
     VideoAdapter,
     RoboticsAdapter,
     MultimodalAdapter,
@@ -18,6 +19,7 @@ __all__ = [
     "AdapterError",
     "TextAdapter",
     "AudioAdapter",
+    "ImageAdapter",
     "VideoAdapter",
     "RoboticsAdapter",
     "MultimodalAdapter",

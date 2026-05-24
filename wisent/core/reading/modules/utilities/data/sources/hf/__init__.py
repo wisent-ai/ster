@@ -1,4 +1,35 @@
 """HuggingFace Hub integration for activation storage."""
+
+# Monkey-patch HfApi's request-issuing methods at module-import time so
+# every HF API call across the wisent fleet (regardless of who created the
+# HfApi instance) acquires a token from a GCS-backed shared rate-limit
+# bucket first. HF accounts are limited to 1000 req/5min account-wide;
+# with 6+ parallel agents this ceiling is hit constantly without
+# coordination, producing 429s that fail random jobs. The bucket lives in
+# wisent_compute.providers.local.hf_rate; refill at 200 tokens/min matches
+# the published HF limit. No-op if wisent_compute isn't installed.
+def _wisent_install_hf_rate_limit() -> None:
+    try:
+        from huggingface_hub import HfApi
+        from wisent_compute.providers.local.hf_rate import wait_for_hf_token
+    except Exception:
+        return
+    if getattr(HfApi, "_wisent_rate_limit_installed", False):
+        return
+    for _m in ("upload_file", "upload_folder", "list_repo_tree",
+               "preupload_lfs_files", "create_commit"):
+        _orig = getattr(HfApi, _m, None)
+        if _orig is None:
+            continue
+        def _make(_o):
+            def _w(self, *a, **k):
+                wait_for_hf_token()
+                return _o(self, *a, **k)
+            return _w
+        setattr(HfApi, _m, _make(_orig))
+    HfApi._wisent_rate_limit_installed = True
+_wisent_install_hf_rate_limit()
+
 from .hf_config import (
     HF_REPO_ID,
     HF_REPO_TYPE,

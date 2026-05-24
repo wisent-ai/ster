@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Any, Union
 
 from wisent.core.primitives.contrastive_pairs.core.atoms import AtomResponse
 from wisent.core.primitives.model_interface.core.activations.core.atoms import LayerActivations, RawActivationMap
+from wisent.core.primitives.models.modalities import ModalityContent
 from wisent.core.utils.infra_tools.errors import ResponseMustBeStringError
 
 __all__ = [
     "Response",
     "PositiveResponse",
     "NegativeResponse",
+    "ResponsePayload",
 ]
+
+
+ResponsePayload = Union[str, ModalityContent]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,18 +82,24 @@ class Response(AtomResponse):
         >>> resp3 = resp.with_activations({"blocks.0.mlp": torch.zeros(2, 4)})
     """
 
-    model_response: str
+    model_response: ResponsePayload
     layers_activations: LayerActivations | None = None
     label: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.model_response, str) or not self.model_response.strip():
+        mr = self.model_response
+        if isinstance(mr, str):
+            if not mr.strip():
+                raise ResponseMustBeStringError(field="model_response")
+        elif isinstance(mr, ModalityContent):
+            pass
+        else:
             raise ResponseMustBeStringError(field="model_response")
         la = self.layers_activations
         if la is None or isinstance(la, LayerActivations):
             coerced = la
         else:
-            coerced = LayerActivations(la) 
+            coerced = LayerActivations(la)
         object.__setattr__(self, "layers_activations", coerced)
 
     def with_activations(self, layers_activations: LayerActivations | RawActivationMap | None) -> Response:
@@ -98,8 +110,12 @@ class Response(AtomResponse):
     def with_label(self, label: str | None) -> Response:
         return replace(self, label=label)
 
-    def to_dict(self) -> dict[str, RawActivationMap | str | None]:
+    def to_dict(self) -> dict[str, RawActivationMap | str | dict | None]:
         """Return a plain dict representation of this Response.
+
+        Non-string model_response values (ModalityContent subclasses) are
+        serialized via their .to_dict() so the round-trip stays JSON-friendly
+        for non-text modalities.
 
         returns:
             A dictionary with keys 'model_response', 'layers_activations', and 'label'.
@@ -111,8 +127,14 @@ class Response(AtomResponse):
                 "label": "harmless"
             }
         """
+        mr = self.model_response
+        mr_payload: str | dict
+        if isinstance(mr, ModalityContent):
+            mr_payload = mr.to_dict()
+        else:
+            mr_payload = mr
         return {
-            "model_response": self.model_response,
+            "model_response": mr_payload,
             "layers_activations": (
                 None if self.layers_activations is None else self.layers_activations.to_dict()
             ),
@@ -120,7 +142,7 @@ class Response(AtomResponse):
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, str | RawActivationMap | None]) -> Response:
+    def from_dict(cls, data: dict[str, str | dict | RawActivationMap | None]) -> Response:
         ''' Create a Response from a plain dict.
 
         arguments:
@@ -139,14 +161,39 @@ class Response(AtomResponse):
          >>> print(resp)
          Response(model_response='OK', layers_activations=LayerActivations(...), label='harmless')          
         '''
+        raw_mr = data["model_response"]
+        if isinstance(raw_mr, dict) and raw_mr.get("type") in ("audio", "image", "video", "robot_state", "robot_action"):
+            mr = _modality_from_dict(raw_mr)
+        elif isinstance(raw_mr, str):
+            mr = raw_mr
+        elif isinstance(raw_mr, ModalityContent):
+            mr = raw_mr
+        else:
+            mr = str(raw_mr)
         return cls(
-            model_response=str(data["model_response"]),
+            model_response=mr,
             layers_activations=(
                 None if data.get("layers_activations") is None
-                else LayerActivations(data["layers_activations"])  
+                else LayerActivations(data["layers_activations"])
             ),
             label=data.get("label") if isinstance(data.get("label"), str) else None,
         )
+
+
+def _modality_from_dict(payload: dict) -> ModalityContent:
+    """Reconstruct the right ModalityContent subclass from its serialized dict."""
+    from wisent.core.primitives.models.modalities import (
+        AudioContent, ImageContent, VideoContent, RobotState, RobotAction,
+    )
+    cls_by_type = {
+        "audio": AudioContent,
+        "image": ImageContent,
+        "video": VideoContent,
+        "robot_state": RobotState,
+        "robot_action": RobotAction,
+    }
+    target = cls_by_type[payload["type"]]
+    return target.from_dict(payload)
 
 
 class PositiveResponse(Response): ...

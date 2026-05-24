@@ -133,8 +133,30 @@ class ContrastivePair(AtomContrastivePair):
             "label": self.label,
             "trait_description": self.trait_description,
             "metadata": self.metadata,
+            "stable_id": self.stable_id(),
         }
         return data
+
+    def stable_id(self) -> str:
+        """Stable global ID derived from pair content. SHA-256 of
+        (prompt + positive_response.text + negative_response.text), truncated.
+
+        Used to track which pairs have had activations extracted across runs
+        so re-runs don't redo work and partial-coverage jobs (e.g. --limit 500
+        on a 1997-pair task) can incrementally extend coverage to the
+        remaining 1497 pairs without overwriting existing shards. Earlier the
+        only "pair_id" was the positional index inside a single pairs.json,
+        which carries no meaning across runs.
+        """
+        import hashlib
+        pos_text = getattr(self.positive_response, "text", None) \
+                   or getattr(self.positive_response, "model_response", "") or ""
+        neg_text = getattr(self.negative_response, "text", None) \
+                   or getattr(self.negative_response, "model_response", "") or ""
+        h = hashlib.sha256(
+            (self.prompt + "\x1f" + pos_text + "\x1f" + neg_text).encode("utf-8")
+        )
+        return h.hexdigest()[:16]
 
     @classmethod
     def from_dict(cls, data: dict[str, str | RawActivationMap | None]) -> ContrastivePair:

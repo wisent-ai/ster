@@ -12,11 +12,11 @@ _video_helpers/video_ops.py to keep files under 300 lines.
 """
 from __future__ import annotations
 
-from wisent.core.primitives.model_interface.adapters.modalities._video_helpers.video_core import (
+from wisent.core.primitives.model_interface.adapters.modalities.extended._video_helpers.video_core import (
     VideoSteeringConfig,
     VideoAdapterCore,
 )
-from wisent.core.primitives.model_interface.adapters.modalities._video_helpers.video_ops import (
+from wisent.core.primitives.model_interface.adapters.modalities.extended._video_helpers.video_ops import (
     VideoOpsMixin,
 )
 

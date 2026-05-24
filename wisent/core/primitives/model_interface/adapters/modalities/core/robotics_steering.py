@@ -17,7 +17,7 @@ __all__ = [
 
 def forward_with_steering_robotics(adapter, content, steering_vectors, config=None) -> RobotAction:
     """Get action with steering applied."""
-    from wisent.core.primitives.model_interface.adapters.modalities.robotics import RoboticsSteeringConfig
+    from wisent.core.primitives.model_interface.adapters.modalities.extended.robotics import RoboticsSteeringConfig
     config = config or RoboticsSteeringConfig()
     with adapter._steering_hooks(steering_vectors, config):
         action_tensor = adapter.forward_policy(content)

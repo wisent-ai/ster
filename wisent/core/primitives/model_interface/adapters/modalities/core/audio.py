@@ -12,10 +12,10 @@ _helpers/audio_ops.py to keep files under 300 lines.
 """
 from __future__ import annotations
 
-from wisent.core.primitives.model_interface.adapters.modalities._helpers.audio_core import (
+from wisent.core.primitives.model_interface.adapters.modalities.extended._helpers.audio_core import (
     AudioAdapterCore,
 )
-from wisent.core.primitives.model_interface.adapters.modalities._helpers.audio_ops import (
+from wisent.core.primitives.model_interface.adapters.modalities.extended._helpers.audio_ops import (
     AudioOpsMixin,
 )
 

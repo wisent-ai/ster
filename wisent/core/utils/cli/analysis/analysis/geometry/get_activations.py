@@ -268,7 +268,7 @@ def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTU
         # 8. Save to file
         os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
         with open(args.output, 'w') as f:
-            json.dump(output_data, f, indent=JSON_INDENT)
+            json.dump(output_data, f)  # indent=None: compact, machine-read
 
         print(f"   ✓ Saved enriched pairs to: {args.output}")
 
@@ -455,7 +455,7 @@ def execute_get_activations_multi(
 
         out_path = os.path.join(output_dir, f"{task_name}__{strategy}.json")
         with open(out_path, "w") as f:
-            json.dump(output_data, f, indent=JSON_INDENT)
+            json.dump(output_data, f)  # indent=None: compact, machine-read
         written[strategy] = out_path
         if verbose:
             print(f"[multi] wrote {out_path}", flush=True)

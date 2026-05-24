@@ -87,7 +87,7 @@ def extract_activations_multimodal(
 
 def forward_with_steering_multimodal(adapter, content, steering_vectors, config=None) -> str:
     """Generate output with steering applied."""
-    from wisent.core.primitives.model_interface.adapters.modalities.multimodal import MultimodalSteeringConfig
+    from wisent.core.primitives.model_interface.adapters.modalities.core.multimodal import MultimodalSteeringConfig
     config = config or MultimodalSteeringConfig()
     if isinstance(config, MultimodalSteeringConfig):
         if config.steer_modalities != "all":
