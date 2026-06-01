@@ -116,6 +116,10 @@ setup(
         # `ModuleNotFoundError: No module named 'wonderwords'`
         # (job 8ecff4a2 / ruler, 2026-05-19T05:42:47Z, local@ubuntu-server).
         "wonderwords>=2.2.0",
+        # Vietoris-Rips persistent homology for Zwiad's unsupervised
+        # topology-discovery pass
+        # (wisent.core.reading.modules.modules.zwiad.unsupervised.topology).
+        "ripser>=0.6.0",
     ],
     extras_require={
         "harness": [

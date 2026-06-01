@@ -21,6 +21,10 @@ from wisent.core.utils.config_tools.constants import DEFAULT_RANDOM_SEED, JSON_I
 # Import compute_geometry_metrics from metrics_core (single source of truth)
 from wisent.core.reading.modules.utilities.metrics.core.metrics_core import compute_geometry_metrics
 from wisent.core.reading.modules.modules.steering.analysis.steerability import compute_final_steering_prescription
+from wisent.core.reading.modules.modules.zwiad.unsupervised.layer_dag import (
+    test_layer_dag as _test_layer_dag,
+    result_to_dict as _layer_dag_to_dict,
+)
 
 
 def run_full_zwiad(
@@ -83,6 +87,8 @@ def run_full_zwiad_with_layer_search(
     benchmark_name: str,
     min_clusters: int,
     output_dir: Optional[str] = None,
+    layer_dag_alpha: Optional[float] = None,
+    layer_dag_max_conditioning_set: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Run zwiad across multiple layers."""
@@ -102,6 +108,18 @@ def run_full_zwiad_with_layer_search(
         "per_layer_metrics": prescription.get("per_layer", {}),
         "results_by_layer": results_by_layer,
     }
+
+    if layer_dag_alpha is not None and layer_dag_max_conditioning_set is not None:
+        signal_layers = sorted([
+            int(l) for l, r in results_by_layer.items()
+            if isinstance(r, dict) and r.get("signal_test", {}).get("passed", False)
+        ])
+        dag_result = _test_layer_dag(
+            activations_by_layer, signal_layers,
+            layer_dag_alpha, layer_dag_max_conditioning_set,
+        )
+        summary["layer_dag"] = _layer_dag_to_dict(dag_result)
+        summary["minimum_steering_layers"] = list(dag_result.minimum_steering_set)
 
     if output_dir:
         output_path = Path(output_dir) / f"{benchmark_name}_layer_search.json"

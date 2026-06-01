@@ -12,6 +12,7 @@ from wisent.core.utils.config_tools.constants import (
     LINEARITY_CROSS_CONTEXT_THRESHOLD,
 )
 from .zwiad_config import adaptive_gap_threshold, adaptive_min_silhouette, ZwiadProtocolConfig
+from .unsupervised.topology import test_topology as _test_topology, result_to_dict as _topology_to_dict
 
 @dataclass
 class SignalTestResult:
@@ -215,6 +216,9 @@ def run_full_protocol(
     zwiad_ranges: Dict[str, float], zwiad_weights: Dict[str, float],
     eot_temperature: float, eot_perturbation_scale: float,
     eot_survival_weight: float, eot_spectral_weight: float,
+    topology_max_dim: Optional[int] = None,
+    topology_max_edge_length: Optional[float] = None,
+    topology_persistence_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run complete Zwiad protocol."""
     if signal_keys is None:
@@ -252,6 +256,9 @@ def run_full_protocol(
         zwiad_score_primary=zwiad_score_primary, zwiad_score_secondary=zwiad_score_secondary,
         zwiad_score_tertiary=zwiad_score_tertiary, zwiad_editability_threshold=zwiad_editability_threshold,
         zwiad_przelom_bonus_max=zwiad_przelom_bonus_max)
+    topo = None
+    if topology_max_dim is not None and topology_max_edge_length is not None and topology_persistence_threshold is not None:
+        topo = _test_topology(pos, neg, topology_max_dim, topology_max_edge_length, topology_persistence_threshold)
     result = {
         "protocol_config": {"n_samples": n_samples, "p_threshold": p_threshold,
             "gap_threshold": gap_threshold, "min_silhouette": min_silhouette},
@@ -269,6 +276,12 @@ def run_full_protocol(
             "spectral_sharpness": edit.spectral_sharpness, "attention_entropy": edit.attention_entropy,
             "jacobian_sensitivity": edit.jacobian_sensitivity},
     }
+    if topo is not None:
+        result["topology_test"] = _topology_to_dict(topo)
+        _b = topo.betti_union
+        if (len(_b) > 1 and _b[1] > 0) or (len(_b) > 2 and _b[2] > 0):
+            result["intervention"].update({"topology_hint": "manifold_topology_detected_prefer_nurt_szlak",
+                "topology_betti": list(_b), "topology_named_shape": topo.named_shape_union})
     try:
         from .geometry_types import profile_benchmark
         geo_dict = {f: getattr(geo, f) for f in _GEO_FIELDS}
