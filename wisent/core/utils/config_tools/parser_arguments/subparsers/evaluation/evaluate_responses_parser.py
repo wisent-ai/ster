@@ -1,5 +1,11 @@
 """Parser setup for the 'evaluate-responses' command."""
 
+from wisent.core.utils.config_tools.parser_arguments.concepts.axbench_parser import (
+    AXBENCH_JUDGE_BATCH_SIZE,
+    AXBENCH_JUDGE_MAX_NEW_TOKENS,
+    AXBENCH_JUDGE_TEMPERATURE,
+)
+
 
 def setup_evaluate_responses_parser(parser):
     """Set up the evaluate-responses command parser."""
@@ -10,6 +16,17 @@ def setup_evaluate_responses_parser(parser):
     parser.add_argument("--task", type=str, help="Task name (optional, overrides task from input JSON)")
     parser.add_argument("--trait", type=str, help="Personality trait to evaluate (optional, for personalization tasks)")
     parser.add_argument("--trait-description", type=str, help="Description of the personality trait")
+    parser.add_argument("--judge-model", type=str, default=None,
+                        help="Judge for axbench tasks: 'openai:gpt-4o-mini' (AxBench reference, "
+                             "needs OPENAI_API_KEY) or a HuggingFace model id for a local judge")
+    parser.add_argument("--judge-batch-size", type=int, default=AXBENCH_JUDGE_BATCH_SIZE,
+                        help="Concurrent judge requests / local judge batch (AxBench reference: 16)")
+    parser.add_argument("--judge-max-new-tokens", type=int, default=AXBENCH_JUDGE_MAX_NEW_TOKENS,
+                        help="Completion budget per judge rubric prompt")
+    parser.add_argument("--judge-temperature", type=float, default=AXBENCH_JUDGE_TEMPERATURE,
+                        help="Judge sampling temperature (0 = deterministic ratings)")
+    parser.add_argument("--concept-label", type=str, default=None,
+                        help="AxBench concept label override when responses lack concept metadata")
     parser.add_argument("--subprocess-timeout", type=int, required=True,
                         help="Timeout in seconds for subprocess execution (e.g. Docker code evaluation)")
     parser.add_argument("--personalization-good-threshold", type=int, required=True,

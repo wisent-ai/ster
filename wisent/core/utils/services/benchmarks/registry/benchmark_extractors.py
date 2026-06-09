@@ -189,6 +189,38 @@ class HLEExtractor(BenchmarkExtractor):
         return exp_norm in pred_norm or pred_norm in exp_norm
 
 
+class AxBenchExtractor(BenchmarkExtractor):
+    """Extractor for AxBench concept-steering tasks (pyvene/axbench-concept*).
+
+    Generations are free-form steered text scored by the AxBench LLM judge
+    (concept/instruct/fluency harmonic mean), so answer extraction is the
+    identity on the generated text. Contrastive pairs map the dataset's
+    instruction (``input``) to the concept-incorporating response
+    (``output``); the incorrect side is supplied by the concept-level pairing
+    in tasks/concepts/axbench_pairs.py, not per-sample.
+    """
+
+    def extract_answer(self, text: str) -> Optional[str]:
+        """Return the generated text unchanged (judge-scored task)."""
+        if not text:
+            return None
+        return text.strip()
+
+    def extract_qa_pair(self, sample: dict, task: any = None) -> Optional[dict]:
+        question = str(sample.get("input", "")).strip()
+        answer = str(sample.get("output", "")).strip()
+        if not question or not answer:
+            return None
+        return {
+            "formatted_question": question,
+            "correct_answer": answer,
+        }
+
+    def check_answer(self, predicted: str, expected: str) -> bool:
+        """Judge-scored task: any non-empty generation is extractable."""
+        return bool(predicted and predicted.strip())
+
+
 # Registry mapping task names to extractors
 _EXTRACTOR_REGISTRY = {}
 

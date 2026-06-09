@@ -7,6 +7,7 @@ from pathlib import Path
 from wisent.core.utils.config_tools.constants import JSON_INDENT
 from wisent.core.reading.evaluators.core.rotator import EvaluatorRotator
 
+from wisent.core.utils.cli.analysis.analysis.evaluation.specialized.evaluate_axbench import evaluate_axbench
 from wisent.core.utils.cli.analysis.analysis.evaluation.specialized.evaluate_docker import evaluate_docker_execution
 from wisent.core.utils.cli.analysis.analysis.evaluation.specialized.evaluate_personalization import evaluate_personalization
 from wisent.core.utils.cli.analysis.analysis.evaluation.standard.evaluate_refusal import evaluate_refusal
@@ -50,7 +51,7 @@ def _get_special_evaluation_type(task_name: str) -> str | None:
             return None
         task_config = tasks[best_key]
     evaluation_type = task_config.get('evaluation_type')
-    if evaluation_type in ("docker_execution", "personalization", "refusal"):
+    if evaluation_type in ("docker_execution", "personalization", "refusal", "axbench_judge"):
         return evaluation_type
     return None
 
@@ -162,6 +163,14 @@ def execute_evaluate_responses(args):
         evaluation_results = []
         task_results = []
         aggregated_metrics = evaluate_refusal(
+            args, input_data, responses, task_name, evaluation_results, task_results)
+        if aggregated_metrics is not None:
+            return
+
+    if special_type == "axbench_judge":
+        evaluation_results = []
+        task_results = []
+        aggregated_metrics = evaluate_axbench(
             args, input_data, responses, task_name, evaluation_results, task_results)
         if aggregated_metrics is not None:
             return

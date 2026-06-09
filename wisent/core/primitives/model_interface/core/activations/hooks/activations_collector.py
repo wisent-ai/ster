@@ -20,6 +20,44 @@ if TYPE_CHECKING:
 __all__ = ["ActivationCollector"]
 
 
+def _encode_ids(tok, text: str, *, add_special_tokens: bool, max_length: int | None = None) -> list[int]:
+    kwargs = {"add_special_tokens": add_special_tokens}
+    if max_length is not None:
+        kwargs.update({"truncation": True, "max_length": max_length})
+    try:
+        return list(tok.encode(text, **kwargs) or [])
+    except TypeError:
+        kwargs.pop("truncation", None); kwargs.pop("max_length", None)
+        return list(tok.encode(text, **kwargs) or [])
+
+
+def _token_len(tok, text: str) -> int:
+    enc = tok(text, return_tensors="pt", add_special_tokens=False)
+    n = int(enc["input_ids"].shape[-1])
+    if n:
+        return n
+    ids = _encode_ids(tok, text, add_special_tokens=False)
+    return len(ids) or len(_encode_ids(tok, text, add_special_tokens=True))
+
+
+def _encode_for_forward(tok, text: str, capped: int):
+    enc = tok(
+        text, return_tensors="pt", add_special_tokens=False,
+        truncation=True, max_length=capped,
+    )
+    if int(enc["input_ids"].shape[-1]):
+        return enc
+    ids = _encode_ids(tok, text, add_special_tokens=False, max_length=capped)
+    if not ids:
+        ids = _encode_ids(tok, text, add_special_tokens=True, max_length=capped)
+    if not ids:
+        return enc
+    return {
+        "input_ids": torch.tensor([ids], dtype=torch.long),
+        "attention_mask": torch.ones((1, len(ids)), dtype=torch.long),
+    }
+
+
 @dataclass(slots=True)
 class ActivationCollector:
     """
@@ -90,12 +128,20 @@ class ActivationCollector:
                 strategy, prompt, response, tok,
                 other_response=other_response, is_positive=is_positive)
             if prompt_only:
-                prompt_enc = tok(prompt_only, return_tensors="pt", add_special_tokens=False)
-                prompt_len = int(prompt_enc["input_ids"].shape[-1])
+                prompt_len = _token_len(tok, prompt_only)
             else:
                 prompt_len = 0
             _capped = min(int(tok.model_max_length or 4096), 4096)
-            full_enc = tok(full_text, return_tensors="pt", add_special_tokens=False, truncation=True, max_length=_capped)
+            full_enc = _encode_for_forward(tok, full_text, _capped)
+            if int(full_enc["input_ids"].shape[-1]) == 0:
+                text = str(full_text or "")
+                raise ValueError(
+                    f"zero-token activation input for strategy={strategy.value}; "
+                    f"text_len={len(text)}; tokenizer={type(tok).__name__}; "
+                    f"name={getattr(tok, 'name_or_path', '')!r}; "
+                    f"chat_template={bool(getattr(tok, 'chat_template', None))}; "
+                    f"text_head={text[:220]!r}"
+                )
             compute_device = getattr(self.model, "compute_device", None) or next(self.model.hf_model.parameters()).device
             full_enc = {k: v.to(compute_device) for k, v in full_enc.items()}
             n_blocks = self.model.num_layers
@@ -275,15 +321,15 @@ class ActivationCollector:
                 other_response=other_response, is_positive=is_positive,
             )
             if prompt_only:
-                prompt_enc = tok(prompt_only, return_tensors="pt", add_special_tokens=False)
-                prompt_len = int(prompt_enc["input_ids"].shape[-1])
+                prompt_len = _token_len(tok, prompt_only)
             else:
                 prompt_len = 0
             _capped = min(int(tok.model_max_length or 4096), 4096)
-            full_enc = tok(
-                full_text, return_tensors="pt",
-                add_special_tokens=False, truncation=True, max_length=_capped,
-            )
+            full_enc = _encode_for_forward(tok, full_text, _capped)
+            if int(full_enc["input_ids"].shape[-1]) == 0:
+                raise ValueError(
+                    f"zero-token activation input for strategy={ref_strategy.value}"
+                )
             compute_device = (
                 getattr(self.model, "compute_device", None)
                 or next(self.model.hf_model.parameters()).device

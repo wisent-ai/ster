@@ -184,7 +184,8 @@ def run_pipeline(
         scores_data = json.load(f)
 
     score = (
-        scores_data.get("aggregated_metrics", {}).get("acc")
+        scores_data.get("aggregated_metrics", {}).get("overall")
+        or scores_data.get("aggregated_metrics", {}).get("acc")
         or scores_data.get("accuracy")
         or scores_data.get("acc")
         or SCORE_RANGE_MIN

@@ -63,6 +63,7 @@ from wisent.core.utils.config_tools.parser_arguments.evaluation import (
     setup_evaluate_parser, setup_evaluate_responses_parser,
     setup_evaluate_refusal_parser, setup_verify_steering_parser,
 )
+from wisent.core.utils.config_tools.parser_arguments.concepts import setup_axbench_parser
 from wisent.core.utils.config_tools.parser_arguments.analysis import (
     setup_check_linearity_parser, setup_cluster_benchmarks_parser,
     setup_geometry_search_parser, setup_zwiad_parser, setup_compare_steering_parser,
@@ -288,4 +289,6 @@ def setup_parser() -> argparse.ArgumentParser:
     setup_compare_steering_parser(compare_steering_parser)
     find_best_parser = subparsers.add_parser("find-best-method", help="Find the best steering method for a benchmark")
     setup_find_best_method_parser(find_best_parser)
+    axbench_parser = subparsers.add_parser("axbench", help="Run the AxBench concept steering/detection benchmark")
+    setup_axbench_parser(axbench_parser)
     return parser

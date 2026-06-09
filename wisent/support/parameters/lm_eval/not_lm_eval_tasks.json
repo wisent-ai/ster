@@ -122,5 +122,9 @@
   "acp_land_gen_with_pddl",
   "acp_nexta_gen_with_pddl",
   "acp_areach_gen_with_pddl",
-  "acp_val_gen_with_pddl"
+  "acp_val_gen_with_pddl",
+  "axbench",
+  "axbench_concept500",
+  "axbench_concept16k",
+  "axbench_concept16k_v2"
 ]

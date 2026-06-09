@@ -29,8 +29,6 @@ from wisent.core.primitives.models.core._hf import (
     _load_cache_first,
 )
 
-
-
 from wisent.core.primitives.models.core.atoms import SteeringPlan, SteeringVector, HookHandleGroup, GenerationStats, TopLogits
 from wisent.core.primitives.model_interface.core.activations.core.atoms import RawActivationMap
 
@@ -68,6 +66,22 @@ __all__ = ["WisentModel"]
 
 
 logger = logging.getLogger(__name__)
+
+_QWEN_CHAT_TEMPLATE = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n'}}{% endfor %}{% if add_generation_prompt %}{{'<|im_start|>assistant\n'}}{% endif %}"
+
+
+def _ensure_qwen_chat_template(tokenizer, model_name: str) -> None:
+    if "qwen" in model_name.lower() and not getattr(tokenizer, "chat_template", None):
+        tokenizer.chat_template = _QWEN_CHAT_TEMPLATE
+
+
+def _prefer_fast_qwen_tokenizer(tokenizer, model_name: str):
+    if "qwen" not in model_name.lower() or type(tokenizer).__name__.endswith("Fast"):
+        return tokenizer
+    try:
+        from transformers import Qwen2TokenizerFast; return _load_cache_first(Qwen2TokenizerFast.from_pretrained, model_name, trust_remote_code=True)
+    except Exception:
+        return tokenizer
 
 class WisentModel:
     """
@@ -151,6 +165,8 @@ class WisentModel:
             use_fast=True,
             trust_remote_code=True,
         )
+        self.tokenizer = _prefer_fast_qwen_tokenizer(self.tokenizer, model_name)
+        _ensure_qwen_chat_template(self.tokenizer, model_name)
 
         if not self._is_chat_tokenizer():
             raise TokenizerMissingMethodError("apply_chat_template")

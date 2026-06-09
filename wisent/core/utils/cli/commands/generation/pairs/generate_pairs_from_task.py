@@ -52,12 +52,30 @@ def execute_generate_pairs_from_task(args):
     try:
         if _skip_fast_path:
             raise RuntimeError("WISENT_DISABLE_PAIR_CACHE set; skipping HF fast path")
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import HfApi, hf_hub_download
         import shutil as _shutil
         import time as _time
         import random as _random
 
         cached_path = None
+        try:
+            _rel = f"pair_texts/{args.task_name}.json"
+            _free = _shutil.disk_usage(os.path.expanduser("~")).free
+            _headroom = 5 * 1024 ** 3
+            _entries = HfApi().list_repo_tree(
+                "wisent-ai/activations", repo_type="dataset",
+                path_in_repo=_rel, token=os.environ.get("HF_TOKEN") or None)
+            _size = next((getattr(e, "size", None) for e in _entries
+                          if getattr(e, "path", "") == _rel), None)
+            if _size and _size > max(0, _free - _headroom):
+                print(f"   ⚠ pair_texts cache {_rel} is {_size/(1024**3):.1f}GB "
+                      f"but home cache has only {_free/(1024**3):.1f}GB free; "
+                      "fresh-building instead", flush=True)
+                raise RuntimeError("pair_texts cache too large for local disk")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
         for _attempt in range(8):
             try:
                 cached_path = hf_hub_download(

@@ -9,6 +9,7 @@ Separated from activations_collector.py to keep files under 300 lines.
 """
 
 from __future__ import annotations
+import os
 from typing import Sequence, TYPE_CHECKING
 import torch
 
@@ -112,9 +113,12 @@ def collect_single_raw(
         else:
             prompt_len = 0
 
+        max_len = int(os.environ.get("WISENT_RAW_MAX_TOKENS") or tok.model_max_length)
+        max_len = max(1, min(max_len, int(tok.model_max_length)))
+
         full_enc = tok(
             full_text, return_tensors="pt",
-            add_special_tokens=False, truncation=True, max_length=tok.model_max_length
+            add_special_tokens=False, truncation=True, max_length=max_len
         )
         compute_device = (
             getattr(collector.model, "compute_device", None)

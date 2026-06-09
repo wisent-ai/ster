@@ -45,6 +45,7 @@ _IMPORT_MAP = {
     'execute_agent': '.agent.main',
     'execute_migrate_activations': '.data.migrate_activations',
     'execute_find_best_method': '.optimize_steering.pipeline.find_best.handler',
+    'execute_axbench': '.concepts.axbench_cmd',
 }
 
 

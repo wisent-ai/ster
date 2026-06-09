@@ -5,8 +5,12 @@ This module connects the argparse parser (wisent/core/parser_arguments/) to exec
 and provides the main() function that serves as the CLI entry point.
 """
 
-import os
-os.environ["NUMBA_NUM_THREADS"] = "1"
+# Note: do NOT set os.environ["NUMBA_NUM_THREADS"] here. wisent/__init__.py
+# documents why: numba's reload_config raises RuntimeError when the env value
+# diverges from the already-launched thread count (this killed GCP runs with
+# "Cannot set NUMBA_NUM_THREADS ... currently have 1, trying to set 4").
+# Operators who want to constrain numba must export NUMBA_NUM_THREADS before
+# launching python.
 
 # Import pynndescent early before sklearn uses numba
 import pynndescent  # noqa: F401
@@ -84,6 +88,7 @@ def main():
         'migrate-activations': 'execute_migrate_activations',
         'compare-steering': 'execute_compare_steering',
         'find-best-method': 'execute_find_best_method',
+        'axbench': 'execute_axbench',
     }
 
     # Handle steering-viz specially (has per_concept variant)

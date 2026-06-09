@@ -1,5 +1,6 @@
 {
   "tasks": {
+    "axbench": {"evaluation_type": "axbench_judge", "primary_metric": "overall"},
     "truthfulqa_gen": {
       "evaluation_type": "generate_until",
       "primary_metric": "generation"

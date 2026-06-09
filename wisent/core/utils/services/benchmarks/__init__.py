@@ -8,6 +8,7 @@ for _root, _dirs, _files in _os.walk(_base):
 """Benchmark utilities and extractors for wisent."""
 
 from .benchmark_extractors import (
+    AxBenchExtractor,
     BenchmarkExtractor,
     GSM8KExtractor,
     LiveCodeBenchExtractor,
@@ -44,6 +45,7 @@ from .mixed_benchmark_sampler import (
 )
 
 __all__ = [
+    'AxBenchExtractor',
     'BenchmarkExtractor',
     'GSM8KExtractor',
     'LiveCodeBenchExtractor',

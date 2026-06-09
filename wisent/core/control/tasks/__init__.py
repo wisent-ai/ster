@@ -5,6 +5,7 @@ This package contains task-agnostic implementations for various benchmarks.
 """
 
 from .base.task_interface import register_task
+from .concepts import AxBenchTask
 from .math import AIMETask, HMMTTask, LiveMathBenchTask, Math500Task, PolyMathTask
 from .code import LiveCodeBenchTask
 from .eval.hle_task import HLEExactMatchTask, HLEMultipleChoiceTask, HLETask
@@ -162,6 +163,12 @@ def register_all_tasks():
     register_task("supergpqa_chemistry", lambda limit=None: SuperGPQAChemistryTask(limit=limit))
     register_task("supergpqa_biology", lambda limit=None: SuperGPQABiologyTask(limit=limit))
 
+    # Register AxBench concept-steering tasks (default: Concept500)
+    register_task("axbench", lambda limit=None, **kw: AxBenchTask(variant="concept500", limit=limit))
+    register_task("axbench_concept500", lambda limit=None, **kw: AxBenchTask(variant="concept500", limit=limit))
+    register_task("axbench_concept16k", lambda limit=None, **kw: AxBenchTask(variant="concept16k", limit=limit))
+    register_task("axbench_concept16k_v2", lambda limit=None, **kw: AxBenchTask(variant="concept16k_v2", limit=limit))
+
 
 # Auto-register tasks when the module is imported
 register_all_tasks()
@@ -170,6 +177,7 @@ register_all_tasks()
 __all__ = [
     "AIMETask",
     "AppsTask",
+    "AxBenchTask",
     "CodexglueCodeToTextGoTask",
     "CodexglueCodeToTextJavaTask",
     "CodexglueCodeToTextJavascriptTask",

@@ -1,4 +1,8 @@
 {
+  "axbench": {"tags": ["steering", "interpretability"]},
+  "axbench_concept500": {"tags": ["steering", "interpretability"]},
+  "axbench_concept16k": {"tags": ["steering", "interpretability"]},
+  "axbench_concept16k_v2": {"tags": ["steering", "interpretability"]},
   "aclue": {
     "tags": [
       "multilingual",

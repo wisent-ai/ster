@@ -11,11 +11,51 @@ from wisent.core.utils.config_tools.constants import (
 )
 
 
+def _has_token_ids(ids) -> bool:
+    if ids is None:
+        return False
+    if hasattr(ids, "numel"):
+        try:
+            return int(ids.numel()) > 0
+        except Exception:
+            return False
+    if isinstance(ids, (list, tuple)):
+        if not ids:
+            return False
+        if isinstance(ids[0], (list, tuple)):
+            return any(_has_token_ids(x) for x in ids)
+        return True
+    try:
+        return bool(ids)
+    except Exception:
+        return False
+
+
+def _tokenizer_has_tokens(tokenizer, text: str) -> bool:
+    value = str(text or "")
+    for add_special in (False, True):
+        try:
+            enc = tokenizer(value, add_special_tokens=add_special)
+            ids = enc.get("input_ids") if hasattr(enc, "get") else enc["input_ids"]
+            if _has_token_ids(ids):
+                return True
+        except Exception:
+            pass
+        try:
+            if _has_token_ids(tokenizer.encode(value, add_special_tokens=add_special)):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTURE_MODULE_LIMIT_DEFAULT):
     """Execute the get-activations command - load pairs and collect activations."""
-    from wisent.core.primitives.models.wisent_model import WisentModel
+    from wisent.core.primitives.models.core.wisent_model import WisentModel
     from wisent.core.primitives.model_interface.core.activations.activations_collector import ActivationCollector
-    from wisent.core.primitives.model_interface.core.activations import ExtractionStrategy, ExtractionComponent
+    from wisent.core.primitives.model_interface.core.activations import (
+        ExtractionStrategy, ExtractionComponent, build_extraction_texts,
+    )
     
     from wisent.core.primitives.contrastive_pairs.core.pair import ContrastivePair
     from wisent.core.primitives.contrastive_pairs.core.io.response import PositiveResponse, NegativeResponse
@@ -181,9 +221,31 @@ def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTU
             enriched_pairs = []
             qk_data_per_pair = []
             layer_norms = {l: [] for l in layer_strs}
+            skipped_empty = 0
             for i, pair in enumerate(pair_set.pairs):
                 if args.verbose:
                     print(f"   Processing pair {i+1}/{len(pair_set.pairs)}...")
+                needs_other = extraction_strategy in (
+                    ExtractionStrategy.MC_BALANCED, ExtractionStrategy.MC_COMPLETION,
+                )
+                pos_text = pair.positive_response.model_response
+                neg_text = pair.negative_response.model_response
+                empty_input = False
+                for response_text, other_text, is_pos in (
+                    (pos_text, neg_text if needs_other else None, True),
+                    (neg_text, pos_text if needs_other else None, False),
+                ):
+                    full_text, _, _ = build_extraction_texts(
+                        extraction_strategy, pair.prompt, response_text, model.tokenizer,
+                        other_response=other_text, is_positive=is_pos,
+                    )
+                    is_qwen = "qwen" in str(getattr(model.tokenizer, "name_or_path", "")).lower()
+                    if (not is_qwen) and not _tokenizer_has_tokens(model.tokenizer, full_text):
+                        empty_input = True
+                        break
+                if empty_input:
+                    skipped_empty += 1
+                    continue
                 updated_pair = collector.collect(
                     pair, strategy=extraction_strategy,
                     layers=layer_strs, component=extraction_component,
@@ -203,6 +265,8 @@ def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTU
                         if neg_act is not None:
                             layer_norms[layer_str].append(neg_act.norm().item())
 
+            if skipped_empty:
+                print(f"   skipped {skipped_empty} zero-token pairs before forward")
             print(f"   ✓ Collected activations for {len(enriched_pairs)} pairs")
             
             # Compute calibration norms (average per layer)
@@ -317,7 +381,9 @@ def execute_get_activations_multi(
     task.
     """
     from wisent.core.primitives.model_interface.core.activations.activations_collector import ActivationCollector
-    from wisent.core.primitives.model_interface.core.activations import ExtractionStrategy, ExtractionComponent
+    from wisent.core.primitives.model_interface.core.activations import (
+        ExtractionStrategy, ExtractionComponent, build_extraction_texts,
+    )
     from wisent.core.primitives.contrastive_pairs.core.pair import ContrastivePair
     from wisent.core.primitives.contrastive_pairs.core.io.response import PositiveResponse, NegativeResponse
     from wisent.core.primitives.contrastive_pairs.core.set import ContrastivePairSet
@@ -372,10 +438,36 @@ def execute_get_activations_multi(
 
     enriched_per_strategy: dict[str, list] = {s: [] for s in strategies}
     qk_per_strategy: dict[str, list] = {s: [] for s in strategies}
+    skipped_empty = 0
 
     for i, pair in enumerate(pair_set.pairs):
         if verbose or (i + 1) % PROGRESS_LOG_INTERVAL_10 == 0:
             print(f"   pair {i+1}/{len(pair_set.pairs)}...", end="\r", flush=True)
+        empty_input = False
+        pos_text = pair.positive_response.model_response
+        neg_text = pair.negative_response.model_response
+        for s_obj in strategy_objs:
+            needs_other = s_obj in (
+                ExtractionStrategy.MC_BALANCED, ExtractionStrategy.MC_COMPLETION,
+            )
+            checks = (
+                (pos_text, neg_text if needs_other else None, True),
+                (neg_text, pos_text if needs_other else None, False),
+            )
+            for response_text, other_text, is_pos in checks:
+                full_text, _, _ = build_extraction_texts(
+                    s_obj, pair.prompt, response_text, model.tokenizer,
+                    other_response=other_text, is_positive=is_pos,
+                )
+                is_qwen = "qwen" in str(getattr(model.tokenizer, "name_or_path", "")).lower()
+                if (not is_qwen) and not _tokenizer_has_tokens(model.tokenizer, full_text):
+                    empty_input = True
+                    break
+            if empty_input:
+                break
+        if empty_input:
+            skipped_empty += 1
+            continue
         per_strat = collector.collect_multi_strategy(
             pair, strategy_objs, layers=layer_strs,
             component=component_obj, capture_qk=capture_qk,
@@ -383,6 +475,8 @@ def execute_get_activations_multi(
         for s_obj in strategy_objs:
             enriched_per_strategy[s_obj.value].append(per_strat[s_obj]["pair"])
             qk_per_strategy[s_obj.value].append(per_strat[s_obj]["qk"])
+    if skipped_empty:
+        print(f"[multi] skipped {skipped_empty} zero-token pairs before forward", flush=True)
 
     os.makedirs(output_dir, exist_ok=True)
     written: dict[str, str] = {}
