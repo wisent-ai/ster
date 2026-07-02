@@ -14,35 +14,98 @@ for _entry in sorted(_os.listdir(_base)):
             if _os.path.isdir(_sub_path) and not _sub.startswith(('.', '_')):
                 __path__.append(_sub_path)
 
-from wisent.core.utils.infra_tools.infra import empty_device_cache, preferred_dtype, resolve_default_device, resolve_device, resolve_torch_device
-# Note: SteeringMethod and SteeringType import temporarily disabled due to missing dependencies
-# from .steering import SteeringMethod, SteeringType
+_LAZY_EXPORTS = {
+    "empty_device_cache": ("wisent.core.utils.infra_tools.infra", "empty_device_cache"),
+    "preferred_dtype": ("wisent.core.utils.infra_tools.infra", "preferred_dtype"),
+    "resolve_default_device": (
+        "wisent.core.utils.infra_tools.infra",
+        "resolve_default_device",
+    ),
+    "resolve_device": ("wisent.core.utils.infra_tools.infra", "resolve_device"),
+    "resolve_torch_device": (
+        "wisent.core.utils.infra_tools.infra",
+        "resolve_torch_device",
+    ),
+    "analyze_steering_vector_subspace": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "analyze_steering_vector_subspace",
+    ),
+    "check_vector_quality": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "check_vector_quality",
+    ),
+    "compress_steering_vectors": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "compress_steering_vectors",
+    ),
+    "decompress_steering_vectors": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "decompress_steering_vectors",
+    ),
+    "compute_optimal_num_directions": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "compute_optimal_num_directions",
+    ),
+    "initialize_from_universal_basis": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "initialize_from_universal_basis",
+    ),
+    "verify_subspace_preservation": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "verify_subspace_preservation",
+    ),
+    "get_recommended_geometry_thresholds": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "get_recommended_geometry_thresholds",
+    ),
+    "SubspaceAnalysisConfig": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "SubspaceAnalysisConfig",
+    ),
+    "SubspaceAnalysisResult": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "SubspaceAnalysisResult",
+    ),
+    "UniversalBasis": (
+        "wisent.core.control.steering_core.core.universal_subspace",
+        "UniversalBasis",
+    ),
+    "compute_icd": ("wisent.core.reading.modules.runner.geometry_runner", "compute_icd"),
+    "compute_nonsense_baseline": (
+        "wisent.core.reading.modules.runner.geometry_runner",
+        "compute_nonsense_baseline",
+    ),
+    "generate_nonsense_activations": (
+        "wisent.core.reading.modules.runner.geometry_runner",
+        "generate_nonsense_activations",
+    ),
+    "analyze_with_nonsense_baseline": (
+        "wisent.core.reading.modules.runner.geometry_runner",
+        "analyze_with_nonsense_baseline",
+    ),
+    "GeometryTestResult": (
+        "wisent.core.reading.modules.runner.geometry_runner",
+        "GeometryTestResult",
+    ),
+    "GeometrySearchResults": (
+        "wisent.core.reading.modules.runner.geometry_runner",
+        "GeometrySearchResults",
+    ),
+    "GeometryRunner": (
+        "wisent.core.reading.modules.runner.geometry_runner",
+        "GeometryRunner",
+    ),
+}
 
-# Universal Subspace Analysis (based on "Universal Weight Subspace Hypothesis")
-from wisent.core.control.steering_core.core.universal_subspace import (
-    analyze_steering_vector_subspace,
-    check_vector_quality,
-    compress_steering_vectors,
-    decompress_steering_vectors,
-    compute_optimal_num_directions,
-    initialize_from_universal_basis,
-    verify_subspace_preservation,
-    get_recommended_geometry_thresholds,
-    SubspaceAnalysisConfig,
-    SubspaceAnalysisResult,
-    UniversalBasis,
-)
 
-# Geometry analysis with ICD and nonsense baseline
-from wisent.core.reading.modules.runner.geometry_runner import (
-    compute_icd,
-    compute_nonsense_baseline,
-    generate_nonsense_activations,
-    analyze_with_nonsense_baseline,
-    GeometryTestResult,
-    GeometrySearchResults,
-    GeometryRunner,
-)
+def __getattr__(name: str):
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr = _LAZY_EXPORTS[name]
+    module = __import__(module_name, fromlist=[attr])
+    value = getattr(module, attr)
+    globals()[name] = value
+    return value
 
 __all__ = [
     # "SteeringMethod",

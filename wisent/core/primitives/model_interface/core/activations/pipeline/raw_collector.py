@@ -113,8 +113,25 @@ def collect_single_raw(
         else:
             prompt_len = 0
 
-        max_len = int(os.environ.get("WISENT_RAW_MAX_TOKENS") or tok.model_max_length)
-        max_len = max(1, min(max_len, int(tok.model_max_length)))
+        model_cfg = getattr(collector.model.hf_model, "config", None)
+        candidates = [
+            getattr(tok, "model_max_length", None),
+            getattr(model_cfg, "max_position_embeddings", None),
+            getattr(model_cfg, "n_positions", None),
+            getattr(model_cfg, "max_sequence_length", None),
+            getattr(model_cfg, "seq_length", None),
+        ]
+        sane_limits = []
+        for value in candidates:
+            try:
+                intval = int(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if 128 < intval < 1_000_000:
+                sane_limits.append(intval)
+        hard_limit = max(sane_limits) if sane_limits else 4096
+        requested = int(os.environ.get("WISENT_RAW_MAX_TOKENS") or hard_limit)
+        max_len = max(1, min(requested, hard_limit))
 
         full_enc = tok(
             full_text, return_tensors="pt",

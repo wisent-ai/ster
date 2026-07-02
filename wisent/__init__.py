@@ -20,7 +20,7 @@ for _entry in sorted(os.listdir(_base)):
     if os.path.isdir(_path) and not _entry.startswith((".", "_")):
         __path__.append(_path)
 
-__version__ = "0.11.68"
+__version__ = "0.11.81"
 
 
 def _wisent_install_hf_rate_limit_global() -> None:
@@ -83,49 +83,74 @@ def _wisent_install_hf_rate_limit_global() -> None:
         pass
 _wisent_install_hf_rate_limit_global()
 
-from wisent.core.control.tasks.base.diversity_processors import (
-    OpenerPenaltyProcessor,
-    PhraseLedger,
-    TriePenaltyProcessor,
-    build_diversity_processors,
-)
-from wisent.core.primitives.model_interface.adapters import (
-    AudioAdapter,
-    BaseAdapter,
-    MultimodalAdapter,
-    RoboticsAdapter,
-    TextAdapter,
-    VideoAdapter,
-)
-# Optional: ImageAdapter ships separately. Some wheels (e.g. 0.11.36, 0.11.46)
-# left the top-level import in place while the implementation/_image_helpers
-# tree was unshipped, producing `ImportError: cannot import name 'ImageAdapter'
-# from 'wisent.core.primitives.model_interface.adapters'` at every `import
-# wisent`. That broke the wisent-compute agent's wisent_import_ok smoke-test,
-# locking the workstation into a crash-restart loop on
-# pip_upgrade_and_exec → reinstall same broken wheel → crash. Guarding the
-# import keeps the top-level `wisent` package importable when ImageAdapter
-# is not present in the installed wheel; the symbol is then absent from
-# `wisent.*` rather than blowing up the whole import surface.
-try:
-    from wisent.core.primitives.model_interface.adapters import ImageAdapter
-except ImportError:
-    ImageAdapter = None
+_LAZY_EXPORTS = {
+    "OpenerPenaltyProcessor": (
+        "wisent.core.control.tasks.base.diversity_processors",
+        "OpenerPenaltyProcessor",
+    ),
+    "TriePenaltyProcessor": (
+        "wisent.core.control.tasks.base.diversity_processors",
+        "TriePenaltyProcessor",
+    ),
+    "PhraseLedger": (
+        "wisent.core.control.tasks.base.diversity_processors",
+        "PhraseLedger",
+    ),
+    "build_diversity_processors": (
+        "wisent.core.control.tasks.base.diversity_processors",
+        "build_diversity_processors",
+    ),
+    "Wisent": ("wisent.core.primitives.model_interface.core.wisent", "Wisent"),
+    "TraitConfig": ("wisent.core.primitives.model_interface.core.wisent", "TraitConfig"),
+    "Modality": ("wisent.core.primitives.models.modalities", "Modality"),
+    "ModalityContent": (
+        "wisent.core.primitives.models.modalities",
+        "ModalityContent",
+    ),
+    "TextContent": ("wisent.core.primitives.models.modalities", "TextContent"),
+    "AudioContent": ("wisent.core.primitives.models.modalities", "AudioContent"),
+    "VideoContent": ("wisent.core.primitives.models.modalities", "VideoContent"),
+    "ImageContent": ("wisent.core.primitives.models.modalities", "ImageContent"),
+    "RobotState": ("wisent.core.primitives.models.modalities", "RobotState"),
+    "RobotAction": ("wisent.core.primitives.models.modalities", "RobotAction"),
+    "RobotTrajectory": (
+        "wisent.core.primitives.models.modalities",
+        "RobotTrajectory",
+    ),
+    "MultimodalContent": (
+        "wisent.core.primitives.models.modalities",
+        "MultimodalContent",
+    ),
+    "BaseAdapter": ("wisent.core.primitives.model_interface.adapters", "BaseAdapter"),
+    "TextAdapter": ("wisent.core.primitives.model_interface.adapters", "TextAdapter"),
+    "AudioAdapter": ("wisent.core.primitives.model_interface.adapters", "AudioAdapter"),
+    "ImageAdapter": ("wisent.core.primitives.model_interface.adapters", "ImageAdapter"),
+    "VideoAdapter": ("wisent.core.primitives.model_interface.adapters", "VideoAdapter"),
+    "RoboticsAdapter": (
+        "wisent.core.primitives.model_interface.adapters",
+        "RoboticsAdapter",
+    ),
+    "MultimodalAdapter": (
+        "wisent.core.primitives.model_interface.adapters",
+        "MultimodalAdapter",
+    ),
+}
 
-# Multi-modal support
-from wisent.core.primitives.model_interface.core.wisent import TraitConfig, Wisent
-from wisent.core.primitives.models.modalities import (
-    AudioContent,
-    ImageContent,
-    Modality,
-    ModalityContent,
-    MultimodalContent,
-    RobotAction,
-    RobotState,
-    RobotTrajectory,
-    TextContent,
-    VideoContent,
-)
+
+def __getattr__(name: str):
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr = _LAZY_EXPORTS[name]
+    try:
+        module = __import__(module_name, fromlist=[attr])
+        value = getattr(module, attr)
+    except ImportError:
+        if name == "ImageAdapter":
+            value = None
+        else:
+            raise
+    globals()[name] = value
+    return value
 
 __all__ = [
     # Version
