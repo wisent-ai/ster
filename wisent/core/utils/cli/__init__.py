@@ -46,6 +46,12 @@ _IMPORT_MAP = {
     'execute_migrate_activations': '.data.migrate_activations',
     'execute_find_best_method': '.optimize_steering.pipeline.find_best.handler',
     'execute_axbench': '.concepts.axbench_cmd',
+    'execute_monitor': '.reenabled.monitor',
+    'execute_test_nonsense': '.reenabled.nonsense',
+    'execute_configure_model': '.reenabled.configure_model',
+    'execute_model_config': '.reenabled.model_config',
+    'execute_evaluate': '.reenabled.evaluate',
+    'execute_generate_vector': '.reenabled.generate_vector',
 }
 
 

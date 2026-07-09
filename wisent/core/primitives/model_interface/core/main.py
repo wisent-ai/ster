@@ -89,6 +89,12 @@ def main():
         'compare-steering': 'execute_compare_steering',
         'find-best-method': 'execute_find_best_method',
         'axbench': 'execute_axbench',
+        'monitor': 'execute_monitor',
+        'test-nonsense': 'execute_test_nonsense',
+        'configure-model': 'execute_configure_model',
+        'model-config': 'execute_model_config',
+        'evaluate': 'execute_evaluate',
+        'generate-vector': 'execute_generate_vector',
     }
 
     # Handle steering-viz specially (has per_concept variant)
