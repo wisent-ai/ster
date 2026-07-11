@@ -13,10 +13,19 @@ from wisent.core.utils.services.optimization.core.parameters import (
 )
 from wisent.core.utils.config_tools import constants as _C
 from wisent.core.control.steering_optimizer.types import SteeringApplicationStrategy
-from wisent.core.primitives.model_interface.core.activations.strategies.extraction_strategy import ExtractionComponent
+from wisent.core.primitives.model_interface.core.activations.pipeline.strategies.extraction_strategy import ExtractionComponent
 
 _SS = [s.value for s in SteeringApplicationStrategy]
 _EC = ExtractionComponent.list_all()
+_ES = [
+    "chat_first",
+    "chat_last",
+    "chat_mean",
+    "chat_max_norm",
+    "chat_weighted",
+    "mc_balanced",
+    "role_play",
+]
 _DW = ["primary_only", "equal"]
 U_MU = _C.UNINFORMATIVE_MU
 U_SIG = _C.UNINFORMATIVE_SIGMA
@@ -48,6 +57,17 @@ def _base(num_layers: int) -> dict[str, Param]:
     max_layer = num_layers - 1
     return {
         "steering_strategy": _Cat(choices=_SS),
+        "extraction_strategy": _Cat(choices=_ES),
+        "strength": _ln(U_MU, U_SIG),
+        "layer": _ri(_C.SS_LAYER_MIN, max_layer),
+    }
+
+
+def _deferred_base(num_layers: int) -> dict[str, Param]:
+    """Legacy Q/K method space; intentionally retains component search."""
+    max_layer = num_layers - 1
+    return {
+        "steering_strategy": _Cat(choices=_SS),
         "extraction_component": _Cat(choices=_EC),
         "strength": _ln(U_MU, U_SIG),
         "layer": _ri(_C.SS_LAYER_MIN, max_layer),
@@ -58,6 +78,7 @@ def _sensor_base(num_layers: int) -> dict[str, Param]:
     max_layer = num_layers - 1
     return {
         "steering_strategy": _Cat(choices=_SS),
+        "extraction_strategy": _Cat(choices=_ES),
         "strength": _ln(U_MU, U_SIG),
         "sensor_layer": _ri(_C.SS_LAYER_MIN, max_layer),
         "steering_start": _ri(_C.SS_LAYER_MIN, max_layer),
@@ -193,7 +214,7 @@ def nurt_space(num_layers: int) -> dict[str, Param]:
 
 
 def szlak_space(num_layers: int) -> dict[str, Param]:
-    s = _base(num_layers)
+    s = _deferred_base(num_layers)
     s["sinkhorn_reg"] = _ln(U_MU, U_SIG)
     s["max_iter"] = _ri(_C.SS_SZLAK_MAX_ITER_MIN, _C.SS_SZLAK_MAX_ITER_MAX)
     s["inference_k"] = _ri(_C.SS_SZLAK_INFERENCE_K_MIN, _C.SS_SZLAK_INFERENCE_K_MAX)
@@ -214,7 +235,7 @@ def wicher_space(num_layers: int) -> dict[str, Param]:
 
 
 def przelom_space(num_layers: int) -> dict[str, Param]:
-    s = _base(num_layers)
+    s = _deferred_base(num_layers)
     s["epsilon"] = _ln(U_MU, U_SIG)
     s["target_mode"] = _Cat(choices=list(_C.SS_PRZELOM_TARGET_MODES))
     s["regularization"] = _ln(U_MU, U_SIG)

@@ -4,7 +4,7 @@ import math
 import os
 import struct
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, Sequence
 
 from wisent.core.utils.config_tools.constants import BYTES_PER_MB
 from wisent.core.control.steering_methods.configs.optimal import get_optimal_extraction_strategy, get_optimal
@@ -263,6 +263,101 @@ def build_enriched_from_hf(
     except Exception as e:
         print(f"  HF: Failed: {e}")
         return None
+
+
+def build_enriched_from_hf_strict(
+    model_name: str,
+    task_name: str,
+    layer: int,
+    extraction_strategy: str,
+    work_dir: str,
+    expected_pair_ids: Sequence[int],
+    completion_manifest_file: Optional[str] = None,
+) -> str:
+    """Build enriched JSON from one exact, manifest-proven HF activation shard.
+
+    Unlike :func:`build_enriched_from_hf`, this API never uses caches, limits,
+    generated pairs, positional joins, or alternate extraction formats. The
+    output pair order is exactly ``expected_pair_ids``. Validation failures are
+    machine-readable ``ValueError`` instances produced by the strict loaders.
+    """
+    from wisent.core.reading.modules.utilities.data.sources.hf.hf_loaders import (
+        _strict_value_error,
+        load_activations_from_hf_strict,
+        load_pair_texts_from_hf_strict,
+    )
+
+    pos_activations, neg_activations, ordered_pair_ids = load_activations_from_hf_strict(
+        model_name=model_name,
+        task_name=task_name,
+        layer=layer,
+        extraction_strategy=extraction_strategy,
+        expected_pair_ids=expected_pair_ids,
+        completion_manifest_file=completion_manifest_file,
+    )
+    pair_texts = load_pair_texts_from_hf_strict(task_name, ordered_pair_ids)
+    if pos_activations.shape[0] != len(ordered_pair_ids) or neg_activations.shape[0] != len(ordered_pair_ids):
+        raise _strict_value_error(
+            "enriched_support_mismatch",
+            "Activation tensors do not cover the exact requested pair support",
+            expected_count=len(ordered_pair_ids),
+            positive_count=pos_activations.shape[0],
+            negative_count=neg_activations.shape[0],
+        )
+
+    layer_key = str(layer)
+    enriched_pairs = []
+    calibration_norm_sum = 0.0
+    for index, pair_id in enumerate(ordered_pair_ids):
+        pair_text = pair_texts[pair_id]
+        positive = pos_activations[index].tolist()
+        negative = neg_activations[index].tolist()
+        calibration_norm_sum += math.sqrt(sum(value * value for value in positive))
+        calibration_norm_sum += math.sqrt(sum(value * value for value in negative))
+        enriched_pairs.append({
+            "pair_id": pair_id,
+            "prompt": pair_text["prompt"],
+            "positive_response": {
+                "model_response": pair_text["positive"],
+                "layers_activations": {layer_key: positive},
+                "q_proj_activations": {},
+                "k_proj_activations": {},
+            },
+            "negative_response": {
+                "model_response": pair_text["negative"],
+                "layers_activations": {layer_key: negative},
+                "q_proj_activations": {},
+                "k_proj_activations": {},
+            },
+            "label": task_name,
+            "trait_description": "",
+        })
+
+    output = {
+        "task_name": task_name,
+        "trait_label": task_name,
+        "model": model_name,
+        "layers": [layer],
+        "extraction_strategy": extraction_strategy,
+        "extraction_component": "residual_stream",
+        "raw_mode": False,
+        "num_pairs": len(enriched_pairs),
+        "pair_ids": ordered_pair_ids,
+        "calibration_norms": {
+            layer_key: calibration_norm_sum / (2 * len(ordered_pair_ids)),
+        },
+        "pairs": enriched_pairs,
+    }
+    out_path = os.path.join(work_dir, "enriched_from_hf_strict.json")
+    try:
+        with open(out_path, "w") as handle:
+            json.dump(output, handle)
+    except OSError as exc:
+        raise _strict_value_error(
+            "enriched_output_write_failed", "Could not write strict enriched JSON",
+            path=out_path, error=str(exc),
+        ) from exc
+    return out_path
 
 
 def generate_and_collect_enriched(

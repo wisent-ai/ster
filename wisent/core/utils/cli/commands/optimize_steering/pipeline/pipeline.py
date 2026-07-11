@@ -17,7 +17,6 @@ from wisent.core.utils.cli.optimize_steering.data.contrastive_pairs_data import 
 from wisent.core.utils.cli.optimize_steering.data.activations_data import execute_get_activations
 from wisent.core.utils.cli.optimize_steering.steering_objects import execute_create_steering_object
 from wisent.core.utils.cli.optimize_steering.data.responses import execute_generate_responses
-from wisent.core.utils.cli.optimize_steering.scores import execute_evaluate_responses, task_uses_log_likelihoods, write_placeholder_responses
 from wisent.core.utils.config_tools.constants import (
     SCORE_RANGE_MIN, GENERATION_DEFAULT_MAX_NEW_TOKENS,
     GENERATION_DEFAULT_TEMPERATURE, GENERATION_DEFAULT_TOP_P,
@@ -56,6 +55,7 @@ def run_pipeline(
     enriched_pairs_file: Optional[str] = None,
     train_pairs_file: Optional[str] = None,
     test_pairs_file: Optional[str] = None,
+    evaluation_pairs_file: Optional[str] = None,
     cached_model=None,
 ) -> OptimizationResult:
     """Run the full optimization pipeline for a single configuration.
@@ -63,6 +63,11 @@ def run_pipeline(
     When train_pairs_file and test_pairs_file are set, the steering object
     is trained on train pairs and evaluated on test pairs (no data leakage).
     """
+    from wisent.core.utils.cli.optimize_steering.scores import (
+        execute_evaluate_responses,
+        task_uses_log_likelihoods,
+        write_placeholder_responses,
+    )
     activations_file = os.path.join(work_dir, "activations.json")
     steering_file = os.path.join(work_dir, "steering.pt")
     responses_file = os.path.join(work_dir, "responses.json")
@@ -77,8 +82,9 @@ def run_pipeline(
 
     if enriched_pairs_file:
         activations_file = enriched_pairs_file
-        eval_pairs_file = enriched_pairs_file
-        eval_limit = limit
+        eval_pairs_file = evaluation_pairs_file or test_pairs_file or enriched_pairs_file
+        with open(eval_pairs_file) as f:
+            eval_limit = len(json.load(f).get("pairs", []))
     elif train_pairs_file:
         layer = getattr(config, 'layer', None) or getattr(config, 'sensor_layer', None)
         if layer is None:
@@ -238,11 +244,20 @@ def _prefix_params(method: str, params: dict) -> dict:
 def _build_config(method: str, params: dict) -> tuple[MethodConfig, float]:
     """Build a MethodConfig from flat params dict. Returns (config, strength)."""
     strength = params.get("strength", SCORE_RANGE_MIN)
-    ext = get_optimal_extraction_strategy()
     steer = params.get("steering_strategy", get_optimal("steering_strategy"))
     m = method.upper()
-    extra = _prefix_params(method, params)
-    ec = params.get("extraction_component", get_optimal("extraction_component"))
+    primary_methods = frozenset({
+        "CAA", "OSTRZE", "MLP", "TECZA", "TETNO", "GROM", "NURT", "WICHER",
+    })
+    if m in primary_methods:
+        ext = params.get("extraction_strategy", get_optimal_extraction_strategy())
+        ec = "residual_stream"
+    else:
+        # Deferred Q/K methods retain their legacy optimal/component path.
+        ext = get_optimal_extraction_strategy()
+        ec = params.get("extraction_component", get_optimal("extraction_component"))
+    prefixed_params = {k: v for k, v in params.items() if k != "extraction_strategy"}
+    extra = _prefix_params(method, prefixed_params)
     extra["extraction_component"] = ec
     kw = dict(extraction_strategy=ext, steering_strategy=steer, _extra_args=extra)
     if m in ("CAA", "OSTRZE", "MLP", "TECZA", "NURT", "SZLAK", "WICHER", "PRZELOM"):
@@ -276,6 +291,7 @@ def create_objective(
     enriched_pairs_file: Optional[str] = None,
     train_pairs_file: Optional[str] = None,
     test_pairs_file: Optional[str] = None,
+    strict_enriched_files: Optional[dict] = None,
     cached_model=None,
 ):
     """Create an objective function for the BaseOptimizer.
@@ -284,12 +300,29 @@ def create_objective(
     When train_pairs_file/test_pairs_file are set, trains on train and
     evaluates on test (no data leakage).
     """
+    if strict_enriched_files is not None and not test_pairs_file:
+        raise ValueError(
+            "Strict pre-materialized trial inputs require separate evaluation pair texts"
+        )
+
     def objective(params: dict) -> float:
         config, strength = _build_config(method, params)
+        selected_enriched_file = enriched_pairs_file
+        if strict_enriched_files is not None:
+            strategy = config.extraction_strategy
+            layer = getattr(config, "layer", None) or getattr(config, "sensor_layer", None)
+            route_key = (strategy, int(layer))
+            try:
+                selected_enriched_file = strict_enriched_files[route_key]
+            except KeyError as exc:
+                raise ValueError(
+                    f"No pre-materialized strict enriched input for strategy/layer {route_key!r}"
+                ) from exc
         return run_pipeline(
             model=model, task=task, config=config, work_dir=work_dir,
             strength=strength, limit=limit, device=device,
-            enriched_pairs_file=enriched_pairs_file,
+            enriched_pairs_file=selected_enriched_file,
+            evaluation_pairs_file=test_pairs_file,
             train_pairs_file=train_pairs_file,
             test_pairs_file=test_pairs_file,
             cached_model=cached_model,

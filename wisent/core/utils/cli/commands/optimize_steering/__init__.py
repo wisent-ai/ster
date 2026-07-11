@@ -42,16 +42,29 @@ from wisent.core.utils.cli.optimize_steering.method_configs import (
     TECZAConfig, TETNOConfig, GROMConfig, NurtConfig,
     SzlakConfig, WicherConfig,
 )
-from wisent.core.utils.cli.optimize_steering.transport import PrzelomConfig, execute_transport_rl
+from wisent.core.utils.cli.optimize_steering.transport.method_configs_transport import PrzelomConfig
 from wisent.core.utils.cli.optimize_steering.search_space import get_method_space
-from wisent.core.utils.cli.optimize_steering.pipeline import (
-    OptimizationResult, run_pipeline, create_objective, _make_args,
-)
 from wisent.core.utils.services.optimization.core.atoms import BaseOptimizer, HPOConfig
-from wisent.core.utils.cli.optimize_steering.welfare import _execute_welfare_optimization
-from wisent.core.utils.cli.optimize_steering.personalization import _execute_personalization_optimization
-from wisent.core.utils.cli.optimize_steering.continual import execute_continual_learning
 from wisent.core.utils.config_tools.constants import JSON_INDENT, SEPARATOR_WIDTH_REPORT, TRIALS_PER_DIMENSION_MULTIPLIER
+
+_LAZY_EXPORTS = {
+    "OptimizationResult": ("wisent.core.utils.cli.optimize_steering.pipeline", "OptimizationResult"),
+    "run_pipeline": ("wisent.core.utils.cli.optimize_steering.pipeline", "run_pipeline"),
+    "create_objective": ("wisent.core.utils.cli.optimize_steering.pipeline", "create_objective"),
+    "_make_args": ("wisent.core.utils.cli.optimize_steering.pipeline", "_make_args"),
+    "execute_transport_rl": ("wisent.core.utils.cli.optimize_steering.transport.transport_rl", "execute_transport_rl"),
+    "execute_continual_learning": ("wisent.core.utils.cli.optimize_steering.continual", "execute_continual_learning"),
+}
+
+
+def __getattr__(name):
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+    value = getattr(import_module(target[0]), target[1])
+    globals()[name] = value
+    return value
 
 
 def execute_optimize_steering(args):
@@ -160,10 +173,12 @@ def execute_optimize_steering(args):
 
     # Check for 'welfare' steering_action - AI welfare states optimization
     if steering_action == 'welfare':
+        from wisent.core.utils.cli.optimize_steering.welfare import _execute_welfare_optimization
         return _execute_welfare_optimization(args)
 
     # Check for 'personalization' steering_action
     if steering_action == 'personalization':
+        from wisent.core.utils.cli.optimize_steering.personalization import _execute_personalization_optimization
         return _execute_personalization_optimization(args)
 
     # Check for 'hierarchical' steering_action
@@ -173,10 +188,12 @@ def execute_optimize_steering(args):
 
     # Check for 'transport-rl' steering_action
     if steering_action == 'transport-rl':
+        from wisent.core.utils.cli.optimize_steering.transport.transport_rl import execute_transport_rl
         return execute_transport_rl(args)
 
     # Check for 'continual' steering_action (subcommand)
     if steering_action == 'continual' or subcommand == 'continual':
+        from wisent.core.utils.cli.optimize_steering.continual import execute_continual_learning
         return execute_continual_learning(args)
 
     # Default: Unified optimizer (Hyperopt or Optuna backend)
@@ -212,6 +229,8 @@ def execute_optimize_steering(args):
     n_trials = len(space) * TRIALS_PER_DIMENSION_MULTIPLIER
     optimizer = BaseOptimizer()
     optimizer.direction = "maximize"
+
+    from wisent.core.utils.cli.optimize_steering.pipeline import create_objective
 
     with tempfile.TemporaryDirectory() as work_dir:
         objective = create_objective(
