@@ -112,7 +112,9 @@ class WisentModel:
             steering_weights: list[float] | None = None,
             layers_description: list[str] | None = None,
             device: str | None = None,
-            hf_model: AutoModelForCausalLM | None = None
+            hf_model: AutoModelForCausalLM | None = None,
+            *,
+            revision: str | None = None,
         ):
         """
         Initialize the wrapper (model + tokenizer + default steering plan).
@@ -128,6 +130,8 @@ class WisentModel:
                 'cuda', 'cuda:0', 'cpu', etc. If None, leave to HF defaults/accelerate.
             hf_model:
                 optional preloaded model (skips from_pretrained if provided).
+            revision:
+                optional immutable Hugging Face commit used for both model and tokenizer.
         """
         self.model_name = model_name
         self.device = resolve_default_device() if device is None or device == "auto" else device
@@ -138,6 +142,8 @@ class WisentModel:
             "low_cpu_mem_usage": True,
             "attn_implementation": "eager",
         }
+        if revision is not None:
+            load_kwargs["revision"] = revision
 
         load_kwargs["torch_dtype"] = preferred_dtype(self.device)
         if self.device == "mps":
@@ -164,8 +170,25 @@ class WisentModel:
             model_name,
             use_fast=True,
             trust_remote_code=True,
+            revision=revision,
         )
         self.tokenizer = _prefer_fast_qwen_tokenizer(self.tokenizer, model_name)
+        self.requested_revision = revision
+        self.resolved_model_revision = getattr(self.hf_model.config, "_commit_hash", None)
+        tokenizer_kwargs = getattr(self.tokenizer, "init_kwargs", {})
+        self.resolved_tokenizer_revision = (
+            getattr(self.tokenizer, "_commit_hash", None)
+            or tokenizer_kwargs.get("_commit_hash")
+        )
+        if revision is not None:
+            if self.resolved_model_revision != revision:
+                raise ValueError(
+                    "loaded model revision does not match the requested immutable revision"
+                )
+            if self.resolved_tokenizer_revision != revision:
+                raise ValueError(
+                    "loaded tokenizer revision does not match the requested immutable revision"
+                )
         _ensure_qwen_chat_template(self.tokenizer, model_name)
 
         if not self._is_chat_tokenizer():
