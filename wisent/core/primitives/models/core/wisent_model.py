@@ -17,6 +17,7 @@ from transformers import (
     PreTrainedTokenizerBase,
     TextIteratorStreamer
 )
+from transformers.utils import hub as transformers_hub
 
 
 # HF Hub load helpers extracted to ._hf 2026-05-10. The 8-attempt 429
@@ -180,6 +181,16 @@ class WisentModel:
             getattr(self.tokenizer, "_commit_hash", None)
             or tokenizer_kwargs.get("_commit_hash")
         )
+        if revision is not None and self.resolved_tokenizer_revision is None:
+            tokenizer_config = transformers_hub.cached_file(
+                model_name,
+                "tokenizer_config.json",
+                revision=revision,
+            )
+            self.resolved_tokenizer_revision = transformers_hub.extract_commit_hash(
+                tokenizer_config,
+                None,
+            )
         if revision is not None:
             if self.resolved_model_revision != revision:
                 raise ValueError(

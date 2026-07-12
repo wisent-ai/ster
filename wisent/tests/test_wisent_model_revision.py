@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch.nn as nn
+from transformers.utils import hub as transformers_hub
 
 from wisent.core.primitives.models.core import wisent_model
 
@@ -58,6 +59,26 @@ def _install_loaders(
     return calls
 
 
+def _install_cached_tokenizer_revision(monkeypatch, resolved_revision):
+    cached_path = "/cache/snapshots/resolved/tokenizer_config.json"
+
+    def cached_file(model_name, filename, *, revision):
+        assert (model_name, filename, revision) == (
+            MODEL_NAME,
+            "tokenizer_config.json",
+            REVISION,
+        )
+        return cached_path
+
+    def extract_commit_hash(path, revision):
+        assert path == cached_path
+        assert revision is None
+        return resolved_revision
+
+    monkeypatch.setattr(transformers_hub, "cached_file", cached_file)
+    monkeypatch.setattr(transformers_hub, "extract_commit_hash", extract_commit_hash)
+
+
 def test_pinned_revision_is_loaded_and_recorded_for_model_and_tokenizer(monkeypatch):
     calls = _install_loaders(monkeypatch)
 
@@ -83,9 +104,30 @@ def test_pinned_revision_rejects_unverified_model_commit(monkeypatch, model_revi
         wisent_model.WisentModel(MODEL_NAME, device="cpu", revision=REVISION)
 
 
-@pytest.mark.parametrize("tokenizer_revision", ["f" * 40, _MISSING], ids=["mismatch", "missing"])
-def test_pinned_revision_rejects_unverified_tokenizer_commit(monkeypatch, tokenizer_revision):
-    _install_loaders(monkeypatch, tokenizer_revision=tokenizer_revision)
+def test_pinned_revision_rejects_mismatched_tokenizer_commit(monkeypatch):
+    _install_loaders(monkeypatch, tokenizer_revision="f" * 40)
+
+    with pytest.raises(
+        ValueError,
+        match="loaded tokenizer revision does not match the requested immutable revision",
+    ):
+        wisent_model.WisentModel(MODEL_NAME, device="cpu", revision=REVISION)
+
+
+def test_pinned_revision_accepts_tokenizer_commit_resolved_from_cache(monkeypatch):
+    _install_loaders(monkeypatch, tokenizer_revision=_MISSING)
+    _install_cached_tokenizer_revision(monkeypatch, REVISION)
+
+    model = wisent_model.WisentModel(MODEL_NAME, device="cpu", revision=REVISION)
+
+    assert model.resolved_tokenizer_revision == REVISION
+
+
+def test_pinned_revision_rejects_tokenizer_commit_resolved_from_different_cache_snapshot(
+    monkeypatch,
+):
+    _install_loaders(monkeypatch, tokenizer_revision=_MISSING)
+    _install_cached_tokenizer_revision(monkeypatch, "f" * 40)
 
     with pytest.raises(
         ValueError,
