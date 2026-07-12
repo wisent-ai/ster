@@ -12,11 +12,12 @@ import platform
 import shutil
 import sys
 import tempfile
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
 from scripts.steering.desired_results_final_test import (
-    ACTIVATION_REVISION, ARMS, BENCHMARK, CALIBRATION_PROTOCOL_ID, CODE_REVISION,
+    ACTIVATION_REVISION, ARMS, BENCHMARK, CALIBRATION_PROTOCOL_ID,
     FinalTestError, FULL_SUPPORT_SHA256, GCSStore, MODEL, PAIR_TEXT_SHA256, PROTOCOL_ID,
     TARGET_ID, _atomic_json, _canonical_bytes, _canonical_json_sha256,
     _require_exact_keys, _strict_json_bytes,
@@ -44,7 +45,8 @@ def _validate_arm_manifest(manifest: Mapping[str, Any], seal: Mapping[str, Any],
                            seal_ref: Mapping[str, Any] | None = None) -> Dict[str, Any]:
     manifest_keys = {"schema_version", "protocol", "target", "contract_sha256", "revisions",
                      "input_identity", "split_contract", "metric_contract", "test_evaluations",
-                     "arm", "method", "calibration", "claim_uri", "output_prefix", "manifest_sha256"}
+                     "test_pairs", "arm", "method", "calibration", "claim_uri", "output_prefix",
+                     "manifest_sha256"}
     _require_exact_keys(manifest, manifest_keys, "arm manifest")
     seal_keys = {"schema_version", "protocol_id", "contract", "contract_sha256",
                  "manifests", "arms", "runtime_identity", "metric_contract_sha256", "seal_sha256"}
@@ -79,7 +81,9 @@ def _validate_arm_manifest(manifest: Mapping[str, Any], seal: Mapping[str, Any],
         raise WorkerError("manifest target differs")
     revisions = _require_exact_keys(
         manifest["revisions"], {"code", "model", "activation", "runtime"}, "manifest revisions")
-    if (revisions["code"] != CODE_REVISION or revisions["activation"] != ACTIVATION_REVISION or
+    if (not isinstance(revisions["code"], str) or len(revisions["code"]) != 40 or
+            any(character not in "0123456789abcdef" for character in revisions["code"]) or
+            revisions["activation"] != ACTIVATION_REVISION or
             seal["runtime_identity"] != revisions["runtime"] or
             revisions["runtime"].get("tokenizer_revision") != revisions["model"]):
         raise WorkerError("manifest revision/runtime identity differs from seal")
@@ -120,17 +124,21 @@ def _validate_arm_manifest(manifest: Mapping[str, Any], seal: Mapping[str, Any],
             seal["metric_contract_sha256"] != metric_hash or metric.get("evaluator") != "log_likelihoods" or
             metric.get("expected_count") != 100):
         raise WorkerError("metric contract differs from sealed log-likelihood contract")
+    _require_exact_keys(manifest["test_pairs"], {"uri", "sha256", "generation", "size"},
+                        "test_pairs")
     if arm == "baseline":
         if manifest["calibration"] is not None:
             raise WorkerError("baseline must not have calibration configuration")
     else:
         calibration = manifest["calibration"]
-        required_cal = {"params", "config_sha256", "selected_config", "frozen_config", "provenance", "completion"}
+        required_cal = {"params", "config_sha256", "selected_config", "frozen_config", "provenance",
+                        "selection_completion", "activation_proof", "train_enriched"}
         _require_exact_keys(calibration, required_cal, "arm calibration")
         if calibration["config_sha256"] != _canonical_json_sha256(calibration["params"]):
             raise WorkerError("frozen parameter hash differs")
-        for name in ("selected_config", "frozen_config", "provenance", "completion"):
-            _require_exact_keys(calibration[name], {"uri", "sha256", "generation"}, f"calibration {name}")
+        for name in required_cal - {"params", "config_sha256"}:
+            _require_exact_keys(calibration[name], {"uri", "sha256", "generation", "size"},
+                                f"calibration {name}")
     prefix = manifest["output_prefix"]
     expected_tail = f"/runs/{arm}/{manifest['contract_sha256']}/"
     if not isinstance(prefix, str) or not prefix.startswith("gs://") or not prefix.endswith(expected_tail) or ".." in prefix:
@@ -157,8 +165,9 @@ def _claim_once(store: GCSStore, manifest: Mapping[str, Any]) -> Dict[str, str]:
 
 def _download_ref(store: GCSStore, ref: Mapping[str, Any], destination: Path) -> Path:
     data, observed = store.read(ref["uri"], ref["generation"])
-    if observed != ref["generation"] or hashlib.sha256(data).hexdigest() != ref["sha256"]:
-        raise WorkerError(f"immutable calibration object drift: {ref['uri']}")
+    if (observed != ref["generation"] or hashlib.sha256(data).hexdigest() != ref["sha256"] or
+            len(data) != int(ref["size"])):
+        raise WorkerError(f"immutable input object drift: {ref['uri']}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("xb") as stream:
         stream.write(data); stream.flush(); os.fsync(stream.fileno())
@@ -193,33 +202,35 @@ def _materialize_train(store: GCSStore, manifest: Mapping[str, Any], work_dir: P
     layer = params.get("layer", params.get("sensor_layer"))
     if not isinstance(strategy, str) or type(layer) is not int:
         raise WorkerError("frozen activation route lacks exact strategy/layer")
-    proof = _download_ref(store, calibration["completion"], work_dir / "activation-completion.json")
-    from wisent.core.reading.modules.utilities.data.enriched_builder import build_enriched_from_hf_strict
+    proof_path = _download_ref(store, calibration["activation_proof"], work_dir / "activation-proof.json")
+    proof = _strict_json_bytes(proof_path.read_bytes(), "activation proof")
     train_ids = [row["pair_id"] for row in manifest["split_contract"]["fit"]["support"]]
-    output = build_enriched_from_hf_strict(
-        MODEL, BENCHMARK, layer, strategy, str(work_dir / "strict-train"), train_ids,
-        completion_manifest_file=str(proof),
-    )
-    data = _strict_json_bytes(Path(output).read_bytes(), "strict train activations")
+    proof_ids = proof.get("pair_ids")
+    if (proof.get("complete") is not True or proof.get("extraction_strategy") != strategy or
+            not isinstance(proof.get("layers"), list) or layer not in proof["layers"] or
+            not isinstance(proof_ids, list) or not set(train_ids).issubset(set(proof_ids))):
+        raise WorkerError("sealed activation proof does not authorize selected route/support")
+    output = _download_ref(store, calibration["train_enriched"], work_dir / "train-enriched.json")
+    data = _strict_json_bytes(output.read_bytes(), "pre-materialized train activations")
     if data.get("pair_ids") != train_ids or data.get("num_pairs") != 300:
-        raise WorkerError("strict train materialization changed ordered support")
-    return output
+        raise WorkerError("pre-materialized train input changed ordered support")
+    return str(output)
 
 
-def _load_test_pairs(manifest: Mapping[str, Any], destination: Path) -> str:
-    from wisent.core.reading.modules.utilities.data.sources.hf.hf_loaders import load_pair_texts_from_hf_strict
+def _load_test_pairs(store: GCSStore, manifest: Mapping[str, Any], destination: Path) -> str:
+    output = _download_ref(store, manifest["test_pairs"], destination)
+    data = _strict_json_bytes(output.read_bytes(), "pre-materialized test pairs")
     rows = manifest["split_contract"]["evaluation"]["support"]
     ids = [row["pair_id"] for row in rows]
-    texts = load_pair_texts_from_hf_strict(BENCHMARK, ids)
-    if list(texts) != ids:
-        raise WorkerError("strict test text loader changed ordered support")
-    pairs = [{"pair_id": pair_id, "stable_id": row["stable_id"], "prompt": texts[pair_id]["prompt"],
-              "positive_response": {"model_response": texts[pair_id]["positive"]},
-              "negative_response": {"model_response": texts[pair_id]["negative"]}}
-             for pair_id, row in zip(ids, rows)]
-    _atomic_json(destination, {"task_name": BENCHMARK, "num_pairs": 100,
-                               "pair_ids": ids, "pairs": pairs})
-    return str(destination)
+    pairs = data.get("pairs")
+    if (data.get("task_name") != BENCHMARK or data.get("num_pairs") != 100 or
+            data.get("pair_ids") != ids or not isinstance(pairs, list) or len(pairs) != 100):
+        raise WorkerError("pre-materialized test input changed ordered support")
+    for expected, pair in zip(rows, pairs):
+        if (not isinstance(pair, dict) or pair.get("pair_id") != expected["pair_id"] or
+                pair.get("stable_id") != expected["stable_id"]):
+            raise WorkerError("pre-materialized test row identity differs")
+    return str(output)
 
 
 def _steering_empty(model: Any) -> bool:
@@ -360,7 +371,7 @@ def _normalize_result(manifest: Mapping[str, Any], scores: Mapping[str, Any],
         "model_revision": manifest["revisions"]["model"],
         "tokenizer_revision": runtime["tokenizer_revision"], "code_revision": manifest["revisions"]["code"],
         "runtime_identity_sha256": _canonical_json_sha256(runtime), "evaluator": "log_likelihoods",
-        "evaluator_version": runtime["evaluator_version"], "evaluation_mode": "log_likelihood",
+        "evaluator_version": runtime["evaluator_source_sha256"], "evaluation_mode": "log_likelihood",
         "sample_count": 100, "aggregation": manifest["metric_contract"]["aggregation"],
     }
     return result, predictions
@@ -369,6 +380,49 @@ def _normalize_result(manifest: Mapping[str, Any], scores: Mapping[str, Any],
 def _fsync_file(path: Path) -> None:
     with path.open("rb") as stream:
         os.fsync(stream.fileno())
+
+
+def _git_head() -> str:
+    root = Path(__file__).resolve().parents[2]
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                                capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise WorkerError(f"cannot measure checkout revision: {exc}") from exc
+    return result.stdout.strip()
+
+
+def _source_sha256(relative: str) -> str:
+    path = Path(__file__).resolve().parents[2] / relative
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise WorkerError(f"cannot measure runtime source {relative}: {exc}") from exc
+
+
+def _measure_runtime_identity(device: str | None) -> Dict[str, str]:
+    try:
+        import torch
+    except ImportError as exc:
+        raise WorkerError("torch is required to measure the sealed runtime") from exc
+    if device != "cuda" or not torch.cuda.is_available():
+        raise WorkerError("final test requires a measurable CUDA runtime")
+    try:
+        driver = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            check=True, capture_output=True, text=True).stdout.strip().splitlines()[0]
+    except (OSError, subprocess.CalledProcessError, IndexError) as exc:
+        raise WorkerError(f"cannot measure NVIDIA driver version: {exc}") from exc
+    return {
+        "runtime": "stado-local", "python": platform.python_version(), "torch": str(torch.__version__),
+        "cuda": str(torch.version.cuda), "driver": driver, "gpu": torch.cuda.get_device_name(0),
+        "precision": "default_dtype:" + str(torch.get_default_dtype()).removeprefix("torch."),
+        "evaluator_source_sha256": _source_sha256(
+            "wisent/core/utils/cli/analysis/analysis/evaluation/standard/evaluate_responses.py"),
+        "coherence_source_sha256": _source_sha256(
+            "wisent/core/reading/evaluators/core/text_quality/__init__.py"),
+        "tokenizer_revision": "",  # filled from the independently sealed model revision below
+    }
 
 
 def _publish_arm(store: GCSStore, manifest: Mapping[str, Any], work_dir: Path,
@@ -405,12 +459,18 @@ def _publish_arm(store: GCSStore, manifest: Mapping[str, Any], work_dir: Path,
 
 def _execute(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[str, Any]:
     store = store or GCSStore()
-    manifest, manifest_ref = _read_object(store, args.manifest)
-    seal, seal_ref = _read_object(store, args.seal)
+    manifest, manifest_ref = _read_object(store, args.manifest, args.manifest_generation)
+    seal, seal_ref = _read_object(store, args.seal, args.seal_generation)
     manifest = _validate_arm_manifest(manifest, seal, manifest_ref, seal_ref)
     expected_prefix = args.remote_prefix.rstrip("/") + "/"
     if manifest["output_prefix"].split("runs/", 1)[0] != expected_prefix:
         raise WorkerError("CLI remote prefix differs from sealed output prefix")
+    if _git_head() != manifest["revisions"]["code"]:
+        raise WorkerError("actual checkout HEAD differs from sealed code revision")
+    runtime_observed = _measure_runtime_identity(args.device)
+    runtime_observed["tokenizer_revision"] = manifest["revisions"]["model"]
+    if runtime_observed != manifest["revisions"]["runtime"]:
+        raise WorkerError("measured stado-local runtime differs from sealed runtime identity")
     claim_ref = _claim_once(store, manifest)  # permanent and before model/train/test
     work_dir = Path(tempfile.mkdtemp(prefix=f"final-test-{manifest['arm']}-", dir=args.output_root.resolve()))
     try:
@@ -418,12 +478,12 @@ def _execute(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[st
         model = WisentModel(MODEL, device=args.device, revision=manifest["revisions"]["model"])
         resolved = _assert_model_revision(model, manifest["revisions"]["model"])
         if manifest["arm"] == "baseline":
-            test_pairs = _load_test_pairs(manifest, work_dir / "test-pairs.json")
+            test_pairs = _load_test_pairs(store, manifest, work_dir / "test-pairs.json")
             run = _run_baseline_arm(manifest, model, test_pairs, work_dir)
             fit_ledger = {"fit": "none", "fit_pair_ids": []}
         else:
             enriched = _materialize_train(store, manifest, work_dir)
-            test_pairs = _load_test_pairs(manifest, work_dir / "test-pairs.json")
+            test_pairs = _load_test_pairs(store, manifest, work_dir / "test-pairs.json")
             run = _run_steered_arm(manifest, model, enriched, test_pairs, work_dir, args.device)
             fit_ledger = {"fit": "train_only", "fit_pair_ids": [row["pair_id"] for row in manifest["split_contract"]["fit"]["support"]]}
         scores = _strict_json_bytes(Path(run["scores"]).read_bytes(), "scores")
@@ -436,7 +496,7 @@ def _execute(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[st
                       "calibration": manifest["calibration"], **fit_ledger,
                       "test_pair_ids_read": [row["pair_id"] for row in manifest["split_contract"]["evaluation"]["support"]],
                       "test_reads": 1, "optimization_calls": 0, "configuration_mutation": False,
-                      "runtime_observed": {"python": platform.python_version()}}
+                      "runtime_observed": runtime_observed}
         completion = _publish_arm(store, manifest, work_dir, result, predictions,
                                   Path(run["scores"]), Path(run["responses"]), provenance, manifest_ref)
         return {"arm": manifest["arm"], "claim": claim_ref, "completion": completion}
@@ -455,7 +515,9 @@ def _execute(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[st
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--manifest-generation", required=True)
     parser.add_argument("--seal", required=True)
+    parser.add_argument("--seal-generation", required=True)
     parser.add_argument("--output-root", type=Path, default=Path("."))
     parser.add_argument("--remote-prefix", required=True)
     parser.add_argument("--device")

@@ -20,6 +20,16 @@ WORKER_SPEC = importlib.util.spec_from_file_location("desired_results_final_test
 worker = importlib.util.module_from_spec(WORKER_SPEC)
 WORKER_SPEC.loader.exec_module(worker)
 
+TEST_CODE_REVISION = "b" * 40
+_REF_PAYLOADS = {}
+
+
+def _ref(uri, value, generation="1"):
+    payload = final._canonical_bytes(value)
+    _REF_PAYLOADS[uri] = payload
+    return {"uri": uri, "generation": generation,
+            "sha256": hashlib.sha256(payload).hexdigest(), "size": str(len(payload))}
+
 
 class FakeStore:
     def __init__(self, *, fail_at=None):
@@ -75,19 +85,34 @@ def _contract_and_manifests():
         params = {"layer": index, "strength": 1.0, "extraction_strategy": strategy}
         methods[method] = {
             "params": params, "config_sha256": final._canonical_json_sha256(params),
-            "selected_config": {"uri": f"gs://cal/{method}/selected", "generation": "1", "sha256": "1" * 64},
-            "frozen_config": {"uri": f"gs://cal/{method}/frozen", "generation": "2", "sha256": "2" * 64},
-            "provenance": {"uri": f"gs://cal/{method}/provenance", "generation": "3", "sha256": "3" * 64},
-            "completion": {"uri": f"gs://cal/{method}/completion", "generation": "4", "sha256": "4" * 64},
+            "selected_config": _ref(f"gs://cal/{method}/selected", {"method": method}),
+            "frozen_config": _ref(f"gs://cal/{method}/frozen", {"method": method}),
+            "provenance": _ref(f"gs://cal/{method}/provenance", {"method": method}),
+            "selection_completion": _ref(f"gs://cal/{method}/selection", {"complete": True}),
+            "activation_proof": _ref(f"gs://cal/{method}/activation", {
+                "complete": True, "extraction_strategy": strategy, "layers": [index],
+                "pair_ids": list(range(500)),
+            }),
+            "train_enriched": _ref(f"gs://cal/{method}/train", {
+                "num_pairs": 300, "pair_ids": list(range(300)),
+            }),
+            "_train_pair_ids": list(range(300)),
         }
-    calibration = {"uri": "gs://cal/index", "sha256": "5" * 64, "generation": "9",
-                   "model_revision": "a" * 40, "methods": methods}
-    runtime = {"container": "sha256:" + "d" * 64, "python": "3.12", "torch": "2.7",
+    test_payload = {
+        "task_name": final.BENCHMARK, "num_pairs": 100, "pair_ids": list(range(400, 500)),
+        "pairs": [{"pair_id": row["pair_id"], "stable_id": row["stable_id"],
+                   "prompt": f"p{row['pair_id']}", "positive_response": {"model_response": "yes"},
+                   "negative_response": {"model_response": "no"}} for row in test],
+    }
+    index_ref = _ref("gs://cal/index", {"kind": "calibration-index"}, "9")
+    calibration = {**index_ref, "model_revision": "a" * 40,
+                   "test_pairs": _ref("gs://cal/test-pairs", test_payload, "10"),
+                   "test_pair_ids": list(range(400, 500)), "methods": methods}
+    runtime = {"runtime": "stado-local", "python": "3.12.2", "torch": "2.7",
                "cuda": "12.8", "driver": "570", "gpu": "nvidia-rtx-pro-6000",
-               "precision": "bfloat16", "evaluator_version": "ll-v1",
-               "tokenizer_revision": "a" * 40,
-               "coherence": {"probe": "fixed", "aggregation": "mean"}}
-    contract = final._build_contract(inventory, calibration, final.CODE_REVISION, runtime,
+               "precision": "default_dtype:float32", "evaluator_source_sha256": "e" * 64,
+               "coherence_source_sha256": "c" * 64, "tokenizer_revision": "a" * 40}
+    contract = final._build_contract(inventory, calibration, TEST_CODE_REVISION, runtime,
                                      "gs://stado/results/target/final-test-v1/")
     return contract, final._build_manifests(contract)
 
@@ -118,6 +143,98 @@ def _scores(*, evaluator="log_likelihoods", count=100, malformed=None, acc=0.75)
 def _responses(count=100):
     return {"responses": [{"prompt": f"p{i}", "positive_reference": "yes",
                             "negative_reference": "no"} for i in range(count)]}
+
+
+def _execution_args(store, manifest, manifests, tmp_path):
+    manifest_uri = f"gs://control/{manifest['arm']}-manifest.json"
+    manifest_ref = store.create(manifest_uri, final._canonical_bytes(manifest))
+    seal, refs = _seal_for(manifests)
+    refs[manifest["arm"]] = manifest_ref
+    seal["manifests"] = refs
+    seal["seal_sha256"] = final._canonical_json_sha256(
+        {key: value for key, value in seal.items() if key != "seal_sha256"}
+    )
+    seal_uri = "gs://control/seal.json"
+    seal_ref = store.create(seal_uri, final._canonical_bytes(seal))
+    return SimpleNamespace(
+        manifest=manifest_uri, manifest_generation=manifest_ref["generation"],
+        seal=seal_uri, seal_generation=seal_ref["generation"],
+        remote_prefix="gs://stado/results/target/final-test-v1/",
+        output_root=tmp_path, device="cuda",
+    )
+
+
+def test_worker_parser_requires_manifest_and_seal_generations():
+    with pytest.raises(SystemExit):
+        worker._parser().parse_args([
+            "--manifest", "gs://m", "--seal", "gs://s", "--remote-prefix", "gs://r"
+        ])
+    args = worker._parser().parse_args([
+        "--manifest", "gs://m", "--manifest-generation", "11",
+        "--seal", "gs://s", "--seal-generation", "12", "--remote-prefix", "gs://r",
+    ])
+    assert (args.manifest_generation, args.seal_generation) == ("11", "12")
+
+
+@pytest.mark.parametrize("field", ["manifest_generation", "seal_generation"])
+def test_worker_reads_manifest_and_seal_at_cli_generations_before_claim(monkeypatch, tmp_path, field):
+    _, manifests = _contract_and_manifests()
+    manifest = manifests["caa"]
+    store = FakeStore()
+    args = _execution_args(store, manifest, manifests, tmp_path)
+    setattr(args, field, "999")
+    monkeypatch.setattr(worker, "_claim_once",
+                        lambda *unused: pytest.fail("claim must follow generation verification"))
+    with pytest.raises(worker.WorkerError, match="generation mismatch"):
+        worker._execute(args, store)
+    assert manifest["claim_uri"] not in store.objects
+
+
+def test_checkout_head_mismatch_refuses_before_permanent_claim(monkeypatch, tmp_path):
+    _, manifests = _contract_and_manifests()
+    manifest = manifests["caa"]
+    store = FakeStore()
+    args = _execution_args(store, manifest, manifests, tmp_path)
+    monkeypatch.setattr(worker, "_git_head", lambda: "f" * 40)
+    monkeypatch.setattr(worker, "_claim_once",
+                        lambda *unused: pytest.fail("claim must follow checkout verification"))
+    with pytest.raises(worker.WorkerError, match="checkout HEAD"):
+        worker._execute(args, store)
+    assert manifest["claim_uri"] not in store.objects
+
+
+@pytest.mark.parametrize("field", [
+    "runtime", "python", "torch", "cuda", "driver", "gpu", "precision",
+    "evaluator_source_sha256", "coherence_source_sha256",
+])
+def test_each_measured_stado_local_runtime_mismatch_refuses_before_claim(monkeypatch, tmp_path, field):
+    _, manifests = _contract_and_manifests()
+    manifest = manifests["caa"]
+    store = FakeStore()
+    args = _execution_args(store, manifest, manifests, tmp_path)
+    observed = dict(manifest["revisions"]["runtime"])
+    observed["tokenizer_revision"] = ""
+    observed[field] = "different"
+    monkeypatch.setattr(worker, "_git_head", lambda: TEST_CODE_REVISION)
+    monkeypatch.setattr(worker, "_measure_runtime_identity", lambda device: dict(observed))
+    monkeypatch.setattr(worker, "_claim_once",
+                        lambda *unused: pytest.fail("claim must follow runtime verification"))
+    with pytest.raises(worker.WorkerError, match="measured stado-local runtime"):
+        worker._execute(args, store)
+    assert manifest["claim_uri"] not in store.objects
+
+
+def test_generation_and_hash_drift_refuse_immutable_input_download(tmp_path):
+    ref = _ref("gs://inputs/object", {"sealed": True}, "7")
+    wrong_generation = FakeStore()
+    wrong_generation.objects[ref["uri"]] = (_REF_PAYLOADS[ref["uri"]], "8")
+    with pytest.raises(worker.WorkerError, match="generation mismatch"):
+        worker._download_ref(wrong_generation, ref, tmp_path / "generation.json")
+
+    wrong_hash = FakeStore()
+    wrong_hash.objects[ref["uri"]] = (_REF_PAYLOADS[ref["uri"]] + b" ", "7")
+    with pytest.raises(worker.WorkerError, match="immutable input object drift"):
+        worker._download_ref(wrong_hash, ref, tmp_path / "hash.json")
 
 
 def test_claim_is_permanent_create_only_and_refuses_all_duplicate_terminal_states():
@@ -156,7 +273,7 @@ def test_execute_claims_before_model_train_test_evaluation_and_completion(monkey
         {key: value for key, value in seal.items() if key != "seal_sha256"}
     )
     seal_uri = "gs://control/seal.json"
-    store.create(seal_uri, final._canonical_bytes(seal))
+    seal_ref = store.create(seal_uri, final._canonical_bytes(seal))
     events = []
 
     original_claim = worker._claim_once
@@ -164,6 +281,10 @@ def test_execute_claims_before_model_train_test_evaluation_and_completion(monkey
         events.append("claim")
         return original_claim(fake_store, value)
     monkeypatch.setattr(worker, "_claim_once", claim)
+    monkeypatch.setattr(worker, "_git_head", lambda: TEST_CODE_REVISION)
+    observed_runtime = dict(manifest["revisions"]["runtime"])
+    observed_runtime["tokenizer_revision"] = ""
+    monkeypatch.setattr(worker, "_measure_runtime_identity", lambda device: dict(observed_runtime))
 
     from wisent.core.primitives.models import wisent_model as model_module
     class FakeModel:
@@ -186,9 +307,10 @@ def test_execute_claims_before_model_train_test_evaluation_and_completion(monkey
     import wisent.core.utils.infra_tools.infra as infra_module
     monkeypatch.setattr(infra_module, "empty_device_cache", lambda: None)
 
-    args = SimpleNamespace(manifest=manifest_uri, seal=seal_uri,
+    args = SimpleNamespace(manifest=manifest_uri, manifest_generation=manifest_ref["generation"],
+                           seal=seal_uri, seal_generation=seal_ref["generation"],
                            remote_prefix="gs://stado/results/target/final-test-v1/",
-                           output_root=tmp_path, device="cpu")
+                           output_root=tmp_path, device="cuda")
     worker._execute(args, store)
     assert events[:6] == ["claim", "model", "train", "test", "evaluate", "completion"]
 
@@ -207,30 +329,21 @@ def test_manifest_mutation_and_extra_field_fail_before_claim_or_data_access():
                                           {"sha256": hashlib.sha256(final._canonical_bytes(seal)).hexdigest()})
 
 
-def test_all_eight_methods_materialize_only_frozen_route_and_ordered_train(monkeypatch, tmp_path):
+def test_all_eight_methods_use_only_route_proof_and_pre_materialized_train(monkeypatch, tmp_path):
     _, manifests = _contract_and_manifests()
-    calls = []
     monkeypatch.setattr(worker, "_validate_frozen_params", lambda method, params: None)
-    monkeypatch.setattr(worker, "_download_ref", lambda store, ref, destination: destination)
-    from wisent.core.reading.modules.utilities.data import enriched_builder
-
-    def build(model, task, layer, strategy, output_dir, pair_ids, **kwargs):
-        calls.append((model, task, layer, strategy, list(pair_ids), kwargs))
-        path = Path(output_dir) / "enriched.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({"pair_ids": pair_ids, "num_pairs": 300}))
-        return str(path)
-
-    monkeypatch.setattr(enriched_builder, "build_enriched_from_hf_strict", build)
     for method in final.METHODS:
-        worker._materialize_train(FakeStore(), manifests[method], tmp_path / method)
-
-    assert len(calls) == 8
-    for method, call in zip(final.METHODS, calls):
-        params = manifests[method]["calibration"]["params"]
-        assert call[2:4] == (params["layer"], params["extraction_strategy"])
-        assert call[4] == list(range(300))
-        assert "validation" not in json.dumps(call).lower()
+        manifest = manifests[method]
+        store = FakeStore()
+        for name in ("activation_proof", "train_enriched"):
+            ref = manifest["calibration"][name]
+            store.objects[ref["uri"]] = (_REF_PAYLOADS[ref["uri"]], ref["generation"])
+        output = worker._materialize_train(store, manifest, tmp_path / method)
+        assert json.loads(Path(output).read_text())["pair_ids"] == list(range(300))
+        assert store.reads == [manifest["calibration"]["activation_proof"]["uri"],
+                               manifest["calibration"]["train_enriched"]["uri"]]
+        assert manifest["calibration"]["selection_completion"]["uri"] not in store.reads
+        assert "validation" not in json.dumps(store.reads).lower()
 
 
 def test_steered_arm_calls_frozen_pipeline_once_with_strict_train_and_test(monkeypatch, tmp_path):
@@ -358,32 +471,24 @@ def test_completion_is_last_create_and_artifact_failure_never_exposes_it(tmp_pat
     assert not any(uri.endswith("completion.json") for uri in failing.writes)
 
 
-def test_train_and_test_helpers_never_read_validation_support(monkeypatch, tmp_path):
+def test_train_and_test_helpers_use_only_generation_pinned_gcs_and_no_hf(monkeypatch, tmp_path):
     _, manifests = _contract_and_manifests()
     manifest = manifests["caa"]
     monkeypatch.setattr(worker, "_validate_frozen_params", lambda method, params: None)
-    store = FakeStore()
-    completion = manifest["calibration"]["completion"]
-    payload = b"proof"
-    completion.update(sha256=hashlib.sha256(payload).hexdigest())
-    store.objects[completion["uri"]] = (payload, completion["generation"])
     from wisent.core.reading.modules.utilities.data import enriched_builder
     from wisent.core.reading.modules.utilities.data.sources.hf import hf_loaders
-
-    def build(model, task, layer, strategy, output_dir, pair_ids, **kwargs):
-        path = Path(output_dir) / "rows.json"; path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({"pair_ids": pair_ids, "num_pairs": 300}))
-        return str(path)
-
-    seen_ids = []
-    def load(task, ids):
-        seen_ids.extend(ids)
-        return {pair_id: {"prompt": "p", "positive": "yes", "negative": "no"} for pair_id in ids}
-
-    monkeypatch.setattr(enriched_builder, "build_enriched_from_hf_strict", build)
-    monkeypatch.setattr(hf_loaders, "load_pair_texts_from_hf_strict", load)
+    def forbidden_hf(*args, **kwargs):
+        pytest.fail("worker must not invoke any HF loader")
+    monkeypatch.setattr(enriched_builder, "build_enriched_from_hf_strict", forbidden_hf)
+    monkeypatch.setattr(hf_loaders, "load_pair_texts_from_hf_strict", forbidden_hf)
+    store = FakeStore()
+    refs = [manifest["calibration"]["activation_proof"],
+            manifest["calibration"]["train_enriched"], manifest["test_pairs"]]
+    for ref in refs:
+        store.objects[ref["uri"]] = (_REF_PAYLOADS[ref["uri"]], ref["generation"])
     worker._materialize_train(store, manifest, tmp_path / "train")
-    worker._load_test_pairs(manifest, tmp_path / "test.json")
-    assert store.reads == [completion["uri"]]
-    assert seen_ids == list(range(400, 500))
-    assert not ({*range(300, 400)} & set(seen_ids))
+    worker._load_test_pairs(store, manifest, tmp_path / "test.json")
+    assert store.reads == [ref["uri"] for ref in refs]
+    assert manifest["calibration"]["selection_completion"]["uri"] not in store.reads
+    assert manifest["calibration"]["activation_proof"]["uri"] in store.reads
+    assert manifest["test_pairs"]["uri"] in store.reads

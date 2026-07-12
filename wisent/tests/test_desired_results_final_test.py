@@ -14,18 +14,27 @@ SPEC = importlib.util.spec_from_file_location("desired_results_final_test", PATH
 final = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(final)
 
+TEST_CODE_REVISION = "b" * 40
+
 
 class FakeStore:
     """Create-only, generation-addressed object store with a write ledger."""
 
-    def __init__(self):
+    def __init__(self, *, fail_at=None):
         self.objects = {}
         self.writes = []
+        self.reads = []
+        self.create_attempts = 0
+        self.fail_at = fail_at
         self.next_generation = 1
 
     def create(self, uri, data, content_type="application/json"):
         if uri in self.objects:
             raise final.FinalTestError(f"object already exists: {uri}")
+        attempt = self.create_attempts
+        self.create_attempts += 1
+        if self.fail_at == attempt:
+            raise final.FinalTestError("injected create failure")
         generation = str(self.next_generation)
         self.next_generation += 1
         payload = bytes(data)
@@ -42,6 +51,7 @@ class FakeStore:
         return uri in self.objects
 
     def read(self, uri, generation=None):
+        self.reads.append((uri, generation))
         if uri not in self.objects:
             raise final.FinalTestError(f"object missing: {uri}")
         data, observed = self.objects[uri]
@@ -52,16 +62,16 @@ class FakeStore:
 
 def _runtime():
     return {
-        "container": "sha256:" + "d" * 64,
+        "runtime": "stado-local",
         "python": "3.12.10",
         "torch": "2.7.1",
         "cuda": "12.8",
         "driver": "570.133",
         "gpu": "nvidia-rtx-pro-6000",
         "precision": "bfloat16",
-        "evaluator_version": "wisent-log-likelihood-v1",
+        "evaluator_source_sha256": "e" * 64,
+        "coherence_source_sha256": "c" * 64,
         "tokenizer_revision": "a" * 40,
-        "coherence": {"probe": "winogrande-coherence-v1", "aggregation": "mean"},
     }
 
 
@@ -88,30 +98,54 @@ def _inventory():
     }
 
 
+_REF_PAYLOADS = {}
+
+
+def _ref(uri, value, generation="1"):
+    payload = final._canonical_bytes(value)
+    _REF_PAYLOADS[uri] = payload
+    return {"uri": uri, "generation": generation,
+            "sha256": hashlib.sha256(payload).hexdigest(), "size": str(len(payload))}
+
+
 def _calibration():
     methods = {}
     for index, method in enumerate(final.METHODS):
         params = {"layer": index + 1, "strength": 1.0, "extraction_strategy": "chat_first"}
+        config_hash = final._canonical_json_sha256(params)
+        selected = {"schema_version": 1, "method": method,
+                    "best_params": params, "config_sha256": config_hash}
         methods[method] = {
-            "params": params,
-            "config_sha256": final._canonical_json_sha256(params),
-            "selected_config": {"uri": f"gs://cal/{method}/selected", "generation": "1", "sha256": "1" * 64},
-            "frozen_config": {"uri": f"gs://cal/{method}/frozen", "generation": "2", "sha256": "2" * 64},
-            "provenance": {"uri": f"gs://cal/{method}/provenance", "generation": "3", "sha256": "3" * 64},
-            "completion": {"uri": f"gs://cal/{method}/completion", "generation": "4", "sha256": "4" * 64},
+            "params": params, "config_sha256": config_hash,
+            "selected_config": _ref(f"gs://cal/{method}/selected", selected),
+            "frozen_config": _ref(f"gs://cal/{method}/frozen",
+                                  {"schema_version": 2, "method": method, "best_params": params}),
+            "provenance": _ref(f"gs://cal/{method}/provenance", {"method": method}),
+            "selection_completion": _ref(f"gs://cal/{method}/selection-completion", {"complete": True}),
+            "activation_proof": _ref(f"gs://cal/{method}/activation-proof", {
+                "complete": True, "extraction_strategy": "chat_first", "layers": [index + 1],
+                "pair_ids": list(range(500)),
+            }),
+            "train_enriched": _ref(f"gs://cal/{method}/train-enriched",
+                                   {"num_pairs": 300, "pair_ids": list(range(300))}),
+            "_train_pair_ids": list(range(300)),
         }
-    return {
-        "uri": "gs://cal/calibration-index.json",
-        "sha256": "5" * 64,
-        "generation": "9",
-        "model_revision": "a" * 40,
-        "methods": methods,
+    index_ref = _ref("gs://cal/calibration-index.json", {"kind": "score-free-calibration-index"}, "9")
+    test_payload = {
+        "task_name": final.BENCHMARK, "num_pairs": 100, "pair_ids": list(range(400, 500)),
+        "pairs": [{"pair_id": pair_id, "stable_id": f"test-{pair_id - 400}",
+                   "prompt": f"p{pair_id}", "positive_response": {"model_response": "yes"},
+                   "negative_response": {"model_response": "no"}}
+                  for pair_id in range(400, 500)],
     }
+    return {**index_ref, "model_revision": "a" * 40,
+            "test_pairs": _ref("gs://cal/test-pairs", test_payload),
+            "test_pair_ids": list(range(400, 500)), "methods": methods}
 
 
 def _contract():
     return final._build_contract(
-        _inventory(), _calibration(), final.CODE_REVISION, _runtime(),
+        _inventory(), _calibration(), TEST_CODE_REVISION, _runtime(),
         "gs://stado/results/target/final-test-v1/",
     )
 
@@ -133,8 +167,18 @@ def _write_bundle(path, contract=None):
     return contract, manifests
 
 
+def _seed_sealed_inputs(store, contract):
+    refs = [contract["calibration"]["index"], contract["calibration"]["test_pairs"]]
+    for record in contract["calibration"]["methods"].values():
+        refs.extend(value for value in record.values()
+                    if isinstance(value, dict) and set(value) == {"uri", "generation", "sha256", "size"})
+    for ref in refs:
+        store.objects[ref["uri"]] = (_REF_PAYLOADS[ref["uri"]], ref["generation"])
+
+
 def _seal(store, tmp_path):
     contract, manifests = _write_bundle(tmp_path)
+    _seed_sealed_inputs(store, contract)
     output = final._seal(Namespace(bundle=tmp_path, output=None), store)
     seal_bytes, seal_generation = store.read(output["seal"]["uri"])
     return contract, manifests, json.loads(seal_bytes), seal_generation
@@ -161,7 +205,7 @@ def _complete_all(store, contract, manifests, seal, *, mutations=None, count=9):
         "code_revision": contract["revisions"]["code"],
         "runtime_identity_sha256": final._canonical_json_sha256(contract["revisions"]["runtime"]),
         "evaluator": "log_likelihoods",
-        "evaluator_version": contract["revisions"]["runtime"]["evaluator_version"],
+        "evaluator_version": contract["revisions"]["runtime"]["evaluator_source_sha256"],
         "evaluation_mode": "log_likelihood",
         "sample_count": 100,
         "aggregation": "arithmetic mean over exact ordered test support",
@@ -267,15 +311,60 @@ def test_contract_seals_exactly_nine_score_free_manifests_and_jobs(tmp_path):
     assert all(forbidden.isdisjoint(job["command"]) for job in jobs)
 
 
-def test_calibration_loader_rejects_score_and_validation_leakage_before_contract(tmp_path):
-    selected = {"schema_version": 1, "method": "caa", "params": {"layer": 1}, "config_sha256": "x"}
-    selected["validation_summary"] = {"best_validation_score": 0.9}
-    selected_path = tmp_path / "selected.json"
-    selected_path.write_text(json.dumps(selected))
-    digest = hashlib.sha256(selected_path.read_bytes()).hexdigest()
-    artifact = {"path": str(selected_path), "uri": "gs://cal/object", "sha256": digest, "generation": "1"}
-    methods = {method: {"selected_config": artifact, "frozen_config": artifact, "provenance": artifact,
-                        "completion": artifact, "config_sha256": "0" * 64} for method in final.METHODS}
+def test_contract_accepts_supplied_commit_without_hardcoded_revision():
+    revision = "b" * 40
+    contract = final._build_contract(_inventory(), _calibration(), revision, _runtime(),
+                                     "gs://stado/results/target/final-test-v1/")
+    assert contract["revisions"]["code"] == revision
+    with pytest.raises(final.FinalTestError, match="40|revision|commit"):
+        final._build_contract(_inventory(), _calibration(), "not-a-commit", _runtime(),
+                             "gs://stado/results/target/final-test-v1/")
+
+
+def test_manifests_seal_route_specific_immutable_inputs_and_distinct_proofs():
+    manifests = final._build_manifests(_contract())
+    assert all(manifest["test_pairs"]["generation"] for manifest in manifests.values())
+    for method in final.METHODS:
+        calibration = manifests[method]["calibration"]
+        assert calibration["activation_proof"]["uri"] != calibration["selection_completion"]["uri"]
+        assert calibration["train_enriched"]["generation"]
+        assert calibration["train_enriched"]["size"]
+
+
+def test_score_free_projection_matches_real_best_and_frozen_outputs(tmp_path):
+    methods = {}
+    for index, method in enumerate(final.METHODS):
+        params = {"layer": index + 1, "strength": 1.0, "extraction_strategy": "chat_first"}
+        config_hash = final._canonical_json_sha256(params)
+        files = {
+            "selected_config": {"schema_version": 1, "method": method,
+                                "best_params": params, "config_sha256": config_hash},
+            "frozen_config": {"schema_version": 2, "method": method, "best_params": params},
+            "provenance": {"method": method},
+            "selection_completion": {"complete": True, "selected_config_sha256": config_hash},
+            "activation_proof": {"complete": True, "extraction_strategy": "chat_first",
+                                 "layers": [index + 1], "pair_ids": list(range(500))},
+            "train_enriched": {"num_pairs": 300, "pair_ids": list(range(300))},
+        }
+        record = {"config_sha256": config_hash}
+        for name, value in files.items():
+            artifact_path = tmp_path / f"{method}-{name}.json"
+            artifact_path.write_bytes(final._canonical_bytes(value))
+            record[name] = {"path": str(artifact_path), "uri": f"gs://cal/{method}/{name}",
+                            "generation": str(index + 1),
+                            "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+        methods[method] = record
+    test_payload = {
+        "task_name": final.BENCHMARK, "num_pairs": 100, "pair_ids": list(range(400, 500)),
+        "pairs": [{"pair_id": pair_id, "stable_id": f"test-{pair_id - 400}",
+                   "prompt": f"p{pair_id}", "positive_response": {"model_response": "yes"},
+                   "negative_response": {"model_response": "no"}}
+                  for pair_id in range(400, 500)],
+    }
+    test_path = tmp_path / "test-pairs.json"
+    test_path.write_bytes(final._canonical_bytes(test_payload))
+    test_pairs = {"path": str(test_path), "uri": "gs://cal/test-pairs", "generation": "20",
+                  "sha256": hashlib.sha256(test_path.read_bytes()).hexdigest()}
     index = {
         "schema_version": 1,
         "protocol": {"id": final.CALIBRATION_PROTOCOL_ID, "revision": 1,
@@ -285,7 +374,57 @@ def test_calibration_loader_rejects_score_and_validation_leakage_before_contract
         "input_identity": {"pair_text_sha256": final.PAIR_TEXT_SHA256,
                            "full_support_sha256": final.FULL_SUPPORT_SHA256},
         "extraction_strategies": list(final.FORMATS), "trials_per_method": 14,
-        "test_evaluations": 0, "methods": methods,
+        "test_evaluations": 0, "test_pairs": test_pairs, "methods": methods,
+    }
+    path = tmp_path / "index.json"
+    path.write_bytes(final._canonical_bytes(index))
+    loaded = final._load_calibration_index(path, "9", "gs://cal/index")
+    assert loaded["methods"]["caa"]["params"] == {
+        "layer": 1, "strength": 1.0, "extraction_strategy": "chat_first"
+    }
+
+
+def test_stado_jobs_pin_manifest_and_seal_generations():
+    contract = _contract()
+    manifests = final._build_manifests(contract)
+    sealed = {arm: _ref(f"gs://sealed/{arm}", manifest, str(index + 1))
+              for index, (arm, manifest) in enumerate(manifests.items())}
+    seal_ref = _ref("gs://sealed/seal", {"sealed": True}, "99")
+    for job in final._build_stado_jobs(contract, sealed, seal_ref):
+        command = job["command"]
+        assert command[command.index("--manifest-generation") + 1] == sealed[job["arm"]]["generation"]
+        assert command[command.index("--seal-generation") + 1] == "99"
+
+
+
+
+def test_calibration_loader_rejects_score_and_validation_leakage_before_contract(tmp_path):
+    selected = {"schema_version": 1, "method": "caa", "params": {"layer": 1}, "config_sha256": "x"}
+    selected["validation_summary"] = {"best_validation_score": 0.9}
+    selected_path = tmp_path / "selected.json"
+    selected_path.write_text(json.dumps(selected))
+    digest = hashlib.sha256(selected_path.read_bytes()).hexdigest()
+    artifact = {"path": str(selected_path), "uri": "gs://cal/object", "sha256": digest, "generation": "1"}
+    methods = {method: {"selected_config": artifact, "frozen_config": artifact,
+                        "provenance": artifact, "selection_completion": artifact,
+                        "activation_proof": artifact, "train_enriched": artifact,
+                        "config_sha256": "0" * 64} for method in final.METHODS}
+    test_payload = {"task_name": final.BENCHMARK, "num_pairs": 100,
+                    "pair_ids": list(range(400, 500)), "pairs": [{} for _ in range(100)]}
+    test_path = tmp_path / "test-pairs.json"
+    test_path.write_bytes(final._canonical_bytes(test_payload))
+    test_pairs = {"path": str(test_path), "uri": "gs://cal/test-pairs", "generation": "2",
+                  "sha256": hashlib.sha256(test_path.read_bytes()).hexdigest()}
+    index = {
+        "schema_version": 1,
+        "protocol": {"id": final.CALIBRATION_PROTOCOL_ID, "revision": 1,
+                     "prior_definitions_sha256": final.PRIOR_DEFINITIONS_SHA256},
+        "target": {"model": final.MODEL, "benchmark": final.BENCHMARK, "target_id": final.TARGET_ID},
+        "revisions": {"model": "a" * 40, "activation": final.ACTIVATION_REVISION},
+        "input_identity": {"pair_text_sha256": final.PAIR_TEXT_SHA256,
+                           "full_support_sha256": final.FULL_SUPPORT_SHA256},
+        "extraction_strategies": list(final.FORMATS), "trials_per_method": 14,
+        "test_evaluations": 0, "test_pairs": test_pairs, "methods": methods,
     }
     path = tmp_path / "index.json"
     path.write_text(json.dumps(index))
@@ -310,6 +449,52 @@ def test_seal_is_create_only_and_existing_control_state_refuses(tmp_path, alread
     with pytest.raises(final.FinalTestError, match="already exists"):
         final._seal(Namespace(bundle=tmp_path, output=None), store)
     assert prefix + "control/seal.json" not in store.writes or already == "seal"
+
+
+def test_seal_generation_reads_every_claimed_input_and_rejects_hash_drift(tmp_path):
+    store = FakeStore()
+    contract, _ = _write_bundle(tmp_path)
+    _seed_sealed_inputs(store, contract)
+    expected_refs = [contract["calibration"]["index"], contract["calibration"]["test_pairs"]]
+    for record in contract["calibration"]["methods"].values():
+        expected_refs.extend(record[name] for name in (
+            "selected_config", "frozen_config", "provenance", "selection_completion",
+            "activation_proof", "train_enriched"))
+    drifted = expected_refs[-1]
+    original = store.objects[drifted["uri"]]
+    store.objects[drifted["uri"]] = (original[0] + b" ", original[1])
+    with pytest.raises(final.FinalTestError, match="bytes differ"):
+        final._seal(Namespace(bundle=tmp_path, output=None), store)
+    assert {(ref["uri"], ref["generation"]) for ref in expected_refs}.issubset(set(store.reads))
+    assert not any(uri.endswith("control/seal.json") for uri in store.writes)
+
+
+def test_mid_seal_resumes_only_exact_byte_identical_preobjects(tmp_path):
+    store = FakeStore(fail_at=3)
+    contract, _ = _write_bundle(tmp_path)
+    _seed_sealed_inputs(store, contract)
+    with pytest.raises(final.FinalTestError, match="injected"):
+        final._seal(Namespace(bundle=tmp_path, output=None), store)
+    preobjects = list(store.writes)
+    assert preobjects and not any(uri.endswith("control/seal.json") for uri in preobjects)
+    store.fail_at = None
+    output = final._seal(Namespace(bundle=tmp_path, output=None), store)
+    assert output["seal"]["uri"].endswith("control/seal.json")
+    assert all(store.writes.count(uri) == 1 for uri in preobjects)
+
+    altered = FakeStore(fail_at=3)
+    other_dir = tmp_path / "altered"
+    other_dir.mkdir()
+    other_contract, _ = _write_bundle(other_dir)
+    _seed_sealed_inputs(altered, other_contract)
+    with pytest.raises(final.FinalTestError, match="injected"):
+        final._seal(Namespace(bundle=other_dir, output=None), altered)
+    altered.fail_at = None
+    uri = altered.writes[0]
+    payload, generation = altered.objects[uri]
+    altered.objects[uri] = (payload + b" ", generation)
+    with pytest.raises(final.FinalTestError, match="different bytes"):
+        final._seal(Namespace(bundle=other_dir, output=None), altered)
 
 
 def test_finalize_refuses_every_partial_completion_count(tmp_path):
@@ -376,6 +561,41 @@ def test_finalize_refuses_incomplete_duplicate_or_misidentified_predictions(tmp_
         final._finalize(Namespace(seal=f"{contract['publication']['remote_prefix']}control/seal.json",
                                   seal_generation=seal_generation), store)
     assert f"{contract['publication']['remote_prefix']}publication.json" not in store.objects
+
+
+def test_mid_finalize_resumes_only_exact_content_addressed_aggregates(tmp_path):
+    store = FakeStore()
+    contract, manifests, seal, seal_generation = _seal(store, tmp_path)
+    _complete_all(store, contract, manifests, seal)
+    args = Namespace(seal=f"{contract['publication']['remote_prefix']}control/seal.json",
+                     seal_generation=seal_generation)
+    store.fail_at = store.create_attempts + 2
+    with pytest.raises(final.FinalTestError, match="injected"):
+        final._finalize(args, store)
+    aggregate_writes = [uri for uri in store.writes if "/aggregate/" in uri]
+    assert len(aggregate_writes) == 2
+    assert not any(uri.endswith("publication.json") for uri in aggregate_writes)
+    store.fail_at = None
+    output = final._finalize(args, store)
+    assert output["publication"]["uri"].endswith("publication.json")
+    assert all(store.writes.count(uri) == 1 for uri in aggregate_writes)
+
+    altered = FakeStore()
+    other_dir = tmp_path / "altered-finalize"
+    other_dir.mkdir()
+    other_contract, other_manifests, other_seal, other_generation = _seal(altered, other_dir)
+    _complete_all(altered, other_contract, other_manifests, other_seal)
+    other_args = Namespace(seal=f"{other_contract['publication']['remote_prefix']}control/seal.json",
+                           seal_generation=other_generation)
+    altered.fail_at = altered.create_attempts + 2
+    with pytest.raises(final.FinalTestError, match="injected"):
+        final._finalize(other_args, altered)
+    altered.fail_at = None
+    aggregate_uri = [uri for uri in altered.writes if "/aggregate/" in uri][0]
+    payload, generation = altered.objects[aggregate_uri]
+    altered.objects[aggregate_uri] = (payload + b" ", generation)
+    with pytest.raises(final.FinalTestError, match="different bytes"):
+        final._finalize(other_args, altered)
 
 
 def test_finalize_publishes_deterministic_leaderboard_baseline_deltas_and_pointer_last(tmp_path):

@@ -38,7 +38,6 @@ FORMATS = (
     "chat_first", "chat_last", "chat_mean", "chat_max_norm", "chat_weighted",
     "mc_balanced", "role_play",
 )
-CODE_REVISION = "a79242ac146502a9f2b2b8c10c8af2eff82e86f4"
 HEX64 = re.compile(r"[0-9a-f]{64}")
 HEX40 = re.compile(r"[0-9a-f]{40}")
 _FORBIDDEN_SELECTION_KEYS = {
@@ -123,10 +122,11 @@ def _artifact_ref(value: Any, label: str, base: Path) -> Dict[str, Any]:
         raise FinalTestError(f"{label}.generation must be a decimal string")
     if not isinstance(value["sha256"], str) or not HEX64.fullmatch(value["sha256"]):
         raise FinalTestError(f"{label}.sha256 must be lowercase SHA-256")
+    size = path.stat().st_size
     if _file_sha256(path) != value["sha256"]:
         raise FinalTestError(f"{label} local bytes do not match declared SHA-256")
     return {"uri": value["uri"], "sha256": value["sha256"],
-            "generation": value["generation"]}
+            "generation": value["generation"], "size": str(size)}
 
 
 def _walk_forbidden(value: Any, label: str = "selection") -> None:
@@ -209,7 +209,7 @@ def _load_calibration_index(path: Path, expected_generation: str,
     index_sha = _file_sha256(path)
     raw = _read_json(path)
     required = {"schema_version", "protocol", "target", "revisions", "input_identity",
-                "extraction_strategies", "trials_per_method", "test_evaluations", "methods"}
+                "extraction_strategies", "trials_per_method", "test_evaluations", "test_pairs", "methods"}
     _require_exact_keys(raw, required, "calibration index")
     protocol = raw["protocol"]
     if protocol != {"id": CALIBRATION_PROTOCOL_ID, "revision": CALIBRATION_PROTOCOL_REVISION,
@@ -231,11 +231,21 @@ def _load_calibration_index(path: Path, expected_generation: str,
         raise FinalTestError("calibration index must contain exactly eight methods")
     clean_methods: Dict[str, Any] = {}
     base = path.resolve().parent
-    method_keys = {"selected_config", "frozen_config", "provenance", "completion", "config_sha256"}
+    test_pairs = _artifact_ref(raw["test_pairs"], "test_pairs", base)
+    test_path = Path(raw["test_pairs"]["path"])
+    if not test_path.is_absolute():
+        test_path = base / test_path
+    test_data = _read_json(test_path.resolve())
+    if (test_data.get("task_name") != BENCHMARK or test_data.get("num_pairs") != 100 or
+            not isinstance(test_data.get("pair_ids"), list) or len(test_data["pair_ids"]) != 100 or
+            not isinstance(test_data.get("pairs"), list) or len(test_data["pairs"]) != 100):
+        raise FinalTestError("pre-materialized test_pairs is not the exact 100-row benchmark input")
+    method_keys = {"selected_config", "frozen_config", "provenance", "selection_completion",
+                   "activation_proof", "train_enriched", "config_sha256"}
+    ref_names = method_keys - {"config_sha256"}
     for method in METHODS:
         record = _require_exact_keys(methods[method], method_keys, f"calibration method {method}")
-        refs = {key: _artifact_ref(record[key], f"{method}.{key}", base)
-                for key in ("selected_config", "frozen_config", "provenance", "completion")}
+        refs = {key: _artifact_ref(record[key], f"{method}.{key}", base) for key in ref_names}
         selected_path = Path(record["selected_config"]["path"])
         if not selected_path.is_absolute():
             selected_path = base / selected_path
@@ -257,23 +267,43 @@ def _load_calibration_index(path: Path, expected_generation: str,
         if (record["config_sha256"] != params_hash or selected["config_sha256"] != params_hash or
                 not HEX64.fullmatch(str(record["config_sha256"]))):
             raise FinalTestError(f"{method} config hash does not match exact selected params")
-        clean_methods[method] = {"params": params, "config_sha256": params_hash, **refs}
+        strategy = params.get("extraction_strategy")
+        layer = params.get("layer", params.get("sensor_layer"))
+        proof_path = Path(record["activation_proof"]["path"])
+        train_path = Path(record["train_enriched"]["path"])
+        if not proof_path.is_absolute(): proof_path = base / proof_path
+        if not train_path.is_absolute(): train_path = base / train_path
+        proof = _read_json(proof_path.resolve())
+        train = _read_json(train_path.resolve())
+        proof_ids = proof.get("pair_ids")
+        train_ids = train.get("pair_ids")
+        if (proof.get("complete") is not True or proof.get("extraction_strategy") != strategy or
+                not isinstance(proof.get("layers"), list) or layer not in proof["layers"] or
+                not isinstance(proof_ids, list)):
+            raise FinalTestError(f"{method} activation proof does not authorize selected route/support")
+        if (train.get("num_pairs") != 300 or not isinstance(train_ids, list) or len(train_ids) != 300 or
+                not set(train_ids).issubset(set(proof_ids))):
+            raise FinalTestError(f"{method} train_enriched is not covered by activation proof")
+        clean_methods[method] = {"params": params, "config_sha256": params_hash,
+                                 "_train_pair_ids": train["pair_ids"], **refs}
     return {"uri": index_uri or path.resolve().as_uri(), "sha256": index_sha,
-            "generation": expected_generation, "model_revision": revisions["model"],
-            "methods": clean_methods}
+            "generation": expected_generation, "size": str(path.stat().st_size),
+            "model_revision": revisions["model"], "test_pairs": test_pairs,
+            "test_pair_ids": test_data["pair_ids"], "methods": clean_methods}
 
 
 def _validate_runtime_identity(value: Any) -> Dict[str, Any]:
-    required = {"container", "python", "torch", "cuda", "driver", "gpu",
-                "precision", "evaluator_version", "tokenizer_revision", "coherence"}
+    required = {"runtime", "python", "torch", "cuda", "driver", "gpu", "precision",
+                "evaluator_source_sha256", "coherence_source_sha256", "tokenizer_revision"}
     _require_exact_keys(value, required, "runtime identity")
-    for key in required - {"coherence"}:
+    for key in required:
         if not isinstance(value[key], str) or not value[key]:
             raise FinalTestError(f"runtime identity {key} must be a nonempty exact string")
-    if not isinstance(value["coherence"], dict) or not value["coherence"]:
-        raise FinalTestError("runtime coherence identity must be an exact nonempty object")
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", value["container"]):
-        raise FinalTestError("runtime container must be a pinned sha256 image digest")
+    if value["runtime"] != "stado-local":
+        raise FinalTestError("runtime identity must honestly identify stado-local")
+    for key in ("evaluator_source_sha256", "coherence_source_sha256"):
+        if not HEX64.fullmatch(value[key]):
+            raise FinalTestError(f"runtime identity {key} must be lowercase SHA-256")
     return dict(value)
 
 
@@ -286,13 +316,23 @@ def _with_hash(value: Dict[str, Any], field: str) -> Dict[str, Any]:
 def _build_contract(inventory: Mapping[str, Any], calibration: Mapping[str, Any],
                     code_revision: str, runtime_identity: Mapping[str, Any],
                     remote_prefix: str) -> Dict[str, Any]:
-    if code_revision != CODE_REVISION:
-        raise FinalTestError(f"code revision must equal frozen commit {CODE_REVISION}")
+    if not isinstance(code_revision, str) or not HEX40.fullmatch(code_revision):
+        raise FinalTestError("code revision must be an exact lowercase 40-hex commit")
     runtime = _validate_runtime_identity(runtime_identity)
     if runtime["tokenizer_revision"] != calibration["model_revision"]:
         raise FinalTestError("tokenizer revision must equal the pinned model revision")
     if not isinstance(calibration.get("uri"), str) or not calibration["uri"].startswith("gs://"):
         raise FinalTestError("calibration index must retain its immutable GCS URI")
+    expected_test_ids = [row["pair_id"] for row in inventory["test"]]
+    if calibration.get("test_pair_ids") != expected_test_ids:
+        raise FinalTestError("pre-materialized test_pairs does not match exact ordered test support")
+    expected_train_ids = [row["pair_id"] for row in inventory["train"]]
+    calibration_methods = {}
+    for method in METHODS:
+        if calibration["methods"][method].get("_train_pair_ids") != expected_train_ids:
+            raise FinalTestError(f"{method} pre-materialized train input differs from exact train support")
+        calibration_methods[method] = {key: value for key, value in calibration["methods"][method].items()
+                                       if key != "_train_pair_ids"}
     prefix = remote_prefix.rstrip("/") + "/"
     if not prefix.startswith("gs://") or "/final-test-v1/" not in prefix:
         raise FinalTestError("remote prefix must be the target final-test-v1 GCS prefix")
@@ -322,8 +362,8 @@ def _build_contract(inventory: Mapping[str, Any], calibration: Mapping[str, Any]
                            "evaluations_per_arm": 1},
             "validation_pair_ids_forbidden": True,
         },
-        "calibration": {"index": {key: calibration[key] for key in ("uri", "sha256", "generation")},
-                        "methods": dict(calibration["methods"])},
+        "calibration": {"index": {key: calibration[key] for key in ("uri", "sha256", "generation", "size")},
+                        "test_pairs": calibration["test_pairs"], "methods": calibration_methods},
         "arms": list(ARMS),
         "baseline": {"fit": "none", "config": None, "steering_object": "forbidden",
                      "steering_hooks": "forbidden", "same_evaluator": True},
@@ -345,6 +385,7 @@ def _build_manifests(contract: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
         "contract_sha256": contract_hash, "revisions": contract["revisions"],
         "input_identity": contract["input_identity"], "split_contract": contract["split_contract"],
         "metric_contract": contract["metric_contract"], "test_evaluations": 1,
+        "test_pairs": contract["calibration"]["test_pairs"],
     }
     prefix = contract["publication"]["remote_prefix"]
     manifests = {}
@@ -375,7 +416,8 @@ def _build_stado_jobs(contract: Mapping[str, Any], sealed_manifests: Mapping[str
                          "metric_contract_sha256": contract["metric_contract"]["metric_contract_sha256"]},
             "inputs": {"manifest": dict(ref), "seal": dict(seal_ref)},
             "command": ["python", "scripts/steering/desired_results_final_test_worker.py",
-                        "--manifest", ref["uri"], "--seal", seal_ref["uri"],
+                        "--manifest", ref["uri"], "--manifest-generation", ref["generation"],
+                        "--seal", seal_ref["uri"], "--seal-generation", seal_ref["generation"],
                         "--remote-prefix", contract["publication"]["remote_prefix"], "--device", "cuda"],
         })
     return jobs
@@ -489,29 +531,52 @@ def _load_bundle(directory: Path) -> tuple[Dict[str, Any], Dict[str, Dict[str, A
     return contract, manifests
 
 
+def _verify_remote_ref(store: GCSStore, ref: Mapping[str, Any], label: str) -> None:
+    _require_exact_keys(ref, {"uri", "generation", "sha256", "size"}, label)
+    data, generation = store.read(ref["uri"], ref["generation"])
+    if (generation != ref["generation"] or hashlib.sha256(data).hexdigest() != ref["sha256"] or
+            len(data) != int(ref["size"])):
+        raise FinalTestError(f"{label} immutable GCS bytes differ")
+
+
+def _create_or_verify(store: GCSStore, uri: str, data: bytes,
+                      content_type: str = "application/json") -> Dict[str, str]:
+    """Resume only an exact byte-identical content-addressed pre-object."""
+    if not store.exists(uri):
+        return store.create(uri, data, content_type)
+    observed, generation = store.read(uri)
+    if observed != data:
+        raise FinalTestError(f"existing resumable object has different bytes: {uri}")
+    return {"uri": uri, "generation": generation, "sha256": hashlib.sha256(data).hexdigest(),
+            "size": str(len(data))}
+
+
 def _seal(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[str, Any]:
     store = store or GCSStore()
     contract, manifests = _load_bundle(args.bundle.resolve())
     prefix = contract["publication"]["remote_prefix"]
     contract_uri = f"{prefix}control/contract/{contract['contract_sha256']}.json"
-    guarded = [
-        f"{prefix}control/seal.json", f"{prefix}publication.json",
-        f"{prefix}aggregate/{contract['contract_sha256']}/publication.json", contract_uri,
-    ]
+    terminal = [f"{prefix}control/seal.json", f"{prefix}publication.json",
+                f"{prefix}aggregate/{contract['contract_sha256']}/publication.json"]
     for arm in ARMS:
-        guarded.extend([
-            f"{prefix}control/claims/{arm}.json",
-            f"{prefix}runs/{arm}/{contract['contract_sha256']}/completion.json",
-            f"{prefix}control/manifests/{arm}/{manifests[arm]['manifest_sha256']}.json",
-        ])
-    if any(store.exists(uri) for uri in guarded):
-        raise FinalTestError("seal/claim/completion/aggregate/control object already exists; rerun forbidden")
-    contract_ref = store.create(contract_uri, _canonical_bytes(contract))
+        terminal.extend([f"{prefix}control/claims/{arm}.json",
+                         f"{prefix}runs/{arm}/{contract['contract_sha256']}/completion.json"])
+    if any(store.exists(uri) for uri in terminal):
+        raise FinalTestError("seal/claim/completion/publication already exists; rerun forbidden")
+    calibration = contract["calibration"]
+    _verify_remote_ref(store, calibration["index"], "calibration index")
+    _verify_remote_ref(store, calibration["test_pairs"], "test_pairs")
+    for method in METHODS:
+        record = calibration["methods"][method]
+        for name in ("selected_config", "frozen_config", "provenance", "selection_completion",
+                     "activation_proof", "train_enriched"):
+            _verify_remote_ref(store, record[name], f"{method}.{name}")
+    contract_ref = _create_or_verify(store, contract_uri, _canonical_bytes(contract))
     refs = {}
     for arm in ARMS:
         manifest = manifests[arm]
         uri = f"{prefix}control/manifests/{arm}/{manifest['manifest_sha256']}.json"
-        refs[arm] = store.create(uri, _canonical_bytes(manifest))
+        refs[arm] = _create_or_verify(store, uri, _canonical_bytes(manifest))
     seal = {
         "schema_version": 1, "protocol_id": PROTOCOL_ID,
         "contract": contract_ref, "manifests": refs, "arms": list(ARMS),
@@ -692,7 +757,7 @@ def _finalize(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[s
                                      "sha256": hashlib.sha256(seal_data).hexdigest()},
                             "completions": completions},
     }
-    refs = {name: store.create(aggregate_prefix + name, _canonical_bytes(value))
+    refs = {name: _create_or_verify(store, aggregate_prefix + name, _canonical_bytes(value))
             for name, value in payloads.items()}
     receipt = {"schema_version": 1, "contract_sha256": contract["contract_sha256"],
                "aggregate_objects": refs, "complete_arms": list(ARMS)}
