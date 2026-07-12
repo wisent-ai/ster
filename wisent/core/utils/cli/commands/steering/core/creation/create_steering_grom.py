@@ -168,8 +168,8 @@ def _create_grom_steering_object(
             best_state = {
                 "directions": {l: p.detach().clone() for l, p in directions.items()},
                 "dw": {l: p.detach().clone() for l, p in direction_weights.items()},
-                "gate": gate_network.state_dict(),
-                "intensity": intensity_network.state_dict(),
+                "gate": {key: value.detach().clone() for key, value in gate_network.state_dict().items()},
+                "intensity": {key: value.detach().clone() for key, value in intensity_network.state_dict().items()},
             }
         if step % log_interval == RECURSION_INITIAL_DEPTH:
             print(f"      Step {step}: loss={current_loss:.4f}")
@@ -190,6 +190,10 @@ def _create_grom_steering_object(
             final_directions[layer] = torch.nn.functional.normalize(directions[layer].detach(), dim=1)
             final_weights[layer] = torch.softmax(direction_weights[layer].detach(), dim=0)
     
+    with torch.no_grad():
+        pos_gate = gate_network(sensor_pos, gate_temperature)
+        neg_gate = gate_network(sensor_neg, gate_temperature)
+
     print(f"   Sensor layer: {sensor_layer}")
     print(f"   Final gate accuracy: pos={pos_gate.mean().item():.3f}, neg={neg_gate.mean().item():.3f}")
     
