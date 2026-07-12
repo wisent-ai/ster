@@ -108,8 +108,29 @@ def test_preflight_manifest_freezes_disjoint_source_splits(tmp_path):
     }
 
 
+
+def _expected_calibration_protocol():
+    return {
+        "id": "desired-results-bounded-rerun-v1",
+        "revision": 1,
+        "run_class": "bounded_calibration_rerun",
+        "prior_owner": "scripts/steering/desired_results_runner.py",
+        "methods": ["caa", "grom", "mlp", "nurt", "ostrze", "tecza", "tetno", "wicher"],
+        "extraction_component": "residual_stream",
+        "extraction_strategies": list(worker.EXTRACTION_STRATEGIES),
+        "trials_per_format": 2,
+        "format_count": 7,
+        "trials_per_method": 14,
+        "selection_split": "validation",
+        "fit_splits": ["train"],
+        "final_fit_splits": ["train"],
+        "test_evaluations": 0,
+        "exploratory_run_disposition": "invalid_unbounded_priors_excluded",
+    }
+
 def test_calibration_manifest_uses_train_for_fit_and_validation_for_selection(tmp_path):
-    manifest = _load(_inventory(tmp_path), purpose="calibration")
+    inventory = _inventory(tmp_path)
+    manifest = _load(inventory, purpose="calibration")
 
     assert manifest["purpose"] == "calibration"
     assert manifest["split"] == {
@@ -120,6 +141,8 @@ def test_calibration_manifest_uses_train_for_fit_and_validation_for_selection(tm
         "final_fit": ["train"],
         "test_evaluations": 0,
     }
+    assert manifest["calibration_protocol"] == _expected_calibration_protocol()
+    assert "calibration_protocol" not in _load(inventory, purpose="preflight")
     assert manifest["mode_contracts"]["hpo"]["strict_loader_pair_ids"] == (
         "train_plus_validation_only"
     )
@@ -183,6 +206,7 @@ def test_calibration_cli_materializes_an_artifact_without_test_partition_data(
     artifact = json.loads(serialized)
     assert artifact["purpose"] == "calibration"
     assert artifact["execution_mode"] == "calibration"
+    assert artifact["calibration_protocol"] == _expected_calibration_protocol()
     assert artifact["split"]["pair_ids"] == {
         "train": [1, 4],
         "validation": [2, 5],

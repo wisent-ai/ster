@@ -45,6 +45,23 @@ EXTRACTION_STRATEGIES = (
 SPLITS = ("train", "validation", "test")
 PURPOSES = ("preflight", "calibration")
 MODES = {"preflight": "preflight", "calibration": "calibration"}
+CALIBRATION_PROTOCOL = {
+    "id": "desired-results-bounded-rerun-v1",
+    "revision": 1,
+    "run_class": "bounded_calibration_rerun",
+    "prior_owner": "scripts/steering/desired_results_runner.py",
+    "methods": ["caa", "grom", "mlp", "nurt", "ostrze", "tecza", "tetno", "wicher"],
+    "extraction_component": "residual_stream",
+    "extraction_strategies": list(EXTRACTION_STRATEGIES),
+    "trials_per_format": 2,
+    "format_count": 7,
+    "trials_per_method": 14,
+    "selection_split": "validation",
+    "fit_splits": ["train"],
+    "final_fit_splits": ["train"],
+    "test_evaluations": 0,
+    "exploratory_run_disposition": "invalid_unbounded_priors_excluded",
+}
 DEFAULT_INVENTORY = (
     Path(__file__).resolve().parents[3]
     / ".work/results_scope/desired_results_state_v1/result_inventory.sqlite"
@@ -94,6 +111,8 @@ def _load_job(
         raise PolicyError(f"method {method} is deferred_special_case and cannot be executed")
     if method not in ELIGIBLE_METHODS:
         raise PolicyError(f"method {method!r} is outside the frozen eligible method scope")
+    if purpose == "calibration" and method == "baseline":
+        raise PolicyError("baseline has no bounded calibration HPO mode")
     if not re.fullmatch(r"[0-9a-f]{40}", model_revision):
         raise PolicyError("model_revision must be an immutable 40-character lowercase commit SHA")
     if not inventory.is_file():
@@ -181,7 +200,7 @@ def _load_job(
             "hpo": {
                 "strict_loader_pair_ids": "train_plus_validation_only",
                 "objective_reports": "validation_only",
-                "writes_under": f"{output_prefix}hpo/",
+                "writes_under": f"{output_prefix}bounded-rerun-v1/hpo/",
                 "required_output": "frozen_config.json",
             },
         }
@@ -210,9 +229,14 @@ def _load_job(
                 "writes_under": f"{output_prefix}final_test/",
             },
         }
+    calibration_fields = (
+        {"execution_mode": "calibration", "calibration_protocol": CALIBRATION_PROTOCOL}
+        if purpose == "calibration" else {"execution_mode": "preflight"}
+    )
     return {
         "schema_version": 1,
         "purpose": purpose,
+        **calibration_fields,
         "job_unit": {
             "model": model,
             "benchmark": benchmark,
