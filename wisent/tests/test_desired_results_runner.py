@@ -190,10 +190,23 @@ def test_hpo_stratifies_optimizer_calls_and_never_materializes_validation(monkey
     materialized_ids = []
     text_ids = []
     optimizer_calls = []
+    publish_observations = []
+    durable_artifacts = {
+        "best_config.json",
+        "validation_summary.json",
+        "trials.json",
+        "frozen_config.json",
+        "validation_pairs.json",
+    }
+    real_publish = runner._publish
+
 
     def fake_materialize(root, pair_ids, routes):
         materialized_ids.append(list(pair_ids))
+        root.mkdir(parents=True)
+        (root / "cached-activations.pt").write_bytes(b"transient")
         return {route: str(root / f"{route[0]}-{route[1]}.json") for route in routes}
+
 
     def fake_pair_file(path, pair_ids):
         text_ids.append(list(pair_ids))
@@ -226,7 +239,12 @@ def test_hpo_stratifies_optimizer_calls_and_never_materializes_validation(monkey
     parameters_module.CategoricalParam = FakeCategoricalParam
     pipeline_module = ModuleType("wisent.core.utils.cli.commands.optimize_steering.pipeline.pipeline")
 
-    pipeline_module.create_objective = lambda **kwargs: object()
+    def fake_create_objective(**kwargs):
+        (Path(kwargs["work_dir"]) / "optimizer-cache.db").write_bytes(b"transient")
+        return object()
+
+    pipeline_module.create_objective = fake_create_objective
+
 
     atoms_module = ModuleType("wisent.core.utils.services.optimization.core.atoms")
     atoms_module.BaseOptimizer = FakeOptimizer
@@ -239,6 +257,17 @@ def test_hpo_stratifies_optimizer_calls_and_never_materializes_validation(monkey
     monkeypatch.setattr(runner, "_materialize", fake_materialize)
     monkeypatch.setattr(runner, "_pair_file", fake_pair_file)
 
+    def fake_publish(staging, destination):
+        publish_observations.append({
+            "strict_train_exists": (staging / "strict_train").exists(),
+            "trial_work_exists": (staging / "trial_work").exists(),
+            "artifacts": {path.name for path in staging.iterdir()},
+        })
+        real_publish(staging, destination)
+
+    monkeypatch.setattr(runner, "_publish", fake_publish)
+
+
     output_root = tmp_path / "outputs"
     result = runner.main([
         "hpo", "--manifest", str(manifest_path),
@@ -249,6 +278,12 @@ def test_hpo_stratifies_optimizer_calls_and_never_materializes_validation(monkey
 
     assert result == 0
     destination = Path(capsys.readouterr().out.strip())
+    assert publish_observations == [{
+        "strict_train_exists": False,
+        "trial_work_exists": False,
+        "artifacts": durable_artifacts,
+    }]
+    assert {path.name for path in destination.iterdir()} == durable_artifacts
     assert materialized_ids == [[1, 4]]
     assert text_ids == [[2, 5]]
     assert len(optimizer_calls) == len(runner.STRATEGIES)

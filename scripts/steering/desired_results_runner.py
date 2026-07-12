@@ -361,6 +361,8 @@ def _run_hpo(args: argparse.Namespace, manifest_path: Path, manifest: Mapping[st
         _atomic_json(staging / "trials.json", {"per_format": format_results})
         _atomic_json(staging / "frozen_config.json", identity)
         os.chmod(staging / "frozen_config.json", 0o444)
+        shutil.rmtree(staging / "strict_train")
+        shutil.rmtree(staging / "trial_work")
         _publish(staging, destination)
         return destination
     except BaseException:
