@@ -37,6 +37,7 @@ DEFAULT_REPO_EXTRAS = "harness"
 PROVIDER = "gcp"
 STADO_IMAGE_NAME = "pytorch-2-9-cu129-ubuntu-2204-nvidia-580-v20260408"
 STADO_IMAGE_PROJECT = "deeplearning-platform-release"
+STADO_QUEUE_BUCKET = "wisent-compute"
 IMAGE_KEYS = frozenset({"name", "project"})
 RUNTIME_KEYS = frozenset({"package", "device", "revision"})
 RUNTIME_PACKAGE = "wisent-runtime"
@@ -73,6 +74,10 @@ _SAFE_DEVICE = re.compile(r"^[A-Za-z0-9._:+-]+$")
 
 class StadoSubmissionError(RuntimeError):
     """A planned submission or scheduler receipt is unsafe or inconsistent."""
+
+
+def _queue_bucket() -> str:
+    return os.environ.get("WC_BUCKET", STADO_QUEUE_BUCKET).strip() or STADO_QUEUE_BUCKET
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -387,7 +392,7 @@ def build_submission_request(job: Mapping[str, Any]) -> dict[str, Any]:
         "command": remote_command,
         "provider": source["provider"],
         "batch_id": batch_id,
-        "bucket": "",
+        "bucket": _queue_bucket(),
         "pin_to_provider": True,
         "repo": source["repo"],
         "repo_workdir": source["repo_workdir"],
@@ -539,7 +544,8 @@ __all__ = [
     "DEPENDENCY_LOCK_FORMAT", "DEPENDENCY_LOCK_PATH", "DEPENDENCY_LOCK_SUFFIX", "IMAGE_KEYS",
     "IMMUTABLE_JOB_KEYS", "PROVIDER", "RECEIPT_BINDING_KEYS", "RESOURCE_KEYS", "RUNTIME_KEYS",
     "RUNTIME_PACKAGE", "RUNTIME_TIMEOUT_KILL_AFTER_SECONDS", "STADO_IMAGE_NAME",
-    "STADO_IMAGE_PROJECT", "SUBMISSION_KEYS", "SUBMISSION_SOURCE_KEYS", "SUPPORTED_SUBMIT_KWARGS",
+    "STADO_IMAGE_PROJECT", "STADO_QUEUE_BUCKET", "SUBMISSION_KEYS", "SUBMISSION_SOURCE_KEYS",
+    "SUPPORTED_SUBMIT_KWARGS",
     "StadoSubmissionError", "build_job", "build_pre_command", "build_submission_request",
     "canonical_bytes", "canonical_sha256", "dispatch_jobs", "submission_source",
     "submission_source_sha256", "submit_jobs", "validate_job", "validate_submission_job",
