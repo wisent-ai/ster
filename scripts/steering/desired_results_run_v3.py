@@ -315,13 +315,14 @@ class GCSStore:
         self.client = storage.Client()
 
     @staticmethod
-    def _blob(client: Any, uri: str) -> Any:
+    def _blob(client: Any, uri: str, generation: str | None = None) -> Any:
         if not uri.startswith("gs://"):
             raise RunV3Error("GCS URI must start with gs://")
         bucket, separator, name = uri[5:].partition("/")
         if not separator or not bucket or not name:
             raise RunV3Error("GCS URI must identify an object")
-        return client.bucket(bucket).blob(name)
+        pinned_generation = int(generation) if generation is not None else None
+        return client.bucket(bucket).blob(name, generation=pinned_generation)
 
     def create(self, uri: str, data: bytes) -> dict[str, str]:
         blob = self._blob(self.client, uri)
@@ -334,12 +335,15 @@ class GCSStore:
         if mapping_call:
             ref = _artifact_ref(uri)
             uri, generation = ref["uri"], ref["generation"]
-        blob = self._blob(self.client, uri)
+        blob = self._blob(self.client, uri, generation)
         if generation is not None:
-            blob.generation = int(generation)
-        data = blob.download_as_bytes(if_generation_match=int(generation) if generation is not None else None)
-        blob.reload()
-        return data if mapping_call else (data, str(blob.generation))
+            data = blob.download_as_bytes(if_generation_match=int(generation))
+            observed_generation = str(generation)
+        else:
+            blob.reload()
+            observed_generation = str(blob.generation)
+            data = blob.download_as_bytes(if_generation_match=int(observed_generation))
+        return data if mapping_call else (data, observed_generation)
 
     def resolve(self, uri: str) -> dict[str, str]:
         data, generation = self.read(uri, None)

@@ -618,13 +618,14 @@ class GCSStore:
             raise FinalTestError("google-cloud-storage is required") from exc
         self.client = storage.Client()
 
-    def _blob(self, uri: str) -> Any:
+    def _blob(self, uri: str, generation: str | None = None) -> Any:
         if not uri.startswith("gs://"):
             raise FinalTestError("GCS URI must start with gs://")
         bucket, separator, name = uri[5:].partition("/")
         if not separator or not bucket or not name:
             raise FinalTestError("GCS URI must identify an object")
-        return self.client.bucket(bucket).blob(name)
+        pinned_generation = int(generation) if generation is not None else None
+        return self.client.bucket(bucket).blob(name, generation=pinned_generation)
 
     def exists(self, uri: str) -> bool:
         return bool(self._blob(uri).exists())
@@ -640,16 +641,14 @@ class GCSStore:
         )
 
     def read(self, uri: str, generation: str | None = None) -> tuple[bytes, str]:
-        blob = self._blob(uri)
+        blob = self._blob(uri, generation)
         if generation is not None:
-            blob.generation = int(generation)
-        data = blob.download_as_bytes(
-            if_generation_match=int(generation) if generation is not None else None,
-        )
-        blob.reload()
-        observed = str(blob.generation)
-        if generation is not None and observed != str(generation):
-            raise FinalTestError(f"generation drift for {uri}")
+            data = blob.download_as_bytes(if_generation_match=int(generation))
+            observed = str(generation)
+        else:
+            blob.reload()
+            observed = str(blob.generation)
+            data = blob.download_as_bytes(if_generation_match=int(observed))
         return data, observed
 
 

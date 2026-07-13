@@ -95,15 +95,19 @@ class GCSStore:
 
     def read(self, uri: str, generation: str | None = None) -> tuple[bytes, str]:
         bucket, name = self._parts(uri)
-        blob = self._client.bucket(bucket).blob(name, generation=int(generation) if generation else None)
+        blob = self._client.bucket(bucket).blob(
+            name, generation=int(generation) if generation is not None else None,
+        )
         try:
-            data = blob.download_as_bytes(if_generation_match=int(generation) if generation else None)
-            blob.reload()
+            if generation is not None:
+                data = blob.download_as_bytes(if_generation_match=int(generation))
+                observed = str(generation)
+            else:
+                blob.reload()
+                observed = str(blob.generation)
+                data = blob.download_as_bytes(if_generation_match=int(observed))
         except Exception as exc:
             raise ContractError(f"cannot read immutable object {uri}: {exc}") from exc
-        observed = str(blob.generation)
-        if generation is not None and observed != str(generation):
-            raise ContractError(f"generation drift for {uri}")
         return data, observed
 
 
