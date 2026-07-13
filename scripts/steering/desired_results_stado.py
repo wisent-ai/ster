@@ -33,7 +33,7 @@ except (ImportError, ModuleNotFoundError):
 
 CANONICAL_REPO = "https://github.com/wisent-ai/wisent.git"
 DEFAULT_REPO_WORKDIR = "wisent"
-DEFAULT_REPO_EXTRAS = "train"
+DEFAULT_REPO_EXTRAS = "harness"
 PROVIDER = "gcp"
 STADO_IMAGE_NAME = "pytorch-2-9-cu129-ubuntu-2204-nvidia-580-v20260408"
 STADO_IMAGE_PROJECT = "deeplearning-platform-release"
