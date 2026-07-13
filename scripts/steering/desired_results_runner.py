@@ -61,6 +61,11 @@ _ORDERED_CONDITIONS = {
 }
 
 
+
+class ArtifactTransportError(RuntimeError):
+    """Retryable transport or local-I/O failure resolving a sealed artifact."""
+
+
 class GCSStore:
     """Minimal immutable object API used by Stado calibration workers."""
     def __init__(self) -> None:
@@ -440,7 +445,7 @@ def _materialize_activation(
             revision=artifact["revision"], filename=artifact["path"],
         ))
     except Exception as exc:
-        raise ContractError(f"cannot download exact sealed activation artifact: {exc}") from exc
+        raise ArtifactTransportError(f"cannot download exact sealed activation artifact: {exc}") from exc
     if not source.is_file():
         raise ContractError("exact sealed activation download did not return a file")
 
@@ -462,7 +467,7 @@ def _materialize_activation(
                 outgoing.flush()
                 os.fsync(outgoing.fileno())
         except OSError as exc:
-            raise ContractError(f"cannot materialize exact sealed activation artifact: {exc}") from exc
+            raise ArtifactTransportError(f"cannot materialize exact sealed activation artifact: {exc}") from exc
         if size != artifact["size"] or digest.hexdigest() != artifact["lfs_sha256"]:
             raise ContractError("sealed activation bytes differ from proven LFS SHA/size")
         try:
@@ -476,7 +481,7 @@ def _materialize_activation(
                         existing_size += len(chunk)
                         existing_digest.update(chunk)
             except OSError as exc:
-                raise ContractError(f"cannot verify local sealed activation cache: {exc}") from exc
+                raise ArtifactTransportError(f"cannot verify local sealed activation cache: {exc}") from exc
             if existing_size != size or existing_digest.hexdigest() != digest.hexdigest():
                 raise ContractError("local sealed activation cache has conflicting bytes")
         cache[identity] = destination
