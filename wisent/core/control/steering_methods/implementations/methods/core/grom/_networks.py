@@ -1,6 +1,8 @@
 """GROM neural network components: gating, intensity, direction routing."""
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,6 +10,17 @@ from wisent.core.utils.config_tools.constants import (
     COMBO_OFFSET,
     RECURSION_INITIAL_DEPTH,
 )
+
+
+def _require_finite_gating_tensor(value: torch.Tensor, name: str) -> None:
+    """Reject corrupted gating inputs without changing the autograd graph."""
+    finite_mask = torch.isfinite(value.detach())
+    if not bool(finite_mask.all()):
+        non_finite_count = value.numel() - int(finite_mask.sum().item())
+        raise RuntimeError(
+            "GROM gating numerical invariant failed: "
+            f"{name} contains {non_finite_count}/{value.numel()} non-finite values"
+        )
 
 
 class GatingNetwork(nn.Module):
@@ -27,11 +40,34 @@ class GatingNetwork(nn.Module):
         )
 
     def forward(self, h: torch.Tensor, temperature: float) -> torch.Tensor:
-        """Predict gate value."""
+        """Predict a finite gate in ``[0, 1]`` or fail before it is consumed."""
+        try:
+            temperature_value = float(temperature)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "GROM gate_temperature must be a finite number greater than zero; "
+                f"got {temperature!r}"
+            ) from exc
+        if not math.isfinite(temperature_value) or temperature_value <= 0.0:
+            raise ValueError(
+                "GROM gate_temperature must be finite and greater than zero; "
+                f"got {temperature!r}"
+            )
+        _require_finite_gating_tensor(h, "gate input activations")
         if h.dim() == COMBO_OFFSET:
             h = h.unsqueeze(RECURSION_INITIAL_DEPTH)
         logit = self.net(h).squeeze(-COMBO_OFFSET)
-        return torch.sigmoid(logit / temperature)
+        _require_finite_gating_tensor(logit, "gate logits")
+        gate = torch.sigmoid(logit / temperature_value)
+        _require_finite_gating_tensor(gate, "gate output")
+        detached_gate = gate.detach()
+        if bool(((detached_gate < 0.0) | (detached_gate > 1.0)).any()):
+            raise RuntimeError(
+                "GROM gating numerical invariant failed: sigmoid output is outside [0, 1]; "
+                f"minimum={detached_gate.min().item():.6g}, "
+                f"maximum={detached_gate.max().item():.6g}"
+            )
+        return gate
 
 
 class IntensityNetwork(nn.Module):

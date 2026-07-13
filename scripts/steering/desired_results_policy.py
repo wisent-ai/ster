@@ -50,6 +50,37 @@ BASELINE_KIND = "desired-results-baseline-config-v3"
 METHODS = tuple(desired_results_target.METHODS)
 STRATEGIES = tuple(desired_results_target.STRATEGIES)
 PHASES = ("calibration", "seal", "arm", "finalize")
+GROM_MAX_DIRECTIONS = 16
+GROM_MAX_OPTIMIZATION_STEPS = 300
+GROM_MAX_WARMUP_STEPS = 100
+
+GROM_RUNTIME_CAPS = {
+    "num_directions": GROM_MAX_DIRECTIONS,
+    "optimization_steps": GROM_MAX_OPTIMIZATION_STEPS,
+    "warmup_steps": GROM_MAX_WARMUP_STEPS,
+}
+GROM_POSITIVE_FLOAT_BOUNDS = {
+    "behavior_weight": (1e-3, 10.0),
+    "caa_alignment_weight": (1e-3, 10.0),
+    "concentration_weight": (1e-3, 10.0),
+    "contrastive_weight": (1e-3, 10.0),
+    "create_noise_scale": (1e-4, 1.0),
+    "gate_temperature": (0.1, 10.0),
+    "gate_warmup_weight": (1e-3, 10.0),
+    "independence_weight": (1e-3, 10.0),
+    "learning_rate": (1e-5, 1e-2),
+    "max_alpha": (0.1, 10.0),
+    "max_grad_norm": (0.1, 10.0),
+    "smooth_weight": (1e-3, 10.0),
+    "sparse_weight": (1e-3, 10.0),
+    "strength": (1e-3, 10.0),
+    "utility_weight": (1e-3, 10.0),
+    "weight_decay": (1e-6, 1e-1),
+}
+GROM_DIMENSION_TRIPLES = (
+    ("gate_dim_min", "gate_hidden_dim", "gate_dim_max"),
+    ("intensity_dim_min", "intensity_hidden_dim", "intensity_dim_max"),
+)
 DEFAULT_CALIBRATION_POLICY = {
     "name": "optuna",
     "version": "1",
@@ -165,6 +196,35 @@ def _cap_integer(spec: dict[str, Any], maximum: int, label: str) -> None:
         raise ContractError(f"{label} has empty support after applying cap {maximum}")
 
 
+def _bound_positive_float(
+    spec: dict[str, Any], low: float, high: float, label: str,
+) -> None:
+    if spec.get("kind") != "float" or not 0.0 < low < high:
+        raise ContractError(f"{label} cannot be bounded to a positive finite range")
+    spec.clear()
+    spec.update({
+        "kind": "float", "distribution": "uniform",
+        "mu": None, "sigma": None, "low": low, "high": high,
+        "log_scale": True,
+    })
+
+
+def _make_grom_dimension_triple_safe(
+    space: dict[str, Any], names: tuple[str, str, str], hidden_size: int,
+) -> None:
+    minimum_name, hidden_name, maximum_name = names
+    minimum = space[minimum_name].get("low")
+    maximum_exclusive = space[maximum_name].get("high")
+    if type(minimum) is not int or type(maximum_exclusive) is not int:
+        raise ContractError(f"grom dimension triple {names!r} lacks finite integer bounds")
+    maximum = max(minimum, min(hidden_size, maximum_exclusive - 1))
+    space[minimum_name] = {"kind": "categorical", "choices": [minimum]}
+    space[hidden_name] = {
+        "kind": "categorical", "choices": list(range(minimum, maximum + 1)),
+    }
+    space[maximum_name] = {"kind": "categorical", "choices": [maximum]}
+
+
 def get_effective_method_space(method: str, layer_count: int, hidden_size: int) -> dict[str, Any]:
     """Return the exact canonical method space with target-specific finite caps."""
     if method not in METHODS:
@@ -194,6 +254,16 @@ def get_effective_method_space(method: str, layer_count: int, hidden_size: int) 
     for name in hidden_caps.get(method, ()):
         if name in space:
             _cap_integer(space[name], hidden_size, f"{method}.{name}")
+    if method == "grom":
+        for name, maximum in GROM_RUNTIME_CAPS.items():
+            if name in space:
+                cap = min(hidden_size, maximum) if name == "num_directions" else maximum
+                _cap_integer(space[name], cap, f"{method}.{name}")
+        for names in GROM_DIMENSION_TRIPLES:
+            _make_grom_dimension_triple_safe(space, names, hidden_size)
+        for name, bounds in GROM_POSITIVE_FLOAT_BOUNDS.items():
+            if name in space:
+                _bound_positive_float(space[name], *bounds, f"{method}.{name}")
 
     canonical_json(space)
     return space

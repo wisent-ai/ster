@@ -328,6 +328,20 @@ def _normalize_sample(method: str, sample: Mapping[str, Any], hidden_size: int,
                 normalized[high_name] = high + 1
             else:
                 normalized[high_name] = math.nextafter(float(high), math.inf)
+    if method == "grom":
+        runtime_caps = _load_sibling("desired_results_policy").GROM_RUNTIME_CAPS
+        for name, maximum in runtime_caps.items():
+            if name not in normalized:
+                continue
+            value = normalized.get(name)
+            if type(value) is not int:
+                raise ContractError(f"{method}.{name} must be an integer")
+            cap = min(hidden_size, maximum) if name == "num_directions" else maximum
+            normalized[name] = max(1, min(value, cap))
+        if "optimization_steps" in normalized and "warmup_steps" in normalized:
+            optimization_steps = max(2, normalized["optimization_steps"])
+            normalized["optimization_steps"] = optimization_steps
+            normalized["warmup_steps"] = min(normalized["warmup_steps"], optimization_steps - 1)
     if method in {"tetno", "grom"}:
         if type(layer_count) is not int or layer_count < 2:
             raise ContractError(f"{method} requires at least two activation layers")

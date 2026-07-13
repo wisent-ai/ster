@@ -10,6 +10,31 @@ from wisent.core.utils.config_tools.constants import NORM_EPS, STEERING_SCALE_ID
 from wisent.core.utils.infra_tools.errors import InsufficientDataError
 
 
+def _validate_gate_for_bce(gate: torch.Tensor, name: str, step: int) -> None:
+    """Enforce BCE's probability-domain contract without masking bad values."""
+    if gate.numel() == 0:
+        raise RuntimeError(
+            f"GROM gate invariant failed at optimization step {step}: "
+            f"{name} is empty before BCE"
+        )
+    detached_gate = gate.detach()
+    finite_mask = torch.isfinite(detached_gate)
+    if not bool(finite_mask.all()):
+        non_finite_count = gate.numel() - int(finite_mask.sum().item())
+        raise RuntimeError(
+            f"GROM gate invariant failed at optimization step {step}: {name} "
+            f"contains {non_finite_count}/{gate.numel()} non-finite values before BCE; "
+            "check activation tensors, gate_temperature, and gate-network parameters"
+        )
+    minimum = detached_gate.min().item()
+    maximum = detached_gate.max().item()
+    if minimum < 0.0 or maximum > STEERING_SCALE_IDENTITY:
+        raise RuntimeError(
+            f"GROM gate invariant failed at optimization step {step}: {name} must "
+            f"be in [0, 1] before BCE, got minimum={minimum:.6g}, maximum={maximum:.6g}"
+        )
+
+
 def _compute_grom_loss_impl(
     self,
     direction_params: Dict[LayerName, nn.Parameter],
@@ -144,6 +169,9 @@ def _compute_grom_loss_impl(
     # Pos should have high gate (target=1), neg should have low gate (target=0)
     # Use BCE loss which provides gradient even when predictions are at 0.5
     # (The old relu-based loss had zero gradient at 0.5, causing the network to get stuck)
+    _validate_gate_for_bce(pos_gate, "pos_gate", step)
+    _validate_gate_for_bce(neg_gate, "neg_gate", step)
+
     _upper = STEERING_SCALE_IDENTITY - NORM_EPS
     pos_gate_clamped = pos_gate.clamp(NORM_EPS, _upper)
     neg_gate_clamped = neg_gate.clamp(NORM_EPS, _upper)

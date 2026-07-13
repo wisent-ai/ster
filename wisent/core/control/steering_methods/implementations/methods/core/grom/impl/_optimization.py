@@ -1,6 +1,7 @@
 """GROM train_grom method and joint optimization loop."""
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Tuple
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,6 +14,30 @@ from wisent.core.control.steering_methods.methods.grom._config import (
     IntensityNetwork,
     GeometryAdaptation,
 )
+
+
+def _require_finite_tensor(value: torch.Tensor, name: str, *, step: Optional[int] = None) -> None:
+    """Reject non-finite optimization state with GROM-specific context."""
+    finite_mask = torch.isfinite(value.detach())
+    if bool(finite_mask.all()):
+        return
+    non_finite_count = value.numel() - int(finite_mask.sum().item())
+    step_context = "" if step is None else f" at optimization step {step}"
+    raise RuntimeError(
+        f"GROM numerical invariant failed{step_context}: {name} contains "
+        f"{non_finite_count}/{value.numel()} non-finite values"
+    )
+
+
+def _require_finite_config(name: str, value: float, *, positive: bool = False) -> None:
+    """Validate scalar optimizer configuration before constructing optimizer state."""
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"GROM {name} must be a finite number; got {value!r}") from exc
+    if not math.isfinite(numeric_value) or (positive and numeric_value <= 0.0):
+        requirement = "finite and greater than zero" if positive else "finite"
+        raise ValueError(f"GROM {name} must be {requirement}; got {value!r}")
 
 
 def train_grom_impl(self, pair_set: ContrastivePairSet):
@@ -158,6 +183,18 @@ def _joint_optimization_impl(
     """
     Joint end-to-end optimization of all GROM components.
     """
+    _require_finite_config("learning_rate", self.config.learning_rate)
+    _require_finite_config("weight_decay", self.config.weight_decay)
+    _require_finite_config("eta_min_factor", self.config.eta_min_factor)
+    _require_finite_config("max_grad_norm", self.config.max_grad_norm, positive=True)
+    if gate_network is not None:
+        _require_finite_config("gate_temperature", self.config.gate_temperature, positive=True)
+    for polarity, layer_data in data.items():
+        for layer, activations in layer_data.items():
+            _require_finite_tensor(
+                activations,
+                f"{polarity} activation data for layer {layer!r}",
+            )
     # Make directions trainable
     direction_params = {layer: nn.Parameter(dirs.clone()) for layer, dirs in directions.items()}
     # Collect all parameters
@@ -167,6 +204,8 @@ def _joint_optimization_impl(
         all_params.extend(gate_network.parameters())
     all_params.extend(intensity_network.parameters())
     all_params.extend(direction_weight_params.values())
+    for parameter_index, parameter in enumerate(all_params):
+        _require_finite_tensor(parameter, f"initial parameter {parameter_index}")
     optimizer = torch.optim.AdamW(all_params, lr=self.config.learning_rate, weight_decay=self.config.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=self.config.optimization_steps, eta_min=self.config.learning_rate * self.config.eta_min_factor
@@ -210,10 +249,43 @@ def _joint_optimization_impl(
             gate_warmup_weight=self.config.gate_warmup_weight,
             caa_alignment_weight=self.config.caa_alignment_weight,
         )
+        if loss.numel() != 1 or not bool(torch.isfinite(loss.detach()).all()):
+            component_summary = ", ".join(
+                f"{name}={component.detach().item():.6g}"
+                for name, component in loss_components.items()
+            )
+            raise RuntimeError(
+                f"GROM optimization step {step} produced a non-finite total loss "
+                "before backward/optimizer.step; optimizer state was not advanced. "
+                f"Loss components: {component_summary}"
+            )
         loss.backward()
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(all_params, max_norm=self.config.max_grad_norm)
+        try:
+            torch.nn.utils.clip_grad_norm_(
+                all_params,
+                max_norm=self.config.max_grad_norm,
+                error_if_nonfinite=True,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"GROM optimization step {step} produced non-finite gradients; "
+                "optimizer.step was not called and optimizer state was not advanced"
+            ) from exc
         optimizer.step()
+        for parameter_index, parameter in enumerate(all_params):
+            _require_finite_tensor(
+                parameter,
+                f"parameter {parameter_index} after optimizer.step; best_state was not updated",
+                step=step,
+            )
+        for state_index, optimizer_state in enumerate(optimizer.state.values()):
+            for state_name, state_value in optimizer_state.items():
+                if isinstance(state_value, torch.Tensor):
+                    _require_finite_tensor(
+                        state_value,
+                        f"optimizer state {state_index}.{state_name}; best_state was not updated",
+                        step=step,
+                    )
         scheduler.step()
         # Apply constraints to directions
         with torch.no_grad():
