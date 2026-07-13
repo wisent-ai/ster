@@ -304,7 +304,8 @@ def _effective_space(method: str, hidden_size: int, layers: Sequence[int], strat
     return _runtime_space(parameters)
 
 
-def _normalize_sample(method: str, sample: Mapping[str, Any], hidden_size: int) -> dict[str, Any]:
+def _normalize_sample(method: str, sample: Mapping[str, Any], hidden_size: int,
+                      layer_count: int | None = None) -> dict[str, Any]:
     if not isinstance(sample, Mapping):
         raise ContractError("optimizer sample must be an object")
     normalized = dict(sample)
@@ -327,6 +328,27 @@ def _normalize_sample(method: str, sample: Mapping[str, Any], hidden_size: int) 
                 normalized[high_name] = high + 1
             else:
                 normalized[high_name] = math.nextafter(float(high), math.inf)
+    if method in {"tetno", "grom"}:
+        if type(layer_count) is not int or layer_count < 2:
+            raise ContractError(f"{method} requires at least two activation layers")
+        sensor = normalized.get("sensor_layer")
+        start = normalized.get("steering_start")
+        end = normalized.get("steering_end")
+        if any(type(value) is not int for value in (sensor, start, end)):
+            raise ContractError(f"{method} sample lacks integer sensor/steering layers")
+        start, end = sorted((max(1, min(start, layer_count)),
+                             max(1, min(end, layer_count))))
+        sensor = max(1, min(sensor, layer_count))
+        if sensor >= start:
+            if start > 1:
+                sensor = start - 1
+            else:
+                sensor = 1
+                start = 2
+                end = max(end, start)
+        normalized.update({"sensor_layer": sensor,
+                           "steering_start": start,
+                           "steering_end": end})
     return normalized
 
 
@@ -623,8 +645,9 @@ def _selected_config(method: str, best: Mapping[str, Any]) -> dict[str, Any]:
     if method in {"tetno", "grom"}:
         sensor = params.get("sensor_layer")
         start, end = params.get("steering_start"), params.get("steering_end")
-        if any(type(value) is not int or value < 1 for value in (sensor, start, end)) or start > end:
-            raise ContractError(f"{method} selected result lacks exact sensor/steering layer identity")
+        if (any(type(value) is not int or value < 1 for value in (sensor, start, end))
+                or not sensor < start <= end):
+            raise ContractError(f"{method} selected result lacks valid sensor/steering layer identity")
         selected.update({
             "sensor_layer": sensor,
             "steering_layers": list(range(start, end + 1)),
@@ -662,7 +685,7 @@ def _execute_optimizer(manifest: Mapping[str, Any], optimizer_policy: Mapping[st
         space = _effective_space(method, hidden_size, layers, strategy, optimizer_policy)
         canonical_space = _serialize_space(space)
         def objective(raw: Mapping[str, Any], _real=real_objective) -> float:
-            normalized = _normalize_sample(method, raw, hidden_size)
+            normalized = _normalize_sample(method, raw, hidden_size, max(layers))
             return _finite_score(_real(normalized), f"{strategy} objective")
         seed_u64 = _study_seed(base_seed, manifest["manifest_sha256"], method, strategy)
         optuna_seed = seed_u64 % (2 ** 32)
@@ -683,10 +706,10 @@ def _execute_optimizer(manifest: Mapping[str, Any], optimizer_policy: Mapping[st
         for trial in result.all_trials:
             if not isinstance(trial, Mapping) or set(trial) != {"params", "score"}:
                 raise ContractError(f"{strategy} returned a malformed Optuna trial")
-            params = _normalize_sample(method, trial["params"], hidden_size)
+            params = _normalize_sample(method, trial["params"], hidden_size, max(layers))
             score = _finite_score(trial["score"], f"{strategy} trial score")
             observed.append({"params": params, "score": score})
-        best_params = _normalize_sample(method, result.best_params, hidden_size)
+        best_params = _normalize_sample(method, result.best_params, hidden_size, max(layers))
         best_score = _finite_score(result.best_score, f"{strategy} best score")
         if not any(row["params"] == best_params and row["score"] == best_score for row in observed):
             raise ContractError(f"{strategy} best result is not an observed trial")

@@ -448,6 +448,61 @@ def test_all_final_spaces_are_finite_exact_and_dependency_safe(method):
         assert max(endpoints["lr_min"]) <= min(endpoints["lr"])
 
 
+@pytest.mark.parametrize("method", ["tetno", "grom"])
+@pytest.mark.parametrize(
+    ("sample", "layer_count", "expected_layers"),
+    [
+        ({"sensor_layer": 1, "steering_start": 3, "steering_end": 5}, 8, (1, 3, 5)),
+        ({"sensor_layer": 10, "steering_start": 5, "steering_end": 2}, 10, (1, 2, 5)),
+        ({"sensor_layer": 1, "steering_start": 1, "steering_end": 1}, 8, (1, 2, 2)),
+        ({"sensor_layer": 8, "steering_start": 8, "steering_end": 8}, 8, (7, 8, 8)),
+    ],
+)
+def test_tetno_and_grom_normalize_sensor_before_steering(
+    method, sample, layer_count, expected_layers,
+):
+    normalized = runner._normalize_sample(method, sample, hidden_size=32, layer_count=layer_count)
+    layers = (
+        normalized["sensor_layer"],
+        normalized["steering_start"],
+        normalized["steering_end"],
+    )
+
+    assert layers == expected_layers
+    assert 1 <= layers[0] < layers[1] <= layers[2] <= layer_count
+
+
+@pytest.mark.parametrize("method", ["tetno", "grom"])
+def test_tetno_and_grom_reject_single_layer_normalization(method):
+    with pytest.raises(runner.ContractError, match="requires at least two activation layers"):
+        runner._normalize_sample(
+            method,
+            {"sensor_layer": 1, "steering_start": 1, "steering_end": 1},
+            hidden_size=32,
+            layer_count=1,
+        )
+
+
+@pytest.mark.parametrize("method", ["tetno", "grom"])
+@pytest.mark.parametrize(
+    ("sensor", "start", "end"),
+    [(2, 2, 4), (1, 4, 3)],
+)
+def test_tetno_and_grom_selected_config_rejects_invalid_layer_order(
+    method, sensor, start, end,
+):
+    with pytest.raises(runner.ContractError, match="valid sensor/steering layer identity"):
+        runner._selected_config(method, {
+            "strategy": runner.STRATEGIES[0],
+            "best_params": {
+                "extraction_strategy": runner.STRATEGIES[0],
+                "sensor_layer": sensor,
+                "steering_start": start,
+                "steering_end": end,
+            },
+        })
+
+
 def test_plan_mutations_are_rejected_fail_closed():
     canonical = runner._calibration_plan()
     mutations = []
