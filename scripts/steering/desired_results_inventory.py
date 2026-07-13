@@ -210,6 +210,24 @@ def _revision_map(value: Any, model_names: set[str], label: str) -> dict[str, st
     return {name: _commit_sha(value[name], f"{label}[{name!r}]") for name in sorted(model_names)}
 
 
+def _layer_count_map(value: Any, model_slugs: set[str], label: str) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise InventoryError(f"{label} must be a mapping keyed by exact model_slug")
+    actual = set(value)
+    missing, extra = sorted(model_slugs - actual), sorted(actual - model_slugs)
+    if missing or extra:
+        raise InventoryError(
+            f"{label} keys must match source model slugs; missing={missing}, extra={extra}"
+        )
+    result: dict[str, int] = {}
+    for slug in sorted(model_slugs):
+        count = value[slug]
+        if type(count) is not int or count <= 0:
+            raise InventoryError(f"{label}[{slug!r}] must be a positive integer")
+        result[slug] = count
+    return result
+
+
 def _positive_decimal(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise InventoryError(f"execution-v3 publication fields must be non-empty strings ({label})")
@@ -252,6 +270,7 @@ def migrate(
     activation_revision: str,
     model_revisions: Mapping[str, str],
     tokenizer_revisions: Mapping[str, str],
+    model_layer_counts: Mapping[str, int],
 ) -> dict[str, Any]:
     """Create a new v2 database; the v1 source is opened read-only and never altered."""
     source, activation_cache, execution_v3, output, report = map(
@@ -301,7 +320,14 @@ def migrate(
         model_names = {row["model_slug"]: row["model_name"] for row in model_rows}
         exact_model_revisions = _revision_map(model_revisions, set(model_names.values()), "model_revisions")
         exact_tokenizer_revisions = _revision_map(tokenizer_revisions, set(model_names.values()), "tokenizer_revisions")
-        layer_counts = _model_layer_counts(old)
+        exact_layer_counts = _layer_count_map(
+            model_layer_counts, set(model_names), "model_layer_counts",
+        )
+        source_layer_counts = _model_layer_counts(old)
+        for slug, source_count in source_layer_counts.items():
+            if source_count is not None and source_count != exact_layer_counts[slug]:
+                raise InventoryError(f"source layer_count differs from model_layer_counts for {slug}")
+        layer_counts = dict(exact_layer_counts)
         target_rows = old.execute("SELECT * FROM result_targets ORDER BY model_slug,benchmark").fetchall()
         blocked_rows = {row["result_id"]: row for row in old.execute("SELECT * FROM blocked_targets")}
         methods = [row[0] for row in old.execute("SELECT method FROM methods ORDER BY method")]
@@ -469,6 +495,7 @@ def migrate(
             },
             "model_revisions": exact_model_revisions,
             "tokenizer_revisions": exact_tokenizer_revisions,
+            "model_layer_counts": exact_layer_counts,
             "partition": partition,
             "output": str(output),
         }
@@ -603,6 +630,7 @@ def _parser() -> argparse.ArgumentParser:
     migration.add_argument("--activation-repo-id", required=True)
     migration.add_argument("--activation-repo-type", required=True)
     migration.add_argument("--activation-revision", required=True)
+    migration.add_argument("--model-layer-counts", required=True)
     migration.add_argument("--model-revisions", required=True)
     migration.add_argument("--tokenizer-revisions", required=True)
     planning = commands.add_parser("plan")
@@ -621,6 +649,7 @@ def main(argv: list[str] | None = None) -> int:
             args.activation_repo_id, args.activation_repo_type, args.activation_revision,
             _load_revision_argument(args.model_revisions, "model_revisions"),
             _load_revision_argument(args.tokenizer_revisions, "tokenizer_revisions"),
+            _load_revision_argument(args.model_layer_counts, "model_layer_counts"),
         )
     else:
         value = plan(args.inventory, args.output_dir, args.report, args.no_submit)
