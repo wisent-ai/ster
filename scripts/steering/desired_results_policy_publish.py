@@ -79,8 +79,9 @@ class GCSCreateOnlyStore:
         blob = self._client.bucket(bucket_name).blob(object_name)
         try:
             blob.upload_from_string(data, content_type="application/json", if_generation_match=0)
+            generation = str(blob.generation)
         except Exception as exc:
-            # google.api_core is optional in offline environments.  Classify only
+            # google.api_core is optional in offline environments. Classify only
             # the documented create precondition failure; all other errors escape.
             code = getattr(exc, "code", None)
             if callable(code):
@@ -88,11 +89,13 @@ class GCSCreateOnlyStore:
             if code not in (409, 412) and exc.__class__.__name__ not in {"Conflict", "PreconditionFailed"}:
                 raise
             blob.reload()
-            existing = blob.download_as_bytes(if_generation_match=int(blob.generation))
+            generation = str(blob.generation)
+            pinned = self._client.bucket(bucket_name).blob(
+                object_name, generation=int(generation),
+            )
+            existing = pinned.download_as_bytes(if_generation_match=int(generation))
             if existing != data:
                 raise ContractError(f"immutable object conflict at {uri}") from exc
-        blob.reload()
-        generation = str(blob.generation)
         if not generation.isdigit() or int(generation) < 1:
             raise ContractError(f"GCS returned a non-numeric generation for {uri}")
         digest = hashlib.sha256(data).hexdigest()
