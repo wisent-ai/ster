@@ -88,6 +88,10 @@ def _generate_with_stats(
         prompt_length, self.tokenizer,
     )
 
+    runtime_hooks = getattr(self, "_active_steering_runtime", None)
+    if runtime_hooks is not None:
+        runtime_hooks.begin_generation()
+
     out = self.hf_model.generate(**generation_kwargs)
 
     if use_steering or steering_object is not None:

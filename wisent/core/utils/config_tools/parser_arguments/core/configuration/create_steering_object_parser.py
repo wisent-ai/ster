@@ -1,6 +1,7 @@
 """Parser for the create-steering-object command."""
 
 import argparse
+from wisent.core.control.steering_methods import SteeringMethodRegistry
 
 
 def setup_create_steering_object_parser(parser: argparse.ArgumentParser) -> None:
@@ -152,57 +153,11 @@ def setup_create_steering_object_parser(parser: argparse.ArgumentParser) -> None
         help="Learning rate for TECZA (required at runtime)"
     )
 
-    # TETNO parameters
-    for _flag, _type, _help in [
-        ("--tetno-sensor-layer", int, "Sensor layer for gating (auto if not set)"),
-        ("--tetno-condition-threshold", float, "Condition threshold for gating"),
-        ("--tetno-gate-temperature", float, "Gate temperature"),
-        ("--tetno-entropy-floor", float, "Minimum entropy for scaling"),
-        ("--tetno-entropy-ceiling", float, "Entropy at which max_alpha is reached"),
-        ("--tetno-max-alpha", float, "Maximum steering strength"),
-        ("--tetno-optimization-steps", int, "Steps for condition vector optimization"),
-        ("--tetno-learning-rate", float, "Learning rate for optimization"),
-        ("--tetno-threshold-search-steps", int, "Steps for threshold grid search"),
-        ("--tetno-condition-margin", float, "Margin for condition activation"),
-        ("--tetno-min-layer-scale", float, "Minimum per-layer scaling factor"),
-        ("--tetno-hybrid-strength-factor", float, "Strength factor for hybrid export"),
-        ("--tetno-gate-scale-factor", float, "Scale factor for sigmoid gating"),
-        ("--tetno-log-interval", int, "Training progress log interval"),
-    ]:
-        parser.add_argument(_flag, type=_type, default=None,
-                            help=f"[TETNO] {_help} (required at runtime)")
-    parser.add_argument(
-        "--tetno-learn-threshold",
-        action="store_true",
-        default=True,
-        help="Learn optimal threshold (default: True)"
-    )
-
-    # GROM parameters
-    for _flag, _type, _help in [
-        ("--grom-num-directions", int, "Number of directions per layer"),
-        ("--grom-sensor-layer", int, "Sensor layer for gating (auto if not set)"),
-        ("--grom-gate-hidden-dim", int, "Gate network hidden dimension (auto if not set)"),
-        ("--grom-intensity-hidden-dim", int, "Intensity hidden dimension (auto if not set)"),
-        ("--grom-max-alpha", float, "Maximum steering intensity"),
-        ("--grom-gate-temperature", float, "Gate temperature"),
-        ("--grom-learning-rate", float, "Learning rate for optimization"),
-        ("--grom-weight-decay", float, "Weight decay for optimizer"),
-        ("--grom-retain-weight", float, "Weight for retain loss"),
-        ("--grom-max-grad-norm", float, "Max gradient norm for clipping"),
-        ("--grom-optimization-steps", int, "Total optimization steps"),
-        ("--grom-log-interval", int, "Training log interval"),
-        ("--grom-gate-dim-min", int, "Minimum gate network hidden dim"),
-        ("--grom-gate-dim-max", int, "Maximum gate network hidden dim"),
-        ("--grom-gate-dim-divisor", int, "Divisor for gate dim snapping"),
-        ("--grom-intensity-dim-min", int, "Min intensity network hidden dim"),
-        ("--grom-intensity-dim-max", int, "Max intensity network hidden dim"),
-        ("--grom-intensity-dim-divisor", int, "Divisor for intensity dim snapping"),
-        ("--grom-create-noise-scale", float, "Noise scale for object creation"),
-        ("--grom-create-gate-threshold", float, "Gate threshold for object creation"),
-    ]:
-        parser.add_argument(_flag, type=_type, default=None,
-                            help=f"[GROM] {_help} (required at runtime)")
+    # Sensor-based method parameters come from the canonical method registry.
+    # Their prefixed layer flags share the generic destinations consumed by the
+    # create helpers and by MethodConfig.to_args().
+    SteeringMethodRegistry.get("tetno").add_cli_arguments(parser)
+    SteeringMethodRegistry.get("grom").add_cli_arguments(parser)
 
     # Concept Flow parameters
     parser.add_argument(

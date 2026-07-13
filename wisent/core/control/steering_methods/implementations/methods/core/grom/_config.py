@@ -84,6 +84,10 @@ class GROMConfig:
     """Weight for gate warmup loss."""
     caa_alignment_weight: float
     """Weight for CAA alignment loss."""
+    create_noise_scale: float
+    """Noise applied to non-primary manifold direction initialization."""
+    create_gate_threshold: float
+    """Gate separation threshold used during joint optimization."""
 
     # Network dimension bounds (no defaults -- must come from caller)
     gate_dim_min: int
@@ -134,17 +138,23 @@ class GROMConfig:
     """If True, use a network to predict direction weights per-input."""
 
     def resolve_network_dims(self, hidden_dim: int) -> None:
-        """Resolve network dimensions based on model's hidden dimension."""
-        if self.gate_hidden_dim is None:
-            self.gate_hidden_dim = max(
-                self.gate_dim_min,
-                min(self.gate_dim_max, hidden_dim // self.gate_dim_divisor),
-            )
-        if self.intensity_hidden_dim is None:
-            self.intensity_hidden_dim = max(
-                self.intensity_dim_min,
-                min(self.intensity_dim_max, hidden_dim // self.intensity_dim_divisor),
-            )
+        """Resolve and clamp sampled network dimensions for this model width."""
+        gate_low, gate_high = sorted((self.gate_dim_min, self.gate_dim_max))
+        intensity_low, intensity_high = sorted((
+            self.intensity_dim_min, self.intensity_dim_max,
+        ))
+        gate_candidate = (
+            hidden_dim // self.gate_dim_divisor
+            if self.gate_hidden_dim is None else self.gate_hidden_dim
+        )
+        intensity_candidate = (
+            hidden_dim // self.intensity_dim_divisor
+            if self.intensity_hidden_dim is None else self.intensity_hidden_dim
+        )
+        self.gate_hidden_dim = max(gate_low, min(gate_high, gate_candidate))
+        self.intensity_hidden_dim = max(
+            intensity_low, min(intensity_high, intensity_candidate),
+        )
 
     # Boolean flags (sensible defaults)
     use_caa_init: bool = field(default_factory=lambda: get_optimal("use_caa_init"))

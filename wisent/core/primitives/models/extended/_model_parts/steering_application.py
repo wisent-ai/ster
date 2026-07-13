@@ -21,6 +21,42 @@ from wisent.core.utils.config_tools.constants import (
 )
 
 
+class _GeneratedTokenStrength:
+    """Stateful strategy weight indexed by absolute generated-token position."""
+
+    def __init__(self, weight_for_position: Any) -> None:
+        self._weight_for_position = weight_for_position
+        self.reset()
+
+    def reset(self) -> None:
+        """Start the next generation at position zero."""
+        self._prompt_len: int | None = None
+        self._last_seq_len: int | None = None
+        self._token_position = 0
+
+    def __call__(self, hidden_states: torch.Tensor) -> float:
+        seq_len = hidden_states.shape[1] if hidden_states.dim() >= 3 else 1
+        if self._last_seq_len is None:
+            self._prompt_len = seq_len
+            self._token_position = 0
+        elif seq_len == 1:
+            # Cached decoding always supplies exactly one new token per forward.
+            self._token_position += 1
+        elif self._last_seq_len == 1 and self._token_position > 0:
+            # A full-sequence forward after cached steps is a new prefill.
+            self._prompt_len = seq_len
+            self._token_position = 0
+        elif seq_len <= self._last_seq_len:
+            # A non-growing full sequence also starts a new request.
+            self._prompt_len = seq_len
+            self._token_position = 0
+        else:
+            # Uncached generation presents the complete growing sequence.
+            self._token_position = max(seq_len - self._prompt_len, 0)
+        self._last_seq_len = seq_len
+        return self._weight_for_position(self._token_position)
+
+
 def _apply_steering_object(
     self,
     steering_obj: "BaseSteeringObject",
@@ -57,8 +93,26 @@ def _apply_steering_object(
     """
     from wisent.core.control.steering_methods.steering_object import BaseSteeringObject
 
-    # KV cache steering handled in _generate, no hooks needed
-    if getattr(getattr(steering_obj, 'metadata', None), 'extraction_component', None) == "kv_cache":
+    method_name = getattr(steering_obj, "method_name", None)
+    if method_name is None:
+        method_name = getattr(steering_obj.metadata, "method", "")
+    method_name = str(method_name).lower()
+    component = getattr(
+        getattr(steering_obj, "metadata", None),
+        "extraction_component",
+        None,
+    )
+    if method_name in {"tetno", "grom"} and component != "residual_stream":
+        raise ValueError(
+            f"{method_name.upper()} requires "
+            "extraction_component='residual_stream'"
+        )
+
+    if component is None:
+        component = "residual_stream"
+
+    # KV cache steering handled in _generate, no hooks needed.
+    if component == "kv_cache":
         return
 
     if max_new_tokens is None:
@@ -94,8 +148,44 @@ def _apply_steering_object(
         else:
             return 1.0
 
-    # Component-targeted steering: dispatch to submodule hooks
-    component = getattr(steering_obj.metadata, "extraction_component", "residual_stream")
+    runtime_strength = _GeneratedTokenStrength(
+        lambda token_pos: get_steering_weight(
+            steering_strategy, token_pos, max_new_tokens,
+        )
+    )
+    runtime_hooks = None
+    if method_name == "tetno":
+        from wisent.core.weight_modification.implementations.directional.hooks.tetno import (
+            TETNORuntimeHooks,
+        )
+
+        runtime_hooks = TETNORuntimeHooks(
+            model=self.hf_model,
+            tetno_result=steering_obj,
+            base_strength=base_strength,
+            gate_temperature=steering_obj.gate_temperature,
+            strength_provider=runtime_strength,
+        )
+    elif method_name == "grom":
+        from wisent.core.weight_modification.implementations.directional.hooks.grom import (
+            GROMRuntimeHooks,
+        )
+
+        runtime_hooks = GROMRuntimeHooks(
+            model=self.hf_model,
+            grom_result=steering_obj,
+            base_strength=base_strength,
+            use_soft_gating=True,
+            strength_provider=runtime_strength,
+        )
+    if runtime_hooks is not None:
+        runtime_hooks.install()
+        for handle in runtime_hooks._hooks:
+            self._hook_group.add(handle)
+        self._active_steering_runtime = runtime_hooks
+        return
+
+    # Component-targeted steering: dispatch to submodule hooks.
     if component != "residual_stream":
         from wisent.core.primitives.models.component_steering import register_component_steering_hooks
         def _strategy_fn(token_pos: int) -> float:

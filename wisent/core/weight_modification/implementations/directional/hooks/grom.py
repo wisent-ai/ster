@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import torch
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
+
 from wisent.core.utils.config_tools.constants import SEPARATOR_WIDTH_STANDARD
 from wisent.core.utils.infra_tools.errors import MissingParameterError
 from wisent.core.utils.cli.cli_logger import setup_logger, bind
@@ -15,95 +16,176 @@ _LOG = setup_logger(__name__)
 
 
 class GROMRuntimeHooks:
-    """Runtime hook system for GROM dynamic steering."""
+    """Runtime hook system for GROM sensor-aware dynamic steering."""
 
-    def __init__(self, model: Module, grom_result, base_strength: float, gate_threshold: float, use_soft_gating: bool = True):
+    def __init__(
+        self,
+        model: Module,
+        grom_result,
+        base_strength: float,
+        gate_threshold: float | None = None,
+        use_soft_gating: bool = True,
+        strength_provider: Callable[[torch.Tensor], float] | None = None,
+    ) -> None:
         self.model = model
         self.grom_result = grom_result
         self.base_strength = base_strength
         self.gate_threshold = gate_threshold
         self.use_soft_gating = use_soft_gating
+        self.strength_provider = strength_provider
         self._hooks = []
         self._sensor_activation = None
         self._current_gate = None
         self._current_intensities = None
-        if hasattr(model, "model"):
+        self._current_strategy_strength = 1.0
+        if hasattr(model, "model") and hasattr(model.model, "layers"):
             self._layers = model.model.layers
-        elif hasattr(model, "transformer"):
+        elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
             self._layers = model.transformer.h
-        else:
+        elif hasattr(model, "layers"):
             self._layers = model.layers
-        self._layer_name_to_idx = {}
-        for layer_name in grom_result.layer_order:
-            try:
-                idx = int(str(layer_name).split("_")[-1])
-                self._layer_name_to_idx[layer_name] = idx
-            except (ValueError, IndexError):
-                pass
-        sensor_layer_name = grom_result.metadata.get("sensor_layer")
-        if sensor_layer_name is None:
-            raise MissingParameterError(params=["sensor_layer"], context="GROM result metadata must contain sensor_layer")
-        self._sensor_layer_idx = self._layer_name_to_idx.get(sensor_layer_name)
-        if self._sensor_layer_idx is None:
-            raise MissingParameterError(params=["sensor_layer"], context=f"sensor_layer '{sensor_layer_name}' not found in layer order")
+        else:
+            raise ValueError("GROM model has no supported decoder layers")
+
+        self._layer_name_to_idx = {
+            layer_name: self._model_index(layer_name, "steering layer")
+            for layer_name in grom_result.layer_order
+        }
+        sensor_value = getattr(grom_result, "sensor_layer", None)
+        metadata = getattr(grom_result, "metadata", None)
+        metadata_sensor = (
+            metadata.get("sensor_layer")
+            if isinstance(metadata, dict)
+            else getattr(metadata, "sensor_layer", None)
+        )
+        metadata_component = (
+            metadata.get("extraction_component")
+            if isinstance(metadata, dict)
+            else getattr(metadata, "extraction_component", None)
+        )
+        if metadata_component != "residual_stream":
+            raise ValueError(
+                "GROM requires extraction_component='residual_stream'"
+            )
+        if sensor_value is None:
+            sensor_value = metadata_sensor
+        elif metadata_sensor is not None and self._layer_number(sensor_value) != self._layer_number(metadata_sensor):
+            raise ValueError("GROM sensor_layer conflicts with metadata.sensor_layer")
+        if sensor_value is None:
+            raise ValueError("GROM sensor_layer is required")
+        self._sensor_layer_idx = self._model_index(sensor_value, "sensor_layer")
+        if (
+            self._layer_name_to_idx
+            and self._sensor_layer_idx >= min(self._layer_name_to_idx.values())
+        ):
+            raise ValueError(
+                "GROM sensor_layer must be strictly earlier than every steering layer"
+            )
+        if not use_soft_gating and gate_threshold is None:
+            raise ValueError("GROM gate_threshold is required for hard gating")
+
+    @staticmethod
+    def _layer_number(layer) -> int:
+        try:
+            number = int(str(layer).split("_")[-1])
+        except (TypeError, ValueError, IndexError) as exc:
+            raise ValueError(f"Invalid GROM layer identifier: {layer!r}") from exc
+        if number <= 0:
+            raise ValueError(f"GROM sensor_layer/steering layer must be >= 1, got {number}")
+        return number
+
+    def _model_index(self, layer, label: str) -> int:
+        number = self._layer_number(layer)
+        if number > len(self._layers):
+            raise ValueError(
+                f"GROM {label} {number} exceeds model layer count {len(self._layers)}"
+            )
+        return number - 1
 
     def install(self) -> None:
-        """Install forward hooks on the model."""
+        """Install sensor first, then steering hooks in causal layer order."""
         self.remove()
-        if self._sensor_layer_idx < len(self._layers):
-            sensor_hook = self._layers[self._sensor_layer_idx].register_forward_hook(self._sensor_hook)
-            self._hooks.append(sensor_hook)
+        self._hooks.append(
+            self._layers[self._sensor_layer_idx].register_forward_hook(self._sensor_hook)
+        )
         for layer_name in self.grom_result.layer_order:
-            layer_idx = self._layer_name_to_idx.get(layer_name)
-            if layer_idx is not None and layer_idx < len(self._layers):
-                steering_hook = self._layers[layer_idx].register_forward_hook(
-                    lambda module, input, output, ln=layer_name: self._steering_hook(module, input, output, ln))
-                self._hooks.append(steering_hook)
+            layer_idx = self._layer_name_to_idx[layer_name]
+            steering_hook = self._layers[layer_idx].register_forward_hook(
+                lambda module, input, output, ln=layer_name: self._steering_hook(
+                    module, input, output, ln
+                )
+            )
+            self._hooks.append(steering_hook)
+
+    def begin_generation(self) -> None:
+        """Reset per-request gate and absolute generated-token schedule state."""
+        self._sensor_activation = None
+        self._current_gate = None
+        self._current_intensities = None
+        self._current_strategy_strength = 1.0
+        reset = getattr(self.strength_provider, "reset", None)
+        if callable(reset):
+            reset()
 
     def remove(self) -> None:
         """Remove all installed hooks."""
         for hook in self._hooks:
             hook.remove()
         self._hooks = []
-        self._sensor_activation = None
-        self._current_gate = None
-        self._current_intensities = None
+        self.begin_generation()
 
     def _sensor_hook(self, module, input, output):
-        """Capture sensor layer activation and compute gate/intensities."""
+        """Compute gate and all intensities from the exact sensor activation."""
         hidden_states = output[0] if isinstance(output, tuple) else output
-        if hidden_states.dim() == 3:
-            sensor_h = hidden_states[:, -1, :]
-        else:
-            sensor_h = hidden_states
+        sensor_h = hidden_states[:, -1, :] if hidden_states.dim() == 3 else hidden_states
         self._sensor_activation = sensor_h.detach()
+        self._current_strategy_strength = (
+            self.strength_provider(hidden_states)
+            if self.strength_provider is not None
+            else 1.0
+        )
         with torch.no_grad():
+            gate_value = self.grom_result.predict_gate(sensor_h)
             if self.use_soft_gating:
-                self._current_gate = self.grom_result.predict_gate(sensor_h)
+                self._current_gate = gate_value
             else:
-                gate_value = self.grom_result.predict_gate(sensor_h)
                 self._current_gate = (gate_value > self.gate_threshold).float()
             self._current_intensities = self.grom_result.predict_intensity(sensor_h)
         return output
 
     def _steering_hook(self, module, input, output, layer_name):
-        """Apply dynamic steering to layer output."""
+        """Apply dynamic steering using the sensor-derived gate and intensities."""
         if self._current_gate is None or self._current_intensities is None:
             return output
         hidden_states = output[0] if isinstance(output, tuple) else output
         rest = output[1:] if isinstance(output, tuple) else None
-        direction = self.grom_result.get_effective_direction(layer_name).to(hidden_states.device)
-        intensity = self._current_intensities.get(layer_name, torch.ones(1)).to(hidden_states.device)
-        gate = self._current_gate.to(hidden_states.device)
+        direction = self.grom_result.get_effective_direction(layer_name).to(
+            device=hidden_states.device, dtype=hidden_states.dtype
+        )
+        if layer_name not in self._current_intensities:
+            raise KeyError(f"No predicted intensity for GROM layer {layer_name!r}")
+        intensity = self._current_intensities[layer_name].to(
+            device=hidden_states.device, dtype=hidden_states.dtype
+        )
+        gate = self._current_gate.to(
+            device=hidden_states.device, dtype=hidden_states.dtype
+        )
+        strategy_strength = self._current_strategy_strength
         if hidden_states.dim() == 3:
-            gate = gate.view(-1, 1, 1)
-            intensity = intensity.view(-1, 1, 1)
+            gate = gate.reshape(-1, 1, 1)
+            intensity = intensity.reshape(-1, 1, 1)
             direction = direction.view(1, 1, -1)
         elif hidden_states.dim() == 2:
-            gate = gate.view(-1, 1)
-            intensity = intensity.view(-1, 1)
+            gate = gate.reshape(-1, 1)
+            intensity = intensity.reshape(-1, 1)
             direction = direction.view(1, -1)
-        steering_delta = gate * intensity * self.base_strength * direction
+        steering_delta = (
+            gate
+            * intensity
+            * self.base_strength
+            * strategy_strength
+            * direction
+        )
         hidden_states = hidden_states + steering_delta
         return (hidden_states,) + rest if rest is not None else hidden_states
 
@@ -113,7 +195,9 @@ class GROMRuntimeHooks:
 
     def get_current_intensities(self) -> dict | None:
         """Get current per-layer intensities."""
-        return {k: v.mean().item() for k, v in self._current_intensities.items()} if self._current_intensities else None
+        if self._current_intensities is None:
+            return None
+        return {k: v.mean().item() for k, v in self._current_intensities.items()}
 
 
 def project_weights_grom(

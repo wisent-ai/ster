@@ -43,6 +43,8 @@ class SteeringObjectMetadata:
     # Calibration data: average hidden state norm per layer
     calibration_norms: Dict[int, float] = field(default_factory=dict)
     extraction_component: Optional[str] = None
+    # Sensor input is persisted independently of vector-bearing steering layers.
+    sensor_layer: Optional[int] = None
     
     def get_calibrated_strength(self, layer: int, target_percentage: float) -> float:
         """

@@ -16,6 +16,7 @@ from wisent.core.utils.config_tools.constants import LOG_EPS, RECURSION_INITIAL_
 
 if TYPE_CHECKING:
     from wisent.core.primitives.models.wisent_model import WisentModel
+    from wisent.core.primitives.model_interface.core.activations.pipeline.pair_identity import PairId
 
 __all__ = ["ActivationCollector"]
 
@@ -213,10 +214,21 @@ class ActivationCollector:
         strategy: ExtractionStrategy = ExtractionStrategy.default(),
         layers: Sequence[LayerName] | None = None,
         component: ExtractionComponent = ExtractionComponent.default(),
+        *,
+        pair_id: PairId,
+        stable_id: str,
     ) -> dict:
-        """Collect RAW hidden states (full sequences) for a contrastive pair."""
-        from wisent.core.primitives.model_interface.core.activations.raw_collector import collect_raw
-        return collect_raw(self, pair, strategy, layers, component=component)
+        """Collect full sequences and exact token metadata for a named pair."""
+        from wisent.core.primitives.model_interface.core.activations.pipeline.raw_collector import collect_raw
+        return collect_raw(
+            self,
+            pair,
+            strategy,
+            layers,
+            component=component,
+            pair_id=pair_id,
+            stable_id=stable_id,
+        )
 
     def collect_multi_strategy(
         self,
@@ -404,9 +416,27 @@ class ActivationCollector:
                 }
             return result
 
-    def _collect_single_raw(self, prompt, response, strategy, layers, other_response=None, is_positive=True):
-        from wisent.core.primitives.model_interface.core.activations.raw_collector import collect_single_raw
-        return collect_single_raw(self, prompt, response, strategy, layers, other_response=other_response, is_positive=is_positive)
+    def _collect_single_raw(
+        self,
+        prompt,
+        response,
+        strategy,
+        layers,
+        other_response=None,
+        is_positive=True,
+        component=ExtractionComponent.default(),
+    ):
+        from wisent.core.primitives.model_interface.core.activations.pipeline.raw_collector import collect_single_raw
+        return collect_single_raw(
+            collector=self,
+            prompt=prompt,
+            response=response,
+            strategy=strategy,
+            layers=layers,
+            other_response=other_response,
+            is_positive=is_positive,
+            component=component,
+        )
 
     def collect_batched(
         self,

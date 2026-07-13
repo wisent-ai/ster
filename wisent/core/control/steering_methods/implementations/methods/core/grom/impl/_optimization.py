@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from wisent.core.primitives.model_interface.core.activations.core.atoms import LayerActivations, RawActivationMap, LayerName
 from wisent.core.primitives.contrastive_pairs.core.set import ContrastivePairSet
 from wisent.core.utils.infra_tools.errors import InsufficientDataError
-from wisent.core.utils.config_tools.constants import RECURSION_INITIAL_DEPTH, COMBO_OFFSET
+from wisent.core.utils.config_tools.constants import RECURSION_INITIAL_DEPTH, COMBO_OFFSET, SCORE_RANGE_MIN
 from wisent.core.control.steering_methods.methods.grom._config import (
     GatingNetwork,
     IntensityNetwork,
@@ -16,70 +16,82 @@ from wisent.core.control.steering_methods.methods.grom._config import (
 
 
 def train_grom_impl(self, pair_set: ContrastivePairSet):
-    """
-    Full GROM training with all components.
-    Args:
-        pair_set: ContrastivePairSet with collected activations.
-    Returns:
-        GROMResult with manifold, networks, and metadata.
-    """
-    # Import GROMResult here to avoid circular import
+    """Train all GROM components on the exact configured sensor and steering layers."""
     from wisent.core.control.steering_methods.methods.grom.grom import GROMResult
 
-    # Collect activations
     buckets = self._collect_from_set(pair_set)
     if not buckets:
         raise InsufficientDataError(reason="No valid activation pairs found")
-    # Detect num_layers from available data if not set
-    # Find max layer index to determine model size
-    max_layer_idx = 0
-    for layer_name in buckets.keys():
+
+    available_by_index = {}
+    for layer_name in buckets:
         try:
-            layer_idx = int(str(layer_name).split("_")[-1])
-            max_layer_idx = max(max_layer_idx, layer_idx)
-        except (ValueError, IndexError):
-            pass
-    # Resolve steering_layers and sensor_layer based on detected num_layers
-    detected_num_layers = max_layer_idx + 1  # layers are 0-indexed
+            layer_index = int(str(layer_name).split("_")[-1])
+        except (ValueError, IndexError) as exc:
+            raise InsufficientDataError(
+                reason=f"Unparseable activation layer name: {layer_name!r}"
+            ) from exc
+        if layer_index in available_by_index:
+            raise InsufficientDataError(
+                reason=f"Multiple activation names resolve to layer {layer_index}"
+            )
+        available_by_index[layer_index] = layer_name
+
     if self.config.steering_layers is None or self.config.sensor_layer is None:
+        detected_num_layers = max(available_by_index) + COMBO_OFFSET
         self.config.resolve_layers(detected_num_layers)
-    # Filter to steering layers and determine hidden dim
+
     layer_names = []
     hidden_dim = None
-    for layer_name in sorted(buckets.keys()):
+    for layer_index in self.config.steering_layers:
+        if layer_index not in available_by_index:
+            raise InsufficientDataError(
+                reason=f"Missing configured steering layer {layer_index}"
+            )
+        layer_name = available_by_index[layer_index]
         pos_list, neg_list = buckets[layer_name]
         if not pos_list or not neg_list:
-            continue
-        # Check if layer matches steering_layers config
-        try:
-            layer_idx = int(str(layer_name).split("_")[-1])
-            if layer_idx not in self.config.steering_layers:
-                continue
-        except (ValueError, IndexError):
-            pass  # Include if can't parse
-        layer_names.append(layer_name)
+            raise InsufficientDataError(
+                reason=f"Empty activations at steering layer {layer_index}"
+            )
+        candidate_dim = pos_list[0].reshape(-1).shape[0]
         if hidden_dim is None:
-            hidden_dim = pos_list[0].reshape(-1).shape[0]
+            hidden_dim = candidate_dim
+        elif candidate_dim != hidden_dim:
+            raise InsufficientDataError(reason="Steering layers have different hidden dimensions")
+        layer_names.append(layer_name)
     if not layer_names or hidden_dim is None:
         raise InsufficientDataError(reason="No valid steering layers found")
-    # Resolve network dimensions based on actual hidden_dim
-    if self.config.gate_hidden_dim is None or self.config.intensity_hidden_dim is None:
-        self.config.resolve_network_dims(hidden_dim)
+
+    if self.config.sensor_layer not in available_by_index:
+        raise InsufficientDataError(
+            reason=f"Missing configured sensor layer {self.config.sensor_layer}"
+        )
+    sensor_layer = available_by_index[self.config.sensor_layer]
+    sensor_pos, sensor_neg = buckets[sensor_layer]
+    if not sensor_pos or not sensor_neg:
+        raise InsufficientDataError(
+            reason=f"Empty activations at sensor layer {self.config.sensor_layer}"
+        )
+    if sensor_pos[0].reshape(-1).shape[0] != hidden_dim:
+        raise InsufficientDataError(reason="Sensor and steering hidden dimensions differ")
+
+    self.config.resolve_network_dims(hidden_dim)
     num_layers = len(layer_names)
-    # Geometry analysis and adaptation
+
     geometry_adaptation = None
     effective_num_directions = self.config.num_directions
     enable_gating = True
     if self.config.adapt_to_geometry:
         geometry_adaptation = self._analyze_and_adapt_geometry(
-            buckets, layer_names, hidden_dim
+            buckets, layer_names, hidden_dim, default_score=SCORE_RANGE_MIN,
         )
         effective_num_directions = geometry_adaptation.adapted_num_directions
         enable_gating = geometry_adaptation.gating_enabled
-    # Initialize components with adapted configuration
+
     directions = self._initialize_directions(
         buckets, layer_names, hidden_dim,
-        num_directions=effective_num_directions
+        num_directions=effective_num_directions,
     )
     gate_network: Optional[GatingNetwork] = None
     if enable_gating:
@@ -88,24 +100,17 @@ def train_grom_impl(self, pair_set: ContrastivePairSet):
             shrink_factor=self.config.gate_shrink_factor,
         )
     intensity_network = IntensityNetwork(
-        hidden_dim, num_layers,
-        self.config.intensity_hidden_dim,
-        self.config.max_alpha
+        hidden_dim, num_layers, self.config.intensity_hidden_dim,
+        self.config.max_alpha,
     )
-    direction_weights = {
-        layer: torch.ones(effective_num_directions) / effective_num_directions
-        for layer in layer_names
-    }
-    # Make direction weights trainable
     direction_weight_params = {
         layer: nn.Parameter(torch.zeros(effective_num_directions))
         for layer in layer_names
     }
-    # Prepare data tensors
-    data = self._prepare_data_tensors(buckets, layer_names)
-    # Find sensor layer
-    sensor_layer = self._find_sensor_layer(layer_names)
-    # Joint optimization
+    data_layers = list(layer_names)
+    if sensor_layer not in data_layers:
+        data_layers.append(sensor_layer)
+    data = self._prepare_data_tensors(buckets, data_layers)
     directions, gate_network, intensity_network, direction_weights = self._joint_optimization(
         directions=directions,
         gate_network=gate_network,
@@ -123,6 +128,7 @@ def train_grom_impl(self, pair_set: ContrastivePairSet):
         intensity_network=intensity_network,
         direction_weights=direction_weights,
         layer_order=layer_names,
+        sensor_layer=sensor_layer,
         gate_temperature=self.config.gate_temperature,
         metadata={
             "config": self.config.__dict__,

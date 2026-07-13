@@ -1,987 +1,666 @@
 #!/usr/bin/env python3
-"""Seal and publish the immutable desired-results final test.
-
-This is control-plane code: it deliberately has no Wisent/model imports.  ``prepare``
-validates local immutable inputs and writes a content-addressed bundle; ``seal``
-performs create-only GCS writes and emits the nine Stado command specifications;
-``finalize`` publishes a leaderboard only after all nine immutable completions pass.
-"""
+"""Schema-v3 final-test control plane with immutable create-only publication."""
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import math
-import os
-import re
-import sqlite3
-import sys
-import tempfile
-from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
-PROTOCOL_ID = "desired-results-final-test-v1"
-PROTOCOL_REVISION = 1
-CALIBRATION_PROTOCOL_ID = "desired-results-bounded-rerun-v1"
-CALIBRATION_PROTOCOL_REVISION = 1
-PRIOR_DEFINITIONS_SHA256 = "d9c8c9cefd107c86835cf486bf673ea62ecbe2f4b648ed82992d66fcc3bb5858"
-MODEL = "meta-llama/Llama-3.2-1B-Instruct"
-MODEL_SLUG = "meta-llama__Llama-3.2-1B-Instruct"
-BENCHMARK = "winogrande"
-TARGET_ID = f"steering_effectiveness_initial:{MODEL_SLUG}:{BENCHMARK}"
-ACTIVATION_REVISION = "8c01dd5342f5b13c6d62eca9c343cd9714ec2e9b"
-FULL_SUPPORT_SHA256 = "04aa45f7726936eea778be76eada31746b97ffcbb712dabfd3fa628d30142c7c"
-PAIR_TEXT_SHA256 = "24511b10962c2ebfba4553217b9619949dfe623a64ac01be685093f2fdfbdeae"
-METHODS = ("caa", "grom", "mlp", "nurt", "ostrze", "tecza", "tetno", "wicher")
-ARMS = ("baseline",) + METHODS
-FORMATS = (
-    "chat_first", "chat_last", "chat_mean", "chat_max_norm", "chat_weighted",
-    "mc_balanced", "role_play",
-)
-HEX64 = re.compile(r"[0-9a-f]{64}")
-HEX40 = re.compile(r"[0-9a-f]{40}")
-_FORBIDDEN_SELECTION_KEYS = {
-    "score", "scores", "best_score", "best_validation_score", "validation_score",
-    "validation_summary", "validation_responses", "responses", "trials", "trial_scores",
-    "validation_pair_ids", "selection_pair_ids", "test_pair_ids",
-}
+from scripts.steering import desired_results_execution_contract as execution
+from scripts.steering import desired_results_target
+
+SCHEMA_VERSION = execution.SCHEMA_VERSION
 
 
 class FinalTestError(RuntimeError):
-    """The immutable final-test contract is incomplete or inconsistent."""
+    """The final-test graph or lifecycle is unsafe or inconsistent."""
 
 
 def _canonical_bytes(value: Any) -> bytes:
     try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"),
-                          ensure_ascii=True, allow_nan=False).encode("ascii")
-    except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise FinalTestError(f"value is not canonical JSON: {exc}") from exc
+        return execution.canonical_json(value)
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
 
 
 def _canonical_json_sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _read_json(path: Path) -> Any:
+def _strict_json(data: bytes, label: str) -> Any:
     try:
-        with path.open(encoding="utf-8") as stream:
-            return json.load(stream, parse_constant=lambda token: (_ for _ in ()).throw(
-                ValueError(f"non-finite number {token}")))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise FinalTestError(f"cannot read strict JSON {path}: {exc}") from exc
-
-
-def _atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    encoded = json.dumps(value, sort_keys=True, indent=2, ensure_ascii=True,
-                         allow_nan=False) + "\n"
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="ascii") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def _atomic_canonical_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(_canonical_bytes(value))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-
-def _require_exact_keys(value: Any, keys: Iterable[str], label: str) -> Mapping[str, Any]:
-    expected = set(keys)
-    if not isinstance(value, dict) or set(value) != expected:
-        actual = set(value) if isinstance(value, dict) else type(value).__name__
-        raise FinalTestError(f"{label} keys differ: expected {sorted(expected)!r}, got {actual!r}")
+        value = json.loads(data.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FinalTestError(f"{label} is not strict ASCII JSON: {exc}") from exc
+    if _canonical_bytes(value) != data:
+        raise FinalTestError(f"{label} is not canonical JSON")
     return value
 
 
-def _artifact_ref(value: Any, label: str, base: Path) -> Dict[str, Any]:
-    """Validate an immutable local+remote artifact identity without deserializing it."""
-    _require_exact_keys(value, {"path", "uri", "sha256", "generation"}, label)
-    path = Path(value["path"])
-    if not path.is_absolute():
-        path = base / path
-    path = path.resolve()
-    if not path.is_file():
-        raise FinalTestError(f"{label} local artifact does not exist: {path}")
-    if not isinstance(value["uri"], str) or not value["uri"].startswith("gs://"):
-        raise FinalTestError(f"{label}.uri must be gs://")
-    if not isinstance(value["generation"], str) or not value["generation"].isdigit():
-        raise FinalTestError(f"{label}.generation must be a decimal string")
-    if not isinstance(value["sha256"], str) or not HEX64.fullmatch(value["sha256"]):
-        raise FinalTestError(f"{label}.sha256 must be lowercase SHA-256")
-    size = path.stat().st_size
-    if _file_sha256(path) != value["sha256"]:
-        raise FinalTestError(f"{label} local bytes do not match declared SHA-256")
-    return {"uri": value["uri"], "sha256": value["sha256"],
-            "generation": value["generation"], "size": str(size)}
+def _exact(value: Any, keys: set[str], label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != keys:
+        actual = sorted(value) if isinstance(value, Mapping) else type(value).__name__
+        raise FinalTestError(f"{label} keys must be exactly {sorted(keys)}; got {actual}")
+    return value
 
 
-def _walk_forbidden(value: Any, label: str = "selection") -> None:
-    if isinstance(value, dict):
-        bad = set(value) & _FORBIDDEN_SELECTION_KEYS
-        if bad:
-            raise FinalTestError(f"{label} exposes forbidden score/validation fields: {sorted(bad)!r}")
-        for key, child in value.items():
-            _walk_forbidden(child, f"{label}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _walk_forbidden(child, f"{label}[{index}]")
+def _normalize_read(result: Any, expected_generation: str | None) -> tuple[bytes, str]:
+    if not isinstance(result, tuple) or len(result) != 2 or not isinstance(result[0], bytes):
+        raise FinalTestError("store.read must return (bytes, generation)")
+    generation = result[1].get("generation") if isinstance(result[1], Mapping) else result[1]
+    if generation is None or (expected_generation is not None and str(generation) != expected_generation):
+        raise FinalTestError("store returned a different object generation")
+    return result[0], str(generation)
 
 
-def _load_inventory(path: Path) -> Dict[str, Any]:
-    if not path.is_file():
-        raise FinalTestError(f"inventory does not exist: {path}")
-    connection = sqlite3.connect(f"file:{path.resolve()}?mode=ro&immutable=1", uri=True)
-    connection.row_factory = sqlite3.Row
+def read_ref(store: Any, value: Mapping[str, Any], label: str = "artifact") -> tuple[Any, dict[str, str]]:
     try:
-        targets = connection.execute(
-            "SELECT * FROM prepared_targets WHERE model_name=? AND benchmark=?", (MODEL, BENCHMARK)
-        ).fetchall()
-        if len(targets) != 1:
-            raise FinalTestError(f"expected one prepared target, found {len(targets)}")
-        target = targets[0]
-        support = connection.execute(
-            "SELECT pair_id, stable_id, split_name FROM prepared_target_support "
-            "WHERE target_id=? ORDER BY pair_id", (target["target_id"],)
-        ).fetchall()
-    except sqlite3.Error as exc:
-        raise FinalTestError(f"invalid inventory schema: {exc}") from exc
-    finally:
-        connection.close()
-    expected_target = {
-        "target_id": TARGET_ID, "model_slug": MODEL_SLUG, "activation_revision": ACTIVATION_REVISION,
-        "pair_count": 500, "layer_count": 16, "format_count": 7, "support_hash": FULL_SUPPORT_SHA256,
-        "pair_text_hash": PAIR_TEXT_SHA256, "no_submission": 1,
+        ref = execution.validate_artifact_ref(value, label)
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    data, generation = _normalize_read(store.read(ref["uri"], ref["generation"]), ref["generation"])
+    digest = hashlib.sha256(data).hexdigest()
+    if str(len(data)) != ref["size"] or digest != ref["sha256"]:
+        raise FinalTestError(f"{label} bytes differ from their immutable reference")
+    return _strict_json(data, label), execution.artifact_ref(ref["uri"], generation, str(len(data)), digest)
+
+
+def _published_ref(uri: str, data: bytes, result: Any) -> dict[str, str]:
+    generation = result.get("generation") if isinstance(result, Mapping) else result
+    if generation is None:
+        raise FinalTestError("store did not return an object generation")
+    return execution.artifact_ref(uri, str(generation), str(len(data)), hashlib.sha256(data).hexdigest())
+
+
+def publish_bytes(store: Any, uri: str, data: bytes) -> dict[str, str]:
+    """Create once; an existing object is accepted only when its bytes are identical."""
+    if not isinstance(uri, str) or not uri.startswith("gs://"):
+        raise FinalTestError("publication URI must be a production gs:// URI")
+    try:
+        return _published_ref(uri, data, store.create(uri, data))
+    except Exception as create_error:
+        try:
+            existing, generation = _normalize_read(store.read(uri, None), None)
+        except Exception:
+            raise FinalTestError(f"create-only publication failed for {uri}: {create_error}") from create_error
+        if existing != data:
+            raise FinalTestError(f"conflicting object already exists at {uri}") from create_error
+        return _published_ref(uri, data, generation)
+
+
+def create_bytes_once(store: Any, uri: str, data: bytes) -> tuple[dict[str, str], bool]:
+    """Attempt one create-only write and report whether this caller acquired it."""
+    if not isinstance(uri, str) or not uri.startswith("gs://"):
+        raise FinalTestError("publication URI must be a production gs:// URI")
+    try:
+        return _published_ref(uri, data, store.create(uri, data)), True
+    except Exception as create_error:
+        try:
+            existing, generation = _normalize_read(store.read(uri, None), None)
+        except Exception:
+            raise FinalTestError(f"create-only publication failed for {uri}: {create_error}") from create_error
+        if existing != data:
+            raise FinalTestError(f"conflicting object already exists at {uri}") from create_error
+        return _published_ref(uri, existing, generation), False
+
+
+def create_json_once(store: Any, uri: str, value: Any) -> tuple[dict[str, str], bool]:
+    return create_bytes_once(store, uri, _canonical_bytes(value))
+
+
+STAGED_RESULT_KEYS = {
+    "schema_version", "contract_sha256", "arm_manifest_sha256", "arm", "target",
+    "revisions", "runtime_evidence", "runtime_evidence_sha256", "pair_texts_ref",
+    "evaluator_ref", "support_refs", "test_token_id", "test_token_consumptions",
+    "test_pair_count", "scores",
+}
+
+
+def validate_staged_result(
+    value: Any, contract: Mapping[str, Any], manifest: Mapping[str, Any],
+    label: str = "staged result",
+) -> dict[str, Any]:
+    """Validate a worker result against its exact sealed target and arm lineage."""
+    result = _exact(value, STAGED_RESULT_KEYS, label)
+    try:
+        execution.validate_execution_contract(contract)
+        execution.validate_arm_manifest(manifest, contract)
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    expected = {
+        "schema_version": SCHEMA_VERSION,
+        "contract_sha256": contract["contract_sha256"],
+        "arm_manifest_sha256": manifest["manifest_sha256"],
+        "arm": manifest["arm"],
+        "target": contract["target"],
+        "revisions": contract["revisions"],
+        "runtime_evidence": contract["runtime_evidence"],
+        "runtime_evidence_sha256": contract["runtime_evidence_sha256"],
+        "pair_texts_ref": manifest["pair_texts_ref"],
+        "evaluator_ref": manifest["evaluator_ref"],
+        "support_refs": manifest["support_refs"],
+        "test_token_id": execution.test_token_id(manifest["manifest_sha256"]),
+        "test_token_consumptions": 1,
+        "test_pair_count": len(contract["target_manifest"]["support"]["splits"]["test"]),
     }
-    for key, expected in expected_target.items():
-        if target[key] != expected:
-            raise FinalTestError(f"inventory target {key} differs from frozen identity")
-    if len(support) != 500:
-        raise FinalTestError("inventory support must contain exactly 500 rows")
-    records: list[Dict[str, Any]] = []
-    pair_ids: set[int] = set()
-    stable_ids: set[str] = set()
-    splits = {"train": [], "validation": [], "test": []}
-    for row in support:
-        pair_id, stable_id, split = row["pair_id"], row["stable_id"], row["split_name"]
-        if type(pair_id) is not int or not isinstance(stable_id, str) or not stable_id or split not in splits:
-            raise FinalTestError("inventory contains malformed support identity")
-        if pair_id in pair_ids or stable_id in stable_ids:
-            raise FinalTestError("inventory pair_id and stable_id must both be unique")
-        pair_ids.add(pair_id); stable_ids.add(stable_id)
-        item = {"pair_id": pair_id, "stable_id": stable_id}
-        records.append({**item, "split": split})
-        splits[split].append(item)
-    if {name: len(rows) for name, rows in splits.items()} != {"train": 300, "validation": 100, "test": 100}:
-        raise FinalTestError("inventory split counts must be train=300 validation=100 test=100")
-    return {
-        "target": {"model": MODEL, "model_slug": MODEL_SLUG, "benchmark": BENCHMARK,
-                   "target_id": TARGET_ID, "optimization_run_id": "primary"},
-        "identity": {"pair_text_sha256": PAIR_TEXT_SHA256,
-                     "full_support_sha256": FULL_SUPPORT_SHA256,
-                     "split_assignment_sha256": _canonical_json_sha256(records),
-                     "train_support_sha256": _canonical_json_sha256(splits["train"]),
-                     "test_support_sha256": _canonical_json_sha256(splits["test"])},
-        "train": splits["train"], "test": splits["test"],
-    }
+    for field, expected_value in expected.items():
+        if result[field] != expected_value:
+            raise FinalTestError(f"{label}.{field} differs from sealed lineage")
+    scores = result["scores"]
+    if not isinstance(scores, Mapping):
+        raise FinalTestError(f"{label}.scores must be an object")
+    required = contract["target_manifest"]["evaluation"]["required_outputs"]
+    missing = [name for name in required if name not in scores]
+    if missing:
+        raise FinalTestError(f"{label}.scores misses required outputs: {missing}")
+    predictions = scores.get("predictions")
+    test_rows = contract["target_manifest"]["support"]["splits"]["test"]
+    if not isinstance(predictions, list) or len(predictions) != len(test_rows):
+        raise FinalTestError(f"{label}.predictions differs from held-out batch size")
+    for expected_row, prediction in zip(test_rows, predictions, strict=True):
+        if (not isinstance(prediction, Mapping)
+                or prediction.get("pair_id") != expected_row["pair_id"]
+                or prediction.get("stable_id") != expected_row["stable_id"]):
+            raise FinalTestError(f"{label}.predictions differs from ordered pair identity")
+    _canonical_bytes(result)
+    return dict(result)
 
 
-def _load_calibration_index(path: Path, expected_generation: str,
-                            index_uri: str | None = None) -> Dict[str, Any]:
-    """Load only the index and score-free selection projections; hash all other artifacts."""
-    if not isinstance(expected_generation, str) or not expected_generation.isdigit():
-        raise FinalTestError("calibration index generation must be a decimal string")
-    if index_uri is not None and (not isinstance(index_uri, str) or not index_uri.startswith("gs://")):
-        raise FinalTestError("calibration index URI must be immutable gs:// identity")
-    index_sha = _file_sha256(path)
-    raw = _read_json(path)
-    required = {"schema_version", "protocol", "target", "revisions", "input_identity",
-                "extraction_strategies", "trials_per_method", "test_evaluations", "test_pairs", "methods"}
-    _require_exact_keys(raw, required, "calibration index")
-    protocol = raw["protocol"]
-    if protocol != {"id": CALIBRATION_PROTOCOL_ID, "revision": CALIBRATION_PROTOCOL_REVISION,
-                    "prior_definitions_sha256": PRIOR_DEFINITIONS_SHA256}:
-        raise FinalTestError("calibration protocol identity differs from frozen bounded rerun")
-    if raw["target"] != {"model": MODEL, "benchmark": BENCHMARK, "target_id": TARGET_ID}:
-        raise FinalTestError("calibration index target differs")
-    revisions = raw["revisions"]
-    _require_exact_keys(revisions, {"model", "activation"}, "calibration revisions")
-    if not HEX40.fullmatch(str(revisions["model"])) or revisions["activation"] != ACTIVATION_REVISION:
-        raise FinalTestError("calibration revisions are not immutable/frozen")
-    if raw["input_identity"] != {"pair_text_sha256": PAIR_TEXT_SHA256,
-                                 "full_support_sha256": FULL_SUPPORT_SHA256}:
-        raise FinalTestError("calibration input identity differs")
-    if raw["extraction_strategies"] != list(FORMATS) or raw["trials_per_method"] != 14 or raw["test_evaluations"] != 0:
-        raise FinalTestError("calibration budget/format/test contract differs")
-    methods = raw["methods"]
-    if not isinstance(methods, dict) or set(methods) != set(METHODS):
-        raise FinalTestError("calibration index must contain exactly eight methods")
-    clean_methods: Dict[str, Any] = {}
-    base = path.resolve().parent
-    test_pairs = _artifact_ref(raw["test_pairs"], "test_pairs", base)
-    test_path = Path(raw["test_pairs"]["path"])
-    if not test_path.is_absolute():
-        test_path = base / test_path
-    test_data = _read_json(test_path.resolve())
-    if (test_data.get("task_name") != BENCHMARK or test_data.get("num_pairs") != 100 or
-            not isinstance(test_data.get("pair_ids"), list) or len(test_data["pair_ids"]) != 100 or
-            not isinstance(test_data.get("pairs"), list) or len(test_data["pairs"]) != 100):
-        raise FinalTestError("pre-materialized test_pairs is not the exact 100-row benchmark input")
-    method_keys = {"selected_config", "frozen_config", "provenance", "selection_completion",
-                   "activation_proof", "train_enriched", "config_sha256"}
-    ref_names = method_keys - {"config_sha256"}
-    for method in METHODS:
-        record = _require_exact_keys(methods[method], method_keys, f"calibration method {method}")
-        refs = {key: _artifact_ref(record[key], f"{method}.{key}", base) for key in ref_names}
-        selected_path = Path(record["selected_config"]["path"])
-        if not selected_path.is_absolute():
-            selected_path = base / selected_path
-        selected = _read_json(selected_path.resolve())
-        _walk_forbidden(selected)
-        _require_exact_keys(selected, {"schema_version", "method", "best_params", "config_sha256"},
-                            f"{method} selected config")
-        if selected["schema_version"] != 1 or selected["method"] != method:
-            raise FinalTestError(f"{method} selection identity differs")
-        params = selected["best_params"]
-        if not isinstance(params, dict) or not params:
-            raise FinalTestError(f"{method} params must be a nonempty object")
-        for name, value in params.items():
-            if not isinstance(name, str) or isinstance(value, bool) or not isinstance(value, (str, int, float)):
-                raise FinalTestError(f"{method}.{name} has unsupported parameter type")
-            if isinstance(value, float) and not math.isfinite(value):
-                raise FinalTestError(f"{method}.{name} is non-finite")
-        params_hash = _canonical_json_sha256(params)
-        if (record["config_sha256"] != params_hash or selected["config_sha256"] != params_hash or
-                not HEX64.fullmatch(str(record["config_sha256"]))):
-            raise FinalTestError(f"{method} config hash does not match exact selected params")
-        strategy = params.get("extraction_strategy")
-        layer = params.get("layer", params.get("sensor_layer"))
-        proof_path = Path(record["activation_proof"]["path"])
-        train_path = Path(record["train_enriched"]["path"])
-        if not proof_path.is_absolute(): proof_path = base / proof_path
-        if not train_path.is_absolute(): train_path = base / train_path
-        proof = _read_json(proof_path.resolve())
-        train = _read_json(train_path.resolve())
-        proof_ids = proof.get("pair_ids")
-        train_ids = train.get("pair_ids")
-        if (proof.get("complete") is not True or proof.get("extraction_strategy") != strategy or
-                not isinstance(proof.get("layers"), list) or layer not in proof["layers"] or
-                not isinstance(proof_ids, list)):
-            raise FinalTestError(f"{method} activation proof does not authorize selected route/support")
-        if (train.get("num_pairs") != 300 or not isinstance(train_ids, list) or len(train_ids) != 300 or
-                not set(train_ids).issubset(set(proof_ids))):
-            raise FinalTestError(f"{method} train_enriched is not covered by activation proof")
-        clean_methods[method] = {"params": params, "config_sha256": params_hash,
-                                 "_train_pair_ids": train["pair_ids"], **refs}
-    return {"uri": index_uri or path.resolve().as_uri(), "sha256": index_sha,
-            "generation": expected_generation, "size": str(path.stat().st_size),
-            "model_revision": revisions["model"], "test_pairs": test_pairs,
-            "test_pair_ids": test_data["pair_ids"], "methods": clean_methods}
+def read_completion_lineage(
+    store: Any, completion_ref: Mapping[str, Any], contract: Mapping[str, Any],
+    manifest: Mapping[str, Any], label: str = "completion",
+) -> tuple[dict[str, Any], dict[str, str], dict[str, Any], dict[str, Any]]:
+    """Dereference and exact-validate completion, attempt, staged and published bytes."""
+    completion, normalized_completion_ref = read_ref(store, completion_ref, label)
+    if not isinstance(completion, Mapping):
+        raise FinalTestError(f"{label} must be an object")
+    try:
+        execution.validate_completion_receipt(completion, contract, manifest)
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    expected_completion_uri = manifest["output_prefix"] + "completion.json"
+    if normalized_completion_ref["uri"] != expected_completion_uri:
+        raise FinalTestError(f"{label} ref is foreign to the sealed arm output prefix")
+    attempt_ref_value = completion["attempt_receipt_ref"]
+    attempt, normalized_attempt_ref = read_ref(store, attempt_ref_value, f"{label} attempt")
+    try:
+        execution.validate_completion_receipt(completion, contract, manifest, attempt)
+        execution.validate_artifact_binding(normalized_completion_ref, completion, f"{label} ref")
+        expected_attempt_ref = execution.validate_artifact_ref(completion["attempt_receipt_ref"])
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    if normalized_attempt_ref != expected_attempt_ref:
+        raise FinalTestError(f"{label} attempt ref changed")
+    expected_attempt_uri = (
+        manifest["output_prefix"] + f"attempts/{attempt['attempt']}/completed.json"
+    )
+    expected_stage_uri = (
+        manifest["output_prefix"] + f"attempts/{attempt['attempt']}/staged-result.json"
+    )
+    expected_publication_uri = manifest["output_prefix"] + "result.json"
+    if normalized_attempt_ref["uri"] != expected_attempt_uri:
+        raise FinalTestError(f"{label} attempt ref is foreign to its arm/attempt lineage")
+    if completion["staged_result_ref"]["uri"] != expected_stage_uri:
+        raise FinalTestError(f"{label} staged result ref is foreign to its arm/attempt lineage")
+    if completion["publication_ref"]["uri"] != expected_publication_uri:
+        raise FinalTestError(f"{label} publication ref is foreign to its sealed arm")
+    staged, normalized_staged_ref = read_ref(
+        store, completion["staged_result_ref"], f"{label} staged result",
+    )
+    published, normalized_publication_ref = read_ref(
+        store, completion["publication_ref"], f"{label} publication",
+    )
+    try:
+        expected_staged_ref = execution.validate_artifact_ref(completion["staged_result_ref"])
+        expected_publication_ref = execution.validate_artifact_ref(completion["publication_ref"])
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    if normalized_staged_ref != expected_staged_ref:
+        raise FinalTestError(f"{label} staged result ref changed")
+    if normalized_publication_ref != expected_publication_ref:
+        raise FinalTestError(f"{label} publication ref changed")
+    staged = validate_staged_result(staged, contract, manifest, f"{label} staged result")
+    published = validate_staged_result(published, contract, manifest, f"{label} publication")
+    if staged != published:
+        raise FinalTestError(f"{label} publication differs from staged result")
+    return dict(completion), normalized_completion_ref, dict(attempt), staged
 
 
-def _validate_runtime_identity(value: Any) -> Dict[str, Any]:
-    required = {"runtime", "python", "torch", "cuda", "driver", "gpu", "precision",
-                "evaluator_source_sha256", "coherence_source_sha256", "tokenizer_revision"}
-    _require_exact_keys(value, required, "runtime identity")
-    for key in required:
-        if not isinstance(value[key], str) or not value[key]:
-            raise FinalTestError(f"runtime identity {key} must be a nonempty exact string")
-    if value["runtime"] != "stado-local":
-        raise FinalTestError("runtime identity must honestly identify stado-local")
-    for key in ("evaluator_source_sha256", "coherence_source_sha256"):
-        if not HEX64.fullmatch(value[key]):
-            raise FinalTestError(f"runtime identity {key} must be lowercase SHA-256")
-    return dict(value)
+def publish_json(store: Any, uri: str, value: Any) -> dict[str, str]:
+    return publish_bytes(store, uri, _canonical_bytes(value))
 
 
-def _with_hash(value: Dict[str, Any], field: str) -> Dict[str, Any]:
-    result = dict(value)
-    result[field] = _canonical_json_sha256(result)
+def _validate_evaluator(value: Any, ref: Any) -> tuple[dict[str, Any], dict[str, str]]:
+    evaluator = _exact(value, {"name", "version", "options"}, "evaluator")
+    if not all(isinstance(evaluator[key], str) and evaluator[key] for key in ("name", "version")):
+        raise FinalTestError("evaluator name/version must be non-empty strings")
+    if not isinstance(evaluator["options"], Mapping):
+        raise FinalTestError("evaluator options must be an object")
+    normalized = {"name": evaluator["name"], "version": evaluator["version"], "options": dict(evaluator["options"])}
+    try:
+        execution.validate_artifact_binding(ref, normalized, "evaluator_ref")
+        normalized_ref = execution.validate_artifact_ref(ref, "evaluator_ref")
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    return normalized, normalized_ref
+
+
+def _validate_prepared_target(value: Any, evaluator: Mapping[str, Any]) -> dict[str, Any]:
+    item = _exact(value, {"target_manifest", "target_manifest_ref", "calibrations"}, "prepared target")
+    manifest = item["target_manifest"]
+    try:
+        desired_results_target.validate_target_manifest(manifest)
+        execution.validate_artifact_binding(item["target_manifest_ref"], manifest, "target_manifest_ref")
+        manifest_ref = execution.validate_artifact_ref(item["target_manifest_ref"], "target_manifest_ref")
+    except (desired_results_target.ContractError, execution.ContractError) as exc:
+        raise FinalTestError(str(exc)) from exc
+    lifecycle = manifest["execution"]
+    if (manifest["activation"]["eligible"] is not True or
+            lifecycle["state"] != "unprepared" or lifecycle["blocked"] is not False or
+            lifecycle["rerun_locked"] is not False):
+        raise FinalTestError(
+            "final-test preparation requires an activation-eligible, unprepared, "
+            "unblocked, rerun-unlocked target"
+        )
+    if manifest["support"]["state"] != "prepared" or manifest["evaluation"]["split"] != "test":
+        raise FinalTestError("final test requires prepared support and held-out test evaluation")
+    methods = manifest["calibration"]["methods"]
+    raw_calibrations = item["calibrations"]
+    if not isinstance(raw_calibrations, Sequence) or isinstance(raw_calibrations, (str, bytes)):
+        raise FinalTestError("calibrations must be a sequence")
+    by_method: dict[str, dict[str, Any]] = {}
+    expected_target = {key: manifest["target"][key] for key in ("target_id", "model_name", "model_slug", "benchmark")}
+    for index, raw in enumerate(raw_calibrations):
+        calibration = _exact(raw, {"manifest", "receipt"}, f"calibrations[{index}]")
+        calibration_manifest, receipt = calibration["manifest"], calibration["receipt"]
+        try:
+            execution.validate_calibration_manifest(calibration_manifest, manifest)
+            execution.validate_calibration_success_receipt(receipt, calibration_manifest)
+        except execution.ContractError as exc:
+            raise FinalTestError(str(exc)) from exc
+        method = calibration_manifest["method"]
+        if method in by_method:
+            raise FinalTestError(f"duplicate successful calibration for {method}")
+        if calibration_manifest["target"] != expected_target or calibration_manifest["evaluator"] != evaluator:
+            raise FinalTestError("calibration target/evaluator differs from final target/evaluator")
+        if receipt["selected_config"].get("method") != method:
+            raise FinalTestError("successful calibration selected_config method differs")
+        by_method[method] = {"manifest": calibration_manifest, "receipt": receipt}
+    if set(by_method) != set(methods):
+        raise FinalTestError(f"calibrations must cover target methods exactly; expected={methods}, got={sorted(by_method)}")
+    return {"target_manifest": manifest, "target_manifest_ref": manifest_ref,
+            "calibrations": [by_method[method] for method in methods]}
+
+
+def plan(
+    prepared_targets: Sequence[Mapping[str, Any]],
+    evaluator: Mapping[str, Any],
+    evaluator_ref: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate a nested composite plan without arm intersection or silent omission."""
+    evaluator, evaluator_ref = _validate_evaluator(evaluator, evaluator_ref)
+    if not isinstance(prepared_targets, Sequence) or isinstance(prepared_targets, (str, bytes)) or not prepared_targets:
+        raise FinalTestError("plan requires at least one prepared target")
+    targets = [_validate_prepared_target(item, evaluator) for item in prepared_targets]
+    target_ids = [item["target_manifest"]["target"]["target_id"] for item in targets]
+    if len(target_ids) != len(set(target_ids)):
+        raise FinalTestError("composite plan contains duplicate targets")
+    return {"schema_version": SCHEMA_VERSION, "evaluator": evaluator,
+            "evaluator_ref": evaluator_ref, "targets": targets}
+
+
+def prepare(
+    planned: Mapping[str, Any], *, protocol: Mapping[str, Any],
+    revisions_by_target: Mapping[str, Mapping[str, Any]],
+    calibration_policy_by_target: Mapping[str, Mapping[str, Any]], output_namespace: str,
+    runtime_evidence: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Build one centrally validated ExecutionContractV3 per target."""
+    root = _exact(planned, {"schema_version", "evaluator", "evaluator_ref", "targets"}, "plan")
+    if root["schema_version"] != SCHEMA_VERSION:
+        raise FinalTestError("plan schema_version must be 3")
+    evaluator, evaluator_ref = _validate_evaluator(root["evaluator"], root["evaluator_ref"])
+    try:
+        runtime = execution.validate_runtime_evidence(runtime_evidence)
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    contracts: list[dict[str, Any]] = []
+    for raw_target in root["targets"]:
+        item = _validate_prepared_target(raw_target, evaluator)
+        manifest = item["target_manifest"]
+        target_id = manifest["target"]["target_id"]
+        if target_id not in revisions_by_target:
+            raise FinalTestError(f"missing exact revisions for {target_id}")
+        if target_id not in calibration_policy_by_target:
+            raise FinalTestError(f"missing calibration policy for {target_id}")
+        methods = list(manifest["calibration"]["methods"])
+        manifest_policies = {
+            entry["manifest"]["method"]: entry["manifest"]["calibration_policy"]
+            for entry in item["calibrations"]
+        }
+        first_policy = manifest_policies[methods[0]]
+        first_options = first_policy["options"]
+        first_optimizer = first_options["optimizer"]
+        for method in methods:
+            candidate = manifest_policies[method]
+            optimizer = candidate["options"]["optimizer"]
+            if ({key: candidate[key] for key in ("name", "version", "policy_ref")} !=
+                    {key: first_policy[key] for key in ("name", "version", "policy_ref")} or
+                    candidate["options"]["device"] != first_options["device"] or
+                    {key: optimizer[key] for key in ("backend", "direction", "seed")} !=
+                    {key: first_optimizer[key] for key in ("backend", "direction", "seed")}):
+                raise FinalTestError(f"calibration policy identity differs across methods for {target_id}")
+        expected_policy = {
+            "name": first_policy["name"], "version": first_policy["version"],
+            "policy_ref": first_policy["policy_ref"],
+            "options": {"device": first_options["device"], "optimizer": {
+                "backend": first_optimizer["backend"], "direction": first_optimizer["direction"],
+                "seed": first_optimizer["seed"],
+                "trials_per_strategy": {method: manifest_policies[method]["options"]["optimizer"]["trials_per_strategy"] for method in methods},
+                "method_space": {method: manifest_policies[method]["options"]["optimizer"]["method_space"] for method in methods},
+            }},
+        }
+        calibration_policy = calibration_policy_by_target[target_id]
+        if calibration_policy != expected_policy:
+            raise FinalTestError(f"aggregate calibration policy differs from prepared method policies for {target_id}")
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "protocol": dict(protocol),
+            "target_manifest": manifest,
+            "target_manifest_ref": item["target_manifest_ref"],
+            "target": {key: manifest["target"][key] for key in ("target_id", "model_name", "model_slug", "benchmark")},
+            "revisions": dict(revisions_by_target[target_id]),
+            "matrix": {"strategies": list(desired_results_target.STRATEGIES),
+                       "layers": list(range(1, manifest["calibration"]["layer_count"] + 1)),
+                       "methods": methods, "pairs": manifest["target"]["expected_pairs"],
+                       "splits": dict(manifest["support"]["split_counts"])},
+            "calibration_policy": dict(calibration_policy),
+            "calibration_receipts": [entry["receipt"] for entry in item["calibrations"]],
+            "evaluator": evaluator,
+            "evaluator_ref": evaluator_ref,
+            "final_test": {"split": "test", "evaluations_per_arm": 1},
+            "arms": ["baseline", *methods],
+            "retry_policy": {"max_pre_test_attempts": execution.MAX_PRE_TEST_ATTEMPTS},
+            "output_namespace": output_namespace.rstrip("/") + "/" + manifest["target"]["model_slug"] + "/" + manifest["target"]["benchmark"],
+            "runtime_evidence": runtime,
+            "runtime_evidence_sha256": execution.runtime_evidence_sha256(runtime),
+        }
+        try:
+            contracts.append(execution.finalize_execution_contract(payload))
+        except execution.ContractError as exc:
+            raise FinalTestError(str(exc)) from exc
+    return contracts
+
+
+def arm_manifests(contract: Mapping[str, Any], contract_ref: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Derive every ArmManifestV3 exclusively from the sealed contract."""
+    try:
+        execution.validate_execution_contract(contract)
+        execution.validate_artifact_binding(contract_ref, contract, "contract_ref")
+        contract_ref = execution.validate_artifact_ref(contract_ref, "contract_ref")
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    receipts = {receipt["selected_config"]["method"]: receipt for receipt in contract["calibration_receipts"]}
+    result: dict[str, dict[str, Any]] = {}
+    for arm in contract["arms"]:
+        receipt = None if arm == "baseline" else receipts[arm]
+        support_refs = []
+        if receipt is not None:
+            selected_keys = set(execution.selected_config_route_keys(receipt["selected_config"]))
+            support_refs = [
+                {key: route[key] for key in ("strategy", "layer", "completion_ref", "proof_ref")}
+                for route in contract["target_manifest"]["activation"]["routes"]
+                if (route["strategy"], route["layer"]) in selected_keys
+            ]
+        payload = {
+            "schema_version": SCHEMA_VERSION, "contract_ref": contract_ref,
+            "contract_sha256": contract["contract_sha256"], "arm": arm,
+            "method": None if arm == "baseline" else arm,
+            "selected_config_ref": None if receipt is None else receipt["result_ref"],
+            "pair_texts_ref": contract["target_manifest"]["support"]["pair_texts_ref"],
+            "support_refs": support_refs, "evaluator_ref": contract["evaluator_ref"],
+            "runtime_evidence": contract["runtime_evidence"],
+            "runtime_evidence_sha256": contract["runtime_evidence_sha256"],
+            "output_namespace": contract["output_namespace"],
+            "output_prefix": execution.derive_output_prefix(contract["output_namespace"], contract["contract_sha256"], arm),
+        }
+        try:
+            result[arm] = execution.finalize_arm_manifest(payload)
+        except execution.ContractError as exc:
+            raise FinalTestError(str(exc)) from exc
     return result
 
 
-def _build_contract(inventory: Mapping[str, Any], calibration: Mapping[str, Any],
-                    code_revision: str, runtime_identity: Mapping[str, Any],
-                    remote_prefix: str) -> Dict[str, Any]:
-    if not isinstance(code_revision, str) or not HEX40.fullmatch(code_revision):
-        raise FinalTestError("code revision must be an exact lowercase 40-hex commit")
-    runtime = _validate_runtime_identity(runtime_identity)
-    if runtime["tokenizer_revision"] != calibration["model_revision"]:
-        raise FinalTestError("tokenizer revision must equal the pinned model revision")
-    if not isinstance(calibration.get("uri"), str) or not calibration["uri"].startswith("gs://"):
-        raise FinalTestError("calibration index must retain its immutable GCS URI")
-    expected_test_ids = [row["pair_id"] for row in inventory["test"]]
-    if calibration.get("test_pair_ids") != expected_test_ids:
-        raise FinalTestError("pre-materialized test_pairs does not match exact ordered test support")
-    expected_train_ids = [row["pair_id"] for row in inventory["train"]]
-    calibration_methods = {}
-    for method in METHODS:
-        if calibration["methods"][method].get("_train_pair_ids") != expected_train_ids:
-            raise FinalTestError(f"{method} pre-materialized train input differs from exact train support")
-        calibration_methods[method] = {key: value for key, value in calibration["methods"][method].items()
-                                       if key != "_train_pair_ids"}
-    prefix = remote_prefix.rstrip("/") + "/"
-    if not prefix.startswith("gs://") or "/final-test-v1/" not in prefix:
-        raise FinalTestError("remote prefix must be the target final-test-v1 GCS prefix")
-    metric = {
-        "evaluator": "log_likelihoods", "primary_metric": "aggregated_metrics.acc",
-        "diagnostics": ["raw_accuracy", "correct_count", "mean_confidence", "coherence_factor"],
-        "expected_count": 100, "skip_or_error_policy": "refuse",
-        "aggregation": "arithmetic mean over exact ordered test support",
-        "constants": {"runtime": runtime, "task": BENCHMARK},
+def seal_target(store: Any, contract: Mapping[str, Any], *, control_prefix: str) -> dict[str, Any]:
+    """Publish contract, all arms, then the seal and one target-local wave."""
+    if not isinstance(control_prefix, str) or not control_prefix.startswith("gs://"):
+        raise FinalTestError("control_prefix must be gs://")
+    target_key = hashlib.sha256(contract["target"]["target_id"].encode("utf-8")).hexdigest()[:16]
+    target_prefix = f"{control_prefix.rstrip('/')}/targets/{target_key}"
+    contract_ref = publish_json(
+        store, f"{target_prefix}/contracts/{contract['contract_sha256']}.json", contract,
+    )
+    manifests = arm_manifests(contract, contract_ref)
+    manifest_refs = {
+        arm: publish_json(
+            store, f"{target_prefix}/arms/{arm}/{manifest['manifest_sha256']}.json", manifest,
+        )
+        for arm, manifest in manifests.items()
     }
-    metric["metric_contract_sha256"] = _canonical_json_sha256(metric)
-    contract = {
-        "schema_version": 1,
-        "protocol": {"id": PROTOCOL_ID, "revision": PROTOCOL_REVISION,
-                     "run_class": "immutable_final_test",
-                     "calibration_protocol_id": CALIBRATION_PROTOCOL_ID,
-                     "calibration_protocol_revision": CALIBRATION_PROTOCOL_REVISION,
-                     "prior_definitions_sha256": PRIOR_DEFINITIONS_SHA256},
-        "target": dict(inventory["target"]),
-        "revisions": {"code": code_revision, "model": calibration["model_revision"],
-                      "activation": ACTIVATION_REVISION, "runtime": runtime},
-        "input_identity": dict(inventory["identity"]),
-        "split_contract": {
-            "fit": {"name": "train", "count": 300, "support": list(inventory["train"])},
-            "selection": {"name": None, "pair_ids": [], "reads": 0},
-            "evaluation": {"name": "test", "count": 100, "support": list(inventory["test"]),
-                           "evaluations_per_arm": 1},
-            "validation_pair_ids_forbidden": True,
-        },
-        "calibration": {"index": {key: calibration[key] for key in ("uri", "sha256", "generation", "size")},
-                        "test_pairs": calibration["test_pairs"], "methods": calibration_methods},
-        "arms": list(ARMS),
-        "baseline": {"fit": "none", "config": None, "steering_object": "forbidden",
-                     "steering_hooks": "forbidden", "same_evaluator": True},
-        "metric_contract": metric,
-        "execution": {"arm_count": 9, "stado_gpu_jobs": 9, "max_attempts": 1,
-                      "retry": "forbidden", "claim_before": ["model_load", "train_fit", "test_read"],
-                      "configuration_mutation": "forbidden", "optimization": "forbidden",
-                      "test_read_per_arm": 1},
-        "publication": {"remote_prefix": prefix, "gcs_precondition": "ifGenerationMatch=0",
-                        "completion_last": True, "partial_leaderboard": "forbidden"},
-    }
-    return _with_hash(contract, "contract_sha256")
-
-
-def _build_manifests(contract: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
-    contract_hash = contract["contract_sha256"]
-    common = {
-        "schema_version": 1, "protocol": contract["protocol"], "target": contract["target"],
-        "contract_sha256": contract_hash, "revisions": contract["revisions"],
-        "input_identity": contract["input_identity"], "split_contract": contract["split_contract"],
-        "metric_contract": contract["metric_contract"], "test_evaluations": 1,
-        "test_pairs": contract["calibration"]["test_pairs"],
-    }
-    prefix = contract["publication"]["remote_prefix"]
-    manifests = {}
-    for arm in ARMS:
-        output_prefix = f"{prefix}runs/{arm}/{contract_hash}/"
-        manifest = {
-            **common, "arm": arm, "method": None if arm == "baseline" else arm,
-            "calibration": None if arm == "baseline" else contract["calibration"]["methods"][arm],
-            "claim_uri": f"{prefix}control/claims/{arm}.json", "output_prefix": output_prefix,
-        }
-        manifests[arm] = _with_hash(manifest, "manifest_sha256")
-    return manifests
-
-
-def _build_stado_jobs(contract: Mapping[str, Any], sealed_manifests: Mapping[str, Any],
-                      seal_ref: Mapping[str, str]) -> list[Dict[str, Any]]:
-    jobs = []
-    short = contract["contract_sha256"][:12]
-    runtime = contract["revisions"]["runtime"]
-    for arm in ARMS:
-        ref = sealed_manifests[arm]
-        jobs.append({
-            "name": f"desired-results-final-test-v1-{arm}-{short}",
-            "arm": arm, "accelerator": "nvidia-rtx-pro-6000", "maxAttempts": 1,
-            "retry": "forbidden", "environment": {"PYTHONPATH": "."},
-            "identity": {"code": contract["revisions"]["code"], "model": contract["revisions"]["model"],
-                         "activation": contract["revisions"]["activation"], "runtime": runtime,
-                         "metric_contract_sha256": contract["metric_contract"]["metric_contract_sha256"]},
-            "inputs": {"manifest": dict(ref), "seal": dict(seal_ref)},
-            "command": ["python", "scripts/steering/desired_results_final_test_worker.py",
-                        "--manifest", ref["uri"], "--manifest-generation", ref["generation"],
-                        "--seal", seal_ref["uri"], "--seal-generation", seal_ref["generation"],
-                        "--remote-prefix", contract["publication"]["remote_prefix"], "--device", "cuda"],
+    try:
+        seal = execution.finalize_final_seal({
+            "schema_version": SCHEMA_VERSION, "contract": contract, "contract_ref": contract_ref,
+            "contract_sha256": contract["contract_sha256"], "arm_manifest_refs": manifest_refs,
+            "runtime_evidence": contract["runtime_evidence"],
+            "runtime_evidence_sha256": contract["runtime_evidence_sha256"],
         })
-    return jobs
+        execution.validate_final_seal(seal, manifests)
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    seal_ref = publish_json(
+        store, f"{target_prefix}/seals/{seal['seal_sha256']}.json", seal,
+    )
+    wave = {"target_id": contract["target"]["target_id"], "contract_ref": contract_ref,
+            "seal_ref": seal_ref, "arm_manifest_refs": manifest_refs, "arms": list(contract["arms"])}
+    return {"contract": contract, "contract_ref": contract_ref, "manifests": manifests,
+            "manifest_refs": manifest_refs, "seal": seal, "seal_ref": seal_ref, "wave": wave}
 
-def _stado_plan(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[str, Any]:
-    """Re-read the immutable seal and emit the one-attempt nine-job fan-out."""
-    store = store or GCSStore()
-    seal_data, seal_generation = store.read(args.seal, args.seal_generation)
-    seal = _strict_json_bytes(seal_data, "seal")
-    if seal.get("seal_sha256") != _canonical_json_sha256(
-            {key: value for key, value in seal.items() if key != "seal_sha256"}):
-        raise FinalTestError("seal hash mismatch")
-    if seal.get("protocol_id") != PROTOCOL_ID or seal.get("arms") != list(ARMS):
-        raise FinalTestError("seal does not authorize exactly the final-test arms")
-    contract = _read_ref(store, seal["contract"], "contract")
-    if contract.get("contract_sha256") != seal.get("contract_sha256"):
-        raise FinalTestError("seal contract reference differs from canonical contract identity")
-    seal_ref = {
-        "uri": args.seal, "generation": seal_generation,
-        "sha256": hashlib.sha256(seal_data).hexdigest(), "size": str(len(seal_data)),
+
+def waves(sealed_targets: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Return one wave per target, never intersecting arm sets across targets."""
+    result: list[dict[str, Any]] = []
+    for item in sealed_targets:
+        wave = item.get("wave") if isinstance(item, Mapping) else None
+        if not isinstance(wave, Mapping) or set(wave.get("arms", ())) != set(wave.get("arm_manifest_refs", {})):
+            raise FinalTestError("sealed wave does not cover its target arms exactly")
+        for ref in (wave["contract_ref"], wave["seal_ref"], *wave["arm_manifest_refs"].values()):
+            if not execution.validate_artifact_ref(ref)["uri"].startswith("gs://"):
+                raise FinalTestError("local refs cannot be dispatched")
+        result.append(dict(wave))
+    return result
+
+
+def _read_sealed_graph(
+    store: Any, sealed_value: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]], dict[str, str]]:
+    sealed = _exact(
+        sealed_value,
+        {"contract", "contract_ref", "manifests", "manifest_refs", "seal", "seal_ref", "wave"},
+        "sealed target",
+    )
+    seal, seal_ref = read_ref(store, sealed["seal_ref"], "final seal")
+    try:
+        execution.validate_final_seal(seal)
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    if seal != sealed["seal"]:
+        raise FinalTestError("sealed target final seal differs from referenced bytes")
+    contract, contract_ref = read_ref(store, seal["contract_ref"], "execution contract")
+    if contract != seal["contract"] or contract != sealed["contract"]:
+        raise FinalTestError("sealed target execution contract differs from referenced bytes")
+    try:
+        sealed_contract_ref = execution.validate_artifact_ref(sealed["contract_ref"])
+        expected_contract_ref = execution.validate_artifact_ref(seal["contract_ref"])
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    if contract_ref != expected_contract_ref:
+        raise FinalTestError("sealed target execution contract ref changed")
+    if contract_ref != sealed_contract_ref:
+        raise FinalTestError("sealed target carries a foreign execution contract ref")
+    seal_uri = seal_ref["uri"]
+    seal_suffix = f"/seals/{seal['seal_sha256']}.json"
+    if not seal_uri.startswith("gs://") or not seal_uri.endswith(seal_suffix):
+        raise FinalTestError("final seal ref is foreign to its canonical target namespace")
+    target_prefix = seal_uri[:-len(seal_suffix)]
+    expected_contract_uri = f"{target_prefix}/contracts/{contract['contract_sha256']}.json"
+    if contract_ref["uri"] != expected_contract_uri:
+        raise FinalTestError("execution contract ref is foreign to the final seal target namespace")
+    raw_manifests = sealed["manifests"]
+    raw_manifest_refs = sealed["manifest_refs"]
+    if not isinstance(raw_manifests, Mapping) or not isinstance(raw_manifest_refs, Mapping):
+        raise FinalTestError("sealed target manifests and refs must be arm maps")
+    if set(raw_manifests) != set(contract["arms"]) or set(raw_manifest_refs) != set(contract["arms"]):
+        raise FinalTestError("sealed target manifest maps do not cover every arm exactly")
+    manifests: dict[str, dict[str, Any]] = {}
+    for arm in contract["arms"]:
+        manifest, manifest_ref = read_ref(store, seal["arm_manifest_refs"][arm], f"arm manifest {arm}")
+        if manifest != raw_manifests[arm]:
+            raise FinalTestError(f"sealed target arm manifest differs from referenced bytes for {arm}")
+        try:
+            expected_manifest_ref = execution.validate_artifact_ref(seal["arm_manifest_refs"][arm])
+            supplied_manifest_ref = execution.validate_artifact_ref(raw_manifest_refs[arm])
+        except execution.ContractError as exc:
+            raise FinalTestError(str(exc)) from exc
+        if manifest_ref != expected_manifest_ref:
+            raise FinalTestError(f"sealed target arm manifest ref changed for {arm}")
+        if manifest_ref != supplied_manifest_ref:
+            raise FinalTestError(f"sealed target carries a foreign arm manifest ref for {arm}")
+        expected_manifest_uri = f"{target_prefix}/arms/{arm}/{manifest['manifest_sha256']}.json"
+        if manifest_ref["uri"] != expected_manifest_uri:
+            raise FinalTestError(f"arm manifest ref is foreign to the final seal target namespace for {arm}")
+        manifests[arm] = dict(manifest)
+    try:
+        execution.validate_final_seal(seal, manifests)
+        execution.validate_artifact_binding(seal_ref, seal, "final seal ref")
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    wave = _exact(
+        sealed["wave"],
+        {"target_id", "contract_ref", "seal_ref", "arm_manifest_refs", "arms"},
+        "sealed target wave",
+    )
+    try:
+        normalized_manifest_refs = {
+            arm: execution.validate_artifact_ref(raw_manifest_refs[arm]) for arm in contract["arms"]
+        }
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    expected_wave = {
+        "target_id": contract["target"]["target_id"],
+        "contract_ref": contract_ref,
+        "seal_ref": seal_ref,
+        "arm_manifest_refs": normalized_manifest_refs,
+        "arms": list(contract["arms"]),
     }
-    return {"stado_jobs": _build_stado_jobs(contract, seal["manifests"], seal_ref)}
+    if wave != expected_wave:
+        raise FinalTestError("sealed target wave differs from dereferenced control graph")
+    return dict(seal), dict(contract), manifests, seal_ref
+
+
+def finalize_target(
+    store: Any, sealed: Mapping[str, Any], completion_refs: Mapping[str, Mapping[str, Any]],
+    *, result_uri: str, finalization_uri: str,
+) -> dict[str, Any]:
+    """Publish a deterministic final result only after exact lineage verification."""
+    _, contract, manifests, seal_ref = _read_sealed_graph(store, sealed)
+    if not isinstance(completion_refs, Mapping) or set(completion_refs) != set(contract["arms"]):
+        raise FinalTestError("completion refs must cover every arm exactly")
+    completions: list[dict[str, Any]] = []
+    normalized_refs: dict[str, dict[str, str]] = {}
+    for arm in contract["arms"]:
+        completion, ref, _, _ = read_completion_lineage(
+            store, completion_refs[arm], contract, manifests[arm], f"completion[{arm}]",
+        )
+        if completion["arm"] != arm:
+            raise FinalTestError(f"completion arm differs for {arm}")
+        completions.append(completion)
+        normalized_refs[arm] = ref
+    final_result = {"schema_version": SCHEMA_VERSION, "contract_sha256": contract["contract_sha256"],
+                    "target": dict(contract["target"]), "evaluator": dict(contract["evaluator"]),
+                    "arms": list(contract["arms"]), "completion_refs": normalized_refs}
+    result_ref = publish_json(store, result_uri, final_result)
+    try:
+        execution.validate_artifact_binding(result_ref, final_result, "final result ref")
+        receipt = execution.finalize_finalization_receipt({
+            "schema_version": SCHEMA_VERSION, "contract_sha256": contract["contract_sha256"],
+            "seal_ref": seal_ref, "completion_refs": normalized_refs,
+            "final_result_ref": result_ref,
+        })
+        execution.validate_finalization_receipt(receipt, contract, completions)
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    finalization_ref = publish_json(store, finalization_uri, receipt)
+    try:
+        execution.validate_artifact_binding(finalization_ref, receipt, "finalization ref")
+    except execution.ContractError as exc:
+        raise FinalTestError(str(exc)) from exc
+    return {"result": final_result, "result_ref": result_ref,
+            "finalization": receipt, "finalization_ref": finalization_ref}
 
 
 class GCSStore:
-    """Minimal immutable-object API; every write is a create-only CAS."""
+    """Generation-pinned create-only Google Cloud Storage adapter."""
     def __init__(self) -> None:
         try:
             from google.cloud import storage
         except ImportError as exc:
-            raise FinalTestError("google-cloud-storage is required for GCS modes") from exc
-        self._client = storage.Client()
+            raise FinalTestError("google-cloud-storage is required") from exc
+        self.client = storage.Client()
 
-    @staticmethod
-    def _parts(uri: str) -> tuple[str, str]:
-        if not isinstance(uri, str) or not uri.startswith("gs://"):
-            raise FinalTestError(f"not a GCS URI: {uri!r}")
-        bucket, sep, name = uri[5:].partition("/")
-        if not bucket or not sep or not name:
-            raise FinalTestError(f"incomplete GCS URI: {uri!r}")
-        return bucket, name
-
-    def create(self, uri: str, data: bytes, content_type: str = "application/json") -> Dict[str, str]:
-        bucket, name = self._parts(uri)
-        blob = self._client.bucket(bucket).blob(name)
-        try:
-            blob.upload_from_string(data, content_type=content_type, if_generation_match=0)
-        except Exception as exc:
-            raise FinalTestError(f"create-only upload refused for {uri}: {exc}") from exc
-        blob.reload()
-        return {"uri": uri, "generation": str(blob.generation),
-                "sha256": hashlib.sha256(data).hexdigest(), "size": str(len(data))}
+    def _blob(self, uri: str) -> Any:
+        if not uri.startswith("gs://"):
+            raise FinalTestError("GCS URI must start with gs://")
+        bucket, separator, name = uri[5:].partition("/")
+        if not separator or not bucket or not name:
+            raise FinalTestError("GCS URI must identify an object")
+        return self.client.bucket(bucket).blob(name)
 
     def exists(self, uri: str) -> bool:
-        bucket, name = self._parts(uri)
-        return bool(self._client.bucket(bucket).blob(name).exists())
+        return bool(self._blob(uri).exists())
+
+    def create(self, uri: str, data: bytes) -> dict[str, str]:
+        if not isinstance(data, bytes):
+            raise FinalTestError("GCS create data must be bytes")
+        blob = self._blob(uri)
+        blob.upload_from_string(data, content_type="application/json", if_generation_match=0)
+        blob.reload()
+        return execution.artifact_ref(
+            uri, str(blob.generation), str(len(data)), hashlib.sha256(data).hexdigest(),
+        )
 
     def read(self, uri: str, generation: str | None = None) -> tuple[bytes, str]:
-        bucket, name = self._parts(uri)
-        blob = self._client.bucket(bucket).blob(name, generation=int(generation) if generation else None)
-        try:
-            data = blob.download_as_bytes(if_generation_match=int(generation) if generation else None)
-            blob.reload()
-        except Exception as exc:
-            raise FinalTestError(f"cannot read immutable object {uri}: {exc}") from exc
+        blob = self._blob(uri)
+        if generation is not None:
+            blob.generation = int(generation)
+        data = blob.download_as_bytes(
+            if_generation_match=int(generation) if generation is not None else None,
+        )
+        blob.reload()
         observed = str(blob.generation)
         if generation is not None and observed != str(generation):
             raise FinalTestError(f"generation drift for {uri}")
         return data, observed
 
 
-def _prepare(args: argparse.Namespace) -> Dict[str, Any]:
-    calibration = _load_calibration_index(
-        args.calibration_index.resolve(), args.index_generation, args.calibration_index_uri)
-    runtime = _read_json(args.runtime_identity.resolve())
-    _validate_runtime_identity(runtime)
-    inventory = _load_inventory(args.inventory.resolve())
-    contract = _build_contract(inventory, calibration, args.code_revision, runtime, args.remote_prefix)
-    manifests = _build_manifests(contract)
-    destination = args.output_dir.resolve()
-    if destination.exists():
-        raise FinalTestError(f"prepare destination already exists: {destination}")
-    destination.mkdir(parents=True)
-    _atomic_json(destination / "contract.json", contract)
-    manifest_dir = destination / "manifests"
-    for arm, manifest in manifests.items():
-        _atomic_json(manifest_dir / f"{arm}.json", manifest)
-    bundle = {"schema_version": 1, "contract_sha256": contract["contract_sha256"],
-              "contract_file": "contract.json", "manifests": {arm: f"manifests/{arm}.json" for arm in ARMS}}
-    _atomic_json(destination / "bundle.json", bundle)
-    return bundle
-
-
-def _load_bundle(directory: Path) -> tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
-    bundle = _read_json(directory / "bundle.json")
-    _require_exact_keys(bundle, {"schema_version", "contract_sha256", "contract_file", "manifests"}, "bundle")
-    contract = _read_json(directory / bundle["contract_file"])
-    expected_hash = contract.pop("contract_sha256", None)
-    contract["contract_sha256"] = expected_hash
-    if expected_hash != bundle["contract_sha256"] or _canonical_json_sha256({k: v for k, v in contract.items() if k != "contract_sha256"}) != expected_hash:
-        raise FinalTestError("bundle contract hash mismatch")
-    if set(bundle["manifests"]) != set(ARMS):
-        raise FinalTestError("bundle does not contain exactly nine manifests")
-    manifests = {}
-    for arm in ARMS:
-        manifest = _read_json(directory / bundle["manifests"][arm])
-        observed = manifest.get("manifest_sha256")
-        if observed != _canonical_json_sha256({k: v for k, v in manifest.items() if k != "manifest_sha256"}):
-            raise FinalTestError(f"{arm} manifest hash mismatch")
-        manifests[arm] = manifest
-    return contract, manifests
-
-
-def _verify_remote_ref(store: GCSStore, ref: Mapping[str, Any], label: str) -> None:
-    _require_exact_keys(ref, {"uri", "generation", "sha256", "size"}, label)
-    data, generation = store.read(ref["uri"], ref["generation"])
-    if (generation != ref["generation"] or hashlib.sha256(data).hexdigest() != ref["sha256"] or
-            len(data) != int(ref["size"])):
-        raise FinalTestError(f"{label} immutable GCS bytes differ")
-
-
-def _create_or_verify(store: GCSStore, uri: str, data: bytes,
-                      content_type: str = "application/json") -> Dict[str, str]:
-    """Resume only an exact byte-identical content-addressed pre-object."""
-    if not store.exists(uri):
-        return store.create(uri, data, content_type)
-    observed, generation = store.read(uri)
-    if observed != data:
-        raise FinalTestError(f"existing resumable object has different bytes: {uri}")
-    return {"uri": uri, "generation": generation, "sha256": hashlib.sha256(data).hexdigest(),
-            "size": str(len(data))}
-
-
-def _seal(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[str, Any]:
-    store = store or GCSStore()
-    contract, manifests = _load_bundle(args.bundle.resolve())
-    prefix = contract["publication"]["remote_prefix"]
-    contract_uri = f"{prefix}control/contract/{contract['contract_sha256']}.json"
-    terminal = [f"{prefix}control/seal.json", f"{prefix}publication.json",
-                f"{prefix}aggregate/{contract['contract_sha256']}/publication.json"]
-    for arm in ARMS:
-        terminal.extend([f"{prefix}control/claims/{arm}.json",
-                         f"{prefix}runs/{arm}/{contract['contract_sha256']}/completion.json"])
-    if any(store.exists(uri) for uri in terminal):
-        raise FinalTestError("seal/claim/completion/publication already exists; rerun forbidden")
-    calibration = contract["calibration"]
-    _verify_remote_ref(store, calibration["index"], "calibration index")
-    _verify_remote_ref(store, calibration["test_pairs"], "test_pairs")
-    for method in METHODS:
-        record = calibration["methods"][method]
-        for name in ("selected_config", "frozen_config", "provenance", "selection_completion",
-                     "activation_proof", "train_enriched"):
-            _verify_remote_ref(store, record[name], f"{method}.{name}")
-    contract_ref = _create_or_verify(store, contract_uri, _canonical_bytes(contract))
-    refs = {}
-    for arm in ARMS:
-        manifest = manifests[arm]
-        uri = f"{prefix}control/manifests/{arm}/{manifest['manifest_sha256']}.json"
-        refs[arm] = _create_or_verify(store, uri, _canonical_bytes(manifest))
-    seal = {
-        "schema_version": 1, "protocol_id": PROTOCOL_ID,
-        "contract": contract_ref, "manifests": refs, "arms": list(ARMS),
-        "contract_sha256": contract["contract_sha256"],
-        "runtime_identity": contract["revisions"]["runtime"],
-        "metric_contract_sha256": contract["metric_contract"]["metric_contract_sha256"],
-    }
-    seal["seal_sha256"] = _canonical_json_sha256(seal)
-    seal_uri = f"{prefix}control/seal.json"
-    seal_ref = store.create(seal_uri, _canonical_bytes(seal))
-    jobs = _build_stado_jobs(contract, refs, seal_ref)
-    output = {"seal": seal_ref, "contract": contract_ref, "manifests": refs, "stado_jobs": jobs}
-    if args.output:
-        _atomic_json(args.output.resolve(), output)
-    return output
-
-
-def _strict_json_bytes(data: bytes, label: str) -> Any:
-    try:
-        return json.loads(data.decode("ascii"), parse_constant=lambda token: (_ for _ in ()).throw(
-            ValueError(f"non-finite {token}")))
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-        raise FinalTestError(f"invalid JSON bytes for {label}: {exc}") from exc
-
-
-def _read_ref_bytes(store: GCSStore, ref: Mapping[str, Any], label: str) -> bytes:
-    _require_exact_keys(ref, {"uri", "generation", "sha256", "size"}, label)
-    data, _ = store.read(ref["uri"], ref["generation"])
-    if hashlib.sha256(data).hexdigest() != ref["sha256"] or len(data) != int(ref["size"]):
-        raise FinalTestError(f"{label} immutable bytes differ")
-    return data
-
-
-def _read_ref(store: GCSStore, ref: Mapping[str, Any], label: str) -> Any:
-    return _strict_json_bytes(_read_ref_bytes(store, ref, label), label)
-
-
-def _validate_completion(arm: str, completion: Mapping[str, Any], contract: Mapping[str, Any],
-                         manifest_ref: Mapping[str, Any], store: GCSStore) -> Dict[str, Any]:
-    required = {"schema_version", "arm", "contract_sha256", "manifest_sha256", "manifest_generation",
-                "metric_contract_sha256", "artifacts", "completion_sha256"}
-    _require_exact_keys(completion, required, f"{arm} completion")
-    claimed = completion["completion_sha256"]
-    if claimed != _canonical_json_sha256({k: v for k, v in completion.items() if k != "completion_sha256"}):
-        raise FinalTestError(f"{arm} completion hash mismatch")
-    manifest = _read_ref(store, manifest_ref, f"{arm} manifest")
-    if (not isinstance(manifest, dict) or manifest.get("arm") != arm or
-            manifest.get("contract_sha256") != contract["contract_sha256"] or
-            manifest.get("manifest_sha256") != _canonical_json_sha256(
-                {key: value for key, value in manifest.items() if key != "manifest_sha256"})):
-        raise FinalTestError(f"{arm} sealed manifest identity differs")
-    if (completion["arm"] != arm or completion["contract_sha256"] != contract["contract_sha256"] or
-            completion["manifest_sha256"] != manifest["manifest_sha256"] or
-            completion["manifest_generation"] != manifest_ref["generation"] or
-            completion["metric_contract_sha256"] != contract["metric_contract"]["metric_contract_sha256"]):
-        raise FinalTestError(f"{arm} completion identity mismatch")
-    artifacts = completion["artifacts"]
-    expected_files = {"result.json", "test_predictions.jsonl", "scores.json", "responses.json", "provenance.json"}
-    if not isinstance(artifacts, dict) or set(artifacts) != expected_files:
-        raise FinalTestError(f"{arm} completion artifact set differs")
-    output_prefix = (contract["publication"]["remote_prefix"] +
-                     f"runs/{arm}/{contract['contract_sha256']}/")
-    for name, ref in artifacts.items():
-        if not isinstance(ref, dict) or ref.get("uri") != output_prefix + name:
-            raise FinalTestError(f"{arm}/{name} artifact URI differs from sealed output")
-    values = {name: _read_ref(store, ref, f"{arm}/{name}")
-              for name, ref in artifacts.items() if name != "test_predictions.jsonl"}
-    result = values["result.json"]
-    if not isinstance(result, dict) or result.get("arm") != arm:
-        raise FinalTestError(f"{arm} result identity differs")
-    scores = values["scores.json"]
-    responses = values["responses.json"]
-    if (not isinstance(scores, dict) or scores.get("evaluator_used") != "log_likelihoods" or
-            scores.get("num_total") != 100 or scores.get("num_evaluated") != 100 or
-            scores.get("num_model_required") != 0 or
-            not isinstance(scores.get("evaluations"), list) or len(scores["evaluations"]) != 100 or
-            not isinstance(responses, dict) or not isinstance(responses.get("responses"), list) or
-            len(responses["responses"]) != 100):
-        raise FinalTestError(f"{arm} evaluator artifacts are not complete log-likelihood outputs")
-    for key in ("primary_metric", "raw_accuracy"):
-        if isinstance(result.get(key), bool) or not isinstance(result.get(key), (int, float)) or not math.isfinite(result[key]):
-            raise FinalTestError(f"{arm} result {key} is not finite")
-    if result.get("num_total") != 100 or result.get("num_evaluated") != 100 or result.get("num_errors") != 0 or result.get("num_skipped") != 0:
-        raise FinalTestError(f"{arm} result is not a complete 100/100 evaluation")
-    expected_support = contract["split_contract"]["evaluation"]["support"]
-    expected_order_hash = _canonical_json_sha256([row["pair_id"] for row in expected_support])
-    if result.get("ordered_test_ids_sha256") != expected_order_hash:
-        raise FinalTestError(f"{arm} ordered test identity hash differs")
-    if result.get("test_support_sha256") != _canonical_json_sha256(expected_support):
-        raise FinalTestError(f"{arm} test support hash differs")
-    prediction_data = _read_ref_bytes(store, artifacts["test_predictions.jsonl"], f"{arm}/test_predictions.jsonl")
-    try:
-        lines = prediction_data.decode("ascii").splitlines()
-    except UnicodeDecodeError as exc:
-        raise FinalTestError(f"{arm} predictions are not ASCII JSONL") from exc
-    if any(not line for line in lines):
-        raise FinalTestError(f"{arm} predictions contain a blank JSONL row")
-    predictions = [_strict_json_bytes(line.encode("ascii"), f"{arm} prediction {index}")
-                   for index, line in enumerate(lines, 1)]
-    if len(predictions) != 100:
-        raise FinalTestError(f"{arm} predictions do not contain exactly 100 rows")
-    correct_count = 0
-    for expected, prediction, evaluation in zip(expected_support, predictions, scores["evaluations"]):
-        _require_exact_keys(prediction, {"pair_id", "stable_id", "correct", "confidence", "evaluation"},
-                            f"{arm} prediction")
-        confidence = prediction["confidence"]
-        outcome = evaluation.get("evaluation") if isinstance(evaluation, dict) else None
-        if (prediction["pair_id"] != expected["pair_id"] or prediction["stable_id"] != expected["stable_id"] or
-                type(prediction["correct"]) is not bool or isinstance(confidence, bool) or
-                not isinstance(confidence, (int, float)) or not math.isfinite(confidence) or
-                not isinstance(outcome, dict) or "error" in evaluation or "error" in outcome or
-                outcome != prediction["evaluation"] or outcome.get("correct") != prediction["correct"] or
-                outcome.get("confidence") != confidence):
-            raise FinalTestError(f"{arm} predictions differ from ordered sealed evaluator output")
-        correct_count += int(prediction["correct"])
-    acc = scores.get("aggregated_metrics", {}).get("acc")
-    if (result.get("correct_count") != correct_count or result.get("raw_accuracy") != correct_count / 100.0 or
-            isinstance(acc, bool) or not isinstance(acc, (int, float)) or not math.isfinite(acc) or
-            result.get("primary_metric") != float(acc)):
-        raise FinalTestError(f"{arm} normalized metrics differ from evaluator artifacts")
-    return result
-
-def _check_comparability(results: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
-    fields = ("metric_contract_sha256", "test_support_sha256", "ordered_test_ids_sha256",
-              "pair_text_sha256", "model_revision", "tokenizer_revision", "code_revision",
-              "runtime_identity_sha256", "evaluator", "evaluator_version", "evaluation_mode",
-              "sample_count", "aggregation")
-    shared = {}
-    first = results[ARMS[0]]
-    for field in fields:
-        value = first.get(field)
-        if value is None or any(results[arm].get(field) != value for arm in ARMS):
-            raise FinalTestError(f"final-test arms are not comparable on {field}")
-        shared[field] = value
-    return {"schema_version": 1, "comparable": True, "arms": list(ARMS), "shared": shared}
-
-
-def _finalize(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[str, Any]:
-    store = store or GCSStore()
-    seal_data, seal_generation = store.read(args.seal, args.seal_generation)
-    seal = _strict_json_bytes(seal_data, "seal")
-    if seal.get("seal_sha256") != _canonical_json_sha256({k: v for k, v in seal.items() if k != "seal_sha256"}):
-        raise FinalTestError("seal hash mismatch")
-    contract = _read_ref(store, seal["contract"], "contract")
-    if seal.get("protocol_id") != PROTOCOL_ID or seal.get("arms") != list(ARMS):
-        raise FinalTestError("seal does not cover exactly all final-test arms")
-    prefix = contract["publication"]["remote_prefix"]
-    results = {}
-    if contract.get("contract_sha256") != seal.get("contract_sha256"):
-        raise FinalTestError("sealed contract identity differs")
-    if (store.exists(prefix + "publication.json") or
-            store.exists(prefix + f"aggregate/{contract['contract_sha256']}/publication.json")):
-        raise FinalTestError("final-test publication already exists; rerun forbidden")
-    completions = {}
-    for arm in ARMS:
-        uri = f"{prefix}runs/{arm}/{contract['contract_sha256']}/completion.json"
-        data, generation = store.read(uri)
-        completion = _strict_json_bytes(data, f"{arm} completion")
-        results[arm] = _validate_completion(arm, completion, contract, seal["manifests"][arm], store)
-        completions[arm] = {"uri": uri, "generation": generation,
-                            "sha256": hashlib.sha256(data).hexdigest(), "size": str(len(data))}
-    comparability = _check_comparability(results)
-    ordered = sorted(ARMS, key=lambda arm: (-float(results[arm]["primary_metric"]), arm))
-    baseline = float(results["baseline"]["primary_metric"])
-    leaderboard = {"schema_version": 1, "metric": "coherence_adjusted_accuracy",
-                   "single_fixed_test_no_statistical_claims": True,
-                   "rows": [{"rank": rank, "arm": arm,
-                              "primary_metric": results[arm]["primary_metric"],
-                              "raw_accuracy": results[arm]["raw_accuracy"],
-                              "baseline_delta": float(results[arm]["primary_metric"]) - baseline}
-                             for rank, arm in enumerate(ordered, 1)]}
-    aggregate_prefix = f"{prefix}aggregate/{contract['contract_sha256']}/"
-    payloads = {
-        "arm-results.json": {"schema_version": 1, "arms": results},
-        "leaderboard.json": leaderboard, "comparability.json": comparability,
-        "provenance.json": {"schema_version": 1, "contract_sha256": contract["contract_sha256"],
-                            "seal": {"uri": args.seal, "generation": seal_generation,
-                                     "sha256": hashlib.sha256(seal_data).hexdigest()},
-                            "completions": completions},
-    }
-    refs = {name: _create_or_verify(store, aggregate_prefix + name, _canonical_bytes(value))
-            for name, value in payloads.items()}
-    receipt = {"schema_version": 1, "contract_sha256": contract["contract_sha256"],
-               "aggregate_objects": refs, "complete_arms": list(ARMS)}
-    receipt["publication_sha256"] = _canonical_json_sha256(receipt)
-    receipt_ref = store.create(aggregate_prefix + "publication.json", _canonical_bytes(receipt))
-    pointer = {"schema_version": 1, "protocol_id": PROTOCOL_ID,
-               "contract_sha256": contract["contract_sha256"], "aggregate": receipt_ref}
-    pointer["publication_pointer_sha256"] = _canonical_json_sha256(pointer)
-    pointer_ref = store.create(prefix + "publication.json", _canonical_bytes(pointer))
-    return {"publication": pointer_ref, "leaderboard": leaderboard}
-
-
-def _load_diff_predictions(store: GCSStore, completion: Mapping[str, Any], arm: str,
-                           support: Sequence[Mapping[str, Any]]) -> list[Dict[str, Any]]:
-    ref = completion["artifacts"]["test_predictions.jsonl"]
-    data = _read_ref_bytes(store, ref, f"{arm}/test_predictions.jsonl")
-    try:
-        lines = data.decode("ascii").splitlines()
-    except UnicodeDecodeError as exc:
-        raise FinalTestError(f"{arm} predictions are not ASCII JSONL") from exc
-    if len(lines) != len(support) or any(not line for line in lines):
-        raise FinalTestError(f"{arm} predictions differ from sealed support length")
-    rows = [_strict_json_bytes(line.encode("ascii"), f"{arm} prediction {index}")
-            for index, line in enumerate(lines, 1)]
-    for expected, row in zip(support, rows):
-        _require_exact_keys(row, {"pair_id", "stable_id", "correct", "confidence", "evaluation"},
-                            f"{arm} prediction")
-        if (row["pair_id"] != expected["pair_id"] or row["stable_id"] != expected["stable_id"] or
-                type(row["correct"]) is not bool or not isinstance(row["evaluation"], dict)):
-            raise FinalTestError(f"{arm} prediction identity differs from sealed support")
-    return rows
-
-
-def _load_final_publication(args: argparse.Namespace, store: GCSStore) -> tuple[
-        Dict[str, Any], Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, str]]:
-    pointer_data, pointer_generation = store.read(args.publication, args.publication_generation)
-    pointer = _strict_json_bytes(pointer_data, "publication pointer")
-    _require_exact_keys(pointer, {"schema_version", "protocol_id", "contract_sha256", "aggregate",
-                                  "publication_pointer_sha256"}, "publication pointer")
-    pointer_hash = pointer["publication_pointer_sha256"]
-    if (pointer.get("protocol_id") != PROTOCOL_ID or pointer_hash != _canonical_json_sha256(
-            {key: value for key, value in pointer.items() if key != "publication_pointer_sha256"})):
-        raise FinalTestError("publication pointer identity differs")
-    receipt = _read_ref(store, pointer["aggregate"], "aggregate publication")
-    _require_exact_keys(receipt, {"schema_version", "contract_sha256", "aggregate_objects",
-                                  "complete_arms", "publication_sha256"}, "aggregate publication")
-    receipt_hash = receipt["publication_sha256"]
-    if (receipt_hash != _canonical_json_sha256(
-            {key: value for key, value in receipt.items() if key != "publication_sha256"}) or
-            receipt.get("contract_sha256") != pointer["contract_sha256"] or
-            receipt.get("complete_arms") != list(ARMS)):
-        raise FinalTestError("aggregate publication identity differs")
-    objects = receipt["aggregate_objects"]
-    _require_exact_keys(objects, {"arm-results.json", "leaderboard.json", "comparability.json",
-                                  "provenance.json"}, "aggregate objects")
-    provenance = _read_ref(store, objects["provenance.json"], "aggregate provenance")
-    _require_exact_keys(provenance, {"schema_version", "contract_sha256", "seal", "completions"},
-                        "aggregate provenance")
-    seal_ref = provenance["seal"]
-    _require_exact_keys(seal_ref, {"uri", "generation", "sha256"}, "aggregate seal reference")
-    seal_data, seal_generation = store.read(seal_ref["uri"], seal_ref["generation"])
-    if (seal_generation != seal_ref["generation"] or
-            hashlib.sha256(seal_data).hexdigest() != seal_ref["sha256"]):
-        raise FinalTestError("aggregate seal reference differs")
-    seal = _strict_json_bytes(seal_data, "seal")
-    if (seal.get("seal_sha256") != _canonical_json_sha256(
-            {key: value for key, value in seal.items() if key != "seal_sha256"}) or
-            seal.get("protocol_id") != PROTOCOL_ID or seal.get("arms") != list(ARMS)):
-        raise FinalTestError("seal identity differs")
-    contract = _read_ref(store, seal["contract"], "contract")
-    contract_hash = pointer["contract_sha256"]
-    if (contract.get("contract_sha256") != contract_hash or
-            receipt.get("contract_sha256") != contract_hash or
-            provenance.get("contract_sha256") != contract_hash or
-            seal.get("contract_sha256") != contract_hash):
-        raise FinalTestError("publication contract identities differ")
-    completions = provenance["completions"]
-    _require_exact_keys(completions, set(ARMS), "aggregate completions")
-    loaded = {}
-    prefix = contract["publication"]["remote_prefix"]
-    for arm in ARMS:
-        ref = completions[arm]
-        expected_uri = f"{prefix}runs/{arm}/{contract_hash}/completion.json"
-        if not isinstance(ref, dict) or ref.get("uri") != expected_uri:
-            raise FinalTestError(f"{arm} aggregate completion URI differs")
-        completion = _read_ref(store, ref, f"{arm} completion")
-        _validate_completion(arm, completion, contract, seal["manifests"][arm], store)
-        loaded[arm] = completion
-    source = {"uri": args.publication, "generation": pointer_generation,
-              "sha256": hashlib.sha256(pointer_data).hexdigest(), "size": str(len(pointer_data))}
-    return contract, provenance, loaded, source
-
-
-def _diff(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[str, Any]:
-    store = store or GCSStore()
-    contract, _, completions, source = _load_final_publication(args, store)
-    support = contract["split_contract"]["evaluation"]["support"]
-    test_pairs = _read_ref(store, contract["calibration"]["test_pairs"], "sealed test pairs")
-    pairs = test_pairs.get("pairs") if isinstance(test_pairs, dict) else None
-    if (not isinstance(pairs, list) or len(pairs) != len(support) or
-            test_pairs.get("pair_ids") != [row["pair_id"] for row in support]):
-        raise FinalTestError("sealed test-pair payload differs from evaluation support")
-    pair_text = {}
-    for expected, pair in zip(support, pairs):
-        if (not isinstance(pair, dict) or pair.get("pair_id") != expected["pair_id"] or
-                pair.get("stable_id") != expected["stable_id"] or
-                not isinstance(pair.get("prompt"), str)):
-            raise FinalTestError("sealed test-pair identity or prompt differs")
-        positive = pair.get("positive_response")
-        negative = pair.get("negative_response")
-        if (not isinstance(positive, dict) or not isinstance(positive.get("model_response"), str) or
-                not isinstance(negative, dict) or not isinstance(negative.get("model_response"), str)):
-            raise FinalTestError("sealed test-pair answers are malformed")
-        pair_text[(pair["pair_id"], pair["stable_id"])] = {
-            "prompt": pair["prompt"], "expected_answer": positive["model_response"],
-            "alternative_answer": negative["model_response"],
-        }
-    predictions = {arm: _load_diff_predictions(store, completions[arm], arm, support)
-                   for arm in ARMS}
-    baseline = {(row["pair_id"], row["stable_id"]): row for row in predictions["baseline"]}
-    selected = METHODS if args.method == "all" else (args.method,)
-    methods = {}
-    for arm in selected:
-        improved = []
-        regressed = []
-        for row in predictions[arm]:
-            key = (row["pair_id"], row["stable_id"])
-            before = baseline.get(key)
-            if before is None:
-                raise FinalTestError(f"{arm} prediction support differs from baseline")
-            text = pair_text[key]
-            before_expected = before["evaluation"].get("expected_answer")
-            after_expected = row["evaluation"].get("expected_answer")
-            if (before_expected != text["expected_answer"] or
-                    after_expected != text["expected_answer"]):
-                raise FinalTestError(f"{arm} expected answer differs from sealed pair text")
-            detail = {"pair_id": key[0], "stable_id": key[1], **text,
-                      "baseline_prediction": before, "method_prediction": row}
-            if not before["correct"] and row["correct"]:
-                detail["flip"] = "wrong_to_correct"
-                improved.append(detail)
-            elif before["correct"] and not row["correct"]:
-                detail["flip"] = "correct_to_wrong"
-                regressed.append(detail)
-        changed = len(improved) + len(regressed)
-        methods[arm] = {
-            "wrong_to_correct": len(improved), "correct_to_wrong": len(regressed),
-            "unchanged": len(support) - changed,
-            "net_improvement": len(improved) - len(regressed),
-            "improved": improved, "regressed": regressed,
-        }
-    report = {"schema_version": 1, "protocol_id": PROTOCOL_ID,
-              "contract_sha256": contract["contract_sha256"],
-              "source_publication": source, "baseline": "baseline", "methods": methods}
-    if args.output is not None:
-        _atomic_canonical_json(args.output, report)
-    return report
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="mode", required=True)
-    prepare = sub.add_parser("prepare")
-    prepare.add_argument("--inventory", type=Path, required=True)
-    prepare.add_argument("--calibration-index", type=Path, required=True)
-    prepare.add_argument("--index-generation", required=True)
-    prepare.add_argument("--code-revision", required=True)
-    prepare.add_argument("--runtime-identity", type=Path, required=True)
-    prepare.add_argument("--remote-prefix", required=True)
-    prepare.add_argument("--output-dir", type=Path, required=True)
-    plan = sub.add_parser("stado-plan")
-    plan.add_argument("--seal", required=True)
-    plan.add_argument("--seal-generation", required=True)
-    seal = sub.add_parser("seal")
-    seal.add_argument("--bundle", type=Path, required=True)
-    prepare.add_argument("--calibration-index-uri", required=True)
-    seal.add_argument("--output", type=Path)
-    finalize = sub.add_parser("finalize")
-    finalize.add_argument("--seal", required=True)
-    finalize.add_argument("--seal-generation", required=True)
-    diff = sub.add_parser("diff")
-    diff.add_argument("--publication", required=True)
-    diff.add_argument("--publication-generation", required=True)
-    diff.add_argument("--method", choices=("all",) + METHODS, default="all")
-    diff.add_argument("--output", type=Path)
+    parser.add_argument("--version", action="version", version="desired-results-final-test-v3")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    try:
-        if args.mode == "prepare":
-            result = _prepare(args)
-        elif args.mode == "seal":
-            result = _seal(args)
-        elif args.mode == "stado-plan":
-            result = _stado_plan(args)
-        elif args.mode == "finalize":
-            result = _finalize(args)
-        else:
-            result = _diff(args)
-        print(json.dumps(result, sort_keys=True, allow_nan=False))
-        return 0
-    except (FinalTestError, OSError, ValueError, KeyError, TypeError) as exc:
-        print(f"desired-results final test refused: {exc}", file=sys.stderr)
-        return 2
+    _parser().parse_args(argv); return 0
 
 
 if __name__ == "__main__":

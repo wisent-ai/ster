@@ -4,7 +4,9 @@ import math
 import os
 import struct
 from collections import defaultdict
-from typing import Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
+
+import torch
 
 from wisent.core.utils.config_tools.constants import BYTES_PER_MB
 from wisent.core.control.steering_methods.configs.optimal import get_optimal_extraction_strategy, get_optimal
@@ -263,6 +265,179 @@ def build_enriched_from_hf(
     except Exception as e:
         print(f"  HF: Failed: {e}")
         return None
+
+
+def build_enriched_from_local_strict(
+    model_name: str,
+    task_name: str,
+    layer: int,
+    extraction_strategy: str,
+    work_dir: str,
+    expected_pair_ids: Sequence[int],
+    *,
+    activation_file: str,
+    activation_pair_ids: Sequence[int],
+    pair_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    """Build enriched pairs only from caller-supplied, already sealed local inputs."""
+    from wisent.core.reading.modules.utilities.data.sources.hf.hf_loaders import (
+        _load_safetensors_file,
+        _strict_value_error,
+        _validate_expected_pair_ids,
+    )
+
+    expected = _validate_expected_pair_ids(expected_pair_ids)
+    sealed_pair_ids = _validate_expected_pair_ids(activation_pair_ids)
+    activation_path = os.fspath(activation_file)
+    if not os.path.isfile(activation_path):
+        raise _strict_value_error(
+            "activation_artifact_unavailable", "Exact local activation artifact does not exist",
+            path=activation_path,
+        )
+    try:
+        tensors, metadata = _load_safetensors_file(activation_path)
+    except Exception as exc:
+        raise _strict_value_error(
+            "invalid_activation_artifact", "Could not read exact local activation artifact",
+            path=activation_path, error=str(exc),
+        ) from exc
+    missing_tensors = sorted({"pos_activations", "neg_activations"}.difference(tensors))
+    if missing_tensors:
+        raise _strict_value_error(
+            "missing_activation_tensor", "Activation artifact is missing required tensors",
+            missing_tensors=missing_tensors, path=activation_path,
+        )
+    positive_tensor = tensors["pos_activations"]
+    negative_tensor = tensors["neg_activations"]
+    if (not positive_tensor.is_floating_point() or
+            not negative_tensor.is_floating_point()):
+        raise _strict_value_error(
+            "invalid_activation_tensor", "Activation tensors must have floating dtype",
+            positive_dtype=str(positive_tensor.dtype),
+            negative_dtype=str(negative_tensor.dtype), path=activation_path,
+        )
+    if (positive_tensor.ndim != 2 or negative_tensor.ndim != 2 or
+            positive_tensor.shape != negative_tensor.shape or
+            positive_tensor.shape[0] != len(sealed_pair_ids) or
+            positive_tensor.shape[1] == 0):
+        raise _strict_value_error(
+            "activation_support_mismatch",
+            "Activation tensors must be equal non-empty matrices with one row per sealed pair",
+            positive_shape=list(positive_tensor.shape),
+            negative_shape=list(negative_tensor.shape),
+            expected_rows=len(sealed_pair_ids), path=activation_path,
+        )
+    if (not torch.isfinite(positive_tensor).all().item() or
+            not torch.isfinite(negative_tensor).all().item()):
+        raise _strict_value_error(
+            "invalid_activation_tensor", "Activation tensors must contain only finite values",
+            path=activation_path,
+        )
+    try:
+        metadata_pair_ids = _validate_expected_pair_ids(json.loads(metadata["pair_ids"]))
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise _strict_value_error(
+            "invalid_activation_pair_ids", "Activation metadata has invalid pair_ids",
+            path=activation_path, error=str(exc),
+        ) from exc
+    if metadata_pair_ids != sealed_pair_ids or len(metadata_pair_ids) != positive_tensor.shape[0]:
+        raise _strict_value_error(
+            "manifest_support_mismatch", "Activation rows differ from sealed pair support",
+            sealed_pair_ids=sealed_pair_ids, activation_pair_ids=metadata_pair_ids,
+            tensor_rows=positive_tensor.shape[0], path=activation_path,
+        )
+    missing_ids = sorted(set(expected).difference(sealed_pair_ids))
+    if missing_ids:
+        raise _strict_value_error(
+            "manifest_support_mismatch", "Activation artifact does not cover requested support",
+            missing_pair_ids=missing_ids, path=activation_path,
+        )
+    if isinstance(pair_rows, (str, bytes)) or not isinstance(pair_rows, Sequence):
+        raise _strict_value_error("invalid_pair_rows", "pair_rows must be an ordered sequence")
+    rows = list(pair_rows)
+    if len(rows) != len(expected):
+        raise _strict_value_error(
+            "enriched_support_mismatch", "Pair text rows do not exactly cover requested support",
+            expected_count=len(expected), pair_text_count=len(rows),
+        )
+    pair_texts: dict[int, dict[str, str]] = {}
+    ordered_row_ids: list[int] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping) or type(row.get("pair_id")) is not int:
+            raise _strict_value_error(
+                "invalid_pair_row", "Pair text row has no integer pair_id", index=index,
+            )
+        pair_id = row["pair_id"]
+        if pair_id in pair_texts:
+            raise _strict_value_error(
+                "duplicate_pair_id", "Pair text rows contain a duplicate pair_id", pair_id=pair_id,
+            )
+        positive = row.get("positive_response")
+        negative = row.get("negative_response")
+        if (not isinstance(row.get("prompt"), str) or not isinstance(positive, Mapping) or
+                not isinstance(negative, Mapping) or
+                not isinstance(positive.get("model_response"), str) or
+                not isinstance(negative.get("model_response"), str)):
+            raise _strict_value_error(
+                "invalid_pair_text", "Pair text row has malformed prompt/responses", pair_id=pair_id,
+            )
+        pair_texts[pair_id] = {
+            "prompt": row["prompt"], "positive": positive["model_response"],
+            "negative": negative["model_response"],
+        }
+        ordered_row_ids.append(pair_id)
+    if ordered_row_ids != expected:
+        raise _strict_value_error(
+            "pair_order_mismatch", "Pair text rows do not preserve requested pair order",
+            expected_pair_ids=expected, pair_row_ids=ordered_row_ids,
+        )
+
+    row_by_pair_id = {pair_id: index for index, pair_id in enumerate(sealed_pair_ids)}
+    layer_key = str(layer)
+    enriched_pairs = []
+    calibration_norm_sum = 0.0
+    for pair_id in expected:
+        tensor_index = row_by_pair_id[pair_id]
+        pair_text = pair_texts[pair_id]
+        positive_values = positive_tensor[tensor_index].tolist()
+        negative_values = negative_tensor[tensor_index].tolist()
+        calibration_norm_sum += math.sqrt(sum(value * value for value in positive_values))
+        calibration_norm_sum += math.sqrt(sum(value * value for value in negative_values))
+        enriched_pairs.append({
+            "pair_id": pair_id,
+            "prompt": pair_text["prompt"],
+            "positive_response": {
+                "model_response": pair_text["positive"],
+                "layers_activations": {layer_key: positive_values},
+                "q_proj_activations": {}, "k_proj_activations": {},
+            },
+            "negative_response": {
+                "model_response": pair_text["negative"],
+                "layers_activations": {layer_key: negative_values},
+                "q_proj_activations": {}, "k_proj_activations": {},
+            },
+            "label": task_name, "trait_description": "",
+        })
+    output = {
+        "task_name": task_name, "trait_label": task_name, "model": model_name,
+        "layers": [layer], "extraction_strategy": extraction_strategy,
+        "extraction_component": "residual_stream", "raw_mode": False,
+        "num_pairs": len(enriched_pairs), "pair_ids": expected,
+        "calibration_norms": {
+            layer_key: calibration_norm_sum / (2 * len(expected)),
+        },
+        "pairs": enriched_pairs,
+    }
+    out_path = os.path.join(work_dir, "enriched_from_local_strict.json")
+    try:
+        with open(out_path, "w") as handle:
+            json.dump(output, handle)
+    except OSError as exc:
+        raise _strict_value_error(
+            "enriched_output_write_failed", "Could not write strict enriched JSON",
+            path=out_path, error=str(exc),
+        ) from exc
+    return out_path
 
 
 def build_enriched_from_hf_strict(

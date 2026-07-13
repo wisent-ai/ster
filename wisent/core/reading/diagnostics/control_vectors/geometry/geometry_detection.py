@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import math
+from numbers import Real
 from typing import Dict, Tuple
 
 import torch
 
+from wisent.core.utils.config_tools.constants import (
+    GEOMETRY_CONFIDENCE_EXPECTED_PAIR_SUPPORT,
+    GEOMETRY_CONFIDENCE_EXPECTED_SAMPLE_SUPPORT,
+    GEOMETRY_THRESHOLD_CLUSTER,
+    GEOMETRY_THRESHOLD_DEFAULT,
+    GEOMETRY_THRESHOLD_MANIFOLD,
+    GEOMETRY_THRESHOLD_SPARSE,
+    SCORE_RANGE_MAX,
+    SCORE_RANGE_MIN,
+)
 
 from .geometry_types import (
     StructureType,
@@ -30,14 +42,24 @@ def detect_geometry_structure(
     pos_activations: torch.Tensor,
     neg_activations: torch.Tensor,
     config: GeometryAnalysisConfig | None = None,
-    geometry_threshold_default: float = None,
-    geometry_threshold_cluster: float = None,
-    geometry_threshold_sparse: float = None,
-    geometry_threshold_manifold: float = None,
+    geometry_threshold_default: float = GEOMETRY_THRESHOLD_DEFAULT,
+    geometry_threshold_cluster: float = GEOMETRY_THRESHOLD_CLUSTER,
+    geometry_threshold_sparse: float = GEOMETRY_THRESHOLD_SPARSE,
+    geometry_threshold_manifold: float = GEOMETRY_THRESHOLD_MANIFOLD,
 ) -> GeometryAnalysisResult:
     """Detect the geometric structure of activation differences."""
-    for _n, _v in [("geometry_threshold_default", geometry_threshold_default), ("geometry_threshold_cluster", geometry_threshold_cluster), ("geometry_threshold_sparse", geometry_threshold_sparse), ("geometry_threshold_manifold", geometry_threshold_manifold)]:
-        if _v is None: raise ValueError(f"{_n} is required")
+    geometry_threshold_default = _validate_threshold(
+        "geometry_threshold_default", geometry_threshold_default,
+    )
+    geometry_threshold_cluster = _validate_threshold(
+        "geometry_threshold_cluster", geometry_threshold_cluster,
+    )
+    geometry_threshold_sparse = _validate_threshold(
+        "geometry_threshold_sparse", geometry_threshold_sparse,
+    )
+    geometry_threshold_manifold = _validate_threshold(
+        "geometry_threshold_manifold", geometry_threshold_manifold,
+    )
     cfg = config or GeometryAnalysisConfig()
 
     pos_tensor = pos_activations.detach().float()
@@ -52,15 +74,45 @@ def detect_geometry_structure(
     diff_vectors = pos_tensor[:n_pairs] - neg_tensor[:n_pairs]
 
     raw_scores: Dict[str, StructureScore] = {}
-    raw_scores["linear"] = detect_linear_structure(pos_tensor, neg_tensor, diff_vectors, cfg)
-    raw_scores["cone"] = detect_cone_structure_score(pos_tensor, neg_tensor, cfg)
-    raw_scores["cluster"] = detect_cluster_structure(pos_tensor, neg_tensor, diff_vectors, cfg, min_clusters=cfg.min_clusters)
-    raw_scores["manifold"] = detect_manifold_structure(pos_tensor, neg_tensor, diff_vectors, cfg)
-    raw_scores["sparse"] = detect_sparse_structure(pos_tensor, neg_tensor, diff_vectors, cfg)
-    raw_scores["bimodal"] = detect_bimodal_structure(pos_tensor, neg_tensor, diff_vectors, cfg)
-    raw_scores["orthogonal"] = detect_orthogonal_structure(pos_tensor, neg_tensor, diff_vectors, cfg)
+    support_confidence = min(
+        SCORE_RANGE_MAX,
+        n_pairs / GEOMETRY_CONFIDENCE_EXPECTED_PAIR_SUPPORT,
+    )
+    raw_scores["linear"] = detect_linear_structure(
+        pos_tensor, neg_tensor, diff_vectors, cfg,
+        detector_cohens_d_divisor=float(max(1, cfg.num_components)),
+        detector_large_sample_n=GEOMETRY_CONFIDENCE_EXPECTED_SAMPLE_SUPPORT,
+    )
+    raw_scores["cone"] = detect_cone_structure_score(
+        pos_tensor, neg_tensor, cfg,
+        detector_small_sample_n=GEOMETRY_CONFIDENCE_EXPECTED_PAIR_SUPPORT,
+    )
+    raw_scores["cluster"] = detect_cluster_structure(
+        pos_tensor, neg_tensor, diff_vectors, cfg,
+        min_clusters=cfg.min_clusters,
+        detector_cluster_sample_n=GEOMETRY_CONFIDENCE_EXPECTED_SAMPLE_SUPPORT,
+    )
+    raw_scores["manifold"] = detect_manifold_structure(
+        pos_tensor, neg_tensor, diff_vectors, cfg,
+        geo_manifold_score_default=SCORE_RANGE_MIN,
+        geo_manifold_confidence=support_confidence,
+    )
+    raw_scores["sparse"] = detect_sparse_structure(
+        pos_tensor, neg_tensor, diff_vectors, cfg,
+        geo_diag_sparse_threshold=geometry_threshold_sparse,
+        sparse_detection_confidence=support_confidence,
+    )
+    raw_scores["bimodal"] = detect_bimodal_structure(
+        pos_tensor, neg_tensor, diff_vectors, cfg,
+        bimodal_detection_confidence=support_confidence,
+    )
+    raw_scores["orthogonal"] = detect_orthogonal_structure(
+        pos_tensor, neg_tensor, diff_vectors, cfg,
+        geo_diag_orthogonal_threshold=geometry_threshold_default,
+        geo_orthogonal_confidence=support_confidence,
+    )
 
-    best_structure, best_score = _find_most_specific_structure(raw_scores, geometry_threshold_default=geometry_threshold_default, geometry_threshold_cluster=geometry_threshold_cluster, geometry_threshold_sparse=geometry_threshold_sparse, geometry_threshold_manifold=geometry_threshold_manifold)
+    best_structure, best_score = _find_most_specific_structure(raw_scores)
     recommendation = _generate_recommendation(best_structure, raw_scores)
 
     return GeometryAnalysisResult(
@@ -77,10 +129,22 @@ def detect_geometry_structure(
     )
 
 
-def _find_most_specific_structure(scores: Dict[str, StructureScore], geometry_threshold_default: float = None, geometry_threshold_cluster: float = None, geometry_threshold_sparse: float = None, geometry_threshold_manifold: float = None) -> Tuple[StructureType, float]:
+def _find_most_specific_structure(
+    scores: Dict[str, StructureScore],
+) -> Tuple[StructureType, float]:
     """Return the structure with the highest score. No priority ordering."""
-    best_key = max(scores.keys(), key=lambda k: scores[k].score)
+    best_key = max(scores.keys(), key=lambda key: scores[key].score)
     return scores[best_key].structure_type, scores[best_key].score
+
+
+def _validate_threshold(name: str, value: float) -> float:
+    """Validate and normalize a geometry threshold override."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a real number in [0, 1]")
+    normalized = float(value)
+    if not math.isfinite(normalized) or not SCORE_RANGE_MIN <= normalized <= SCORE_RANGE_MAX:
+        raise ValueError(f"{name} must be a finite number in [0, 1]")
+    return normalized
 
 
 def _generate_recommendation(best_structure: StructureType, all_scores: Dict[str, StructureScore]) -> str:

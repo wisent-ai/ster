@@ -43,6 +43,7 @@ class SteeringMethodParameter:
     default: Any = _UNSET
     required: bool = True
     cli_flag: Optional[str] = None
+    cli_dest: Optional[str] = None
     choices: Optional[List[Any]] = None
     action: Optional[str] = None
 
@@ -56,6 +57,12 @@ class SteeringMethodParameter:
         if self.cli_flag:
             return self.cli_flag
         return f"--{method_name}-{self.name.replace('_', '-')}"
+
+    def get_cli_dest(self, method_name: str) -> str:
+        """Get the argparse namespace destination for this parameter."""
+        if self.cli_dest:
+            return self.cli_dest
+        return self.get_cli_flag(method_name).lstrip("-").replace("-", "_")
 
 
 @dataclass
@@ -93,6 +100,8 @@ class SteeringMethodDefinition:
                 "default": param.default if param.has_default else None,
                 "help": f"[{self.name.upper()}] {param.help}",
             }
+            if param.cli_dest:
+                kwargs["dest"] = param.cli_dest
             if param.action:
                 kwargs["action"] = param.action
             else:
@@ -105,8 +114,7 @@ class SteeringMethodDefinition:
         """Extract this method's parameters from parsed CLI args."""
         params = {}
         for param in self.parameters:
-            flag = param.get_cli_flag(self.name)
-            attr_name = flag.lstrip("-").replace("-", "_")
+            attr_name = param.get_cli_dest(self.name)
             if hasattr(args, attr_name):
                 val = getattr(args, attr_name)
                 if val is not None:

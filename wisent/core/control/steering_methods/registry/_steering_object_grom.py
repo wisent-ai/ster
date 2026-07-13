@@ -78,18 +78,38 @@ class GROMSteeringObject(BaseSteeringObject):
         gate_network: Optional[GROMGateNetwork],
         intensity_network: GROMIntensityNetwork,
         layer_order: List[int],
+        sensor_layer: int,
         gate_temperature: float,
         max_alpha: float,
     ):
+        if metadata.extraction_component != "residual_stream":
+            raise ValueError(
+                "GROM requires extraction_component='residual_stream'"
+            )
+        steering_layers = set(metadata.layers)
+        if steering_layers != set(directions) or steering_layers != set(direction_weights):
+            raise ValueError(
+                "GROM metadata.layers must exactly match direction and weight layers"
+            )
+        if layer_order != sorted(steering_layers):
+            raise ValueError("GROM layer_order must exactly match ordered steering layers")
+        if steering_layers and sensor_layer >= min(steering_layers):
+            raise ValueError(
+                "GROM sensor_layer must be strictly earlier than every steering layer"
+            )
+        if metadata.sensor_layer is not None and metadata.sensor_layer != sensor_layer:
+            raise ValueError("GROM sensor_layer conflicts with metadata.sensor_layer")
+        metadata.sensor_layer = sensor_layer
         super().__init__(metadata)
         self.directions = directions
         self.direction_weights = direction_weights
         self.gate_network = gate_network
         self.intensity_network = intensity_network
         self.layer_order = layer_order
+        self.sensor_layer = sensor_layer
         self.gate_temperature = gate_temperature
         self.max_alpha = max_alpha
-        
+
         # Create layer index mapping
         self._layer_to_idx = {layer: i for i, layer in enumerate(layer_order)}
     
@@ -130,6 +150,27 @@ class GROMSteeringObject(BaseSteeringObject):
         layer_idx = self._layer_to_idx[layer]
         return intensities[:, layer_idx].to(hidden_state.dtype)
     
+    def get_effective_direction(self, layer: int) -> torch.Tensor:
+        """Return the learned effective direction for a steering layer."""
+        return self.get_steering_vector(layer)
+
+    def predict_gate(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        """Predict the gate once from the configured sensor activation."""
+        return self.compute_gate(hidden_state)
+
+    def predict_intensity(self, hidden_state: torch.Tensor) -> Dict[int, torch.Tensor]:
+        """Predict every steering-layer intensity from one sensor activation."""
+        self.intensity_network = self.intensity_network.to(
+            device=hidden_state.device, dtype=torch.float32
+        )
+        intensities = self.intensity_network(hidden_state.float())
+        if intensities.dim() == 1:
+            intensities = intensities.unsqueeze(0)
+        return {
+            layer: intensities[:, index].to(hidden_state.dtype)
+            for index, layer in enumerate(self.layer_order)
+        }
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'method': self.method_name,
@@ -145,6 +186,8 @@ class GROMSteeringObject(BaseSteeringObject):
                 'created_at': self.metadata.created_at,
                 'extra': self.metadata.extra,
                 'extraction_component': self.metadata.extraction_component,
+                'calibration_norms': self.metadata.calibration_norms,
+                'sensor_layer': self.metadata.sensor_layer,
             },
             'directions': {str(k): v for k, v in self.directions.items()},
             'direction_weights': {str(k): v for k, v in self.direction_weights.items()},
@@ -162,6 +205,7 @@ class GROMSteeringObject(BaseSteeringObject):
                 'max_alpha': self.max_alpha,
             },
             'layer_order': self.layer_order,
+            'sensor_layer': self.sensor_layer,
             'gate_temperature': self.gate_temperature,
             'max_alpha': self.max_alpha,
         }
@@ -169,6 +213,11 @@ class GROMSteeringObject(BaseSteeringObject):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GROMSteeringObject":
         meta_data = data['metadata']
+        if "sensor_layer" not in data or "sensor_layer" not in meta_data:
+            raise ValueError("GROM sensor_layer is required in object and metadata")
+        sensor_layer = int(data["sensor_layer"])
+        if int(meta_data["sensor_layer"]) != sensor_layer:
+            raise ValueError("GROM sensor_layer conflicts with metadata.sensor_layer")
         metadata = SteeringObjectMetadata(
             method=meta_data['method'],
             model_name=meta_data['model_name'],
@@ -180,7 +229,12 @@ class GROMSteeringObject(BaseSteeringObject):
             hidden_dim=meta_data['hidden_dim'],
             created_at=meta_data.get('created_at', ''),
             extra=meta_data.get('extra', {}),
+            calibration_norms={
+                int(k): float(v)
+                for k, v in meta_data.get('calibration_norms', {}).items()
+            },
             extraction_component=meta_data.get('extraction_component', get_optimal("extraction_component")),
+            sensor_layer=sensor_layer,
         )
         
         def to_tensor(v):
@@ -225,6 +279,7 @@ class GROMSteeringObject(BaseSteeringObject):
             gate_network=gate_network,
             intensity_network=intensity_network,
             layer_order=data['layer_order'],
+            sensor_layer=sensor_layer,
             gate_temperature=data['gate_temperature'],
             max_alpha=data['max_alpha'],
         )

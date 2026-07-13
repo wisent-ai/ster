@@ -6,7 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from wisent.core.primitives.model_interface.core.activations.core.atoms import LayerActivations, RawActivationMap, LayerName
 from wisent.core.primitives.contrastive_pairs.core.set import ContrastivePairSet
-from wisent.core.utils.config_tools.constants import NORM_EPS, STEERING_SCALE_IDENTITY
+from wisent.core.utils.config_tools.constants import NORM_EPS, STEERING_SCALE_IDENTITY, SS_GROM_BEHAVIOR_TARGET
+from wisent.core.utils.infra_tools.errors import InsufficientDataError
 
 
 def _compute_grom_loss_impl(
@@ -71,15 +72,22 @@ def _compute_grom_loss_impl(
     contrastive_loss = contrastive_loss / len(layer_names)
     loss_components["contrastive"] = contrastive_loss
 
-    # 2. Behavior loss - positives should have HIGH projection
-    behavior_loss = torch.tensor(0.0)
-    for layer in layer_names:
+    # 2. Behavior loss - optimize the same gate * intensity * direction update
+    # applied at inference, so gradients reach every learned component.
+    behavior_loss = pos_intensity.new_zeros(())
+    for layer_index, layer in enumerate(layer_names):
         pos_data = data["pos"][layer]
-        eff_dir = effective_dirs[layer]
-        pos_proj = (pos_data * eff_dir).sum(dim=1)
-        # We want pos_proj > 0 (positive side of direction)
-        behavior_loss = behavior_loss + F.relu(-pos_proj).mean()
-
+        eff_dir = F.normalize(effective_dirs[layer], p=2, dim=-1)
+        steering_delta = (
+            pos_gate.unsqueeze(-1)
+            * pos_intensity[:, layer_index].unsqueeze(-1)
+            * eff_dir.unsqueeze(0)
+        )
+        steered_pos = pos_data + steering_delta
+        pos_proj = (steered_pos * eff_dir).sum(dim=1)
+        behavior_loss = behavior_loss + F.relu(
+            SS_GROM_BEHAVIOR_TARGET - pos_proj
+        ).mean()
     behavior_loss = behavior_loss / len(layer_names)
     loss_components["behavior"] = behavior_loss
 
@@ -96,11 +104,13 @@ def _compute_grom_loss_impl(
     retain_loss = retain_loss / len(layer_names)
     loss_components["retain"] = retain_loss
 
-    # 4. Sparse loss - encourage sparse layer activation
-    # Penalize uniform intensity distribution
-    pos_intensity_norm = pos_intensity / (pos_intensity.sum(dim=1, keepdim=True) + NORM_EPS)
-    sparse_loss = -torch.mean(torch.sum(pos_intensity_norm * torch.log(pos_intensity_norm + NORM_EPS), dim=1))
-    sparse_loss = -sparse_loss  # We want LOW entropy (sparse)
+    # 4. Sparse loss - minimizing entropy encourages concentrated layer use.
+    pos_intensity_norm = pos_intensity / (
+        pos_intensity.sum(dim=1, keepdim=True) + NORM_EPS
+    )
+    sparse_loss = -torch.mean(torch.sum(
+        pos_intensity_norm * torch.log(pos_intensity_norm + NORM_EPS), dim=1,
+    ))
     loss_components["sparse"] = sparse_loss
 
     # 5. Smooth loss - penalize abrupt intensity changes
@@ -138,8 +148,10 @@ def _compute_grom_loss_impl(
     pos_gate_clamped = pos_gate.clamp(NORM_EPS, _upper)
     neg_gate_clamped = neg_gate.clamp(NORM_EPS, _upper)
     gate_loss = (
-        F.binary_cross_entropy(pos_gate_clamped, torch.ones_like(pos_gate)) +
-        F.binary_cross_entropy(neg_gate_clamped, torch.zeros_like(neg_gate))
+        F.binary_cross_entropy(pos_gate_clamped, torch.ones_like(pos_gate))
+        + F.binary_cross_entropy(neg_gate_clamped, torch.zeros_like(neg_gate))
+        + F.relu(self.config.create_gate_threshold - pos_gate).mean()
+        + F.relu(neg_gate - self.config.create_gate_threshold).mean()
     )
     loss_components["gate"] = gate_loss
 
@@ -192,7 +204,9 @@ def _compute_grom_loss_impl(
                 # Also add concentration reward: maximize squared weights
                 concentration = -(weights ** 2).sum()
 
-                direction_concentration_loss = direction_concentration_loss + normalized_entropy + concentration_weight * concentration
+                direction_concentration_loss = (
+                    direction_concentration_loss + normalized_entropy + concentration
+                )
 
         direction_concentration_loss = direction_concentration_loss / len(layer_names)
 
@@ -273,25 +287,93 @@ def _apply_direction_constraints_impl(self, directions: torch.Tensor) -> torch.T
 def _collect_from_set_impl(
     self, pair_set: ContrastivePairSet
 ) -> Dict[LayerName, Tuple[List[torch.Tensor], List[torch.Tensor]]]:
-    """Build {layer_name: ([pos tensors...], [neg tensors...])} from pairs."""
-    from collections import defaultdict
+    """Collect configured layers from one shared, complete set of pair rows.
 
-    buckets: Dict[LayerName, Tuple[List[torch.Tensor], List[torch.Tensor]]] = defaultdict(lambda: ([], []))
-
+    Every returned layer is appended in ``pair_set`` order from the same pairs.
+    Pairs missing any configured sensor, steering, or geometry layer are excluded
+    as a unit, so sensor-derived gates/intensities cannot be combined with a
+    different steering example. Before layer resolution, all returned layers are
+    instead required to have full support across every included pair.
+    """
+    pair_rows = []
+    observed_layers = set()
     for pair in pair_set.pairs:
         pos_la = getattr(pair.positive_response, "layers_activations", None)
         neg_la = getattr(pair.negative_response, "layers_activations", None)
-
         if pos_la is None or neg_la is None:
             continue
 
-        layer_names = set(pos_la.to_dict().keys()) | set(neg_la.to_dict().keys())
-        for layer in layer_names:
-            p = pos_la.to_dict().get(layer, None) if pos_la is not None else None
-            n = neg_la.to_dict().get(layer, None) if neg_la is not None else None
-            if isinstance(p, torch.Tensor) and isinstance(n, torch.Tensor):
-                buckets[layer][0].append(p)
-                buckets[layer][1].append(n)
+        pos_by_layer = pos_la.to_dict()
+        neg_by_layer = neg_la.to_dict()
+        supported_layers = {
+            layer
+            for layer in pos_by_layer.keys() & neg_by_layer.keys()
+            if isinstance(pos_by_layer[layer], torch.Tensor)
+            and isinstance(neg_by_layer[layer], torch.Tensor)
+        }
+        pair_rows.append((pos_by_layer, neg_by_layer, supported_layers))
+        observed_layers.update(supported_layers)
+
+    if not pair_rows:
+        raise InsufficientDataError(reason="No tensor-backed activation pairs found")
+
+    config = getattr(self, "config", None)
+    steering_layers = getattr(config, "steering_layers", None)
+    sensor_layer = getattr(config, "sensor_layer", None)
+    if steering_layers is not None and sensor_layer is not None:
+        required_indices = set(steering_layers)
+        required_indices.add(sensor_layer)
+        geometry_layer = getattr(config, "geometry_analysis_layer", None)
+        if geometry_layer is not None:
+            required_indices.add(geometry_layer)
+
+        required_layers = set()
+        resolved_indices = set()
+        for layer in observed_layers:
+            try:
+                layer_index = int(str(layer).split("_")[-1])
+            except (ValueError, IndexError):
+                continue
+            if layer_index in required_indices:
+                required_layers.add(layer)
+                resolved_indices.add(layer_index)
+        missing_indices = required_indices - resolved_indices
+        if missing_indices:
+            raise InsufficientDataError(
+                reason=(
+                    "Missing configured activation layer support for indices "
+                    f"{sorted(missing_indices)}"
+                )
+            )
+    else:
+        required_layers = set.intersection(
+            *(supported for _, _, supported in pair_rows)
+        )
+
+    if not required_layers:
+        raise InsufficientDataError(
+            reason="No configured activation layers have complete pair support"
+        )
+    complete_rows = [
+        (pos_by_layer, neg_by_layer)
+        for pos_by_layer, neg_by_layer, supported_layers in pair_rows
+        if required_layers <= supported_layers
+    ]
+    if not complete_rows:
+        raise InsufficientDataError(
+            reason=(
+                "No activation pair has complete sensor, steering, and geometry "
+                "layer support"
+            )
+        )
+
+    buckets: Dict[
+        LayerName, Tuple[List[torch.Tensor], List[torch.Tensor]]
+    ] = {layer: ([], []) for layer in sorted(required_layers, key=str)}
+    for pos_by_layer, neg_by_layer in complete_rows:
+        for layer, (positive_rows, negative_rows) in buckets.items():
+            positive_rows.append(pos_by_layer[layer])
+            negative_rows.append(neg_by_layer[layer])
 
     return buckets
 

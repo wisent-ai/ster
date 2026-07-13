@@ -60,6 +60,7 @@ def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTU
     from wisent.core.primitives.contrastive_pairs.core.pair import ContrastivePair
     from wisent.core.primitives.contrastive_pairs.core.io.response import PositiveResponse, NegativeResponse
     from wisent.core.primitives.contrastive_pairs.core.set import ContrastivePairSet
+    from wisent.core.primitives.model_interface.core.activations.pipeline.pair_identity import validate_pair_id
 
     raw_mode = getattr(args, 'raw', False)
     mode_str = "raw hidden states" if raw_mode else "activations"
@@ -130,6 +131,16 @@ def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTU
         pair_set = ContrastivePairSet(name=task_name, task_type=trait_label)
 
         for pair_data in pairs_list:
+            metadata = dict(pair_data.get("metadata") or {})
+            if raw_mode:
+                if "pair_id" not in pair_data or "stable_id" not in pair_data:
+                    raise ValueError(
+                        "raw activation input requires explicit pair_id and stable_id"
+                    )
+                metadata.update(
+                    pair_id=validate_pair_id(pair_data["pair_id"]),
+                    stable_id=pair_data["stable_id"],
+                )
             pair = ContrastivePair(
                 prompt=pair_data['prompt'],
                 positive_response=PositiveResponse(
@@ -140,6 +151,7 @@ def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTU
                 ),
                 label=pair_data.get('label', trait_label),
                 trait_description=pair_data.get('trait_description', ''),
+                metadata=metadata,
             )
             pair_set.add(pair)
 
@@ -151,6 +163,12 @@ def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTU
             print(f"\n⚡ Collecting RAW hidden states...")
             from wisent.core.primitives.model_interface.core.activations.activation_cache import get_strategy_text_family
             text_family = get_strategy_text_family(extraction_strategy)
+            padding_side = getattr(model.tokenizer, "padding_side", None)
+            if padding_side not in ("left", "right"):
+                raise ValueError(
+                    "raw activation serialization requires tokenizer padding_side "
+                    "to be 'left' or 'right'"
+                )
             
             raw_pairs_data = []
             for i, pair in enumerate(pair_set.pairs):
@@ -159,22 +177,47 @@ def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTU
 
                 # Collect RAW hidden states (full sequences)
                 raw_data = collector.collect_raw(
-                    pair, strategy=extraction_strategy,
-                    layers=layer_strs, component=extraction_component,
+                    pair,
+                    strategy=extraction_strategy,
+                    layers=layer_strs,
+                    component=extraction_component,
+                    pair_id=pair.metadata["pair_id"],
+                    stable_id=pair.metadata["stable_id"],
                 )
+                if (
+                    raw_data["pair_id"] != pair.metadata["pair_id"]
+                    or raw_data["stable_id"] != pair.metadata["stable_id"]
+                ):
+                    raise ValueError("raw collector changed the explicit pair identity")
                 raw_pairs_data.append({
                     'pair': pair,
                     'raw_data': raw_data,
                 })
 
             print(f"   ✓ Collected raw hidden states for {len(raw_pairs_data)} pairs")
+            if raw_pairs_data:
+                model_revision = raw_pairs_data[0]['raw_data']['model_revision']
+                tokenizer_revision = raw_pairs_data[0]['raw_data']['tokenizer_revision']
+                for item in raw_pairs_data[1:]:
+                    raw_data = item['raw_data']
+                    if (
+                        raw_data['model_revision'] != model_revision
+                        or raw_data['tokenizer_revision'] != tokenizer_revision
+                    ):
+                        raise ValueError("raw collector returned inconsistent revisions")
+            else:
+                model_revision = model.resolved_model_revision
+                tokenizer_revision = model.resolved_tokenizer_revision
 
             # Convert to JSON format (raw mode)
             print(f"\n💾 Saving raw activations to '{args.output}'...")
             output_data = {
+                'schema_version': 2,
                 'task_name': task_name,
                 'trait_label': trait_label,
                 'model': args.model,
+                'model_revision': model_revision,
+                'tokenizer_revision': tokenizer_revision,
                 'layers': layers,
                 'extraction_strategy': extraction_strategy.value,
                 'extraction_component': extraction_component.value,
@@ -189,17 +232,29 @@ def execute_get_activations(args, *, architecture_module_limit: int = ARCHITECTU
                 raw_data = item['raw_data']
                 
                 pair_dict = {
+                    'pair_id': raw_data['pair_id'],
+                    'stable_id': raw_data['stable_id'],
                     'prompt': pair.prompt,
                     'positive_response': {
                         'model_response': pair.positive_response.model_response,
                         'answer_text': raw_data['pos_answer_text'],
-                        'prompt_len': raw_data['pos_prompt_len'],
+                        'input_ids': raw_data['pos_input_ids'].tolist(),
+                        'attention_mask': raw_data['pos_attention_mask'].tolist(),
+                        'effective_length': raw_data['pos_effective_length'],
+                        'answer_onset': raw_data['pos_answer_onset'],
+                        'answer_end_exclusive': raw_data['pos_answer_end_exclusive'],
+                        'padding_side': padding_side,
                         'layers_hidden_states': {}
                     },
                     'negative_response': {
                         'model_response': pair.negative_response.model_response,
                         'answer_text': raw_data['neg_answer_text'],
-                        'prompt_len': raw_data['neg_prompt_len'],
+                        'input_ids': raw_data['neg_input_ids'].tolist(),
+                        'attention_mask': raw_data['neg_attention_mask'].tolist(),
+                        'effective_length': raw_data['neg_effective_length'],
+                        'answer_onset': raw_data['neg_answer_onset'],
+                        'answer_end_exclusive': raw_data['neg_answer_end_exclusive'],
+                        'padding_side': padding_side,
                         'layers_hidden_states': {}
                     },
                     'label': pair.label,

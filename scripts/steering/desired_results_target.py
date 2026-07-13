@@ -18,6 +18,7 @@ STRATEGIES = (
     "chat_first", "chat_last", "chat_max_norm", "chat_mean",
     "chat_weighted", "mc_balanced", "role_play",
 )
+METHODS = ("caa", "ostrze", "mlp", "tecza", "tetno", "grom", "nurt", "wicher")
 
 
 class ContractError(ValueError):
@@ -40,18 +41,30 @@ def canonical_sha256(value: Any) -> str:
 
 
 def target_id(protocol: str, model_slug: str, benchmark: str) -> str:
-    _identity_parts(protocol, model_slug, benchmark)
-    return f"{protocol}:{model_slug}:{benchmark}"
+    return f"target-v2:{_identity_digest(protocol, model_slug, benchmark)}"
 
 
 def result_id(protocol: str, model_slug: str, benchmark: str) -> str:
+    return f"result-v2:{_identity_digest(protocol, model_slug, benchmark)}"
+
+
+def _identity_digest(protocol: str, model_slug: str, benchmark: str) -> str:
     _identity_parts(protocol, model_slug, benchmark)
-    return f"{protocol}:{model_slug}:{benchmark}"
+    return canonical_sha256({
+        "protocol": protocol, "model_slug": model_slug, "benchmark": benchmark,
+    })
 
 
-def _identity_parts(*parts: str) -> None:
-    if any(not isinstance(part, str) or not part or ":" in part or "/" in part or part in {".", ".."} for part in parts):
-        raise ContractError("identity components must be non-empty path-safe strings without ':' or '/'")
+def _identity_parts(protocol: str, model_slug: str, benchmark: str) -> None:
+    for label, part in (("protocol", protocol), ("model_slug", model_slug)):
+        if (not isinstance(part, str) or not part or part in {".", ".."}
+                or any(character in part for character in (":", "/", "\\", "\x00"))):
+            raise ContractError(f"{label} must be a non-empty path-safe identity component")
+    if (not isinstance(benchmark, str) or not benchmark or benchmark.startswith("/")
+            or any(character in benchmark for character in (":", "\\", "\x00"))):
+        raise ContractError("benchmark must be a safe non-absolute category path")
+    if any(part in {"", ".", ".."} for part in benchmark.split("/")):
+        raise ContractError("benchmark must be a safe non-absolute category path")
 
 
 def _exact(value: Any, keys: set[str] | frozenset[str], label: str) -> Mapping[str, Any]:
@@ -72,6 +85,23 @@ def _sha(value: Any, label: str, *, optional: bool = False) -> None:
         return
     if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
         raise ContractError(f"{label} must be a lowercase SHA-256 hex digest")
+
+
+def _revision(value: Any, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 40 or any(c not in "0123456789abcdef" for c in value):
+        raise ContractError(f"{label} must be a lowercase 40-character Git revision")
+    return value
+
+
+def _artifact_ref(value: Any, label: str) -> Mapping[str, Any]:
+    ref = _exact(value, {"uri", "generation", "size", "sha256"}, label)
+    _string(ref["uri"], f"{label}.uri")
+    _string(ref["generation"], f"{label}.generation")
+    size = _string(ref["size"], f"{label}.size")
+    if not size.isascii() or not size.isdecimal() or size.startswith("0"):
+        raise ContractError(f"{label}.size must be a canonical positive decimal string")
+    _sha(ref["sha256"], f"{label}.sha256")
+    return ref
 
 
 def _positive(value: Any, label: str, *, zero: bool = False) -> int:
@@ -116,6 +146,7 @@ def validate_target_manifest(manifest: Mapping[str, Any]) -> None:
     }, "target")
     model_slug = _string(target["model_slug"], "target.model_slug")
     benchmark = _string(target["benchmark"], "target.benchmark")
+    _identity_parts(protocol_id, model_slug, benchmark)
     _string(target["model_name"], "target.model_name")
     expected_pairs = _positive(target["expected_pairs"], "target.expected_pairs")
     expected_id = target_id(protocol_id, model_slug, benchmark)
@@ -125,9 +156,12 @@ def validate_target_manifest(manifest: Mapping[str, Any]) -> None:
     if target["result_prefix"] != expected_prefix:
         raise ContractError(f"result_prefix must be {expected_prefix!r}")
 
-    revisions = _exact(root["revisions"], {"inventory_sha256", "activation_revision"}, "revisions")
+    revisions = _exact(root["revisions"], {
+        "inventory_sha256", "model_revision", "tokenizer_revision", "activation_revision",
+    }, "revisions")
     _sha(revisions["inventory_sha256"], "revisions.inventory_sha256")
-    _sha(revisions["activation_revision"], "revisions.activation_revision", optional=True)
+    for name in ("model_revision", "tokenizer_revision", "activation_revision"):
+        _revision(revisions[name], f"revisions.{name}")
 
     activation = _exact(root["activation"], {
         "status", "eligible", "layer_count", "n_pairs", "grouped", "strategies", "routes", "proof",
@@ -184,10 +218,15 @@ def validate_target_manifest(manifest: Mapping[str, Any]) -> None:
     if status == "absent" and any((n_pairs is not None, activation["grouped"] is not None, proof["record_sha256"] is not None, any(strategies.values()), routes)):
         raise ContractError("absent activation cannot carry record evidence")
 
-    support = _exact(root["support"], {"state", "proof_sha256", "pair_count", "split_counts", "splits"}, "support")
+    support = _exact(root["support"], {
+        "state", "proof_sha256", "pair_count", "split_counts", "splits", "pair_texts_ref",
+    }, "support")
     if support["state"] not in SUPPORT_STATES:
         raise ContractError("support.state is invalid")
     _sha(support["proof_sha256"], "support.proof_sha256", optional=True)
+    pair_texts_ref = support["pair_texts_ref"]
+    if pair_texts_ref is not None:
+        _artifact_ref(pair_texts_ref, "support.pair_texts_ref")
     pair_count = _positive(support["pair_count"], "support.pair_count", zero=True)
     split_names = {"train", "validation", "test"}
     split_counts = _exact(support["split_counts"], split_names, "support.split_counts")
@@ -210,10 +249,14 @@ def validate_target_manifest(manifest: Mapping[str, Any]) -> None:
             stable_ids.add(stable_id)
     if pair_count != sum(split_counts.values()):
         raise ContractError("support.pair_count must equal split_counts total")
-    if support["state"] == "missing" and (pair_count != 0 or support["proof_sha256"] is not None):
-        raise ContractError("missing support cannot carry pairs or proof")
-    if support["state"] == "prepared" and (pair_count != expected_pairs or support["proof_sha256"] is None):
-        raise ContractError("prepared support must prove exactly expected_pairs")
+    if support["state"] == "missing" and (
+        pair_count != 0 or support["proof_sha256"] is not None or pair_texts_ref is not None
+    ):
+        raise ContractError("missing support cannot carry pairs, proof, or pair texts")
+    if support["state"] == "prepared" and (
+        pair_count != expected_pairs or support["proof_sha256"] is None or pair_texts_ref is None
+    ):
+        raise ContractError("prepared support must prove exactly expected_pairs and bind pair texts")
 
     evaluation = _exact(root["evaluation"], {"required_outputs", "split"}, "evaluation")
     required_outputs = _strings(evaluation["required_outputs"], "evaluation.required_outputs")
@@ -223,8 +266,8 @@ def validate_target_manifest(manifest: Mapping[str, Any]) -> None:
         raise ContractError("evaluation.split is invalid")
 
     calibration = _exact(root["calibration"], {"methods", "strategies", "layer_count", "expected_pairs"}, "calibration")
-    if not _strings(calibration["methods"], "calibration.methods"):
-        raise ContractError("calibration.methods cannot be empty")
+    if _strings(calibration["methods"], "calibration.methods") != list(METHODS):
+        raise ContractError("calibration.methods must be the exact ordered eight-method matrix")
     if calibration["strategies"] != list(STRATEGIES):
         raise ContractError("calibration.strategies must be the required seven-strategy route")
     if calibration["layer_count"] is not None:

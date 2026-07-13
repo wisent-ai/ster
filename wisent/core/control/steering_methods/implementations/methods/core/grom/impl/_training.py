@@ -7,6 +7,50 @@ from wisent.core.primitives.model_interface.core.activations.core.atoms import L
 from wisent.core.primitives.contrastive_pairs.core.set import ContrastivePairSet
 from wisent.core.utils.config_tools.constants import COMBO_OFFSET, RECURSION_INITIAL_DEPTH  # noqa: E501
 from wisent.core.control.steering_methods.methods.grom._config import GeometryAdaptation
+from wisent.core.utils.infra_tools.errors import InsufficientDataError
+
+def _validate_aligned_support(
+    buckets: Dict[LayerName, Tuple[List[torch.Tensor], List[torch.Tensor]]],
+    layer_names: List[LayerName],
+) -> int:
+    """Require equal positive/negative pair support across all selected layers.
+
+    ``_collect_from_set_impl`` builds each layer from the same pair rows in the
+    same order. Equal support here both enforces that collector contract and
+    rejects manually supplied/incomplete buckets before tensor arithmetic.
+    """
+    if not layer_names:
+        raise InsufficientDataError(reason="No activation layers selected")
+
+    expected_support = None
+    for layer in layer_names:
+        if layer not in buckets:
+            raise InsufficientDataError(reason=f"Missing activation layer {layer!r}")
+        pos_rows, neg_rows = buckets[layer]
+        if len(pos_rows) != len(neg_rows):
+            raise InsufficientDataError(
+                reason=(
+                    f"Layer {layer!r} has unpaired activation support: "
+                    f"{len(pos_rows)} positive rows and {len(neg_rows)} negative rows"
+                )
+            )
+        if not pos_rows:
+            raise InsufficientDataError(
+                reason=f"Layer {layer!r} has no complete activation pairs"
+            )
+        if expected_support is None:
+            expected_support = len(pos_rows)
+        elif len(pos_rows) != expected_support:
+            raise InsufficientDataError(
+                reason=(
+                    "Sensor and steering layers do not share identical full pair "
+                    f"support: expected {expected_support} rows, but layer "
+                    f"{layer!r} has {len(pos_rows)}"
+                )
+            )
+
+    return expected_support
+
 
 def _analyze_and_adapt_geometry_impl(
     self,
@@ -26,33 +70,89 @@ def _analyze_and_adapt_geometry_impl(
         GeometryAnalysisConfig,
     )
 
-    # Find the layer to analyze
-    analysis_layer_idx = self.config.geometry_analysis_layer or self.config.sensor_layer
+    analysis_layer_idx = (
+        self.config.geometry_analysis_layer
+        if self.config.geometry_analysis_layer is not None
+        else self.config.sensor_layer
+    )
     analysis_layer = None
-    for layer in layer_names:
+    for layer in buckets:
         try:
-            idx = int(str(layer).split("_")[-1])
-            if idx == analysis_layer_idx:
-                analysis_layer = layer
-                break
+            layer_index = int(str(layer).split("_")[-1])
         except (ValueError, IndexError):
             continue
-
+        if layer_index == analysis_layer_idx:
+            if analysis_layer is not None:
+                raise InsufficientDataError(
+                    reason=f"Multiple activation names resolve to geometry layer {layer_index}"
+                )
+            analysis_layer = layer
     if analysis_layer is None:
-        analysis_layer = layer_names[len(layer_names) // 2]
+        raise InsufficientDataError(
+            reason=f"Missing configured geometry layer {analysis_layer_idx}"
+        )
 
-    # Get activations for analysis
     pos_list, neg_list = buckets[analysis_layer]
-    pos_tensor = torch.stack([t.detach().float().reshape(-1) for t in pos_list], dim=0)
-    neg_tensor = torch.stack([t.detach().float().reshape(-1) for t in neg_list], dim=0)
-
-    # Run geometry detection
-    geo_config = GeometryAnalysisConfig(
-        num_components=self.config.num_directions,
-        max_clusters=self.config.max_clusters,
-        manifold_neighbors=min(self.config.manifold_neighbors, len(pos_list) - COMBO_OFFSET),
+    pair_support = _validate_aligned_support(buckets, [analysis_layer])
+    pos_tensor = torch.stack(
+        [tensor.detach().float().reshape(-1) for tensor in pos_list], dim=0,
     )
-    geo_result = detect_geometry_structure(pos_tensor, neg_tensor, geo_config)
+    neg_tensor = torch.stack(
+        [tensor.detach().float().reshape(-1) for tensor in neg_list], dim=0,
+    )
+
+    combined_support = pair_support * 2
+    min_clusters = 2
+    max_supported_clusters = max(min_clusters, combined_support // 2)
+    configured_max_clusters = self.config.max_clusters
+    if configured_max_clusters is None:
+        max_clusters = max(
+            min_clusters,
+            min(self.config.num_directions, max_supported_clusters),
+        )
+    else:
+        if type(configured_max_clusters) is not int:
+            raise ValueError(
+                f"max_clusters must be an integer; got {configured_max_clusters!r}"
+            )
+        max_clusters = min(
+            max(configured_max_clusters, min_clusters), max_supported_clusters,
+        )
+    max_supported_neighbors = max(1, pair_support - 1)
+    configured_neighbors = self.config.manifold_neighbors
+    if configured_neighbors is None:
+        manifold_neighbors = max(
+            1, min(self.config.num_directions, max_supported_neighbors),
+        )
+    else:
+        if type(configured_neighbors) is not int:
+            raise ValueError(
+                "manifold_neighbors must be an integer; "
+                f"got {configured_neighbors!r}"
+            )
+        manifold_neighbors = min(
+            max(configured_neighbors, 1), max_supported_neighbors,
+        )
+
+    geo_config = GeometryAnalysisConfig(
+        num_components=max(
+            1, min(self.config.num_directions, hidden_dim, pair_support),
+        ),
+        optimization_steps=max(1, self.config.optimization_steps),
+        min_clusters=min_clusters,
+        max_clusters=max_clusters,
+        manifold_neighbors=manifold_neighbors,
+        kmeans_max_iterations=max(1, self.config.optimization_steps),
+    )
+    geo_result = detect_geometry_structure(
+        pos_tensor,
+        neg_tensor,
+        geo_config,
+        geometry_threshold_default=self.config.linear_threshold,
+        geometry_threshold_cluster=self.config.adapt_cone_threshold,
+        geometry_threshold_sparse=self.config.adapt_cone_threshold,
+        geometry_threshold_manifold=self.config.adapt_manifold_threshold,
+    )
 
     # Extract scores
     structure_scores = {
@@ -131,6 +231,7 @@ def _initialize_directions_impl(
     """Initialize direction manifold for each layer using PCA for diversity."""
     directions = {}
     K = num_directions if num_directions is not None else self.config.num_directions
+    _validate_aligned_support(buckets, layer_names)
 
     for layer in layer_names:
         pos_list, neg_list = buckets[layer]
@@ -176,7 +277,11 @@ def _initialize_directions_impl(
                         pca_idx = next_idx
                         candidate = F.normalize(pca_dirs[pca_idx], p=2, dim=0)
 
-                    dirs[i] = candidate
+                    dirs[i] = F.normalize(
+                        candidate + torch.randn_like(candidate) * self.config.create_noise_scale,
+                        p=2,
+                        dim=0,
+                    )
                     pca_idx += 1
                 else:
                     # Orthogonalize random vector against previous directions
@@ -185,7 +290,11 @@ def _initialize_directions_impl(
                     for j in range(i):
                         proj = (random_dir * dirs[j]).sum() * dirs[j]
                         random_dir = random_dir - proj
-                    dirs[i] = F.normalize(random_dir, p=2, dim=0)
+                    dirs[i] = F.normalize(
+                        random_dir + torch.randn_like(random_dir) * self.config.create_noise_scale,
+                        p=2,
+                        dim=0,
+                    )
         else:
             # Use Gram-Schmidt orthogonalization for all directions
             for i in range(1, K):
@@ -193,7 +302,11 @@ def _initialize_directions_impl(
                 for j in range(i):
                     proj = (random_dir * dirs[j]).sum() * dirs[j]
                     random_dir = random_dir - proj
-                dirs[i] = F.normalize(random_dir, p=2, dim=0)
+                dirs[i] = F.normalize(
+                    random_dir + torch.randn_like(random_dir) * self.config.create_noise_scale,
+                    p=2,
+                    dim=0,
+                )
 
         # Ensure all in same half-space as CAA
         for i in range(1, K):
@@ -210,6 +323,7 @@ def _prepare_data_tensors_impl(
     layer_names: List[LayerName],
 ) -> Dict[str, Dict[LayerName, torch.Tensor]]:
     """Prepare stacked tensors for training."""
+    _validate_aligned_support(buckets, layer_names)
     data = {"pos": {}, "neg": {}}
 
     for layer in layer_names:
@@ -220,14 +334,20 @@ def _prepare_data_tensors_impl(
     return data
 
 def _find_sensor_layer_impl(self, layer_names: List[LayerName]) -> LayerName:
-    """Find the sensor layer from available layers."""
+    """Resolve the exact configured sensor layer from available names."""
+    matches = []
     for layer in layer_names:
         try:
-            layer_idx = int(str(layer).split("_")[-1])
-            if layer_idx == self.config.sensor_layer:
-                return layer
+            layer_index = int(str(layer).split("_")[-1])
         except (ValueError, IndexError):
             continue
-
-    # Default to middle layer
-    return layer_names[len(layer_names) // 2]
+        if layer_index == self.config.sensor_layer:
+            matches.append(layer)
+    if len(matches) != 1:
+        raise InsufficientDataError(
+            reason=(
+                f"Expected exactly one configured sensor layer {self.config.sensor_layer}; "
+                f"found {len(matches)}"
+            )
+        )
+    return matches[0]

@@ -32,11 +32,11 @@ def _require_arg(args, attr_name):
 
 
 
-from wisent.core.utils.cli.steering.core.create_steering_helpers import (
+from wisent.core.utils.cli.commands.steering.core.creation.create_steering_helpers import (
     _create_tecza_steering_object,
     _create_tetno_steering_object,
 )
-from wisent.core.utils.cli.steering.core.create_steering_grom import (
+from wisent.core.utils.cli.commands.steering.core.creation.create_steering_grom import (
     _create_grom_steering_object,
 )
 
@@ -64,6 +64,68 @@ def _parse_layer_spec(spec: str, num_layers: int) -> set:
     return layers
 
 
+def _source_pair_identity(pair: dict, pair_index: int) -> str | int:
+    """Return the source identity used to align a pair across activation layers."""
+    if "pair_id" in pair:
+        identity = pair["pair_id"]
+    elif "stable_id" in pair:
+        identity = pair["stable_id"]
+    else:
+        identity = pair_index
+    if isinstance(identity, bool) or not isinstance(identity, (str, int)):
+        raise ValueError(
+            f"Pair at row {pair_index} has invalid pair identity {identity!r}; "
+            "pair_id/stable_id must be a non-empty string or integer"
+        )
+    if isinstance(identity, str) and not identity.strip():
+        raise ValueError(f"Pair at row {pair_index} has an empty pair identity")
+    return identity
+
+
+def _organize_layer_activations(pairs_list: list[dict], dtype) -> defaultdict:
+    """Group activations by layer while retaining every source pair identity."""
+    organized = defaultdict(
+        lambda: {
+            "positive": [],
+            "negative": [],
+            "positive_pair_ids": [],
+            "negative_pair_ids": [],
+        }
+    )
+    for pair_index, pair in enumerate(pairs_list):
+        pair_id = _source_pair_identity(pair, pair_index)
+        for side, response_key in (
+            ("positive", "positive_response"),
+            ("negative", "negative_response"),
+        ):
+            layers = pair[response_key].get("layers_activations", {})
+            for layer_str, activation_list in layers.items():
+                if activation_list is None:
+                    continue
+                organized[layer_str][side].append(
+                    torch.tensor(activation_list, dtype=dtype)
+                )
+                organized[layer_str][f"{side}_pair_ids"].append(pair_id)
+
+        # Load Q/K projections: Q from negative (source queries), K from
+        # positive (target keys). These method-specific arrays remain separate.
+        for layer_str, q_val in pair["negative_response"].get(
+            "q_proj_activations", {}
+        ).items():
+            if q_val is not None:
+                organized[layer_str].setdefault("q_proj_activations", []).append(
+                    torch.tensor(q_val, dtype=dtype)
+                )
+        for layer_str, k_val in pair["positive_response"].get(
+            "k_proj_activations", {}
+        ).items():
+            if k_val is not None:
+                organized[layer_str].setdefault("k_proj_activations", []).append(
+                    torch.tensor(k_val, dtype=dtype)
+                )
+    return organized
+
+
 def execute_create_steering_object(args):
     """Create a full steering object from enriched pairs."""
     
@@ -88,6 +150,15 @@ def execute_create_steering_object(args):
         token_aggregation = data.get('token_aggregation', 'unknown')
         from wisent.core.control.steering_methods.configs.optimal import get_optimal
         extraction_component = data.get('extraction_component', get_optimal("extraction_component"))
+        method_name = args.method.lower()
+        if (
+            method_name in {"tetno", "grom"}
+            and extraction_component != "residual_stream"
+        ):
+            raise ValueError(
+                f"{method_name.upper()} requires "
+                "extraction_component='residual_stream'"
+            )
         pairs_list = data.get('pairs', [])
         
         print(f"   ✓ Loaded {len(pairs_list)} pairs")
@@ -97,29 +168,7 @@ def execute_create_steering_object(args):
         # 2. Organize activations by layer
         print(f"\n📊 Organizing activations...")
         dtype = preferred_dtype()
-        layer_activations = defaultdict(lambda: {"positive": [], "negative": []})
-        
-        for pair in pairs_list:
-            pos_layers = pair['positive_response'].get('layers_activations', {})
-            for layer_str, activation_list in pos_layers.items():
-                if activation_list is not None:
-                    tensor = torch.tensor(activation_list, dtype=dtype)
-                    layer_activations[layer_str]["positive"].append(tensor)
-            
-            neg_layers = pair['negative_response'].get('layers_activations', {})
-            for layer_str, activation_list in neg_layers.items():
-                if activation_list is not None:
-                    tensor = torch.tensor(activation_list, dtype=dtype)
-                    layer_activations[layer_str]["negative"].append(tensor)
-            # Load Q/K projections: Q from negative (source queries), K from positive (target keys)
-            for layer_str, q_val in pair['negative_response'].get('q_proj_activations', {}).items():
-                if q_val is not None:
-                    layer_activations[layer_str].setdefault("q_proj_activations", []).append(
-                        torch.tensor(q_val, dtype=dtype))
-            for layer_str, k_val in pair['positive_response'].get('k_proj_activations', {}).items():
-                if k_val is not None:
-                    layer_activations[layer_str].setdefault("k_proj_activations", []).append(
-                        torch.tensor(k_val, dtype=dtype))
+        layer_activations = _organize_layer_activations(pairs_list, dtype)
         all_layers = sorted(layer_activations.keys(), key=lambda x: int(x))
         hidden_dim = layer_activations[all_layers[0]]["positive"][0].shape[-1]
 
@@ -163,7 +212,6 @@ def execute_create_steering_object(args):
         )
         
         # 4. Create steering object based on method
-        method_name = args.method.lower()
         print(f"\n🧠 Creating {method_name.upper()} steering object...")
         
         if method_name in ('caa', 'ostrze', 'mlp'):
@@ -175,11 +223,8 @@ def execute_create_steering_object(args):
                 metadata, layer_activations, available_layers, args
             )
         elif method_name == 'tetno':
-            from wisent.core.utils.config_tools.constants import SEARCH_INIT_NEGATIVE, SCORE_RANGE_MIN
             steering_obj = _create_tetno_steering_object(
                 metadata, layer_activations, available_layers, args,
-                threshold_search_init_value=SEARCH_INIT_NEGATIVE,
-                default_score=SCORE_RANGE_MIN,
             )
         elif method_name == 'grom':
             _r = _require_arg

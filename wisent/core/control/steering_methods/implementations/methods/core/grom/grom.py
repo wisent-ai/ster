@@ -73,9 +73,11 @@ _GROM_REQUIRED_KWARGS = [
     "caa_alignment_weight", "gate_dim_min", "gate_dim_max",
     "gate_dim_divisor", "intensity_dim_min", "intensity_dim_max",
     "intensity_dim_divisor", "gate_shrink_factor",
+    "create_noise_scale", "create_gate_threshold",
 ]
 
 
+@dataclass
 class GROMResult:
     """Result containing all GROM components."""
     
@@ -96,6 +98,9 @@ class GROMResult:
     # Layer mapping
     layer_order: List[LayerName]
     """Ordered list of layer names (for intensity network output indexing)."""
+
+    sensor_layer: LayerName
+    """Exact layer supplying the gate and intensity network input."""
     
     # Trained hyperparameters (stored from training config)
     gate_temperature: float

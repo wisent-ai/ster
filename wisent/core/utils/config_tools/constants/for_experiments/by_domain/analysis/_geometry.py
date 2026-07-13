@@ -7,6 +7,24 @@ from wisent.core.utils.config_tools.constants.for_experiments.by_domain.analysis
 
 GEOMETRY_VARIANCE_EXPLAINED_90PCT = 0.9  # "90%" in "dims for 90% variance"
 
+# Canonical defaults for the public geometry-detection API.
+GEOMETRY_THRESHOLD_DEFAULT = 0.5
+GEOMETRY_THRESHOLD_CLUSTER = 0.6
+GEOMETRY_THRESHOLD_SPARSE = 0.7
+GEOMETRY_THRESHOLD_MANIFOLD = 0.3
+
+GEOMETRY_DEFAULT_NUM_COMPONENTS = 5
+GEOMETRY_DEFAULT_OPTIMIZATION_STEPS = 100
+GEOMETRY_DEFAULT_MIN_CLUSTERS = 2
+GEOMETRY_DEFAULT_MAX_CLUSTERS = 5
+GEOMETRY_DEFAULT_KMEANS_MAX_ITERATIONS = 50
+GEOMETRY_DEFAULT_MANIFOLD_NEIGHBORS = 10
+
+# Fixed support references for sample-size confidence. These deliberately do
+# not depend on the support observed by a particular detector invocation.
+GEOMETRY_CONFIDENCE_EXPECTED_PAIR_SUPPORT = 5
+GEOMETRY_CONFIDENCE_EXPECTED_SAMPLE_SUPPORT = 2 * GEOMETRY_CONFIDENCE_EXPECTED_PAIR_SUPPORT
+
 # Category B: min_cloud_points (minimum for centroid + spread, need >= 3 for std)
 GEOMETRY_MIN_CLOUD_POINTS = 3
 

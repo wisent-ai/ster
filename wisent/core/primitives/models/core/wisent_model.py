@@ -6,6 +6,7 @@ import logging
 import random
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import torch
@@ -76,13 +77,37 @@ def _ensure_qwen_chat_template(tokenizer, model_name: str) -> None:
         tokenizer.chat_template = _QWEN_CHAT_TEMPLATE
 
 
-def _prefer_fast_qwen_tokenizer(tokenizer, model_name: str):
+def _prefer_fast_qwen_tokenizer(
+    tokenizer,
+    model_name: str,
+    tokenizer_revision: str | None = None,
+):
     if "qwen" not in model_name.lower() or type(tokenizer).__name__.endswith("Fast"):
         return tokenizer
     try:
-        from transformers import Qwen2TokenizerFast; return _load_cache_first(Qwen2TokenizerFast.from_pretrained, model_name, trust_remote_code=True)
+        from transformers import Qwen2TokenizerFast
+
+        return _load_cache_first(
+            Qwen2TokenizerFast.from_pretrained,
+            model_name,
+            trust_remote_code=True,
+            revision=tokenizer_revision,
+        )
     except Exception:
         return tokenizer
+
+
+def _validate_immutable_revision(revision: str | None, artifact: str) -> None:
+    if revision is None:
+        return
+    if (
+        not isinstance(revision, str)
+        or len(revision) != 40
+        or any(c not in "0123456789abcdef" for c in revision)
+    ):
+        raise ValueError(
+            f"{artifact} revision must be an immutable lowercase 40-character commit SHA"
+        )
 
 class WisentModel:
     """
@@ -116,6 +141,7 @@ class WisentModel:
             hf_model: AutoModelForCausalLM | None = None,
             *,
             revision: str | None = None,
+            tokenizer_revision: str | None = None,
         ):
         """
         Initialize the wrapper (model + tokenizer + default steering plan).
@@ -132,10 +158,25 @@ class WisentModel:
             hf_model:
                 optional preloaded model (skips from_pretrained if provided).
             revision:
-                optional immutable Hugging Face commit used for both model and tokenizer.
+                optional immutable Hugging Face commit for the model. For legacy
+                callers, this is also used for the tokenizer when
+                ``tokenizer_revision`` is omitted or None.
+            tokenizer_revision:
+                optional independent immutable Hugging Face tokenizer commit.
         """
         self.model_name = model_name
         self.device = resolve_default_device() if device is None or device == "auto" else device
+        requested_tokenizer_revision = (
+            tokenizer_revision if tokenizer_revision is not None else revision
+        )
+        _validate_immutable_revision(revision, "model")
+        _validate_immutable_revision(requested_tokenizer_revision, "tokenizer")
+        if (
+            revision is not None or requested_tokenizer_revision is not None
+        ) and Path(model_name).exists():
+            raise ValueError(
+                "immutable model/tokenizer revisions cannot be verified for a local repository"
+            )
 
         # Determine appropriate dtype and settings for the device
         load_kwargs = {
@@ -171,35 +212,46 @@ class WisentModel:
             model_name,
             use_fast=True,
             trust_remote_code=True,
-            revision=revision,
+            revision=requested_tokenizer_revision,
         )
-        self.tokenizer = _prefer_fast_qwen_tokenizer(self.tokenizer, model_name)
+        self.tokenizer = _prefer_fast_qwen_tokenizer(
+            self.tokenizer,
+            model_name,
+            requested_tokenizer_revision,
+        )
         self.requested_revision = revision
+        self.requested_model_revision = revision
+        self.requested_tokenizer_revision = requested_tokenizer_revision
         self.resolved_model_revision = getattr(self.hf_model.config, "_commit_hash", None)
         tokenizer_kwargs = getattr(self.tokenizer, "init_kwargs", {})
         self.resolved_tokenizer_revision = (
             getattr(self.tokenizer, "_commit_hash", None)
             or tokenizer_kwargs.get("_commit_hash")
         )
-        if revision is not None and self.resolved_tokenizer_revision is None:
+        if (
+            requested_tokenizer_revision is not None
+            and self.resolved_tokenizer_revision is None
+        ):
             tokenizer_config = transformers_hub.cached_file(
                 model_name,
                 "tokenizer_config.json",
-                revision=revision,
+                revision=requested_tokenizer_revision,
             )
             self.resolved_tokenizer_revision = transformers_hub.extract_commit_hash(
                 tokenizer_config,
                 None,
             )
-        if revision is not None:
-            if self.resolved_model_revision != revision:
-                raise ValueError(
-                    "loaded model revision does not match the requested immutable revision"
-                )
-            if self.resolved_tokenizer_revision != revision:
-                raise ValueError(
-                    "loaded tokenizer revision does not match the requested immutable revision"
-                )
+        if revision is not None and self.resolved_model_revision != revision:
+            raise ValueError(
+                "loaded model revision does not match the requested immutable model revision"
+            )
+        if (
+            requested_tokenizer_revision is not None
+            and self.resolved_tokenizer_revision != requested_tokenizer_revision
+        ):
+            raise ValueError(
+                "loaded tokenizer revision does not match the requested immutable tokenizer revision"
+            )
         _ensure_qwen_chat_template(self.tokenizer, model_name)
 
         if not self._is_chat_tokenizer():
@@ -311,6 +363,10 @@ class WisentModel:
 
     def detach(self) -> None:
         """Remove all registered steering hooks; model returns to unsteered behavior."""
+        runtime_hooks = getattr(self, "_active_steering_runtime", None)
+        if runtime_hooks is not None:
+            runtime_hooks.remove()
+            self._active_steering_runtime = None
         self._hook_group.remove_all()
 
     @contextmanager

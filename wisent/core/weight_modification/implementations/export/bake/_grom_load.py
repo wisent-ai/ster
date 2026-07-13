@@ -200,8 +200,12 @@ def load_grom_model(
         grom_result.predict_gate = predict_gate
         grom_result.predict_intensity = predict_intensity
         
-        # Add metadata dict for GROMRuntimeHooks compatibility
-        sensor_layer = grom_data.get("sensor_layer", grom_result.layer_order[len(grom_result.layer_order)//2])
+        # Sensor identity is independent from direction-bearing layer_order.
+        if "sensor_layer" not in grom_data:
+            raise InsufficientDataError(
+                reason="sensor_layer missing from saved GROM data. Re-export the model."
+            )
+        sensor_layer = grom_data["sensor_layer"]
         grom_result.metadata = {"sensor_layer": sensor_layer}
         grom_result.sensor_layer = sensor_layer
         

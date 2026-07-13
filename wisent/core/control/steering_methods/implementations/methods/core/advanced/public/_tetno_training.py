@@ -7,6 +7,7 @@ from wisent.core.primitives.model_interface.core.activations.core.atoms import L
 from wisent.core.primitives.contrastive_pairs.core.set import ContrastivePairSet
 from wisent.core.control.steering_methods.methods.advanced._tetno_types import TETNOConfig, TETNOResult
 from wisent.core.utils.config_tools.constants import RECURSION_INITIAL_DEPTH
+from wisent.core.utils.infra_tools.errors import InsufficientDataError
 
 class TETNOTrainingMixin:
     """Mixin: behavior and condition vector training."""
@@ -15,46 +16,45 @@ class TETNOTrainingMixin:
         self,
         pair_set: ContrastivePairSet,
     ) -> Dict[LayerName, torch.Tensor]:
-        """Train behavior vectors using CAA for each steering layer."""
+        """Train one CAA behavior vector for every configured steering layer."""
         buckets = self._collect_from_set(pair_set)
-        
-        behavior_vectors: Dict[LayerName, torch.Tensor] = {}
-        steering_layer_names = set()
-        
-        # Map layer indices to layer names
-        for layer_name in buckets.keys():
+        by_index: Dict[int, LayerName] = {}
+        for layer_name in buckets:
             try:
-                layer_idx = int(layer_name.split("_")[-1]) if "_" in str(layer_name) else int(layer_name)
-                if layer_idx in self.config.steering_layers:
-                    steering_layer_names.add(layer_name)
-            except (ValueError, AttributeError):
-                # If we can't parse, include all layers
-                steering_layer_names.add(layer_name)
-        
-        # If no matching layers found, use all available
-        if not steering_layer_names:
-            steering_layer_names = set(buckets.keys())
-        
-        for layer_name in steering_layer_names:
-            if layer_name not in buckets:
-                continue
-                
+                layer_index = int(str(layer_name).split("_")[-1])
+            except (ValueError, IndexError) as exc:
+                raise InsufficientDataError(
+                    reason=f"Unparseable activation layer name: {layer_name!r}"
+                ) from exc
+            if layer_index in by_index:
+                raise InsufficientDataError(
+                    reason=f"Multiple activation names resolve to layer {layer_index}"
+                )
+            by_index[layer_index] = layer_name
+
+        behavior_vectors: Dict[LayerName, torch.Tensor] = {}
+        for layer_index in self.config.steering_layers:
+            if layer_index not in by_index:
+                raise InsufficientDataError(
+                    reason=f"Missing configured steering layer {layer_index}"
+                )
+            layer_name = by_index[layer_index]
             pos_list, neg_list = buckets[layer_name]
             if not pos_list or not neg_list:
-                continue
-            
-            # Stack activations
-            pos_tensor = torch.stack([t.detach().float().reshape(-1) for t in pos_list], dim=0)
-            neg_tensor = torch.stack([t.detach().float().reshape(-1) for t in neg_list], dim=0)
-            
-            # CAA: mean difference
+                raise InsufficientDataError(
+                    reason=f"Empty activations at steering layer {layer_index}"
+                )
+
+            pos_tensor = torch.stack(
+                [tensor.detach().float().reshape(-1) for tensor in pos_list], dim=0,
+            )
+            neg_tensor = torch.stack(
+                [tensor.detach().float().reshape(-1) for tensor in neg_list], dim=0,
+            )
             behavior_vec = pos_tensor.mean(dim=0) - neg_tensor.mean(dim=0)
-            
             if self.config.normalize:
                 behavior_vec = F.normalize(behavior_vec, p=2, dim=0)
-            
             behavior_vectors[layer_name] = behavior_vec
-            
             self._training_logs.append({
                 "phase": "behavior",
                 "layer": str(layer_name),
@@ -62,8 +62,8 @@ class TETNOTrainingMixin:
                 "neg_samples": len(neg_list),
                 "vector_norm": behavior_vec.norm().item(),
             })
-        
         return behavior_vectors
+
     
     def _train_condition_vector(
         self,
@@ -80,23 +80,22 @@ class TETNOTrainingMixin:
         """
         buckets = self._collect_from_set(pair_set)
         
-        # Find sensor layer
         sensor_layer_name = None
-        for layer_name in buckets.keys():
+        for layer_name in buckets:
             try:
-                layer_idx = int(layer_name.split("_")[-1]) if "_" in str(layer_name) else int(layer_name)
-                if layer_idx == self.config.sensor_layer:
-                    sensor_layer_name = layer_name
-                    break
-            except (ValueError, AttributeError):
+                layer_index = int(str(layer_name).split("_")[-1])
+            except (ValueError, IndexError):
                 continue
-        
-        # Fallback to first available layer if sensor not found
+            if layer_index == self.config.sensor_layer:
+                if sensor_layer_name is not None:
+                    raise InsufficientDataError(
+                        reason=f"Multiple activation names resolve to sensor layer {layer_index}"
+                    )
+                sensor_layer_name = layer_name
         if sensor_layer_name is None:
-            sensor_layer_name = list(buckets.keys())[0] if buckets else None
-        
-        if sensor_layer_name is None:
-            raise InsufficientDataError(reason="No activations found for condition training")
+            raise InsufficientDataError(
+                reason=f"Missing configured sensor layer {self.config.sensor_layer}"
+            )
         
         pos_list, neg_list = buckets[sensor_layer_name]
         if not pos_list or not neg_list:

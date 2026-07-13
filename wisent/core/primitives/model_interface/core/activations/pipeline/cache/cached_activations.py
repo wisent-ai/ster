@@ -43,6 +43,29 @@ def get_strategy_text_family(strategy: ExtractionStrategy) -> str:
         return strategy.value
 
 
+def validate_revision_identity(
+    model_revision: str | None,
+    tokenizer_revision: str | None,
+) -> None:
+    """Require either an unpinned identity or two exact commit SHAs."""
+    if model_revision is None and tokenizer_revision is None:
+        return
+    for name, revision in (
+        ("model_revision", model_revision),
+        ("tokenizer_revision", tokenizer_revision),
+    ):
+        if (
+            revision is None
+            or not isinstance(revision, str)
+            or len(revision) != 40
+            or any(c not in "0123456789abcdef" for c in revision)
+        ):
+            raise ValueError(
+                "activation cache revision identity requires a complete pair of "
+                f"lowercase 40-character commit SHAs; invalid {name}"
+            )
+
+
 @dataclass
 class CachedActivations:
     """
@@ -55,10 +78,15 @@ class CachedActivations:
     strategy: ExtractionStrategy
     model_name: str
     num_layers: int
+    model_revision: str | None = None
+    tokenizer_revision: str | None = None
 
     pair_activations: List[Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]] = field(default_factory=list)
     num_pairs: int = 0
     hidden_size: int = 0
+
+    def __post_init__(self) -> None:
+        validate_revision_identity(self.model_revision, self.tokenizer_revision)
 
     def add_pair(self, positive: LayerActivations, negative: LayerActivations) -> None:
         """Add activations for a contrastive pair."""
@@ -86,6 +114,8 @@ class CachedActivations:
             strategy=self.strategy,
             model_name=self.model_name,
             num_layers=len(layers),
+            model_revision=self.model_revision,
+            tokenizer_revision=self.tokenizer_revision,
             hidden_size=self.hidden_size,
         )
         result.pair_activations = new_pairs
@@ -149,6 +179,8 @@ class CachedActivations:
             strategy=self.strategy,
             model_name=self.model_name,
             num_layers=self.num_layers,
+            model_revision=self.model_revision,
+            tokenizer_revision=self.tokenizer_revision,
             hidden_size=self.hidden_size,
         )
         result.pair_activations = new_pairs

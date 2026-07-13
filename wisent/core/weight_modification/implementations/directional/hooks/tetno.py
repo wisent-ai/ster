@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
-from typing import TYPE_CHECKING
-from wisent.core.utils.infra_tools.errors import MissingParameterError
-from wisent.core.utils.cli.cli_logger import setup_logger, bind
+from typing import TYPE_CHECKING, Callable
+
 from wisent.core.utils.cli.cli_logger import setup_logger, bind
 
 if TYPE_CHECKING:
@@ -18,97 +16,165 @@ _LOG = setup_logger(__name__)
 class TETNORuntimeHooks:
     """Runtime hooks for TETNO conditional steering."""
 
-    def __init__(self, model: Module, tetno_result, base_strength: float, gate_temperature: float) -> None:
+    def __init__(
+        self,
+        model: Module,
+        tetno_result,
+        base_strength: float,
+        gate_temperature: float,
+        strength_provider: Callable[[torch.Tensor], float] | None = None,
+    ) -> None:
         self.model = model
         self.tetno_result = tetno_result
         self.base_strength = base_strength
         self.gate_temperature = gate_temperature
+        self.strength_provider = strength_provider
         self._hooks = []
         self._current_gate = None
         self._sensor_activation = None
-        if hasattr(model, "model"):
+        self._current_strategy_strength = 1.0
+        if hasattr(model, "model") and hasattr(model.model, "layers"):
             self._layers = model.model.layers
-        elif hasattr(model, "transformer"):
+        elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
             self._layers = model.transformer.h
-        else:
+        elif hasattr(model, "layers"):
             self._layers = model.layers
-        sensor_layer = tetno_result.metadata.get("sensor_layer") if hasattr(tetno_result, "metadata") else None
-        if sensor_layer is None:
-            layer_indices = []
-            for layer_name in tetno_result.behavior_vectors.keys():
-                try:
-                    idx = int(str(layer_name).split("_")[-1])
-                    layer_indices.append(idx)
-                except (ValueError, IndexError):
-                    pass
-            sensor_layer = layer_indices[len(layer_indices)//2] if layer_indices else None
-        self._sensor_layer_idx = sensor_layer
-        if self._sensor_layer_idx is None:
-            raise MissingParameterError(params=["sensor_layer"], context="TETNO hooks: no layer indices found in behavior vectors")
-        self._layer_name_to_idx = {}
-        for layer_name in tetno_result.behavior_vectors.keys():
-            try:
-                idx = int(str(layer_name).split("_")[-1])
-                self._layer_name_to_idx[layer_name] = idx
-            except (ValueError, IndexError):
-                pass
+        else:
+            raise ValueError("TETNO model has no supported decoder layers")
+
+        self._layer_name_to_idx = {
+            layer_name: self._model_index(layer_name, "steering layer")
+            for layer_name in tetno_result.behavior_vectors
+        }
+        sensor_value = getattr(tetno_result, "sensor_layer", None)
+        metadata = getattr(tetno_result, "metadata", None)
+        metadata_sensor = (
+            metadata.get("sensor_layer")
+            if isinstance(metadata, dict)
+            else getattr(metadata, "sensor_layer", None)
+        )
+        metadata_component = (
+            metadata.get("extraction_component")
+            if isinstance(metadata, dict)
+            else getattr(metadata, "extraction_component", None)
+        )
+        if metadata_component != "residual_stream":
+            raise ValueError(
+                "TETNO requires extraction_component='residual_stream'"
+            )
+        if sensor_value is None:
+            sensor_value = metadata_sensor
+        elif metadata_sensor is not None and self._layer_number(sensor_value) != self._layer_number(metadata_sensor):
+            raise ValueError("TETNO sensor_layer conflicts with metadata.sensor_layer")
+        if sensor_value is None:
+            raise ValueError("TETNO sensor_layer is required")
+        self._sensor_layer_idx = self._model_index(sensor_value, "sensor_layer")
+        if (
+            self._layer_name_to_idx
+            and self._sensor_layer_idx >= min(self._layer_name_to_idx.values())
+        ):
+            raise ValueError(
+                "TETNO sensor_layer must be strictly earlier than every steering layer"
+            )
+
+    @staticmethod
+    def _layer_number(layer) -> int:
+        try:
+            number = int(str(layer).split("_")[-1])
+        except (TypeError, ValueError, IndexError) as exc:
+            raise ValueError(f"Invalid TETNO layer identifier: {layer!r}") from exc
+        if number <= 0:
+            raise ValueError(f"TETNO sensor_layer/steering layer must be >= 1, got {number}")
+        return number
+
+    def _model_index(self, layer, label: str) -> int:
+        number = self._layer_number(layer)
+        if number > len(self._layers):
+            raise ValueError(
+                f"TETNO {label} {number} exceeds model layer count {len(self._layers)}"
+            )
+        return number - 1
 
     def install(self) -> None:
-        """Install forward hooks on the model."""
+        """Install sensor first, then steering hooks in causal layer order."""
         self.remove()
-        if self._sensor_layer_idx < len(self._layers):
-            sensor_hook = self._layers[self._sensor_layer_idx].register_forward_hook(self._sensor_hook)
-            self._hooks.append(sensor_hook)
-        for layer_name in self.tetno_result.behavior_vectors.keys():
-            layer_idx = self._layer_name_to_idx.get(layer_name)
-            if layer_idx is not None and layer_idx < len(self._layers):
-                steering_hook = self._layers[layer_idx].register_forward_hook(
-                    lambda module, input, output, ln=layer_name: self._steering_hook(module, input, output, ln))
-                self._hooks.append(steering_hook)
+        self._hooks.append(
+            self._layers[self._sensor_layer_idx].register_forward_hook(self._sensor_hook)
+        )
+        for layer_name in self.tetno_result.behavior_vectors:
+            layer_idx = self._layer_name_to_idx[layer_name]
+            steering_hook = self._layers[layer_idx].register_forward_hook(
+                lambda module, input, output, ln=layer_name: self._steering_hook(
+                    module, input, output, ln
+                )
+            )
+            self._hooks.append(steering_hook)
+
+    def begin_generation(self) -> None:
+        """Reset per-request gate and absolute generated-token schedule state."""
+        self._current_gate = None
+        self._sensor_activation = None
+        self._current_strategy_strength = 1.0
+        reset = getattr(self.strength_provider, "reset", None)
+        if callable(reset):
+            reset()
 
     def remove(self) -> None:
         """Remove all installed hooks."""
         for hook in self._hooks:
             hook.remove()
         self._hooks = []
-        self._current_gate = None
-        self._sensor_activation = None
+        self.begin_generation()
 
     def _sensor_hook(self, module, input, output):
-        """Capture sensor layer activation and compute gate."""
+        """Capture the exact configured sensor activation and compute the gate."""
         hidden_states = output[0] if isinstance(output, tuple) else output
         sensor_hidden = hidden_states[:, -1, :] if hidden_states.dim() == 3 else hidden_states
         self._sensor_activation = sensor_hidden
-        if hasattr(self.tetno_result, 'compute_gate'):
-            self._current_gate = self.tetno_result.compute_gate(sensor_hidden, self.gate_temperature)
+        self._current_strategy_strength = (
+            self.strength_provider(hidden_states)
+            if self.strength_provider is not None
+            else 1.0
+        )
+        if hasattr(self.tetno_result, "threshold"):
+            self._current_gate = self.tetno_result.compute_gate(sensor_hidden)
+        elif hasattr(self.tetno_result, "optimal_threshold"):
+            self._current_gate = self.tetno_result.compute_gate(
+                sensor_hidden, self.gate_temperature
+            )
         else:
-            h_norm = F.normalize(sensor_hidden, p=2, dim=-1)
-            c_norm = F.normalize(self.tetno_result.condition_vector.to(sensor_hidden.device), p=2, dim=-1)
-            similarity = (h_norm * c_norm).sum(dim=-1)
-            self._current_gate = torch.sigmoid((similarity - self.tetno_result.optimal_threshold) / self.gate_temperature)
+            raise ValueError("TETNO result has no persisted gate threshold")
         return output
 
     def _steering_hook(self, module, input, output, layer_name):
-        """Apply conditional steering to layer output."""
+        """Apply conditional steering using the previously computed sensor gate."""
         if self._current_gate is None:
             return output
         hidden_states = output[0] if isinstance(output, tuple) else output
         rest = output[1:] if isinstance(output, tuple) else None
-        behavior_vector = self.tetno_result.behavior_vectors.get(layer_name)
-        if behavior_vector is None:
-            return output
-        behavior_vector = behavior_vector.to(hidden_states.device)
+        behavior_vector = self.tetno_result.behavior_vectors[layer_name].to(
+            device=hidden_states.device, dtype=hidden_states.dtype
+        )
         if layer_name not in self.tetno_result.layer_scales:
             raise KeyError(f"No layer_scale for '{layer_name}' in TETNO result")
         layer_scale = self.tetno_result.layer_scales[layer_name]
-        gate = self._current_gate.to(hidden_states.device)
+        gate = self._current_gate.to(
+            device=hidden_states.device, dtype=hidden_states.dtype
+        )
+        strategy_strength = self._current_strategy_strength
         if hidden_states.dim() == 3:
-            gate = gate.view(-1, 1, 1)
+            gate = gate.reshape(-1, 1, 1)
             behavior_vector = behavior_vector.view(1, 1, -1)
         elif hidden_states.dim() == 2:
-            gate = gate.view(-1, 1)
+            gate = gate.reshape(-1, 1)
             behavior_vector = behavior_vector.view(1, -1)
-        steering_delta = gate * self.base_strength * layer_scale * behavior_vector
+        steering_delta = (
+            gate
+            * self.base_strength
+            * strategy_strength
+            * layer_scale
+            * behavior_vector
+        )
         hidden_states = hidden_states + steering_delta
         return (hidden_states,) + rest if rest is not None else hidden_states
 

@@ -120,6 +120,10 @@ def _generate(
         prompt_length, self.tokenizer,
     )
 
+    runtime_hooks = getattr(self, "_active_steering_runtime", None)
+    if runtime_hooks is not None:
+        runtime_hooks.begin_generation()
+
     # KV cache steering: prefill -> modify cache -> generate from cache
     _ec = getattr(getattr(steering_object, 'metadata', None), 'extraction_component', None)
     if steering_object is not None and _ec == "kv_cache":

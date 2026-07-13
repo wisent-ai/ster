@@ -14,6 +14,8 @@ from wisent.core import constants as _C
 from wisent.core.utils.config_tools.constants import (
     COMBO_OFFSET,
     RECURSION_INITIAL_DEPTH,
+    HASH_PREFIX_LEN,
+    ARCHITECTURE_MODULE_LIMIT_DEFAULT,
 )
 from wisent.examples.scripts.intervention_validation_helpers import (
     gcs_upload_file,
@@ -106,7 +108,7 @@ def run_intervention_validation(
 
     model_prefix = model_name.replace('/', '_')
     cache_dir = f"/tmp/wisent_intervention_cache_{model_prefix}"
-    cache = ActivationCache(cache_dir)
+    cache = ActivationCache(cache_dir, hash_digest_prefix=HASH_PREFIX_LEN)
 
     validation_results = ValidationResults(model=model_name)
 
@@ -162,6 +164,7 @@ def run_intervention_validation(
                 report_interval=report_interval,
                 cache=cache,
                 show_progress=False,
+                architecture_module_limit=ARCHITECTURE_MODULE_LIMIT_DEFAULT,
             )
         except Exception as e:
             print(f"  ERROR extracting activations: {e}")

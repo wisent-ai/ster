@@ -19,7 +19,7 @@ try:
 except ImportError:
     HAS_SKLEARN = False
 
-from wisent.core.utils.config_tools.constants import VIZ_PLOT_DPI, VIZ_FONTSIZE_SUPTITLE, VIZ_FONTSIZE_SUBTITLE, VIZ_ALPHA_LIGHT, VIZ_ALPHA_HALF, VIZ_LINEWIDTH_NORMAL, SEPARATOR_WIDTH_WIDE, NONSENSE_N_PAIRS
+from wisent.core.utils.config_tools.constants import VIZ_PLOT_DPI, VIZ_FONTSIZE_SUPTITLE, VIZ_FONTSIZE_SUBTITLE, VIZ_ALPHA_LIGHT, VIZ_ALPHA_HALF, VIZ_LINEWIDTH_NORMAL, SEPARATOR_WIDTH_WIDE, NONSENSE_N_PAIRS, HASH_PREFIX_LEN, ARCHITECTURE_MODULE_LIMIT_DEFAULT
 from wisent.examples.scripts.visualization_gallery_helpers import (
     gcs_upload_file,
     load_diagnosis_results,
@@ -64,7 +64,7 @@ def create_tsne_gallery(
     fig.suptitle(f't-SNE Visualization Gallery\n{model_name}', fontsize=VIZ_FONTSIZE_SUPTITLE, fontweight='bold')
     
     cache_dir = f"/tmp/wisent_viz_cache_{model_name.replace('/', '_')}"
-    cache = ActivationCache(cache_dir)
+    cache = ActivationCache(cache_dir, hash_digest_prefix=HASH_PREFIX_LEN)
     tm = TaskManager()
     strategy = ExtractionStrategy.default()
     
@@ -100,6 +100,7 @@ def create_tsne_gallery(
                     report_interval=report_interval,
                     cache=cache,
                     show_progress=False,
+                    architecture_module_limit=ARCHITECTURE_MODULE_LIMIT_DEFAULT,
                 )
                 
                 # Use middle layer

@@ -95,6 +95,8 @@ def _train_multi_direction_method(
                 intensity_dim_max=args.grom_intensity_dim_max,
                 intensity_dim_divisor=args.grom_intensity_dim_divisor,
                 gate_shrink_factor=args.grom_gate_shrink_factor,
+                create_noise_scale=args.grom_create_noise_scale,
+                create_gate_threshold=args.grom_create_gate_threshold,
             )
             trainer = GROMMethod(config=config, log_interval=args.grom_log_interval)
             result = trainer.train_grom(pair_set)

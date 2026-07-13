@@ -21,6 +21,95 @@ from wisent.core.utils.services.optimization.core.parameters import (
 )
 
 
+def _validate_optuna_resume_distributions(study, space: dict[str, Param]) -> None:
+    """Reject persisted distributions that do not exactly match current schemas."""
+    from optuna.distributions import CategoricalDistribution, IntDistribution
+
+    qlognormal_params = {
+        name: param
+        for name, param in space.items()
+        if isinstance(param, IntParam) and param.distribution == "qlognormal"
+    }
+    if not qlognormal_params:
+        return
+
+    categorical_supports = {
+        name: _qlognormal_categorical_support(name, param)
+        for name, param in qlognormal_params.items()
+        if param.q != QUANTIZATION_STEP_DEFAULT
+    }
+    for trial in study.trials:
+        for name in qlognormal_params.keys() & trial.distributions.keys():
+            param = qlognormal_params[name]
+            distribution = trial.distributions[name]
+            if (
+                param.q != QUANTIZATION_STEP_DEFAULT
+                and isinstance(distribution, IntDistribution)
+            ):
+                incompatibility = (
+                    "the pre-categorical IntDistribution schema, but qlognormal "
+                    "with q > 1 now requires CategoricalDistribution"
+                )
+            elif param.q != QUANTIZATION_STEP_DEFAULT:
+                expected = categorical_supports[name]
+                persisted = (
+                    list(distribution.choices)
+                    if isinstance(distribution, CategoricalDistribution)
+                    else None
+                )
+                exact_match = persisted is not None and len(persisted) == len(expected)
+                if exact_match:
+                    exact_match = all(
+                        type(old) is type(new) and old == new
+                        for old, new in zip(persisted, expected)
+                    )
+                if exact_match:
+                    continue
+                incompatibility = (
+                    f"categorical choices {persisted!r}, but the newly computed "
+                    f"qlognormal support is {expected!r}"
+                )
+            elif (
+                isinstance(distribution, IntDistribution)
+                and not distribution.log
+            ):
+                incompatibility = (
+                    "the legacy IntDistribution(log=False) schema, but qlognormal "
+                    "with q=1 now requires IntDistribution(log=True)"
+                )
+            else:
+                continue
+            raise ValueError(
+                f"Optuna study {study.study_name!r} stores parameter {name!r} with "
+                f"{incompatibility}. Resume is unsafe because the search support "
+                "changed. Choose a new study_name, or explicitly remove/migrate "
+                "the persisted study before retrying."
+            )
+
+
+def _qlognormal_categorical_support(name: str, p: IntParam) -> list[int]:
+    """Return the exact positive qlognormal support used by Optuna."""
+    spread = OPTUNA_SIGMA_SPREAD_FACTOR
+    raw_lo = math.exp(p.mu - spread * p.sigma)
+    raw_hi = math.exp(p.mu + spread * p.sigma)
+    lo_units = raw_lo / p.q
+    hi_units = raw_hi / p.q
+    lo_nearest = round(lo_units)
+    hi_nearest = round(hi_units)
+    if abs(lo_units - lo_nearest) <= 4 * math.ulp(lo_units):
+        lo_units = float(lo_nearest)
+    if abs(hi_units - hi_nearest) <= 4 * math.ulp(hi_units):
+        hi_units = float(hi_nearest)
+    quantized_lo = math.ceil(lo_units) * p.q
+    quantized_hi = math.floor(hi_units) * p.q
+    if quantized_lo > quantized_hi:
+        raise ValueError(
+            f"qlognormal parameter '{name}' has no positive multiple of q={p.q} "
+            f"inside [{raw_lo}, {raw_hi}]"
+        )
+    return list(range(int(quantized_lo), int(quantized_hi) + p.q, p.q))
+
+
 def run_hyperopt(
     objective_fn: Callable[[dict[str, Any]], float],
     space: dict[str, Param],
@@ -154,6 +243,7 @@ def run_optuna_functional(
         storage=storage, study_name=study_name,
         load_if_exists=bool(storage and study_name and load_if_exists),
     )
+    _validate_optuna_resume_distributions(study, space)
     prior_count = len(study.trials)
     target = n_trials + extra_trials
     if prior_count >= target:
@@ -265,12 +355,30 @@ def _int_to_optuna(trial, name: str, p: IntParam):
         hi = int(p.mu + spread * p.sigma)
         return trial.suggest_int(name, lo, hi, step=p.q)
     if d == "qlognormal":
-        lo = max(
-            QUANTIZATION_STEP_DEFAULT,
-            int(math.exp(p.mu - spread * p.sigma)),
+        if p.q != QUANTIZATION_STEP_DEFAULT:
+            return trial.suggest_categorical(
+                name, _qlognormal_categorical_support(name, p),
+            )
+        raw_lo = math.exp(p.mu - spread * p.sigma)
+        raw_hi = math.exp(p.mu + spread * p.sigma)
+        lo_units = raw_lo / p.q
+        hi_units = raw_hi / p.q
+        lo_nearest = round(lo_units)
+        hi_nearest = round(hi_units)
+        if abs(lo_units - lo_nearest) <= 4 * math.ulp(lo_units):
+            lo_units = float(lo_nearest)
+        if abs(hi_units - hi_nearest) <= 4 * math.ulp(hi_units):
+            hi_units = float(hi_nearest)
+        quantized_lo = math.ceil(lo_units) * p.q
+        quantized_hi = math.floor(hi_units) * p.q
+        if quantized_lo > quantized_hi:
+            raise ValueError(
+                f"qlognormal parameter '{name}' has no positive multiple of q={p.q} "
+                f"inside [{raw_lo}, {raw_hi}]"
+            )
+        return trial.suggest_int(
+            name, int(quantized_lo), int(quantized_hi), log=True,
         )
-        hi = int(math.exp(p.mu + spread * p.sigma))
-        return trial.suggest_int(name, lo, hi, step=p.q)
     raise ValueError(f"Unknown int distribution: {d}")
 
 

@@ -1,358 +1,295 @@
 #!/usr/bin/env python3
-"""Fail-closed preflight execution gate for one desired-results method run.
-
-The gate reads the prepared inventory and atomically writes a deterministic
-execution manifest. It never loads a model or activations, runs optimization,
-submits compute, or writes the shared canonical result leaf.
-"""
+"""Generation-pinned Stado adapter for one CalibrationManifestV3 attempt."""
+from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
-import os
 import re
-import sqlite3
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
-
-PROTOCOL_ID = "steering_effectiveness_initial"
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
-BENCHMARK = "winogrande"
-ELIGIBLE_METHODS = (
-    "baseline",
-    "caa",
-    "ostrze",
-    "mlp",
-    "tecza",
-    "tetno",
-    "grom",
-    "nurt",
-    "wicher",
-)
-DEFERRED_METHODS = ("szlak", "przelom")
-EXTRACTION_COMPONENT = "residual_stream"
-EXTRACTION_STRATEGIES = (
-    "chat_first",
-    "chat_last",
-    "chat_mean",
-    "chat_max_norm",
-    "chat_weighted",
-    "mc_balanced",
-    "role_play",
-)
-SPLITS = ("train", "validation", "test")
-PURPOSES = ("preflight", "calibration")
-MODES = {"preflight": "preflight", "calibration": "calibration"}
-CALIBRATION_PROTOCOL = {
-    "id": "desired-results-bounded-rerun-v1",
-    "revision": 1,
-    "run_class": "bounded_calibration_rerun",
-    "prior_owner": "scripts/steering/desired_results_runner.py",
-    "methods": ["caa", "grom", "mlp", "nurt", "ostrze", "tecza", "tetno", "wicher"],
-    "extraction_component": "residual_stream",
-    "extraction_strategies": list(EXTRACTION_STRATEGIES),
-    "trials_per_format": 2,
-    "format_count": 7,
-    "trials_per_method": 14,
-    "selection_split": "validation",
-    "fit_splits": ["train"],
-    "final_fit_splits": ["train"],
-    "test_evaluations": 0,
-    "exploratory_run_disposition": "invalid_unbounded_priors_excluded",
-}
-DEFAULT_INVENTORY = (
-    Path(__file__).resolve().parents[3]
-    / ".work/results_scope/desired_results_state_v1/result_inventory.sqlite"
-)
+from typing import Any, Mapping, Sequence
 
 
-class PolicyError(RuntimeError):
-    """An inventory or execution request violates the frozen policy."""
-
-
-def _sha256_json(value: Any) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _read_one(connection: sqlite3.Connection, query: str, values: Sequence[Any]) -> sqlite3.Row:
-    rows = connection.execute(query, values).fetchall()
-    if len(rows) != 1:
-        raise PolicyError(f"expected exactly one inventory row, found {len(rows)}")
-    return rows[0]
-
-
-def _validate_output_prefix(prefix: str, model_slug: str, method: str, run_id: str) -> str:
-    expected = f"runs/{PROTOCOL_ID}/{model_slug}/{BENCHMARK}/{method}/{run_id}/"
-    if prefix != expected:
-        raise PolicyError(f"inventory staging_prefix is not the isolated expected prefix: {prefix!r}")
-    parts = Path(prefix).parts
-    if not parts or parts[0] != "runs" or "results" in parts or ".." in parts:
-        raise PolicyError("method output prefix could reach the shared canonical result leaf")
-    return prefix
-
-
-def _load_job(
-    inventory: Path,
-    model: str,
-    benchmark: str,
-    method: str,
-    run_id: str,
-    model_revision: str,
-    purpose: str = "preflight",
-) -> Dict[str, Any]:
-    if purpose not in PURPOSES:
-        raise PolicyError(f"unknown manifest purpose {purpose!r}")
-    if model != MODEL_NAME or benchmark != BENCHMARK:
-        raise PolicyError(f"this worker is pinned to {MODEL_NAME} x {BENCHMARK}")
-    if method in DEFERRED_METHODS:
-        raise PolicyError(f"method {method} is deferred_special_case and cannot be executed")
-    if method not in ELIGIBLE_METHODS:
-        raise PolicyError(f"method {method!r} is outside the frozen eligible method scope")
-    if purpose == "calibration" and method == "baseline":
-        raise PolicyError("baseline has no bounded calibration HPO mode")
-    if not re.fullmatch(r"[0-9a-f]{40}", model_revision):
-        raise PolicyError("model_revision must be an immutable 40-character lowercase commit SHA")
-    if not inventory.is_file():
-        raise PolicyError(f"inventory does not exist: {inventory}")
-
-    uri = f"file:{inventory.resolve()}?mode=ro&immutable=1"
-    connection = sqlite3.connect(uri, uri=True)
-    connection.row_factory = sqlite3.Row
+def _load_sibling(name: str):
     try:
-        target = _read_one(
-            connection,
-            "SELECT * FROM prepared_targets WHERE model_name=? AND benchmark=?",
-            (model, benchmark),
-        )
-        run = _read_one(
-            connection,
-            "SELECT * FROM prepared_method_runs "
-            "WHERE target_id=? AND method=? AND optimization_run_id=?",
-            (target["target_id"], method, run_id),
-        )
-        method_row = _read_one(
-            connection,
-            "SELECT * FROM methods WHERE method=?",
-            (method,),
-        )
-        support = connection.execute(
-            "SELECT pair_id, stable_id, split_name FROM prepared_target_support "
-            "WHERE target_id=? ORDER BY pair_id",
-            (target["target_id"],),
-        ).fetchall()
-    finally:
-        connection.close()
+        return __import__(f"scripts.steering.{name}", fromlist=[name])
+    except (ImportError, ModuleNotFoundError):
+        path = Path(__file__).with_name(f"{name}.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot import {name}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
-    if target["preflight_status"] != "ready_metadata_and_identity":
-        raise PolicyError(f"target preflight is not ready: {target['preflight_status']}")
-    if int(target["no_submission"]) != 1:
-        raise PolicyError("prepared target is not marked no_submission")
-    if int(target["format_count"]) != len(EXTRACTION_STRATEGIES):
-        raise PolicyError("inventory format count does not match the frozen seven-format scope")
-    if run["eligibility"] != "eligible":
-        reason = run["reason"] or "no reason recorded"
-        raise PolicyError(f"method status is {run['eligibility']}: {reason}")
-    if method_row["required_data"] not in ("no_steering", "residual_stream", "residual_stream_or_sequential_forward"):
-        raise PolicyError("method inventory requires a component outside the residual-stream policy")
-    if not support or len(support) != int(target["pair_count"]):
-        raise PolicyError("prepared support size does not match target pair_count")
 
-    split_pair_ids = {name: [] for name in SPLITS}  # type: Dict[str, List[int]]
-    support_records = []
-    stable_ids = set()
-    pair_ids = set()
-    for row in support:
-        split = row["split_name"]
-        pair_id = row["pair_id"]
-        stable_id = row["stable_id"]
-        if split not in split_pair_ids:
-            raise PolicyError(f"unknown split {split!r}")
-        if pair_id is None or stable_id is None:
-            raise PolicyError("support contains a missing pair_id or stable_id")
-        if pair_id in pair_ids or stable_id in stable_ids:
-            raise PolicyError("support contains duplicate pair_id or stable_id")
-        pair_ids.add(pair_id)
-        stable_ids.add(stable_id)
-        split_pair_ids[split].append(int(pair_id))
-        support_records.append({"pair_id": int(pair_id), "stable_id": stable_id, "split": split})
-    if any(not split_pair_ids[name] for name in SPLITS):
-        raise PolicyError("train, validation, and test must all be non-empty")
-    if set().union(*(set(ids) for ids in split_pair_ids.values())) != pair_ids:
-        raise PolicyError("split union does not equal prepared support")
+contract = _load_sibling("desired_results_execution_contract")
+runner = _load_sibling("desired_results_runner")
+WorkerError = contract.ContractError
 
-    output_prefix = _validate_output_prefix(
-        run["staging_prefix"], target["model_slug"], method, run_id
+
+def _json_object(data: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkerError(f"{label} is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise WorkerError(f"{label} must be a JSON object")
+    if contract.canonical_json(value) != data:
+        raise WorkerError(f"{label} is not in canonical JSON form")
+    return value
+
+
+def _load_manifest(store: Any, uri: str, generation: str) -> tuple[dict[str, Any], dict[str, str]]:
+    if not isinstance(uri, str) or not uri:
+        raise WorkerError("calibration manifest URI must be non-empty")
+    if not isinstance(generation, str) or not generation:
+        raise WorkerError("calibration manifest generation must be non-empty")
+    data, observed = store.read(uri, generation)
+    if str(observed) != generation:
+        raise WorkerError("calibration manifest generation drift")
+    manifest = _json_object(data, "calibration manifest")
+    contract.validate_calibration_manifest(manifest)
+    ref = contract.artifact_ref(
+        uri, generation, str(len(data)), hashlib.sha256(data).hexdigest()
     )
-    if purpose == "calibration":
-        exposed_splits = ("train", "validation")
-        split_contract = {
-            "counts": {name: len(split_pair_ids[name]) for name in exposed_splits},
-            "pair_ids": {name: split_pair_ids[name] for name in exposed_splits},
-            "hpo_reads": ["train"],
-            "selection_split": "validation",
-            "final_fit": ["train"],
-            "test_evaluations": 0,
-        }
-        mode_contracts = {
-            "hpo": {
-                "strict_loader_pair_ids": "train_plus_validation_only",
-                "objective_reports": "validation_only",
-                "writes_under": f"{output_prefix}bounded-rerun-v1/hpo/",
-                "required_output": "frozen_config.json",
-            },
-        }
-    else:
-        split_contract = {
-            "counts": {name: len(split_pair_ids[name]) for name in SPLITS},
-            "pair_ids": split_pair_ids,
-            "hpo_reads": ["train", "validation"],
-            "selection_split": "validation",
-            "final_fit": ["train", "validation"],
-            "final_test_reads": ["test"],
-            "test_evaluations": 1,
-        }
-        mode_contracts = {
-            "hpo": {
-                "strict_loader_pair_ids": "train_plus_validation_only",
-                "objective_reports": "validation_only",
-                "writes_under": f"{output_prefix}hpo/",
-                "required_output": "frozen_config.json",
-            },
-            "final_test": {
-                "requires": f"{output_prefix}hpo/frozen_config.json",
-                "strict_loader_pair_ids": "test_only",
-                "configuration_mutation": "forbidden",
-                "evaluations": 1,
-                "writes_under": f"{output_prefix}final_test/",
-            },
-        }
-    calibration_fields = (
-        {"execution_mode": "calibration", "calibration_protocol": CALIBRATION_PROTOCOL}
-        if purpose == "calibration" else {"execution_mode": "preflight"}
-    )
+    contract.validate_artifact_binding(ref, manifest)
+    return manifest, ref
+
+
+def _attempt_prefix(manifest: Mapping[str, Any], attempt: int) -> str:
+    namespace = manifest["output_namespace"].rstrip("/")
+    digest = manifest["manifest_sha256"]
+    return f"{namespace}/calibration-v3/{digest}/attempt-{attempt}"
+
+
+def _receipt_uri(manifest: Mapping[str, Any], attempt: int, state: str) -> str:
+    if state not in contract.CALIBRATION_STATES:
+        raise WorkerError(f"invalid calibration receipt state {state!r}")
+    return f"{_attempt_prefix(manifest, attempt)}/{state}.json"
+
+
+def _create_once_with_status(store: Any, uri: str, payload: Mapping[str, Any]) -> tuple[dict[str, str], bool]:
+    """Create immutable bytes and report whether this process won creation."""
+    data = contract.canonical_json(payload)
+    expected_sha = hashlib.sha256(data).hexdigest()
+    created = True
+    try:
+        ref = store.create(uri, data, content_type="application/json")
+    except Exception:
+        # Creation is the ownership boundary. An identical object observed
+        # after a failed create belongs to the winner, never this process.
+        if not store.exists(uri):
+            raise
+        existing, generation = store.read(uri)
+        if existing != data:
+            raise WorkerError(f"conflicting immutable object won create race: {uri}")
+        ref = {"uri": uri, "generation": str(generation),
+               "size": str(len(existing)), "sha256": expected_sha}
+        created = False
+    normalized = contract.validate_artifact_ref(ref, "created object")
+    expected = {"uri": uri, "generation": normalized["generation"],
+                "size": str(len(data)), "sha256": expected_sha}
+    if normalized != expected:
+        raise WorkerError("store returned an incorrect ArtifactRef")
+    observed, generation = store.read(uri, normalized["generation"])
+    if observed != data or str(generation) != normalized["generation"]:
+        raise WorkerError("created object failed immutable read-back")
+    return normalized, created
+
+
+def _create_once(store: Any, uri: str, payload: Mapping[str, Any]) -> dict[str, str]:
+    ref, _ = _create_once_with_status(store, uri, payload)
+    return ref
+
+
+def _base_receipt(manifest: Mapping[str, Any], manifest_ref: Mapping[str, Any],
+                  attempt: int, state: str, runtime_evidence: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": 1,
-        "purpose": purpose,
-        **calibration_fields,
-        "job_unit": {
-            "model": model,
-            "benchmark": benchmark,
-            "method": method,
-            "optimization_run_id": run_id,
-            "job_key": run["job_key"],
-            "target_id": target["target_id"],
-        },
-        "revisions": {
-            "model": model_revision,
-            "activation": target["activation_revision"],
-        },
-        "input_identity": {
-            "join_key": ["benchmark", "pair_id"],
-            "pair_text_hash": target["pair_text_hash"],
-            "support_hash": target["support_hash"],
-            "split_assignment_hash": _sha256_json(support_records),
-        },
-        "split": split_contract,
-        "activation_search_scope": {
-            "extraction_component": EXTRACTION_COMPONENT,
-            "extraction_strategies": list(EXTRACTION_STRATEGIES),
-            "layers": list(range(1, int(target["layer_count"]) + 1)),
-        },
-        "saved_activation_policy": {
-            "loader": "wisent.core.reading.modules.utilities.data.enriched_builder.build_enriched_from_hf_strict",
-            "complete_marker_required": True,
-            "automatic_regeneration": "forbidden",
-            "fallback": "forbidden",
-            "positional_join": "forbidden",
-        },
-        "mode_contracts": mode_contracts,
-        "method_status": "eligible",
-        "output_prefix": output_prefix,
-        "write_policy": {
-            "atomic_method_staging": True,
-            "shared_canonical_result_leaf": "forbidden",
-            "canonical_leaf_writer": "finalizer_only",
-        },
+        "schema_version": contract.SCHEMA_VERSION,
+        "manifest_ref": dict(manifest_ref),
+        "manifest_sha256": manifest["manifest_sha256"],
+        "attempt": attempt,
+        "attempt_id": contract.calibration_attempt_id(manifest["manifest_sha256"], attempt),
+        "state": state,
+        "runtime_evidence": dict(runtime_evidence),
+        "runtime_evidence_sha256": contract.runtime_evidence_sha256(runtime_evidence),
     }
 
 
-def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
+def _publish_phase(store: Any, manifest: Mapping[str, Any], manifest_ref: Mapping[str, Any],
+                   attempt: int, state: str, runtime_evidence: Mapping[str, Any],
+                   evidence: Mapping[str, Any], previous: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    receipt = contract.finalize_calibration_phase_receipt({
+        **_base_receipt(manifest, manifest_ref, attempt, state, runtime_evidence),
+        "evidence": dict(evidence),
+    })
+    contract.validate_calibration_receipt(receipt)
+    if previous is not None:
+        contract.validate_calibration_transition(previous, receipt)
+    _create_once(store, _receipt_uri(manifest, attempt, state), receipt)
+    return receipt
+
+def _acquire_claim(store: Any, manifest: Mapping[str, Any], manifest_ref: Mapping[str, Any],
+                   attempt: int, runtime_evidence: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    claim = contract.finalize_calibration_phase_receipt({
+        **_base_receipt(manifest, manifest_ref, attempt, "claim", runtime_evidence),
+        "evidence": {"attempt_id": contract.calibration_attempt_id(manifest["manifest_sha256"], attempt)},
+    })
+    contract.validate_calibration_receipt(claim)
+    _, owner = _create_once_with_status(store, _receipt_uri(manifest, attempt, "claim"), claim)
+    return claim, owner
 
 
-def _default_manifest_path(
-    inventory: Path, manifest: Mapping[str, Any], purpose: str
-) -> Path:
-    unit = manifest["job_unit"]
-    model_slug = unit["model"].replace("/", "__")
-    directory = "calibration_manifests" if purpose == "calibration" else "preflight_manifests"
-    return (
-        inventory.parent
-        / directory
-        / model_slug
-        / unit["benchmark"]
-        / unit["method"]
-        / unit["optimization_run_id"]
-        / "manifest.json"
+def _recover_completed_receipt(store: Any, manifest: Mapping[str, Any], attempt: int) -> dict[str, Any] | None:
+    uri = _receipt_uri(manifest, attempt, "success")
+    if not store.exists(uri):
+        return None
+    data, _ = store.read(uri)
+    receipt = _json_object(data, "existing calibration success receipt")
+    contract.validate_calibration_success_receipt(receipt, manifest)
+    return receipt
+
+
+def _safe_error(exc: BaseException, retryable: bool) -> dict[str, Any]:
+    kind = type(exc).__name__
+    normalized = re.sub(r"[^A-Za-z0-9_.-]", "_", kind)[:80] or "Error"
+    digest = hashlib.sha256(str(exc).encode("utf-8", "replace")).hexdigest()
+    return {"type": normalized, "message": f"redacted-sha256:{digest}", "retryable": retryable}
+
+
+def _publish_failure(store: Any, manifest: Mapping[str, Any], manifest_ref: Mapping[str, Any],
+                     attempt: int, runtime_evidence: Mapping[str, Any], exc: BaseException,
+                     previous: Mapping[str, Any] | None, *, publication_failed: bool = False) -> dict[str, Any]:
+    retryable = attempt < contract.MAX_CALIBRATION_ATTEMPTS and (
+        publication_failed or not isinstance(exc, (contract.ContractError, ValueError, TypeError))
     )
+    receipt = contract.finalize_calibration_failure_receipt({
+        **_base_receipt(manifest, manifest_ref, attempt, "failure", runtime_evidence),
+        "error": _safe_error(exc, retryable),
+    })
+    contract.validate_calibration_failure_receipt(receipt)
+    if previous is not None:
+        contract.validate_calibration_transition(previous, receipt)
+    _create_once(store, _receipt_uri(manifest, attempt, "failure"), receipt)
+    return receipt
 
 
+def _validate_runner_result(result: Any, manifest: Mapping[str, Any],
+                            runtime_evidence: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    if not isinstance(result, Mapping) or set(result) != {
+        "selected_config", "result_ref", "runtime_evidence", "result"
+    }:
+        raise WorkerError("runner returned a malformed calibration result adapter")
+    if result["runtime_evidence"] != runtime_evidence:
+        raise WorkerError("runner runtime evidence differs from worker evidence")
+    try:
+        selected = contract.validate_selected_config(
+            result["selected_config"], "runner selected_config",
+        )
+    except contract.ContractError as exc:
+        raise WorkerError(f"runner returned an invalid selected_config: {exc}") from exc
+    if selected["method"] != manifest["method"]:
+        raise WorkerError("runner selected_config method differs from calibration manifest")
+    result_ref = contract.validate_artifact_ref(result["result_ref"], "runner result_ref")
+    payload = result["result"]
+    if not isinstance(payload, Mapping):
+        raise WorkerError("runner result payload must be an object")
+    contract.validate_artifact_binding(result_ref, payload)
+    if payload.get("manifest_sha256") != manifest["manifest_sha256"]:
+        raise WorkerError("runner result binds a different calibration manifest")
+    expected = manifest["target"]
+    if payload.get("target") != expected or payload.get("method") != manifest["method"]:
+        raise WorkerError("runner result target/method differs from manifest")
+    if payload.get("revisions") != manifest["revisions"]:
+        raise WorkerError("runner result revisions differ from manifest")
+    if payload.get("fit_support") != manifest["support"]["train"] or payload.get("selection_support") != manifest["support"]["validation"]:
+        raise WorkerError("runner result support differs from manifest")
+    if payload.get("test_reads") != 0 or payload.get("test_pair_ids_read") != []:
+        raise WorkerError("calibration runner reported held-out test access")
+    if payload.get("runtime_evidence") != runtime_evidence:
+        raise WorkerError("runner result runtime evidence differs")
+    if payload.get("selected_config") != selected:
+        raise WorkerError("runner selected_config differs from published result")
+    return dict(selected), result_ref
+
+
+def run_attempt(store: Any, manifest_uri: str, manifest_generation: str,
+                attempt_number: int) -> dict[str, Any]:
+    manifest, manifest_ref = _load_manifest(store, manifest_uri, manifest_generation)
+    contract.calibration_attempt_id(manifest["manifest_sha256"], attempt_number)
+    runtime_evidence = contract.observe_runtime_evidence()
+    expected_revision = manifest["runtime"]["revision"]
+    if (runtime_evidence["runtime_revision"] != expected_revision or
+            runtime_evidence["runtime_revision"] != manifest["revisions"]["code"] or
+            runtime_evidence["device"] != manifest["runtime"]["device"] or
+            runtime_evidence["device"] != manifest["calibration_policy"]["options"]["device"]):
+        raise WorkerError("observed detached revision/device differs from calibration manifest policy")
+    claim = prepared = running = None
+    publication_in_progress = False
+    try:
+        claim, owner = _acquire_claim(
+            store, manifest, manifest_ref, attempt_number, runtime_evidence,
+        )
+        if not owner:
+            completed = _recover_completed_receipt(store, manifest, attempt_number)
+            return completed if completed is not None else claim
+        prepared = _publish_phase(
+            store, manifest, manifest_ref, attempt_number, "prepared", runtime_evidence,
+            {"manifest_verified": True, "test_support_exposed": False}, claim,
+        )
+        running = _publish_phase(
+            store, manifest, manifest_ref, attempt_number, "running", runtime_evidence,
+            {"method": manifest["method"], "test_reads": 0}, prepared,
+        )
+        publication_in_progress = False
+        result = runner._run_calibration(
+            store, manifest_uri, manifest_generation, attempt_number,
+            runtime_evidence=runtime_evidence,
+        )
+        selected_config, result_ref = _validate_runner_result(result, manifest, runtime_evidence)
+        success = contract.finalize_calibration_success_receipt({
+            **_base_receipt(manifest, manifest_ref, attempt_number, "success", runtime_evidence),
+            "selected_config": selected_config,
+            "result_ref": result_ref,
+        })
+        contract.validate_calibration_success_receipt(success, manifest)
+        contract.validate_calibration_transition(running, success)
+        publication_in_progress = True
+        _create_once(store, _receipt_uri(manifest, attempt_number, "success"), success)
+        return success
+    except BaseException as exc:
+        previous = running or prepared or claim
+        return _publish_failure(
+            store, manifest, manifest_ref, attempt_number, runtime_evidence, exc, previous,
+            publication_failed=publication_in_progress,
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--inventory", type=Path, default=DEFAULT_INVENTORY)
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--benchmark", required=True)
-    parser.add_argument("--method", required=True, choices=ELIGIBLE_METHODS + DEFERRED_METHODS)
-    parser.add_argument("--optimization-run", required=True)
-    parser.add_argument("--model-revision", required=True)
-    parser.add_argument("--mode", choices=tuple(MODES), default="preflight")
-    parser.add_argument("--manifest-out", type=Path)
+    parser.add_argument("--calibration-manifest", required=True)
+    parser.add_argument("--calibration-manifest-generation", required=True)
+    parser.add_argument("--attempt-number", required=True, type=int)
     return parser
 
 
-def main(argv: Sequence[str] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        purpose = MODES[args.mode]
-        manifest = _load_job(
-            args.inventory.resolve(),
-            args.model,
-            args.benchmark,
-            args.method,
-            args.optimization_run,
-            args.model_revision,
-            purpose=purpose,
+        store = runner.GCSStore()
+        receipt = run_attempt(
+            store, args.calibration_manifest,
+            args.calibration_manifest_generation, args.attempt_number,
         )
-        manifest["execution_mode"] = args.mode
-        output = args.manifest_out or _default_manifest_path(
-            args.inventory.resolve(), manifest, purpose
-        )
-        _atomic_json(output.resolve(), manifest)
-        print(output.resolve())
-        return 0
-    except (PolicyError, sqlite3.Error, json.JSONDecodeError) as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        print(contract.canonical_json(receipt).decode("ascii"))
+        return 0 if receipt["state"] == "success" else 2
+    except (WorkerError, OSError, RuntimeError) as exc:
+        print(f"calibration worker refused execution: {exc}", file=sys.stderr)
         return 2
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

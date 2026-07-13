@@ -44,6 +44,117 @@ def _make_args(**kwargs):
     return args
 
 
+def _activation_layers_for_config(config: MethodConfig) -> list[int]:
+    """Return the exact sorted activation-layer union required for training."""
+    if config.method.upper() in {"TETNO", "GROM"}:
+        if config.sensor_layer is None or not config.steering_layers:
+            raise ValueError("Sensor methods require sensor_layer and steering_layers")
+        return sorted({int(config.sensor_layer), *map(int, config.steering_layers)})
+    layer = getattr(config, "layer", None)
+    if layer is None:
+        raise ValueError("Config must specify 'layer'")
+    return [int(layer)]
+
+
+def _merge_strict_enriched_inputs(
+    strict_enriched_files: dict,
+    strategy: str,
+    required_layers: list[int],
+    work_dir: str,
+) -> str:
+    """Validate and merge exact single-layer enriched artifacts by pair identity."""
+    import copy
+    import hashlib
+
+    documents = []
+    for layer in required_layers:
+        route_key = (strategy, layer)
+        try:
+            path = strict_enriched_files[route_key]
+        except KeyError as exc:
+            raise ValueError(
+                f"No pre-materialized strict enriched input for strategy/layer {route_key!r}"
+            ) from exc
+        with open(path) as handle:
+            document = json.load(handle)
+        if document.get("extraction_strategy") != strategy:
+            raise ValueError(f"Strict enriched strategy mismatch for {route_key!r}")
+        try:
+            artifact_layers = [int(value) for value in document["layers"]]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid strict enriched layer provenance for {route_key!r}") from exc
+        if artifact_layers != [layer]:
+            raise ValueError(
+                f"Strict enriched artifact {route_key!r} must contain exactly layer {layer}"
+            )
+        pair_ids = document.get("pair_ids")
+        pairs = document.get("pairs")
+        if not isinstance(pair_ids, list) or not isinstance(pairs, list):
+            raise ValueError(f"Strict enriched artifact {route_key!r} lacks pair identity")
+        if len(pair_ids) != len(pairs) or len(set(pair_ids)) != len(pair_ids):
+            raise ValueError(f"Strict enriched pair support is ambiguous for {route_key!r}")
+        layer_key = str(layer)
+        for index, (pair_id, pair) in enumerate(zip(pair_ids, pairs)):
+            if pair.get("pair_id") != pair_id:
+                raise ValueError(
+                    f"Strict enriched pair_id/order mismatch at {route_key!r} row {index}"
+                )
+            for side in ("positive_response", "negative_response"):
+                response = pair.get(side)
+                activations = response.get("layers_activations") if isinstance(response, dict) else None
+                if not isinstance(activations, dict) or set(activations) != {layer_key}:
+                    raise ValueError(
+                        f"Strict enriched {side} at {route_key!r} is not single-layer proven"
+                    )
+        calibration_norms = document.get("calibration_norms")
+        if not isinstance(calibration_norms, dict) or set(calibration_norms) != {layer_key}:
+            raise ValueError(f"Strict enriched calibration norms mismatch for {route_key!r}")
+        documents.append(document)
+
+    base = copy.deepcopy(documents[0])
+    base_ids = base["pair_ids"]
+    invariant_headers = (
+        "task_name", "trait_label", "model", "extraction_component", "raw_mode",
+    )
+    for layer, document in zip(required_layers[1:], documents[1:]):
+        if document["pair_ids"] != base_ids:
+            raise ValueError(f"Strict enriched pair_ids/order mismatch at layer {layer}")
+        for header in invariant_headers:
+            if document.get(header) != base.get(header):
+                raise ValueError(f"Strict enriched {header} mismatch at layer {layer}")
+        for index, (base_pair, candidate_pair) in enumerate(zip(base["pairs"], document["pairs"])):
+            identity_fields = (
+                ("pair_id", base_pair.get("pair_id"), candidate_pair.get("pair_id")),
+                ("stable_id", base_pair.get("stable_id"), candidate_pair.get("stable_id")),
+                ("prompt", base_pair.get("prompt"), candidate_pair.get("prompt")),
+                ("positive response", base_pair["positive_response"].get("model_response"),
+                 candidate_pair["positive_response"].get("model_response")),
+                ("negative response", base_pair["negative_response"].get("model_response"),
+                 candidate_pair["negative_response"].get("model_response")),
+            )
+            for field, expected, actual in identity_fields:
+                if actual != expected:
+                    raise ValueError(
+                        f"Strict enriched {field} mismatch at layer {layer}, row {index}"
+                    )
+            layer_key = str(layer)
+            for side in ("positive_response", "negative_response"):
+                base_pair[side]["layers_activations"][layer_key] = (
+                    candidate_pair[side]["layers_activations"][layer_key]
+                )
+        base["calibration_norms"].update(document["calibration_norms"])
+
+    base["layers"] = required_layers
+    base["num_pairs"] = len(base_ids)
+    digest = hashlib.sha256(
+        f"{strategy}:{','.join(map(str, required_layers))}".encode("utf-8")
+    ).hexdigest()[:16]
+    output_path = os.path.join(work_dir, f"strict-enriched-{digest}.json")
+    with open(output_path, "w") as handle:
+        json.dump(base, handle, sort_keys=True, separators=(",", ":"))
+    return output_path
+
+
 def run_pipeline(
     model: str,
     task: str,
@@ -86,9 +197,8 @@ def run_pipeline(
         with open(eval_pairs_file) as f:
             eval_limit = len(json.load(f).get("pairs", []))
     elif train_pairs_file:
-        layer = getattr(config, 'layer', None) or getattr(config, 'sensor_layer', None)
-        if layer is None:
-            raise ValueError("Config must specify 'layer' or 'sensor_layer'")
+        activation_layers = _activation_layers_for_config(config)
+        layer_spec = ",".join(map(str, activation_layers))
         needs_qk = config.method in METHODS_REQUIRING_QK_CAPTURE
         cached = None
         if not needs_qk:
@@ -98,9 +208,11 @@ def run_pipeline(
             ec = config._extra_args.get("extraction_component", "residual_stream")
             hf_strat = (f"{config.extraction_strategy}/{ec}"
                         if ec != "residual_stream" else config.extraction_strategy)
-            cached = build_enriched_from_hf(
-                model, task, layer, hf_strat, work_dir,
-                train_pairs_file=train_pairs_file, limit=limit)
+            if len(activation_layers) == 1:
+                cached = build_enriched_from_hf(
+                    model, task, activation_layers[0], hf_strat, work_dir,
+                    train_pairs_file=train_pairs_file, limit=limit,
+                )
             if not cached:
                 cached = build_enriched_from_db(
                     model, task, work_dir, config.extraction_strategy, limit=limit)
@@ -109,7 +221,7 @@ def run_pipeline(
         else:
             execute_get_activations(_make_args(
                 pairs_file=train_pairs_file, model=model, output=activations_file,
-                layers=str(layer), extraction_strategy=config.extraction_strategy,
+                layers=layer_spec, extraction_strategy=config.extraction_strategy,
                 device=device, verbose=False, timing=False, raw=False,
                 cached_model=cached_model,
             ))
@@ -126,12 +238,11 @@ def run_pipeline(
             task_name=task, output=pairs_file, limit=limit, verbose=False,
             train_ratio=SPLIT_RATIO_TRAIN_DEFAULT,
         ))
-        layer = getattr(config, 'layer', None) or getattr(config, 'sensor_layer', None)
-        if layer is None:
-            raise ValueError("Config must specify 'layer' or 'sensor_layer'")
+        activation_layers = _activation_layers_for_config(config)
+        layer_spec = ",".join(map(str, activation_layers))
         execute_get_activations(_make_args(
             pairs_file=pairs_file, model=model, output=activations_file,
-            layers=str(layer), extraction_strategy=config.extraction_strategy,
+            layers=layer_spec, extraction_strategy=config.extraction_strategy,
             device=device, verbose=False, timing=False, raw=False,
             cached_model=cached_model,
         ))
@@ -310,14 +421,10 @@ def create_objective(
         selected_enriched_file = enriched_pairs_file
         if strict_enriched_files is not None:
             strategy = config.extraction_strategy
-            layer = getattr(config, "layer", None) or getattr(config, "sensor_layer", None)
-            route_key = (strategy, int(layer))
-            try:
-                selected_enriched_file = strict_enriched_files[route_key]
-            except KeyError as exc:
-                raise ValueError(
-                    f"No pre-materialized strict enriched input for strategy/layer {route_key!r}"
-                ) from exc
+            required_layers = _activation_layers_for_config(config)
+            selected_enriched_file = _merge_strict_enriched_inputs(
+                strict_enriched_files, strategy, required_layers, work_dir,
+            )
         return run_pipeline(
             model=model, task=task, config=config, work_dir=work_dir,
             strength=strength, limit=limit, device=device,

@@ -131,6 +131,22 @@ class TETNOSteeringObject(BaseSteeringObject):
         layer_scales: Dict[int, float],
         gate_temperature: float,
     ):
+        if metadata.extraction_component != "residual_stream":
+            raise ValueError(
+                "TETNO requires extraction_component='residual_stream'"
+            )
+        steering_layers = set(metadata.layers)
+        if steering_layers != set(behavior_vectors) or steering_layers != set(layer_scales):
+            raise ValueError(
+                "TETNO metadata.layers must exactly match behavior vector and scale layers"
+            )
+        if steering_layers and sensor_layer >= min(steering_layers):
+            raise ValueError(
+                "TETNO sensor_layer must be strictly earlier than every steering layer"
+            )
+        if metadata.sensor_layer is not None and metadata.sensor_layer != sensor_layer:
+            raise ValueError("TETNO sensor_layer conflicts with metadata.sensor_layer")
+        metadata.sensor_layer = sensor_layer
         super().__init__(metadata)
         self.behavior_vectors = behavior_vectors
         self.condition_vector = condition_vector
@@ -180,6 +196,8 @@ class TETNOSteeringObject(BaseSteeringObject):
                 'created_at': self.metadata.created_at,
                 'extra': self.metadata.extra,
                 'extraction_component': self.metadata.extraction_component,
+                'calibration_norms': self.metadata.calibration_norms,
+                'sensor_layer': self.metadata.sensor_layer,
             },
             'behavior_vectors': {str(k): v for k, v in self.behavior_vectors.items()},
             'condition_vector': self.condition_vector,
@@ -192,6 +210,11 @@ class TETNOSteeringObject(BaseSteeringObject):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TETNOSteeringObject":
         meta_data = data['metadata']
+        if "sensor_layer" not in data or "sensor_layer" not in meta_data:
+            raise ValueError("TETNO sensor_layer is required in object and metadata")
+        sensor_layer = int(data["sensor_layer"])
+        if int(meta_data["sensor_layer"]) != sensor_layer:
+            raise ValueError("TETNO sensor_layer conflicts with metadata.sensor_layer")
         metadata = SteeringObjectMetadata(
             method=meta_data['method'],
             model_name=meta_data['model_name'],
@@ -203,7 +226,12 @@ class TETNOSteeringObject(BaseSteeringObject):
             hidden_dim=meta_data['hidden_dim'],
             created_at=meta_data.get('created_at', ''),
             extra=meta_data.get('extra', {}),
+            calibration_norms={
+                int(k): float(v)
+                for k, v in meta_data.get('calibration_norms', {}).items()
+            },
             extraction_component=meta_data.get('extraction_component', get_optimal("extraction_component")),
+            sensor_layer=sensor_layer,
         )
 
         def to_tensor(v):
@@ -217,7 +245,7 @@ class TETNOSteeringObject(BaseSteeringObject):
             metadata=metadata,
             behavior_vectors=behavior_vectors,
             condition_vector=condition_vector,
-            sensor_layer=data['sensor_layer'],
+            sensor_layer=sensor_layer,
             threshold=data['threshold'],
             layer_scales=layer_scales,
             gate_temperature=data['gate_temperature'],

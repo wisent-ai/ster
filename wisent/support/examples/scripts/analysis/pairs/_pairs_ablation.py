@@ -59,6 +59,8 @@ def run_pairs_ablation(
             strategy=cached.strategy,
             model_name=cached.model_name,
             num_layers=cached.num_layers,
+            model_revision=cached.model_revision,
+            tokenizer_revision=cached.tokenizer_revision,
             hidden_size=cached.hidden_size,
         )
         sub_cached.pair_activations = cached.pair_activations[:n]

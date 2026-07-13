@@ -8,16 +8,25 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from wisent.core.reading.modules import GeometrySearchSpace
-from wisent.core.primitives.model_interface.core.activations import ExtractionStrategy
+from wisent.core.primitives.model_interface.core.activations import (
+    ExtractionComponent,
+    ExtractionStrategy,
+)
 from wisent.core.utils.config_tools.constants import (
+    ARCHITECTURE_MODULE_LIMIT_DEFAULT,
     DEFAULT_RANDOM_SEED,
+    HASH_PREFIX_LEN,
 )
 from wisent.core.primitives.model_interface.core.activations.activation_cache import (
     ActivationCache,
     CachedActivations,
     RawActivationCache,
+    collect_and_cache_activations,
     collect_and_cache_raw_activations,
     get_strategy_text_family,
+)
+from wisent.core.primitives.model_interface.core.activations.pipeline.cache.collection import (
+    get_exact_revision_identity,
 )
 from wisent.core.utils import get_layer_combinations
 from wisent.core.reading.modules import (
@@ -53,8 +62,19 @@ class GeometryRunner:
         self.cache_dir = cache_dir or (
             f"/tmp/wisent_geometry_cache_{model.model_name.replace('/', '_')}"
         )
-        self.cache = ActivationCache(self.cache_dir)
-        self.raw_cache = RawActivationCache(self.cache_dir)
+        self.cache = ActivationCache(
+            self.cache_dir,
+            hash_digest_prefix=HASH_PREFIX_LEN,
+        )
+        model_revision, tokenizer_revision = get_exact_revision_identity(model)
+        self.raw_cache = (
+            RawActivationCache(
+                self.cache_dir,
+                hash_digest_prefix=HASH_PREFIX_LEN,
+            )
+            if model_revision is not None and tokenizer_revision is not None
+            else None
+        )
         self._nonsense_cache: Dict[
             Tuple[int, int], Tuple[torch.Tensor, torch.Tensor]
         ] = {}
@@ -189,27 +209,82 @@ class GeometryRunner:
         show_progress: bool = True,
     ) -> CachedActivations:
         """Get cached activations, extracting if necessary."""
-        if self.cache.has(self.model.model_name, benchmark, strategy):
+        component = ExtractionComponent.default()
+        model_revision, tokenizer_revision = get_exact_revision_identity(self.model)
+        cache_identity = {
+            "model_revision": model_revision,
+            "tokenizer_revision": tokenizer_revision,
+        }
+        if self.cache.has(
+            self.model.model_name,
+            benchmark,
+            strategy,
+            component,
+            **cache_identity,
+        ):
             if show_progress:
-                print(f"  Loading from cache...")
-            return self.cache.get(self.model.model_name, benchmark, strategy)
+                print("  Loading from cache...")
+            loaded = self.cache.get(
+                self.model.model_name,
+                benchmark,
+                strategy,
+                component,
+                **cache_identity,
+            )
+            if loaded is None:
+                raise RuntimeError("activation cache disappeared after lookup")
+            return loaded
+
         text_family = get_strategy_text_family(strategy)
-        if self.raw_cache.has(self.model.model_name, benchmark, text_family):
+        raw_cache = (
+            self.raw_cache
+            if model_revision is not None and tokenizer_revision is not None
+            else None
+        )
+        if raw_cache is not None and raw_cache.has(
+            self.model.model_name,
+            benchmark,
+            text_family,
+            component,
+            **cache_identity,
+        ):
             if show_progress:
                 print(
                     f"  Loading from raw cache ({text_family} family)..."
                 )
-            raw_cached = self.raw_cache.get(
-                self.model.model_name, benchmark, text_family
+            raw_cached = raw_cache.get(
+                self.model.model_name,
+                benchmark,
+                text_family,
+                component,
+                **cache_identity,
             )
+            if raw_cached is None:
+                raise RuntimeError("raw activation cache disappeared after lookup")
             cached = raw_cached.to_cached_activations(
                 strategy, self.model.tokenizer
             )
-            self.cache.put(cached)
+            self.cache.put(cached, component)
             return cached
+
         if show_progress:
-            print(f"  Loading pairs...")
+            print("  Loading pairs...")
         pairs = self._load_pairs(benchmark)
+        if raw_cache is None:
+            if show_progress:
+                print(f"  Extracting activations for {len(pairs)} pairs...")
+            return collect_and_cache_activations(
+                model=self.model,
+                pairs=pairs,
+                benchmark=benchmark,
+                strategy=strategy,
+                report_interval=self.report_interval,
+                cache=self.cache,
+                show_progress=show_progress,
+                component=component,
+                architecture_module_limit=ARCHITECTURE_MODULE_LIMIT_DEFAULT,
+            )
+
         if show_progress:
             print(
                 f"  Extracting raw activations for {len(pairs)} pairs "
@@ -221,13 +296,15 @@ class GeometryRunner:
             benchmark=benchmark,
             strategy=strategy,
             report_interval=self.report_interval,
-            cache=self.raw_cache,
+            cache=raw_cache,
             show_progress=show_progress,
+            component=component,
+            architecture_module_limit=ARCHITECTURE_MODULE_LIMIT_DEFAULT,
         )
         cached = raw_cached.to_cached_activations(
             strategy, self.model.tokenizer
         )
-        self.cache.put(cached)
+        self.cache.put(cached, component)
         return cached
 
     def _load_pairs(self, benchmark: str) -> List:

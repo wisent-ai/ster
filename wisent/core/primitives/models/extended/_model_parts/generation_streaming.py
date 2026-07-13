@@ -122,6 +122,10 @@ def _generate_stream(
         prompt_length, self.tokenizer,
     )
 
+    runtime_hooks = getattr(self, "_active_steering_runtime", None)
+    if runtime_hooks is not None:
+        runtime_hooks.begin_generation()
+
     worker = threading.Thread(
         target=self.hf_model.generate,
         kwargs=generation_kwargs,

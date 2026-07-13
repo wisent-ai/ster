@@ -6,6 +6,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Any, List, Tuple
 
+from wisent.core.utils.config_tools.constants import (
+    GEOMETRY_DEFAULT_KMEANS_MAX_ITERATIONS,
+    GEOMETRY_DEFAULT_MANIFOLD_NEIGHBORS,
+    GEOMETRY_DEFAULT_MAX_CLUSTERS,
+    GEOMETRY_DEFAULT_MIN_CLUSTERS,
+    GEOMETRY_DEFAULT_NUM_COMPONENTS,
+    GEOMETRY_DEFAULT_OPTIMIZATION_STEPS,
+)
+
 
 __all__ = [
     "StructureType",
@@ -40,22 +49,22 @@ class StructureScore:
 class GeometryAnalysisConfig:
     """Configuration for comprehensive geometry analysis."""
 
-    num_components: int = None
+    num_components: int = GEOMETRY_DEFAULT_NUM_COMPONENTS
     """Number of components/directions to analyze."""
 
-    optimization_steps: int = None
+    optimization_steps: int = GEOMETRY_DEFAULT_OPTIMIZATION_STEPS
     """Steps for optimization-based methods."""
 
-    min_clusters: int = None
+    min_clusters: int = GEOMETRY_DEFAULT_MIN_CLUSTERS
     """Minimum number of clusters."""
 
-    max_clusters: int = None
+    max_clusters: int = GEOMETRY_DEFAULT_MAX_CLUSTERS
     """Maximum number of clusters to try."""
 
-    kmeans_max_iterations: int = None
+    kmeans_max_iterations: int = GEOMETRY_DEFAULT_KMEANS_MAX_ITERATIONS
     """Maximum iterations for k-means clustering."""
 
-    manifold_neighbors: int = None
+    manifold_neighbors: int = GEOMETRY_DEFAULT_MANIFOLD_NEIGHBORS
     """Number of neighbors for manifold analysis."""
 
     def __post_init__(self):

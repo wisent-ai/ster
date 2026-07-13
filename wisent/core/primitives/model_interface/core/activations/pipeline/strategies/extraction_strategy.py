@@ -197,6 +197,62 @@ def tokenizer_has_chat_template(tokenizer) -> bool:
     return (hasattr(tokenizer, "apply_chat_template") and callable(getattr(tokenizer, "apply_chat_template"))
             and hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None)
 
+
+def _retained_answer_hidden_states(
+    hidden_states: torch.Tensor,
+    attention_mask: torch.Tensor,
+    effective_length: int,
+    answer_onset: int,
+    answer_end_exclusive: int,
+    padding_side: str,
+) -> torch.Tensor:
+    """Return the exact stored, attended answer span."""
+    if not isinstance(hidden_states, torch.Tensor) or hidden_states.ndim != 2:
+        raise ValueError("hidden_states must be a 2-D tensor")
+    if hidden_states.shape[0] == 0:
+        raise ValueError("hidden_states must contain at least one token")
+    if not isinstance(attention_mask, torch.Tensor) or attention_mask.ndim != 1:
+        raise ValueError("attention_mask must be a 1-D tensor")
+    if attention_mask.shape[0] != hidden_states.shape[0]:
+        raise ValueError("attention_mask must match the hidden-state sequence length")
+    if not bool(torch.all((attention_mask == 0) | (attention_mask == 1))):
+        raise ValueError("attention_mask must be binary")
+    if isinstance(effective_length, bool) or not isinstance(effective_length, int):
+        raise ValueError("effective_length must be an integer")
+    if effective_length <= 0 or effective_length != int(attention_mask.sum().item()):
+        raise ValueError("effective_length must equal the attended token count")
+    if padding_side not in ("left", "right"):
+        raise ValueError("padding_side must be 'left' or 'right'")
+
+    expected_mask = torch.zeros_like(attention_mask)
+    if padding_side == "left":
+        expected_mask[-effective_length:] = 1
+        attended_end = hidden_states.shape[0]
+    else:
+        expected_mask[:effective_length] = 1
+        attended_end = effective_length
+    if not torch.equal(attention_mask, expected_mask):
+        raise ValueError(f"attention_mask is not contiguous {padding_side}-padded data")
+
+    if isinstance(answer_onset, bool) or not isinstance(answer_onset, int):
+        raise ValueError("answer_onset must be an integer")
+    if not 0 <= answer_onset < hidden_states.shape[0]:
+        raise ValueError("answer_onset is outside the hidden-state sequence")
+    if int(attention_mask[answer_onset].item()) != 1:
+        raise ValueError("answer_onset must identify an attended token")
+    if isinstance(answer_end_exclusive, bool) or not isinstance(answer_end_exclusive, int):
+        raise ValueError("answer_end_exclusive must be an integer")
+    if not answer_onset < answer_end_exclusive <= attended_end:
+        raise ValueError("answer_end_exclusive is outside the attended answer span")
+    if int(attention_mask[answer_end_exclusive - 1].item()) != 1:
+        raise ValueError("answer_end_exclusive must follow an attended token")
+
+    answer_hidden = hidden_states[answer_onset:answer_end_exclusive]
+    if answer_hidden.shape[0] == 0:
+        raise ValueError("no retained answer tokens are available for extraction")
+    return answer_hidden
+
+
 def extract_activation(
     strategy: ExtractionStrategy,
     hidden_states: torch.Tensor,
@@ -204,26 +260,75 @@ def extract_activation(
     tokenizer,
     prompt_len: int,
     weighted_decay: float = 0.1,
+    *,
+    attention_mask: torch.Tensor | None = None,
+    effective_length: int | None = None,
+    answer_onset: int | None = None,
+    answer_end_exclusive: int | None = None,
+    padding_side: str | None = None,
 ) -> torch.Tensor:
-    """
-    Extract the activation vector based on strategy.
+    """Extract one activation vector for ``strategy``.
 
-    Args:
-        strategy: The extraction strategy
-        hidden_states: Hidden states tensor of shape [seq_len, hidden_dim]
-        answer_text: The answer text (for computing answer token count)
-        tokenizer: The tokenizer
-        prompt_len: Length of prompt in tokens (boundary)
-
-    Returns:
-        Activation vector of shape [hidden_dim]
+    Raw-cache callers provide all four keyword-only token metadata fields. In
+    that mode this function uses only the stored retained span and never invokes
+    the tokenizer. Existing live-collection callers retain the legacy tokenizer
+    path when none of those fields is supplied.
     """
+    metadata = (
+        attention_mask,
+        effective_length,
+        answer_onset,
+        answer_end_exclusive,
+        padding_side,
+    )
+    uses_stored_span = any(value is not None for value in metadata)
+    if uses_stored_span and not all(value is not None for value in metadata):
+        raise ValueError(
+            "attention_mask, effective_length, answer_onset, "
+            "answer_end_exclusive, and padding_side must be supplied together"
+        )
+
+    if uses_stored_span:
+        answer_hidden = _retained_answer_hidden_states(
+            hidden_states,
+            attention_mask,
+            effective_length,
+            answer_onset,
+            answer_end_exclusive,
+            padding_side,
+        )
+        if strategy == ExtractionStrategy.CHAT_FIRST:
+            return answer_hidden[0]
+        if strategy in (
+            ExtractionStrategy.CHAT_LAST,
+            ExtractionStrategy.ROLE_PLAY,
+            ExtractionStrategy.COMPLETION_LAST,
+            ExtractionStrategy.MC_COMPLETION,
+        ):
+            return answer_hidden[-1]
+        if strategy in (
+            ExtractionStrategy.CHAT_MEAN,
+            ExtractionStrategy.COMPLETION_MEAN,
+        ):
+            return answer_hidden.mean(dim=0)
+        if strategy == ExtractionStrategy.CHAT_MAX_NORM:
+            return answer_hidden[torch.argmax(torch.norm(answer_hidden, dim=1))]
+        if strategy == ExtractionStrategy.CHAT_WEIGHTED:
+            positions = torch.arange(
+                answer_hidden.shape[0],
+                dtype=answer_hidden.dtype,
+                device=answer_hidden.device,
+            )
+            weights = torch.exp(-positions * weighted_decay)
+            weights = weights / weights.sum()
+            return (answer_hidden * weights.unsqueeze(1)).sum(dim=0)
+        if strategy == ExtractionStrategy.MC_BALANCED:
+            return answer_hidden[0]
+        raise ValueError(f"Unknown extraction strategy: {strategy}")
+
     seq_len = hidden_states.shape[0]
-
-    # Compute answer token count
     answer_tokens = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
     num_answer_tokens = len(answer_tokens)
-
     if strategy == ExtractionStrategy.CHAT_LAST:
         return hidden_states[-1]
 
