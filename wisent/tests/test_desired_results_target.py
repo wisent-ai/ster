@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -12,6 +13,11 @@ SPEC = importlib.util.spec_from_file_location("desired_results_target", PATH)
 targets = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(targets)
 
+POLICY_PATH = ROOT / "scripts" / "steering" / "desired_results_policy.py"
+POLICY_SPEC = importlib.util.spec_from_file_location("desired_results_policy", POLICY_PATH)
+policy = importlib.util.module_from_spec(POLICY_SPEC)
+POLICY_SPEC.loader.exec_module(policy)
+
 
 def _manifest_payload(
     *,
@@ -23,8 +29,13 @@ def _manifest_payload(
     activation_status="complete",
     execution_state="unprepared",
     blocked=False,
+    rerun_locked=None,
+    support_state=None,
+    evaluation_split="test",
 ):
     protocol = "desired-results-v2"
+    finalized = execution_state == "finalized"
+    locked = finalized if rerun_locked is None else rerun_locked
     pair_count = sum(split_counts)
     split_names = ("train", "validation", "test")
     splits = {}
@@ -63,7 +74,7 @@ def _manifest_payload(
     if activation_status == "complete":
         activation = {
             "status": "complete",
-            "eligible": execution_state == "unprepared" and not blocked,
+            "eligible": execution_state == "unprepared" and not blocked and not locked,
             "layer_count": layers,
             "n_pairs": pair_count,
             "grouped": False,
@@ -97,16 +108,27 @@ def _manifest_payload(
         }
 
     prepared = execution_state in {"prepared", "calibrated", "finalized"}
-    support = {
-        "state": "prepared" if prepared or activation_status == "complete" else "missing",
-        "proof_sha256": "c" * 64 if prepared or activation_status == "complete" else None,
-        "pair_count": pair_count if prepared or activation_status == "complete" else 0,
-        "split_counts": dict(zip(split_names, split_counts, strict=True))
-        if prepared or activation_status == "complete"
-        else {name: 0 for name in split_names},
-        "splits": splits if prepared or activation_status == "complete" else {name: [] for name in split_names},
+    support_prepared = (
+        prepared or activation_status == "complete"
+        if support_state is None
+        else support_state == "prepared"
+    )
+    pair_texts_ref = {
+        "uri": f"gs://pair-texts/{model_slug}/{benchmark}/pairs.json",
+        "generation": "actual-generation-29",
+        "size": "128",
+        "sha256": "5" * 64,
     }
-    finalized = execution_state == "finalized"
+    support = {
+        "state": "prepared" if support_prepared else "missing",
+        "proof_sha256": "c" * 64 if support_prepared else None,
+        "pair_count": pair_count if support_prepared else 0,
+        "split_counts": dict(zip(split_names, split_counts, strict=True))
+        if support_prepared
+        else {name: 0 for name in split_names},
+        "splits": splits if support_prepared else {name: [] for name in split_names},
+        "pair_texts_ref": pair_texts_ref if support_prepared else None,
+    }
     publication = {
         "uri": f"gs://bucket/results/{model_slug}/{benchmark}/execution-v3/publication.json",
         "generation": "17",
@@ -126,12 +148,17 @@ def _manifest_payload(
             "expected_pairs": pair_count,
             "result_prefix": f"results/{protocol}/{model_slug}/{benchmark}",
         },
-        "revisions": {"inventory_sha256": "e" * 64, "activation_revision": "f" * 64},
+        "revisions": {
+            "inventory_sha256": "e" * 64,
+            "model_revision": "a" * 40,
+            "tokenizer_revision": "b" * 40,
+            "activation_revision": "f" * 40,
+        },
         "activation": activation,
         "support": support,
-        "evaluation": {"required_outputs": ["accuracy", "coherence"], "split": "test"},
+        "evaluation": {"required_outputs": ["accuracy", "coherence"], "split": evaluation_split},
         "calibration": {
-            "methods": ["caa", "grom"],
+            "methods": list(targets.METHODS),
             "strategies": list(targets.STRATEGIES),
             "layer_count": None if activation_status == "absent" else layers,
             "expected_pairs": pair_count,
@@ -139,7 +166,7 @@ def _manifest_payload(
         "execution": {
             "state": execution_state,
             "blocked": blocked,
-            "rerun_locked": finalized,
+            "rerun_locked": locked,
             "publication": publication,
             "provenance": {
                 "execution_sha256": "1" * 64 if finalized else None,
@@ -147,6 +174,93 @@ def _manifest_payload(
             },
         },
     }
+
+
+def _manifest_binding(manifest):
+    encoded = policy.canonical_json(manifest)
+    return {
+        "ref": {
+            "uri": "gs://target-manifests/org__model-small/short_bench/target.json",
+            "generation": "actual-generation-31",
+            "size": str(len(encoded)),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        },
+        "payload": manifest,
+    }
+
+
+def _policy_inputs(manifest):
+    target_id = manifest["target"]["target_id"]
+    resource_class = "calibration-gpu"
+    return {
+        "target_manifest_refs": [_manifest_binding(manifest)],
+        "pair_text_refs": {target_id: copy.deepcopy(manifest["support"]["pair_texts_ref"])},
+        "revisions": {"code": "3" * 40, "runtime": "3" * 40},
+        "resource_classes": {
+            resource_class: {
+                "accelerator": "nvidia-tesla-a100",
+                "memory_bytes": 40_000_000_000,
+                "runtime_seconds": 3_600,
+                "image": {
+                    "name": policy.desired_results_stado.STADO_IMAGE_NAME,
+                    "project": policy.desired_results_stado.STADO_IMAGE_PROJECT,
+                },
+                "dependency_lock_ref": {
+                    "uri": "gs://wisent-runtime/requirements.lock",
+                    "generation": "actual-generation-37",
+                    "size": "128",
+                    "sha256": "4" * 64,
+                },
+            }
+        },
+        "model_classes": {
+            manifest["target"]["model_name"]: {
+                "phase_classes": {phase: resource_class for phase in policy.PHASES},
+                "hidden_size": 4_096,
+            }
+        },
+        "output_namespace": "gs://wisent-policy/results",
+        "trials_per_strategy": 1,
+        "retry_policy": {
+            "calibration_max_attempts": 1,
+            "max_pre_test_attempts": 1,
+        },
+        "evaluator": {"name": "log_likelihoods", "version": "1", "options": {}},
+    }
+
+
+def test_build_policy_bundle_accepts_activation_ready_unprepared_target():
+    manifest = targets.finalize_target_manifest(_manifest_payload())
+    inputs = _policy_inputs(manifest)
+
+    bundle = policy.build_policy_bundle(**inputs)
+
+    target_id = manifest["target"]["target_id"]
+    assert bundle["target_manifest_refs"] == inputs["target_manifest_refs"]
+    assert bundle["pair_text_refs"] == {
+        target_id: manifest["support"]["pair_texts_ref"]
+    }
+
+
+@pytest.mark.parametrize(
+    "manifest_options",
+    [
+        pytest.param({"execution_state": "finalized"}, id="finalized"),
+        pytest.param({"blocked": True}, id="blocked"),
+        pytest.param({"rerun_locked": True}, id="rerun-locked"),
+        pytest.param({"activation_status": "partial"}, id="activation-ineligible"),
+        pytest.param({"support_state": "missing"}, id="support-missing"),
+        pytest.param({"evaluation_split": "validation"}, id="non-test-evaluation"),
+    ],
+)
+def test_build_policy_bundle_rejects_targets_not_ready_for_activation(manifest_options):
+    manifest = targets.finalize_target_manifest(_manifest_payload(**manifest_options))
+
+    with pytest.raises(
+        policy.PolicyError,
+        match="not activation-eligible for calibration/final planning",
+    ):
+        policy.build_policy_bundle(**_policy_inputs(manifest))
 
 
 @pytest.mark.parametrize(
@@ -272,7 +386,10 @@ def test_complete_activation_requires_target_bound_refs_for_every_route():
     cross_target_ref["activation"]["routes"][0]["proof_ref"]["uri"] = (
         "cache://proof/other__model/short_bench/chat_first/1/record.json"
     )
-    with pytest.raises(targets.ContractError, match="route reference does not match target"):
+    with pytest.raises(
+        targets.ContractError,
+        match="activation route reference is neither target-scoped nor canonically content-addressed",
+    ):
         targets.finalize_target_manifest(cross_target_ref)
 
 

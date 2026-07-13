@@ -437,8 +437,18 @@ def build_policy_bundle(
         if target_id in seen:
             raise ContractError(f"duplicate target manifest for {target_id}")
         seen.add(target_id)
-        if manifest["execution"]["state"] not in {"prepared", "calibrated"}:
-            raise ContractError(f"target {target_id} is not promoted for calibration/final planning")
+        lifecycle = manifest["execution"]
+        if (
+            lifecycle["state"] != "unprepared"
+            or lifecycle["blocked"] is not False
+            or lifecycle["rerun_locked"] is not False
+            or manifest["activation"]["eligible"] is not True
+            or manifest["support"]["state"] != "prepared"
+            or manifest["evaluation"]["split"] != "test"
+        ):
+            raise ContractError(
+                f"target {target_id} is not activation-eligible for calibration/final planning"
+            )
         layer_count = manifest["activation"]["layer_count"]
         if type(layer_count) is not int or layer_count < 1:
             raise ContractError(f"target {target_id} lacks a positive activation layer_count")
