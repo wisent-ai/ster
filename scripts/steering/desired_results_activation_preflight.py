@@ -959,9 +959,13 @@ def execute_remote(descriptor_ref: Mapping[str, Any], output_prefix: str,
         descriptor = _read_descriptor(local_descriptor)
         _bind_remote_descriptor(plan, descriptor, descriptor_exact)
         local_bundle = temporary_root / "bundle"
-        bundle_index_path = Path(run_function(local_descriptor, local_bundle, workers))
-        if bundle_index_path.parent != local_bundle or not bundle_index_path.is_file():
-            raise PreflightError("local preflight returned a bundle index outside its output directory")
+        bundle_index_path = Path(run_function(local_descriptor, local_bundle, workers)).resolve()
+        try:
+            bundle_index_path.relative_to(local_bundle.resolve())
+        except ValueError as exc:
+            raise PreflightError("local preflight returned a bundle index outside its output directory") from exc
+        if not bundle_index_path.is_file():
+            raise PreflightError("local preflight returned a missing bundle index")
         published: Dict[str, Tuple[Dict[str, str], Dict[str, Any]]] = {}
         active: set[str] = set()
         raw_sha_to_relative = {
@@ -1014,7 +1018,7 @@ def execute_remote(descriptor_ref: Mapping[str, Any], output_prefix: str,
             published[relative] = (ref, rewritten)
             return ref, rewritten
 
-        bundle_relative = bundle_index_path.relative_to(local_bundle).as_posix()
+        bundle_relative = bundle_index_path.relative_to(local_bundle.resolve()).as_posix()
         bundle_ref, bundle = publish_relative(bundle_relative)
         # Upload even unreferenced bundle files; a successful receipt certifies the complete local output.
         for candidate in sorted(path for path in local_bundle.rglob("*") if path.is_file()):
