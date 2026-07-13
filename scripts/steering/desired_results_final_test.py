@@ -99,6 +99,24 @@ def _atomic_json(path: Path, value: Any) -> None:
         raise
 
 
+def _atomic_canonical_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(_canonical_bytes(value))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+
 def _require_exact_keys(value: Any, keys: Iterable[str], label: str) -> Mapping[str, Any]:
     expected = set(keys)
     if not isinstance(value, dict) or set(value) != expected:
@@ -770,6 +788,153 @@ def _finalize(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[s
     return {"publication": pointer_ref, "leaderboard": leaderboard}
 
 
+def _load_diff_predictions(store: GCSStore, completion: Mapping[str, Any], arm: str,
+                           support: Sequence[Mapping[str, Any]]) -> list[Dict[str, Any]]:
+    ref = completion["artifacts"]["test_predictions.jsonl"]
+    data = _read_ref_bytes(store, ref, f"{arm}/test_predictions.jsonl")
+    try:
+        lines = data.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise FinalTestError(f"{arm} predictions are not ASCII JSONL") from exc
+    if len(lines) != len(support) or any(not line for line in lines):
+        raise FinalTestError(f"{arm} predictions differ from sealed support length")
+    rows = [_strict_json_bytes(line.encode("ascii"), f"{arm} prediction {index}")
+            for index, line in enumerate(lines, 1)]
+    for expected, row in zip(support, rows):
+        _require_exact_keys(row, {"pair_id", "stable_id", "correct", "confidence", "evaluation"},
+                            f"{arm} prediction")
+        if (row["pair_id"] != expected["pair_id"] or row["stable_id"] != expected["stable_id"] or
+                type(row["correct"]) is not bool or not isinstance(row["evaluation"], dict)):
+            raise FinalTestError(f"{arm} prediction identity differs from sealed support")
+    return rows
+
+
+def _load_final_publication(args: argparse.Namespace, store: GCSStore) -> tuple[
+        Dict[str, Any], Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, str]]:
+    pointer_data, pointer_generation = store.read(args.publication, args.publication_generation)
+    pointer = _strict_json_bytes(pointer_data, "publication pointer")
+    _require_exact_keys(pointer, {"schema_version", "protocol_id", "contract_sha256", "aggregate",
+                                  "publication_pointer_sha256"}, "publication pointer")
+    pointer_hash = pointer["publication_pointer_sha256"]
+    if (pointer.get("protocol_id") != PROTOCOL_ID or pointer_hash != _canonical_json_sha256(
+            {key: value for key, value in pointer.items() if key != "publication_pointer_sha256"})):
+        raise FinalTestError("publication pointer identity differs")
+    receipt = _read_ref(store, pointer["aggregate"], "aggregate publication")
+    _require_exact_keys(receipt, {"schema_version", "contract_sha256", "aggregate_objects",
+                                  "complete_arms", "publication_sha256"}, "aggregate publication")
+    receipt_hash = receipt["publication_sha256"]
+    if (receipt_hash != _canonical_json_sha256(
+            {key: value for key, value in receipt.items() if key != "publication_sha256"}) or
+            receipt.get("contract_sha256") != pointer["contract_sha256"] or
+            receipt.get("complete_arms") != list(ARMS)):
+        raise FinalTestError("aggregate publication identity differs")
+    objects = receipt["aggregate_objects"]
+    _require_exact_keys(objects, {"arm-results.json", "leaderboard.json", "comparability.json",
+                                  "provenance.json"}, "aggregate objects")
+    provenance = _read_ref(store, objects["provenance.json"], "aggregate provenance")
+    _require_exact_keys(provenance, {"schema_version", "contract_sha256", "seal", "completions"},
+                        "aggregate provenance")
+    seal_ref = provenance["seal"]
+    _require_exact_keys(seal_ref, {"uri", "generation", "sha256"}, "aggregate seal reference")
+    seal_data, seal_generation = store.read(seal_ref["uri"], seal_ref["generation"])
+    if (seal_generation != seal_ref["generation"] or
+            hashlib.sha256(seal_data).hexdigest() != seal_ref["sha256"]):
+        raise FinalTestError("aggregate seal reference differs")
+    seal = _strict_json_bytes(seal_data, "seal")
+    if (seal.get("seal_sha256") != _canonical_json_sha256(
+            {key: value for key, value in seal.items() if key != "seal_sha256"}) or
+            seal.get("protocol_id") != PROTOCOL_ID or seal.get("arms") != list(ARMS)):
+        raise FinalTestError("seal identity differs")
+    contract = _read_ref(store, seal["contract"], "contract")
+    contract_hash = pointer["contract_sha256"]
+    if (contract.get("contract_sha256") != contract_hash or
+            receipt.get("contract_sha256") != contract_hash or
+            provenance.get("contract_sha256") != contract_hash or
+            seal.get("contract_sha256") != contract_hash):
+        raise FinalTestError("publication contract identities differ")
+    completions = provenance["completions"]
+    _require_exact_keys(completions, set(ARMS), "aggregate completions")
+    loaded = {}
+    prefix = contract["publication"]["remote_prefix"]
+    for arm in ARMS:
+        ref = completions[arm]
+        expected_uri = f"{prefix}runs/{arm}/{contract_hash}/completion.json"
+        if not isinstance(ref, dict) or ref.get("uri") != expected_uri:
+            raise FinalTestError(f"{arm} aggregate completion URI differs")
+        completion = _read_ref(store, ref, f"{arm} completion")
+        _validate_completion(arm, completion, contract, seal["manifests"][arm], store)
+        loaded[arm] = completion
+    source = {"uri": args.publication, "generation": pointer_generation,
+              "sha256": hashlib.sha256(pointer_data).hexdigest(), "size": str(len(pointer_data))}
+    return contract, provenance, loaded, source
+
+
+def _diff(args: argparse.Namespace, store: GCSStore | None = None) -> Dict[str, Any]:
+    store = store or GCSStore()
+    contract, _, completions, source = _load_final_publication(args, store)
+    support = contract["split_contract"]["evaluation"]["support"]
+    test_pairs = _read_ref(store, contract["calibration"]["test_pairs"], "sealed test pairs")
+    pairs = test_pairs.get("pairs") if isinstance(test_pairs, dict) else None
+    if (not isinstance(pairs, list) or len(pairs) != len(support) or
+            test_pairs.get("pair_ids") != [row["pair_id"] for row in support]):
+        raise FinalTestError("sealed test-pair payload differs from evaluation support")
+    pair_text = {}
+    for expected, pair in zip(support, pairs):
+        if (not isinstance(pair, dict) or pair.get("pair_id") != expected["pair_id"] or
+                pair.get("stable_id") != expected["stable_id"] or
+                not isinstance(pair.get("prompt"), str)):
+            raise FinalTestError("sealed test-pair identity or prompt differs")
+        positive = pair.get("positive_response")
+        negative = pair.get("negative_response")
+        if (not isinstance(positive, dict) or not isinstance(positive.get("model_response"), str) or
+                not isinstance(negative, dict) or not isinstance(negative.get("model_response"), str)):
+            raise FinalTestError("sealed test-pair answers are malformed")
+        pair_text[(pair["pair_id"], pair["stable_id"])] = {
+            "prompt": pair["prompt"], "expected_answer": positive["model_response"],
+            "alternative_answer": negative["model_response"],
+        }
+    predictions = {arm: _load_diff_predictions(store, completions[arm], arm, support)
+                   for arm in ARMS}
+    baseline = {(row["pair_id"], row["stable_id"]): row for row in predictions["baseline"]}
+    selected = METHODS if args.method == "all" else (args.method,)
+    methods = {}
+    for arm in selected:
+        improved = []
+        regressed = []
+        for row in predictions[arm]:
+            key = (row["pair_id"], row["stable_id"])
+            before = baseline.get(key)
+            if before is None:
+                raise FinalTestError(f"{arm} prediction support differs from baseline")
+            text = pair_text[key]
+            before_expected = before["evaluation"].get("expected_answer")
+            after_expected = row["evaluation"].get("expected_answer")
+            if (before_expected != text["expected_answer"] or
+                    after_expected != text["expected_answer"]):
+                raise FinalTestError(f"{arm} expected answer differs from sealed pair text")
+            detail = {"pair_id": key[0], "stable_id": key[1], **text,
+                      "baseline_prediction": before, "method_prediction": row}
+            if not before["correct"] and row["correct"]:
+                detail["flip"] = "wrong_to_correct"
+                improved.append(detail)
+            elif before["correct"] and not row["correct"]:
+                detail["flip"] = "correct_to_wrong"
+                regressed.append(detail)
+        changed = len(improved) + len(regressed)
+        methods[arm] = {
+            "wrong_to_correct": len(improved), "correct_to_wrong": len(regressed),
+            "unchanged": len(support) - changed,
+            "net_improvement": len(improved) - len(regressed),
+            "improved": improved, "regressed": regressed,
+        }
+    report = {"schema_version": 1, "protocol_id": PROTOCOL_ID,
+              "contract_sha256": contract["contract_sha256"],
+              "source_publication": source, "baseline": "baseline", "methods": methods}
+    if args.output is not None:
+        _atomic_canonical_json(args.output, report)
+    return report
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -791,6 +956,11 @@ def _parser() -> argparse.ArgumentParser:
     finalize = sub.add_parser("finalize")
     finalize.add_argument("--seal", required=True)
     finalize.add_argument("--seal-generation", required=True)
+    diff = sub.add_parser("diff")
+    diff.add_argument("--publication", required=True)
+    diff.add_argument("--publication-generation", required=True)
+    diff.add_argument("--method", choices=("all",) + METHODS, default="all")
+    diff.add_argument("--output", type=Path)
     return parser
 
 
@@ -803,8 +973,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _seal(args)
         elif args.mode == "stado-plan":
             result = _stado_plan(args)
-        else:
+        elif args.mode == "finalize":
             result = _finalize(args)
+        else:
+            result = _diff(args)
         print(json.dumps(result, sort_keys=True, allow_nan=False))
         return 0
     except (FinalTestError, OSError, ValueError, KeyError, TypeError) as exc:

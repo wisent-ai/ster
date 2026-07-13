@@ -176,8 +176,8 @@ def _seed_sealed_inputs(store, contract):
         store.objects[ref["uri"]] = (_REF_PAYLOADS[ref["uri"]], ref["generation"])
 
 
-def _seal(store, tmp_path):
-    contract, manifests = _write_bundle(tmp_path)
+def _seal(store, tmp_path, contract=None):
+    contract, manifests = _write_bundle(tmp_path, contract)
     _seed_sealed_inputs(store, contract)
     output = final._seal(Namespace(bundle=tmp_path, output=None), store)
     seal_bytes, seal_generation = store.read(output["seal"]["uri"])
@@ -274,6 +274,80 @@ def _replace_predictions(store, contract, seal, arm, predictions):
         {key: value for key, value in completion.items() if key != "completion_sha256"}
     )
     store.objects[completion_uri] = (final._canonical_bytes(completion), generation)
+
+
+def _replace_arm_evaluation(store, contract, arm, correctness):
+    prefix = f"{contract['publication']['remote_prefix']}runs/{arm}/{contract['contract_sha256']}/"
+    completion_uri = prefix + "completion.json"
+    completion_bytes, completion_generation = store.objects[completion_uri]
+    completion = json.loads(completion_bytes)
+    support = contract["split_contract"]["evaluation"]["support"]
+    predictions = []
+    evaluations = []
+    for index, (identity, correct) in enumerate(zip(support, correctness)):
+        outcome = {"correct": correct, "confidence": 0.8, "expected_answer": "yes"}
+        predictions.append({**identity, "correct": correct, "confidence": 0.8,
+                            "evaluation": outcome})
+        evaluations.append({"prompt": f"deliberately-non-unique-{index % 2}",
+                            "positive_reference": "yes", "negative_reference": "no",
+                            "evaluation": outcome})
+    correct_count = sum(correctness)
+    replacements = {
+        "test_predictions.jsonl": b"".join(final._canonical_bytes(row) + b"\n"
+                                             for row in predictions),
+        "scores.json": final._canonical_bytes({
+            "evaluator_used": "log_likelihoods", "num_total": 100,
+            "num_evaluated": 100, "num_model_required": 0,
+            "aggregated_metrics": {"acc": correct_count / 100},
+            "evaluations": evaluations,
+        }),
+    }
+    result_ref = completion["artifacts"]["result.json"]
+    result = json.loads(store.objects[result_ref["uri"]][0])
+    result.update({"primary_metric": correct_count / 100,
+                   "raw_accuracy": correct_count / 100,
+                   "correct_count": correct_count})
+    replacements["result.json"] = final._canonical_bytes(result)
+    for name, payload in replacements.items():
+        ref = completion["artifacts"][name]
+        store.objects[ref["uri"]] = (payload, store.objects[ref["uri"]][1])
+        completion["artifacts"][name] = {
+            "uri": ref["uri"], "generation": ref["generation"],
+            "sha256": hashlib.sha256(payload).hexdigest(), "size": str(len(payload)),
+        }
+    completion["completion_sha256"] = final._canonical_json_sha256(
+        {key: value for key, value in completion.items() if key != "completion_sha256"}
+    )
+    store.objects[completion_uri] = (final._canonical_bytes(completion), completion_generation)
+    return predictions
+
+
+def _finalized_flip_publication(store, tmp_path):
+    calibration = _calibration()
+    test_pairs = json.loads(_REF_PAYLOADS[calibration["test_pairs"]["uri"]])
+    test_pairs["pairs"][0]["prompt"] = "same prompt"
+    test_pairs["pairs"][1]["prompt"] = "same prompt"
+    calibration["test_pairs"] = _ref(calibration["test_pairs"]["uri"], test_pairs)
+    contract = final._build_contract(
+        _inventory(), calibration, TEST_CODE_REVISION, _runtime(),
+        "gs://stado/results/target/final-test-v1/",
+    )
+    contract, manifests, seal, seal_generation = _seal(store, tmp_path, contract)
+    _complete_all(store, contract, manifests, seal)
+    baseline = [False, True] + [False] * 98
+    predictions = {"baseline": _replace_arm_evaluation(store, contract, "baseline", baseline)}
+    method_correctness = {
+        "caa": [True, False] + [False] * 98,
+        "grom": [False, True, True] + [False] * 97,
+    }
+    for method in final.METHODS:
+        correctness = method_correctness.get(method, baseline)
+        predictions[method] = _replace_arm_evaluation(store, contract, method, correctness)
+    publication = final._finalize(Namespace(
+        seal=f"{contract['publication']['remote_prefix']}control/seal.json",
+        seal_generation=seal_generation,
+    ), store)
+    return contract, publication["publication"], predictions
 
 
 def test_contract_uses_distinct_ordered_id_and_full_support_hashes():
@@ -618,3 +692,94 @@ def test_finalize_publishes_deterministic_leaderboard_baseline_deltas_and_pointe
     with pytest.raises(final.FinalTestError, match="already exists"):
         final._finalize(Namespace(seal=f"{contract['publication']['remote_prefix']}control/seal.json",
                                   seal_generation=seal_generation), store)
+
+
+def test_diff_reports_identity_joined_flips_and_filters_methods(tmp_path):
+    store = FakeStore()
+    contract, publication, predictions = _finalized_flip_publication(store, tmp_path)
+    args = Namespace(publication=publication["uri"],
+                     publication_generation=publication["generation"],
+                     method="all", output=None)
+
+    report = final._diff(args, store)
+
+    assert report["schema_version"] == 1
+    assert report["protocol_id"] == final.PROTOCOL_ID
+    assert report["contract_sha256"] == contract["contract_sha256"]
+    assert report["source_publication"] == publication
+    assert report["baseline"] == "baseline"
+    assert set(report["methods"]) == set(final.METHODS)
+    assert report["methods"]["caa"] == {
+        "wrong_to_correct": 1,
+        "correct_to_wrong": 1,
+        "unchanged": 98,
+        "net_improvement": 0,
+        "improved": [{
+            "pair_id": 400,
+            "stable_id": "test-0",
+            "flip": "wrong_to_correct",
+            "prompt": "same prompt",
+            "expected_answer": "yes",
+            "alternative_answer": "no",
+            "baseline_prediction": predictions["baseline"][0],
+            "method_prediction": predictions["caa"][0],
+        }],
+        "regressed": [{
+            "pair_id": 401,
+            "stable_id": "test-1",
+            "flip": "correct_to_wrong",
+            "prompt": "same prompt",
+            "expected_answer": "yes",
+            "alternative_answer": "no",
+            "baseline_prediction": predictions["baseline"][1],
+            "method_prediction": predictions["caa"][1],
+        }],
+    }
+    assert report["methods"]["grom"] == {
+        "wrong_to_correct": 1,
+        "correct_to_wrong": 0,
+        "unchanged": 99,
+        "net_improvement": 1,
+        "improved": [{
+            "pair_id": 402,
+            "stable_id": "test-2",
+            "flip": "wrong_to_correct",
+            "prompt": "p402",
+            "expected_answer": "yes",
+            "alternative_answer": "no",
+            "baseline_prediction": predictions["baseline"][2],
+            "method_prediction": predictions["grom"][2],
+        }],
+        "regressed": [],
+    }
+    unchanged = {"wrong_to_correct": 0, "correct_to_wrong": 0, "unchanged": 100,
+                 "net_improvement": 0, "improved": [], "regressed": []}
+    for method in set(final.METHODS) - {"caa", "grom"}:
+        assert report["methods"][method] == unchanged
+
+    single = final._diff(Namespace(
+        publication=publication["uri"],
+        publication_generation=publication["generation"],
+        method="caa", output=tmp_path / "caa-diff.json",
+    ), store)
+    assert single["methods"] == {"caa": report["methods"]["caa"]}
+    assert (tmp_path / "caa-diff.json").read_bytes() == final._canonical_bytes(single)
+
+
+def test_diff_refuses_completion_ref_drift_without_writing_remote_objects(tmp_path):
+    store = FakeStore()
+    contract, publication, _ = _finalized_flip_publication(store, tmp_path)
+    completion_uri = (contract["publication"]["remote_prefix"] +
+                      f"runs/caa/{contract['contract_sha256']}/completion.json")
+    payload, generation = store.objects[completion_uri]
+    store.objects[completion_uri] = (payload + b" ", generation)
+    writes_before_diff = list(store.writes)
+
+    with pytest.raises(final.FinalTestError, match="completion|immutable|hash|bytes"):
+        final._diff(Namespace(
+            publication=publication["uri"],
+            publication_generation=publication["generation"],
+            method="caa", output=None,
+        ), store)
+
+    assert store.writes == writes_before_diff
