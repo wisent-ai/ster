@@ -202,8 +202,15 @@ def validate_target_manifest(manifest: Mapping[str, Any]) -> None:
             for field in ("uri", "generation", "size"):
                 _string(ref[field], f"activation.routes[{index}].{ref_name}.{field}")
             _sha(ref["sha256"], f"activation.routes[{index}].{ref_name}.sha256")
-            if f"/{model_slug}/{benchmark}/" not in ref["uri"]:
-                raise ContractError("activation route reference does not match target identity")
+            identity_path = f"/{model_slug}/{benchmark}/" in ref["uri"]
+            content_addressed_path = (
+                ref["uri"].startswith("gs://")
+                and ref["uri"].endswith(f"/artifacts/{ref['sha256']}.json")
+            )
+            if not identity_path and not content_addressed_path:
+                raise ContractError(
+                    "activation route reference is neither target-scoped nor canonically content-addressed"
+                )
     expected_routes = set() if layer_count is None else {(strategy, layer) for strategy in STRATEGIES for layer in range(1, layer_count + 1)}
     evidence_complete = (
         status == "complete" and layer_count is not None and n_pairs == expected_pairs

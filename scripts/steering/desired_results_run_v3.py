@@ -1139,6 +1139,71 @@ def _resolve_production_document(store: Any, uri: str, label: str) -> tuple[dict
     return _production_document(store, resolve_ref(store, uri, label), label)
 
 
+def _validate_production_route_artifacts(
+    store: Any, manifest: Mapping[str, Any], label: str,
+) -> None:
+    """Exact-load content-addressed route evidence and bind it to its manifest route."""
+    target = manifest["target"]
+    target_id = target["target_id"]
+    expected_pairs = target["expected_pairs"]
+    for index, route in enumerate(manifest["activation"]["routes"]):
+        route_label = f"{label} activation route {index}"
+        completion, completion_ref = _production_document(
+            store, route["completion_ref"], f"{route_label} completion",
+        )
+        proof, proof_ref = _production_document(
+            store, route["proof_ref"], f"{route_label} proof",
+        )
+        if completion_ref != route["completion_ref"] or proof_ref != route["proof_ref"]:
+            raise RunV3Error(f"{route_label} ref changed during exact load")
+        expected_route = {"strategy": route["strategy"], "layer": route["layer"]}
+        if (set(completion) != {
+                "schema_version", "complete", "target_id", "route", "proof_ref",
+                "activation_lfs_sha256", "activation_header_sha256",
+        } or completion["schema_version"] != 2 or completion["complete"] is not True
+                or completion["target_id"] != target_id or completion["route"] != expected_route
+                or completion["proof_ref"] != proof_ref):
+            raise RunV3Error(f"{route_label} completion differs from the manifest route")
+        if (set(proof) != {
+                "schema_version", "proof_kind", "target_id", "activation_artifact", "route",
+                "pair_ids", "tensor_shapes", "tensor_dtypes", "safetensors_header_length",
+                "safetensors_header_sha256", "tensor_payload_downloaded",
+        } or proof["schema_version"] != 2
+                or proof["proof_kind"] != "pinned_hf_safetensors_header"
+                or proof["target_id"] != target_id or proof["route"] != expected_route
+                or proof["tensor_payload_downloaded"] is not False):
+            raise RunV3Error(f"{route_label} proof differs from the manifest route")
+        artifact = proof["activation_artifact"]
+        expected_path = (
+            f"activations/{target['model_slug']}/{target['benchmark']}/"
+            f"{route['strategy']}/layer_{route['layer']}.safetensors"
+        )
+        if (not isinstance(artifact, Mapping)
+                or set(artifact) != {"repo_id", "repo_type", "revision", "path", "lfs_sha256", "size"}
+                or artifact["revision"] != manifest["revisions"]["activation_revision"]
+                or artifact["path"] != expected_path
+                or artifact["lfs_sha256"] != completion["activation_lfs_sha256"]
+                or not isinstance(artifact["size"], int) or artifact["size"] <= 0):
+            raise RunV3Error(f"{route_label} activation artifact differs from target identity")
+        if (proof["pair_ids"] != list(range(expected_pairs))
+                or proof["safetensors_header_sha256"] != completion["activation_header_sha256"]
+                or not isinstance(proof["safetensors_header_length"], int)
+                or proof["safetensors_header_length"] <= 0):
+            raise RunV3Error(f"{route_label} tensor support differs from target evidence")
+        shapes, dtypes = proof["tensor_shapes"], proof["tensor_dtypes"]
+        if (not isinstance(shapes, Mapping) or set(shapes) != {"pos_activations", "neg_activations"}
+                or shapes["pos_activations"] != shapes["neg_activations"]
+                or not isinstance(shapes["pos_activations"], list)
+                or len(shapes["pos_activations"]) != 2
+                or shapes["pos_activations"][0] != expected_pairs
+                or not isinstance(shapes["pos_activations"][1], int)
+                or shapes["pos_activations"][1] <= 0
+                or not isinstance(dtypes, Mapping)
+                or set(dtypes) != {"pos_activations", "neg_activations"}
+                or dtypes["pos_activations"] != dtypes["neg_activations"]):
+            raise RunV3Error(f"{route_label} tensor schema is inconsistent")
+
+
 def _same_canonical_payload(observed: Mapping[str, Any], expected: Any, label: str) -> None:
     if not isinstance(expected, Mapping) or canonical_bytes(observed) != canonical_bytes(expected):
         raise RunV3Error(f"{label} differs from its immutable store payload")
@@ -1227,6 +1292,10 @@ def promote(preflight_receipts: Sequence[Mapping[str, Any]], *,
             desired_results_target.validate_target_manifest(manifest)
         except (execution.ContractError, desired_results_target.ContractError) as exc:
             raise RunV3Error(f"invalid promoted target {target_id}: {exc}") from exc
+        if production:
+            if completion.get("routes") != manifest["activation"]["routes"]:
+                raise RunV3Error(f"{label} completion route matrix differs from target manifest")
+            _validate_production_route_artifacts(store, manifest, label)
         if (bundle.get("target_id") != target_id or bundle.get("descriptor_sha256") != receipt["descriptor_sha256"] or
                 bundle.get("completion_index_ref") != completion_ref or bundle.get("target_manifest_ref") != manifest_ref):
             raise RunV3Error("bundle index differs from terminal receipt bindings")
@@ -1244,17 +1313,22 @@ def promote(preflight_receipts: Sequence[Mapping[str, Any]], *,
         normalized_selection_ref = (None if selected_ref_value is None else
                                     _artifact_ref(selected_ref_value, "selection_ref"))
         submitted_ref = _artifact_ref(receipt["submission_ref"], "submission_ref")
+        normalized_submission_sha = receipt["submission_sha256"]
         if production:
             inventory_plan, loaded_plan_ref = _load_inventory_plan_ref(store, plan_ref, production=True)
             submission_plan, loaded_submission_ref = load_preflight_plan(store, submitted_ref)
             if loaded_plan_ref != plan_ref or loaded_submission_ref != submitted_ref:
                 raise RunV3Error("preflight source ref changed during exact load")
-            if (inventory_plan.get("plan_sha256") != receipt["inventory_plan_sha256"] or
-                    submission_plan["plan_sha256"] != receipt["submission_sha256"] or
-                    submission_plan["inventory_plan_ref"] != plan_ref or
-                    submission_plan["inventory_plan_sha256"] != receipt["inventory_plan_sha256"] or
-                    submission_plan["selection_ref"] != normalized_selection_ref or
-                    submission_plan["selection_sha256"] != receipt["selection_sha256"]):
+            logical_submission_sha = submission_plan["plan_sha256"]
+            if receipt["submission_sha256"] not in {
+                    logical_submission_sha, loaded_submission_ref["sha256"]}:
+                raise RunV3Error("preflight receipt submission hash differs from exact submission bytes")
+            normalized_submission_sha = logical_submission_sha
+            if (inventory_plan.get("plan_sha256") != receipt["inventory_plan_sha256"]
+                    or submission_plan["inventory_plan_ref"] != plan_ref
+                    or submission_plan["inventory_plan_sha256"] != receipt["inventory_plan_sha256"]
+                    or submission_plan["selection_ref"] != normalized_selection_ref
+                    or submission_plan["selection_sha256"] != receipt["selection_sha256"]):
                 raise RunV3Error("preflight receipt differs from authoritative submission lineage")
             matching_nodes = [item for item in submission_plan["targets"] if item["node_id"] == receipt["node_id"]]
             if (len(matching_nodes) != 1 or matching_nodes[0]["target_id"] != target_id or
@@ -1275,7 +1349,7 @@ def promote(preflight_receipts: Sequence[Mapping[str, Any]], *,
                 raise RunV3Error("preflight receipt has a selection hash without an immutable selection_ref")
         identity = (
             plan_ref, receipt["inventory_plan_sha256"], normalized_selection_ref,
-            receipt["selection_sha256"], submitted_ref, receipt["submission_sha256"],
+            receipt["selection_sha256"], submitted_ref, normalized_submission_sha,
         )
         if common_plan_ref is None:
             (common_plan_ref, common_plan_sha, common_selection_ref,
