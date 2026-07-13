@@ -43,8 +43,8 @@ SCHEMA_VERSION = execution.SCHEMA_VERSION
 PILOT_TARGET_COUNT = 4
 PRODUCTION_SCHEMES = ("gs://",)
 LOCAL_SCHEMES = ("bundle://", "file://", "local://")
-CALIBRATION_WORKER_COMMAND = ("python", "scripts/steering/desired_results_worker.py")
-FINAL_TEST_WORKER_COMMAND = ("python", "scripts/steering/desired_results_final_test_worker.py")
+CALIBRATION_WORKER_COMMAND = ("python", "-m", "scripts.steering.desired_results_worker")
+FINAL_TEST_WORKER_COMMAND = ("python", "-m", "scripts.steering.desired_results_final_test_worker")
 
 def _policy_module() -> Any:
     try:

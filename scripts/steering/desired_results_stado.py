@@ -236,7 +236,7 @@ def _validate_command(value: Any, job: Mapping[str, Any]) -> list[str]:
         uri = _string(ref.get("uri"), "job.manifest_ref.uri")
         generation = _string(ref.get("generation"), "job.manifest_ref.generation")
         expected = [
-            "python", "scripts/steering/desired_results_worker.py",
+            "python", "-m", "scripts.steering.desired_results_worker",
             "--calibration-manifest", uri,
             "--calibration-manifest-generation", generation,
             "--attempt-number", str(job.get("attempt")),
@@ -252,7 +252,7 @@ def _validate_command(value: Any, job: Mapping[str, Any]) -> list[str]:
         if _SAFE_DEVICE.fullmatch(device) is None:
             raise StadoSubmissionError("job.runtime.device contains unsafe characters")
         expected = [
-            "python", "scripts/steering/desired_results_final_test_worker.py",
+            "python", "-m", "scripts.steering.desired_results_final_test_worker",
             "--seal-ref", seal_uri, "--seal-ref-generation", seal_generation,
             "--arm-manifest", uri, "--arm-manifest-generation", generation,
             "--attempt-number", str(job.get("attempt")), "--device", device,
