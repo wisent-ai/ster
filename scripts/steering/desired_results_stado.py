@@ -175,7 +175,7 @@ def build_pre_command(submission: Mapping[str, Any], dependency_lock_ref: Mappin
             "gsutil -h "
             f"x-goog-if-generation-match:{shlex.quote(lock['generation'])} cp "
             f"{shlex.quote(lock['uri'])} {DEPENDENCY_LOCK_PATH}",
-            f'test "$(wc -c < {DEPENDENCY_LOCK_PATH} | tr -d \'[:space:]\')" = '
+            f'test "$(/usr/bin/wc -c < {DEPENDENCY_LOCK_PATH} | tr -d \'[:space:]\')" = '
             f"{shlex.quote(lock['size'])}",
             f'test "$(sha256sum {DEPENDENCY_LOCK_PATH} | cut -d \' \' -f 1)" = '
             f"{shlex.quote(lock['sha256'])}",
