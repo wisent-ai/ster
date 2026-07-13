@@ -43,6 +43,7 @@ except ImportError:
         )
 
 MAX_HEADER_BYTES = 16 * 1024 * 1024
+HEADER_PROBE_BYTES = 64 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
 RETRIES = 4
 ROOT_KEYS = {
@@ -417,11 +418,21 @@ def _route_proof(descriptor: Mapping[str, Any], route: Mapping[str, Any], entry:
     oid, size = _lfs_identity(entry, repo_path)
     if size < 10:
         raise PreflightError(f"safetensors artifact is too small: {repo_path}")
-    prefix = _range(source["activation_repo_type"], source["activation_repo_id"], source["activation_revision"], repo_path, 0, 7)
-    header_length = struct.unpack("<Q", prefix)[0]
-    if header_length <= 1 or header_length > MAX_HEADER_BYTES or 8 + header_length > size:
+    probe_end = min(size - 1, HEADER_PROBE_BYTES - 1)
+    probe = _range(
+        source["activation_repo_type"], source["activation_repo_id"],
+        source["activation_revision"], repo_path, 0, probe_end,
+    )
+    header_length = struct.unpack("<Q", probe[:8])[0]
+    header_end = 8 + header_length
+    if header_length <= 1 or header_length > MAX_HEADER_BYTES or header_end > size:
         raise PreflightError(f"invalid safetensors header length for {repo_path}")
-    raw_header = _range(source["activation_repo_type"], source["activation_repo_id"], source["activation_revision"], repo_path, 8, 7 + header_length)
+    raw_header = probe[8:header_end]
+    if header_end > len(probe):
+        raw_header += _range(
+            source["activation_repo_type"], source["activation_repo_id"],
+            source["activation_revision"], repo_path, len(probe), header_end - 1,
+        )
     try:
         header = json.loads(raw_header)
     except json.JSONDecodeError as exc:
