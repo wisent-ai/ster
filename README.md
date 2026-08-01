@@ -1,3 +1,13 @@
+# wisent
+
+<!-- wisent-readme-signals:start -->
+[![CI](https://github.com/wisent-ai/wisent/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/wisent-ai/wisent/actions/workflows/tests.yml)
+[![Release](https://img.shields.io/github/v/release/wisent-ai/wisent?display_name=tag&sort=semver)](https://github.com/wisent-ai/wisent/releases)
+[![Downloads](https://img.shields.io/github/downloads/wisent-ai/wisent/total)](https://github.com/wisent-ai/wisent/releases)
+[![License](https://img.shields.io/github/license/wisent-ai/wisent)](https://github.com/wisent-ai/wisent)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Wisent-5865F2?logo=discord&logoColor=white)](https://discord.gg/qRjpkthq54)
+<!-- wisent-readme-signals:end -->
+
 <p align="center">
   <img src="banner.png" alt="Wisent Banner" width="100%">
 </p>
@@ -15,4 +25,4 @@ Wisent allows you to control your AI by identifying brain patterns corresponding
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.
