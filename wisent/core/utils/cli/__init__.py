@@ -12,6 +12,8 @@ when this package is loaded as a side effect of namespace resolution.
 """
 
 _IMPORT_MAP = {
+    'execute_onboarding': '.onboarding',
+    'record_representation_operation': '.onboarding',
     'execute_tasks': '.analysis.config.tasks',
     'execute_inference_config': '.analysis.config.inference_config_cli',
     'execute_diagnose_pairs': '.analysis.diagnosis.diagnose_pairs',
