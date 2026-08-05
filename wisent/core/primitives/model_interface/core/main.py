@@ -42,6 +42,8 @@ def main():
     # Show banner only on first use
     if _should_show_banner():
         print_banner("Wisent CLI", width=BANNER_WIDTH, use_color=True)
+        print("Start or resume your first representation workflow with `wisent onboarding`.")
+
 
     # Parse arguments
     parser = setup_parser()
@@ -54,6 +56,8 @@ def main():
 
     # Command-to-function dispatch map (modules lazy-loaded via cli.__getattr__)
     _COMMAND_MAP = {
+        'onboarding': 'execute_onboarding',
+
         'tasks': 'execute_tasks',
         'generate-pairs': 'execute_generate_pairs',
         'diagnose-pairs': 'execute_diagnose_pairs',
@@ -105,6 +109,7 @@ def main():
 
     handler = getattr(_cli, func_name)
     handler(args)
+    _cli.record_representation_operation(args.command)
 
 
 if __name__ == '__main__':

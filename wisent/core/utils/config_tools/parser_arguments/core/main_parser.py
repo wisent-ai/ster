@@ -79,6 +79,19 @@ def setup_parser() -> argparse.ArgumentParser:
 
     # Create subparsers for different commands
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    # First-use representation-engineering journey
+    onboarding_parser = subparsers.add_parser(
+        "onboarding",
+        help="Start or resume the first representation-engineering journey",
+    )
+    onboarding_parser.add_argument(
+        "onboarding_action",
+        nargs="?",
+        choices=("show", "continue", "skip", "reset"),
+        default="show",
+        help="Show the current step, continue, skip, or restart the journey",
+    )
+
 
     # Tasks command (main evaluation pipeline)
     tasks_parser = subparsers.add_parser("tasks", help="Run evaluation tasks")
