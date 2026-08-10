@@ -13,27 +13,29 @@
       "quality": [
         {
           "name": "release-metadata",
-          "argv": ["python3", "scripts/stado_release.py", "quality"]
+          "argv": [
+            "python3",
+            "scripts/stado_release.py",
+            "quality"
+          ]
         }
       ],
       "build": {
-        "argv": ["python3", "scripts/stado_release.py", "build"]
+        "argv": [
+          "python3",
+          "scripts/stado_release.py",
+          "build"
+        ]
       },
       "stage": {
         "release/python-distributions.tar": "release/python-distributions.tar"
       }
     }
   },
-  "runtime": {
-    "binary": "release/python-distributions.tar",
-    "launcher": "release/python-distributions.tar",
-    "config_schema": 1,
-    "state_schema": 1,
-    "minimum_stado_version": "0.1.0",
-    "rollback_compatible_with": []
-  },
   "promotion": {
-    "channels": ["stable"],
+    "channels": [
+      "stable"
+    ],
     "reconcile": false
   },
   "inputs": {},
@@ -41,7 +43,11 @@
     {
       "name": "pypi",
       "platform": "python",
-      "argv": ["python3", "scripts/stado_release.py", "deliver-pypi"],
+      "argv": [
+        "python3",
+        "scripts/stado_release.py",
+        "deliver-pypi"
+      ],
       "required": true,
       "secret_env": {
         "PYPI_TOKEN": "PYPI_TOKEN#token"
