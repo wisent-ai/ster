@@ -1,4 +1,6 @@
-# wisent
+<p align="center">
+  <img src="banner.png" alt="Wisent Banner" width="100%">
+</p>
 
 <!-- wisent-readme-signals:start -->
 [![CI](https://github.com/wisent-ai/wisent/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/wisent-ai/wisent/actions/workflows/tests.yml)
@@ -8,9 +10,7 @@
 [![Discord](https://img.shields.io/badge/Discord-Join%20Wisent-5865F2?logo=discord&logoColor=white)](https://discord.gg/qRjpkthq54)
 <!-- wisent-readme-signals:end -->
 
-<p align="center">
-  <img src="banner.png" alt="Wisent Banner" width="100%">
-</p>
+# Wisent: Understand and Manipulate AI Brains
 
 <p align="center">
   <code>pip install wisent</code>
