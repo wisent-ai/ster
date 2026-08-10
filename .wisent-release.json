@@ -30,6 +30,20 @@
       "stage": {
         "release/python-distributions.tar": "release/python-distributions.tar"
       }
+    },
+    "space": {
+      "runner_platform": "linux-amd64",
+      "quality": [],
+      "build": {
+        "argv": [
+          "python3",
+          "scripts/stado_space_release.py",
+          "build"
+        ]
+      },
+      "stage": {
+        ".wisent-output/release/space-bundle.tar": "release/space-bundle.tar"
+      }
     }
   },
   "promotion": {
@@ -51,6 +65,19 @@
       "required": true,
       "secret_env": {
         "PYPI_TOKEN": "PYPI_TOKEN#token"
+      }
+    },
+    {
+      "name": "huggingface-space",
+      "platform": "space",
+      "argv": [
+        "python3",
+        "scripts/stado_space_release.py",
+        "deliver"
+      ],
+      "required": true,
+      "secret_env": {
+        "HUGGINGFACE_TOKEN": "HUGGINGFACE_TOKEN#token"
       }
     }
   ]
