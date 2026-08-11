@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "product": "wisent",
+  "releases": true,
+  "version_source": {
+    "kind": "regex",
+    "path": "wisent/__init__.py",
+    "pattern": "(?m)^__version__\\s*=\\s*[\\\"'](?P<version>[0-9A-Za-z._-]+)[\\\"']"
+  },
+  "platforms": {
+    "python": {
+      "runner_platform": "linux-amd64",
+      "quality": [
+        {
+          "name": "release-metadata",
+          "argv": [
+            "python3",
+            "scripts/stado_release.py",
+            "quality"
+          ]
+        }
+      ],
+      "build": {
+        "argv": [
+          "python3",
+          "scripts/stado_release.py",
+          "build"
+        ]
+      },
+      "stage": {
+        "release/python-distributions.tar": "release/python-distributions.tar"
+      }
+    },
+    "space": {
+      "runner_platform": "linux-amd64",
+      "quality": [],
+      "build": {
+        "argv": [
+          "python3",
+          "scripts/stado_space_release.py",
+          "build"
+        ]
+      },
+      "stage": {
+        ".wisent-output/release/space-bundle.tar": "release/space-bundle.tar"
+      }
+    }
+  },
+  "promotion": {
+    "channels": [
+      "stable"
+    ],
+    "reconcile": false
+  },
+  "inputs": {},
+  "deliveries": [
+    {
+      "name": "pypi",
+      "platform": "python",
+      "argv": [
+        "python3",
+        "scripts/stado_release.py",
+        "deliver-pypi"
+      ],
+      "required": true,
+      "secret_env": {
+        "PYPI_TOKEN": "PYPI_TOKEN#token"
+      }
+    },
+    {
+      "name": "huggingface-space",
+      "platform": "space",
+      "argv": [
+        "python3",
+        "scripts/stado_space_release.py",
+        "deliver"
+      ],
+      "required": true,
+      "secret_env": {
+        "HUGGINGFACE_TOKEN": "HUGGINGFACE_TOKEN#token"
+      }
+    }
+  ]
+}
