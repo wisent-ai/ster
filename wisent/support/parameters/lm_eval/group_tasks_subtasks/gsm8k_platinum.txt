@@ -1,4 +1,0 @@
-gsm8k_platinum
-gsm8k_platinum_cot
-gsm8k_platinum_cot_self_consistency
-gsm8k_platinum_cot_llama

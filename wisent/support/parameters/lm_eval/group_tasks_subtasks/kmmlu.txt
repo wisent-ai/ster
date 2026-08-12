@@ -1,5 +1,0 @@
-kmmlu_{subject_english}
-kmmlu_direct_{subject_english}
-kmmlu_hard_{subject_english}
-kmmlu_hard_cot_{subject_english}
-kmmlu_hard_direct_{subject_english}

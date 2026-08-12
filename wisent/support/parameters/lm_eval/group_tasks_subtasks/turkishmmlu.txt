@@ -1,2 +1,0 @@
-turkishmmlu_{subject}
-turkishmmlu_cot_{subject}

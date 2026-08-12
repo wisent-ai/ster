@@ -1,2 +1,0 @@
-copal_id_standard
-copal_id_colloquial

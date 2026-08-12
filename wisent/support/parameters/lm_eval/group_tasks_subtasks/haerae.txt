@@ -1,5 +1,0 @@
-haerae_standard_nomenclature
-haerae_loan_word
-haerae_rare_word
-haerae_general_knowledge
-haerae_history

@@ -1,1 +1,0 @@
-"""GROM implementation details."""

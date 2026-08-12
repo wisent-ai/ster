@@ -1,5 +1,0 @@
-kobest_boolq
-kobest_copa
-kobest_hallawag
-kobest_sentineg
-kobest_wic

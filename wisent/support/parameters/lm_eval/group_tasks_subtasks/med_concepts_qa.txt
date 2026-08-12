@@ -1,5 +1,0 @@
-med_concepts_qa_icd9cm
-med_concepts_qa_icd10cm
-med_concepts_qa_icd9proc
-med_concepts_qa_icd10proc
-med_concepts_qa_atc

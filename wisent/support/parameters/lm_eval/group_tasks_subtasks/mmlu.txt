@@ -1,6 +1,0 @@
-mmlu_continuation
-mmlu_generative
-mmlu_stem
-mmlu_humanities
-mmlu_social_sciences
-mmlu_other

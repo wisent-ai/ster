@@ -1,4 +1,0 @@
-gsm8k_yaml
-gsm8k_cot
-gsm8k_cot_self_consistency
-gsm8k_cot_llama

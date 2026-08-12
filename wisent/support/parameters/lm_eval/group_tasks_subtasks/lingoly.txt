@@ -1,2 +1,0 @@
-lingoly_context
-lingoly_nocontext

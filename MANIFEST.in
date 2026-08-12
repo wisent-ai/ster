@@ -1,7 +1,0 @@
-recursive-include wisent/parameters *.json
-recursive-include wisent/support/parameters *.json
-recursive-include wisent/examples/scripts *.json
-recursive-include wisent/examples/contrastive_pairs *.json
-recursive-include wisent/pairs/extractors/configs *.yaml *.yml
-include wisent/eval/evaluators/benchmark_specific/coding/safe_docker/Dockerfile
-include wisent/eval/evaluators/benchmark_specific/coding/safe_docker/entrypoint.py

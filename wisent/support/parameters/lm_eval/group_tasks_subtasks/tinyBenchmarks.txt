@@ -1,6 +1,0 @@
-tinyArc
-tinyGSM8k
-tinyHellaswag
-tinyMMLU
-tinyTruthfulQA
-tinyWinogrande

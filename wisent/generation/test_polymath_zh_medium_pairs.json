@@ -1,8 +1,0 @@
-[
-  {
-    "pair_id": 0,
-    "prompt": "Question: \u5728$\\triangle ABC$\u4e2d\uff0c\u5df2\u77e5$(a+c)(\\sin A - \\sin C) = b(\\sin A - \\sin B)$. \uff0c\u8bf7\u95ee$\\angle C$\u7684\u5f27\u5ea6\u503c\u662f\u591a\u5c11\uff1f\n\nWhat is the answer?",
-    "positive_response": "$\\frac{\\pi}{3}$",
-    "negative_response": "$\\frac{\\pi}{3}$ + 1"
-  }
-]

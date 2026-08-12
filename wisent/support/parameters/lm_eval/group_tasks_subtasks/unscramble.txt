@@ -1,5 +1,0 @@
-anagrams1
-anagrams2
-cycle_letters
-random_insertion
-reversed_words

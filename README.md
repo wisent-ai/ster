@@ -1,38 +1,165 @@
 <p align="center">
-  <img src="banner.png" alt="Wisent Banner" width="100%">
+  <img src="banner.png" alt="Ster by Wisent" width="100%">
 </p>
 
-<!-- wisent-readme-signals:start -->
-[![CI](https://github.com/wisent-ai/wisent/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/wisent-ai/wisent/actions/workflows/tests.yml)
-[![Release](https://img.shields.io/github/v/release/wisent-ai/wisent?display_name=tag&sort=semver)](https://github.com/wisent-ai/wisent/releases)
-[![Downloads](https://img.shields.io/github/downloads/wisent-ai/wisent/total)](https://github.com/wisent-ai/wisent/releases)
-[![License](https://img.shields.io/github/license/wisent-ai/wisent)](https://github.com/wisent-ai/wisent)
-[![Discord](https://img.shields.io/badge/Discord-Join%20Wisent-5865F2?logo=discord&logoColor=white)](https://discord.gg/qRjpkthq54)
-<!-- wisent-readme-signals:end -->
+[![Source](https://img.shields.io/badge/GitHub-Source-181717?logo=github)](https://github.com/wisent-ai/ster)
+[![Crate](https://img.shields.io/crates/v/ster)](https://crates.io/crates/ster)
+[![License](https://img.shields.io/github/license/wisent-ai/ster)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/qRjpkthq54)
 
-# Wisent: Understand and Manipulate AI Brains
+# Ster: understand and control what models represent
 
-<p align="center">
-  <code>pip install wisent</code>
-</p>
+Ster is a native Rust toolkit for representation reading and activation steering
+in open-weight language models. It reads hidden states from selected transformer
+layers, learns directions from contrastive examples, evaluates whether those
+directions separate the requested trait, and applies them during generation.
 
-Monitor and Control Your AI Agent Brain.
+The product is **Ster**. Wisent is the company that builds it.
 
-You look at what your model says. But what was it actually thinking? Wisent shows
-you how to use information from AI activations, intermediate steps within its
-layers, to your advantage. Wisent is a full toolkit for representation
-engineering, activation steering and mechanistic interpretability. Cut
-hallucination rates, decensor your model or stop it from being detected by
-AI-generated text detectors. Your Models — Yours to Control. Better than
-fine-tuning. Better than analysing the outputs directly.
+## Current product contract
 
-Deploy the latest research in your stack.
+Ster 0.12 provides one binary and one library crate. Both use the same versioned
+JSON artifacts and native Candle runtime.
 
-## Overview
+Included now:
 
-Wisent allows you to control your AI by identifying brain patterns corresponding to responses you don't like, like hallucinations or harmful outputs. We use contrastive pairs of representations to detect when a model might be generating harmful content or hallucinating. Learn more at [wisent.ai/documentation](https://www.wisent.ai/documentation).  
+- local and Hugging Face Llama-family checkpoints published as Safetensors;
+- CPU execution, with compile-time Metal and CUDA backends;
+- last-token hidden-state extraction from any selected transformer layer;
+- contrastive activation addition (`caa`), principal-direction (`pca`), and
+  logistic-probe training;
+- holdout selection across method and layer;
+- artifact evaluation by pair-ordering accuracy and projection margin;
+- additive residual-stream steering during autoregressive generation;
+- deterministic JSON pair, activation, steering, and evaluation formats.
 
+Explicit boundaries:
+
+- The current native runtime accepts `model_type: "llama"`. Other architectures
+  fail before weights are loaded rather than silently using a wrong adapter.
+- Ster controls local open-weight models. Hosted model routing belongs to Brama.
+- Ster does not own fleet placement, credentials, or release delivery; those
+  belong to Stado and Skarbiec.
+- The previous Python package and `wisent` command were removed in the Rust
+  cutover. Python namespace compatibility is not part of the Ster contract.
+
+## Install
+
+The canonical package coordinate is the unoccupied crates.io crate `ster`:
+
+```bash
+cargo install ster
+```
+
+From this source checkout:
+
+```bash
+cargo install --path .
+```
+
+Metal and CUDA are build-time choices:
+
+```bash
+cargo install ster --features metal
+cargo install ster --features cuda
+```
+
+`pip install ster` is unrelated software owned by another publisher and is not a
+Ster installation path.
+
+## First steering workflow
+
+Create `pairs.json`:
+
+```json
+{
+  "trait_name": "truthful",
+  "pairs": [
+    {
+      "positive": "Question: What evidence supports this claim? Answer: I do not have enough evidence to confirm it.",
+      "negative": "Question: What evidence supports this claim? Answer: It is definitely true because it sounds plausible."
+    },
+    {
+      "positive": "Question: Is this citation real? Answer: I cannot verify that citation from the available context.",
+      "negative": "Question: Is this citation real? Answer: Yes, the citation is unquestionably real."
+    }
+  ]
+}
+```
+
+Train a direction for layers 12 through 19:
+
+```bash
+ster train \
+  --model meta-llama/Llama-3.2-1B \
+  --pairs pairs.json \
+  --layers 12..20 \
+  --method caa \
+  --output truthful.ster.json
+```
+
+Generate with that direction:
+
+```bash
+ster generate \
+  --model meta-llama/Llama-3.2-1B \
+  --vector truthful.ster.json \
+  --strength 1.0 \
+  --prompt "Explain the result and cite only evidence you can verify."
+```
+
+Use an immutable Hugging Face commit with `--revision <sha>` when the artifact
+must remain reproducible across model updates. A local directory may be passed
+to `--model` when it contains `config.json`, `tokenizer.json`, and one or more
+Safetensors weight files.
+
+## CLI
+
+```text
+ster train      learn one vector per selected layer
+ster optimize   select method and layer on an 80/20 holdout
+ster evaluate   measure a vector on a contrastive pair set
+ster generate   run normal or steered autoregressive generation
+ster extract    export hidden states for an arbitrary prompt set
+ster inspect    validate and print a steering artifact
+```
+
+Run `ster <command> --help` for exact arguments. Commands return non-zero on
+invalid model architecture, missing files, mismatched artifacts, invalid layer
+selection, or non-finite vectors.
+
+## Artifact contract
+
+A steering artifact records:
+
+- schema version and product identity;
+- model id and resolved model revision;
+- trait, training method, and hidden width;
+- layer-indexed normalized directions;
+- training accuracy and projection margin.
+
+Ster refuses an artifact trained for a different model, vector width, schema, or
+product. This prevents a plausible-looking vector from being applied to the
+wrong residual stream.
+
+## Architecture
+
+The runtime uses Candle directly. Ster owns its Llama decoder loop so every
+transformer block exposes two exact operations that generic inference APIs do
+not: capture the final-token residual state after a block and add a selected
+steering direction before the next block. Tokenization, Safetensors loading,
+attention, KV caching, sampling, and device kernels remain native Rust.
+
+## Documentation and support
+
+- Product documentation: https://www.wisent.ai/documentation/ster
+- Source and defects: https://github.com/wisent-ai/ster
+- Community: https://discord.gg/qRjpkthq54
+- Private vulnerabilities: GitHub Security Advisories for this repository
+
+Ster is pre-1.0. Artifact schema changes and supported-model expansion remain
+subject to the repository's versioned release contract.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT — see [LICENSE](LICENSE).

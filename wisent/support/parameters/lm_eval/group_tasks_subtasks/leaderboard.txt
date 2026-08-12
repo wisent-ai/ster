@@ -1,6 +1,0 @@
-leaderboard_bbh
-leaderboard_gpqa
-leaderboard_ifeval
-leaderboard_math_hard
-leaderboard_mmlu_pro
-leaderboard_musr

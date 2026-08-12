@@ -1,2 +1,0 @@
-mgsm_direct
-mgsm_cot_native

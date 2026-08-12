@@ -1,5 +1,0 @@
-afrixnli_en_direct_{language_code}
-afrixnli_native_direct_{language_code}
-afrixnli_translate_{language_code}
-afrixnli_manual_direct_{language_code}
-afrixnli_manual_translate_{language_code}

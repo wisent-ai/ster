@@ -1,84 +1,40 @@
 {
   "schema_version": 1,
-  "product": "wisent",
+  "product": "ster",
   "releases": true,
   "version_source": {
     "kind": "regex",
-    "path": "wisent/__init__.py",
-    "pattern": "(?m)^__version__\\s*=\\s*[\\\"'](?P<version>[0-9A-Za-z._-]+)[\\\"']"
+    "path": "Cargo.toml",
+    "pattern": "(?m)^version\\s*=\\s*\"(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)\"\\s*$"
   },
   "platforms": {
-    "python": {
-      "runner_platform": "linux-amd64",
-      "quality": [
-        {
-          "name": "release-metadata",
-          "argv": [
-            "python3",
-            "scripts/stado_release.py",
-            "quality"
-          ]
-        }
-      ],
+    "darwin-arm64": {
+      "runner_platform": "darwin-arm64",
+      "quality": [],
       "build": {
-        "argv": [
-          "python3",
-          "scripts/stado_release.py",
-          "build"
-        ]
+        "argv": ["sh", "scripts/build-release.sh"]
       },
       "stage": {
-        "release/python-distributions.tar": "release/python-distributions.tar"
+        ".wisent-output/release/ster-darwin-arm64.tar.gz": "release/ster-darwin-arm64.tar.gz",
+        ".wisent-output/release/ster-darwin-arm64.tar.gz.sha256": "release/ster-darwin-arm64.tar.gz.sha256"
       }
     },
-    "space": {
+    "linux-amd64": {
       "runner_platform": "linux-amd64",
       "quality": [],
       "build": {
-        "argv": [
-          "python3",
-          "scripts/stado_space_release.py",
-          "build"
-        ]
+        "argv": ["sh", "scripts/build-release.sh"]
       },
       "stage": {
-        ".wisent-output/release/space-bundle.tar": "release/space-bundle.tar"
+        ".wisent-output/release/ster-linux-amd64.tar.gz": "release/ster-linux-amd64.tar.gz",
+        ".wisent-output/release/ster-linux-amd64.tar.gz.sha256": "release/ster-linux-amd64.tar.gz.sha256"
       }
     }
   },
   "promotion": {
-    "channels": [
-      "stable"
-    ],
+    "channels": ["stable"],
     "reconcile": false
   },
   "inputs": {},
-  "deliveries": [
-    {
-      "name": "pypi",
-      "platform": "python",
-      "argv": [
-        "python3",
-        "scripts/stado_release.py",
-        "deliver-pypi"
-      ],
-      "required": true,
-      "secret_env": {
-        "PYPI_TOKEN": "PYPI_TOKEN#token"
-      }
-    },
-    {
-      "name": "huggingface-space",
-      "platform": "space",
-      "argv": [
-        "python3",
-        "scripts/stado_space_release.py",
-        "deliver"
-      ],
-      "required": true,
-      "secret_env": {
-        "HUGGINGFACE_TOKEN": "HUGGINGFACE_TOKEN#token"
-      }
-    }
-  ]
+  "deliveries": []
 }

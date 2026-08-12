@@ -1,2 +1,0 @@
-mastermind_easy
-mastermind_hard

@@ -1,1 +1,0 @@
-"""KV cache activation collection."""

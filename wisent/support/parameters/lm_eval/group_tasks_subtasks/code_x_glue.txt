@@ -1,6 +1,0 @@
-code2text_go
-code2text_java
-code2text_javascript
-code2text_php
-code2text_python
-code2text_ruby

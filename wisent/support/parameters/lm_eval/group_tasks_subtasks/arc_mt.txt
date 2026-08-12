@@ -1,1 +1,0 @@
-arc_challenge_mt_{language}

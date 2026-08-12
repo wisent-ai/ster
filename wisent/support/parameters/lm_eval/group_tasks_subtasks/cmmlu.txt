@@ -1,1 +1,0 @@
-cmmlu_{subject_english}

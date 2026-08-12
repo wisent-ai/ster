@@ -1,6 +1,0 @@
-xwinograd_en
-xwinograd_fr
-xwinograd_jp
-xwinograd_pt
-xwinograd_ru
-xwinograd_zh

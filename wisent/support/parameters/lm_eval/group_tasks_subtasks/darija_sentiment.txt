@@ -1,5 +1,0 @@
-darija_sentiment_mac
-darija_sentiment_myc
-darija_sentiment_msac
-darija_sentiment_msda
-darija_sentiment_electrom

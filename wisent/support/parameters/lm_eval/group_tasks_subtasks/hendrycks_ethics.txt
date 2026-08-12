@@ -1,6 +1,0 @@
-ethics_cm
-ethics_deontology
-ethics_justice
-ethics_utilitarianism
-ethics_utilitarianism_original
-ethics_virtue

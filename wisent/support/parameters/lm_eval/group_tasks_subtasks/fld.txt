@@ -1,4 +1,0 @@
-fld_default
-fld_star
-fld_logical_formula_default
-fld_logical_formula_fld_star

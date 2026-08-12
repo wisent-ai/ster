@@ -1,5 +1,0 @@
-lambada_mt_stablelm_en
-lambada_mt_stablelm_fr
-lambada_mt_stablelm_de
-lambada_mt_stablelm_it
-lambada_mt_stablelm_es

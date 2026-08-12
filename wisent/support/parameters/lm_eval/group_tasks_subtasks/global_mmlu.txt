@@ -1,6 +1,0 @@
-global_mmlu_{lang}
-global_mmlu_full_{lang}
-global_mmlu_full_stem
-global_mmlu_full_humanities
-global_mmlu_full_social_sciences
-global_mmlu_full_other

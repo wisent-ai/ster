@@ -1,1 +1,0 @@
-mmlu_prox_{ar,bn,de,en,es,fr,hi,ja,ko,pt,sw,th,zh}_{biology,business,chemistry,computer_science,economics,engineering,health,history,law,math,other,philosophy,physics,psychology}

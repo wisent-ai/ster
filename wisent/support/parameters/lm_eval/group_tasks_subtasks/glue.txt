@@ -1,8 +1,0 @@
-cola
-mnli
-mrpc
-qnli
-qqp
-rte
-sst
-wnli

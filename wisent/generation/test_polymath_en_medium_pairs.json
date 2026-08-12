@@ -1,8 +1,0 @@
-[
-  {
-    "pair_id": 0,
-    "prompt": "Question: In $\\triangle ABC$, $(a+c)(\\sin A - \\sin C) = b(\\sin A - \\sin B)$, what is the value of $\\angle C$ in radian?\n\nWhat is the answer?",
-    "positive_response": "$\\frac{\\pi}{3}$",
-    "negative_response": "$\\frac{\\pi}{3}$ + 1"
-  }
-]

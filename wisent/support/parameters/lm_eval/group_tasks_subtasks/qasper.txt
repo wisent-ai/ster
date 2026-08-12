@@ -1,2 +1,0 @@
-qasper_bool
-qasper_freeform

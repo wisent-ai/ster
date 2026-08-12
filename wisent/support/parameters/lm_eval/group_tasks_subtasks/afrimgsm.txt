@@ -1,3 +1,0 @@
-afrimgsm_direct_{language_code}
-afrimgsm_en_cot_{language_code}
-afrimgsm_translate_{language_code}

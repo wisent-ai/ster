@@ -1,9 +1,0 @@
-COMMAND: python -m wisent.cli tasks --task-name hellaswag --limit 5 --model meta-llama/Llama-2-7b-chat-hf --layer 15 --verbose --allow-small-dataset --output-mode both
-RETURN CODE: 2
-STDOUT:
-
-STDERR:
-usage: cli.py [-h] [--verbose]
-              {tasks,generate-pairs,synthetic,test-nonsense,monitor,agent} ...
-cli.py: error: unrecognized arguments: --task-name
-

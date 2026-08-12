@@ -1,8 +1,0 @@
-[
-  {
-    "pair_id": 0,
-    "prompt": "Question: Convert the point $(0,3)$ in rectangular coordinates to polar coordinates.  Enter your answer in the form $(r,\\theta),$ where $r > 0$ and $0 \\le \\theta < 2 \\pi.$\n\nWhat is the answer?",
-    "positive_response": "\\left( 3, \\frac{\\pi}{2} \\right)",
-    "negative_response": "\\left( 3, \\frac{\\pi}{2} \\right) + 1"
-  }
-]

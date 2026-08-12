@@ -1,5 +1,0 @@
-winogender_male
-winogender_female
-winogender_neutral
-winogender_gotcha_male
-winogender_gotcha_female

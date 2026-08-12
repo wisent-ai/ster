@@ -1,7 +1,0 @@
-paws_de
-paws_en
-paws_es
-paws_fr
-paws_ja
-paws_ko
-paws_zh

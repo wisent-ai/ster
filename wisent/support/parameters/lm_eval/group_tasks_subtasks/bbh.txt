@@ -1,5 +1,0 @@
-bbh
-bbh_zeroshot
-bbh_fewshot
-bbh_cot_fewshot
-bbh_cot_zeroshot

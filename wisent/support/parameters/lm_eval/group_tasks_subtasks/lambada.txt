@@ -1,2 +1,0 @@
-lambada_openai
-lambada_standard

@@ -1,3 +1,0 @@
-metabench_permute
-metabench_secondary
-metabench_secondary_permute

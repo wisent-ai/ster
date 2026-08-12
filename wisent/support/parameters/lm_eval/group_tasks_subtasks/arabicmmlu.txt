@@ -1,5 +1,0 @@
-arabicmmlu_stem
-arabicmmlu_stem_social_science
-arabicmmlu_stem_humanities
-arabicmmlu_stem_language
-arabicmmlu_stem_other

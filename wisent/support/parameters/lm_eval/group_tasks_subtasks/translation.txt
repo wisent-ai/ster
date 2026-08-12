@@ -1,5 +1,0 @@
-gpt3_translation_tasks
-wmt14
-wmt16
-wmt20
-iwslt2017

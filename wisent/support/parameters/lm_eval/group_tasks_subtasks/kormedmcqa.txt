@@ -1,4 +1,0 @@
-kormedmcqa_doctor
-kormedmcqa_nurse
-kormedmcqa_pharm
-kormedmcqa_dentist
