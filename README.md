@@ -3,7 +3,6 @@
 </p>
 
 [![Source](https://img.shields.io/badge/GitHub-Source-181717?logo=github)](https://github.com/wisent-ai/ster)
-[![Crate](https://img.shields.io/crates/v/ster)](https://crates.io/crates/ster)
 [![License](https://img.shields.io/github/license/wisent-ai/ster)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/qRjpkthq54)
 
@@ -45,27 +44,28 @@ Explicit boundaries:
 
 ## Install
 
-The canonical package coordinate is the unoccupied crates.io crate `ster`:
+Install the current source release from GitHub:
 
 ```bash
-cargo install ster
+cargo install --git https://github.com/wisent-ai/ster --locked
 ```
 
 From this source checkout:
 
 ```bash
-cargo install --path .
+cargo install --path . --locked
 ```
 
 Metal and CUDA are build-time choices:
 
 ```bash
-cargo install ster --features metal
-cargo install ster --features cuda
+cargo install --git https://github.com/wisent-ai/ster --features metal --locked
+cargo install --git https://github.com/wisent-ai/ster --features cuda --locked
 ```
 
-`pip install ster` is unrelated software owned by another publisher and is not a
-Ster installation path.
+The crates.io name `ster` is currently unclaimed and is not Ster's release
+surface. `pip install ster` installs unrelated software from another publisher.
+
 
 ## First steering workflow
 

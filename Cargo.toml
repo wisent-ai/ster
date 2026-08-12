@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 description = "Representation reading and steering for open-weight language models"
 license = "MIT"
+publish = false
 repository = "https://github.com/wisent-ai/ster"
 homepage = "https://www.wisent.ai/documentation/ster"
 readme = "README.md"
