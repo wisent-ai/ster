@@ -12,7 +12,7 @@
 [![License](https://img.shields.io/github/license/wisent-ai/ster)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/qRjpkthq54)
 
-# Ster: understand and control what models represent
+# Ster
 
 Ster is a native Rust toolkit for representation reading and activation steering
 in open-weight language models. It reads hidden states from selected transformer
