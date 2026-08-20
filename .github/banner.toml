@@ -1,11 +1,13 @@
 [automation]
 managed = true
-source_fingerprint = "f98ab8df17148251"
+source_fingerprint = "7d84156d984e8902"
 category = "safety"
+copy_status = "approved"
+approved_in = "agent-copy-repair-plan@2026-08-20"
 
 [banner]
-title = "Ster steers. Outputs stay safer."
-description = "Native Rust representation reading and activation steering for open-weight language models."
+title = "Ster"
+description = ""
 product = "Wisent"
 url = "wisent.com"
 theme = "dark"
