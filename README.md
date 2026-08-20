@@ -152,7 +152,7 @@ attention, KV caching, sampling, and device kernels remain native Rust.
 
 ## Documentation and support
 
-- Product documentation: https://www.wisent.ai/documentation/ster
+- Product documentation: https://ster.wisent.com/docs
 - Source and defects: https://github.com/wisent-ai/ster
 - Community: https://discord.gg/qRjpkthq54
 - Private vulnerabilities: GitHub Security Advisories for this repository
