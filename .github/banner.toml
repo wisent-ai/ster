@@ -1,0 +1,15 @@
+[automation]
+managed = true
+source_fingerprint = "f98ab8df17148251"
+category = "safety"
+
+[banner]
+title = "Ster steers. Outputs stay safer."
+description = "Native Rust representation reading and activation steering for open-weight language models."
+product = "Wisent"
+url = "wisent.com"
+theme = "dark"
+layout = "latent-field-left"
+art_seed = "ster"
+width = 1584
+height = 396
