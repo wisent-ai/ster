@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "siteName": "Ster",
+  "domain": "https://ster.wisent.com",
+  "repository": "https://github.com/wisent-ai/ster",
+  "sourceUrl": "https://github.com/wisent-ai/ster",
+  "docsUrl": "https://github.com/wisent-ai/ster#readme",
+  "discordUrl": "https://discord.gg/qRjpkthq54",
+  "ogImageAlt": "Ster by Wisent — native representation reading and activation steering",
+  "navLinks": [
+    { "label": "Workflow", "href": "https://github.com/wisent-ai/ster#first-steering-workflow" },
+    { "label": "Artifacts", "href": "https://github.com/wisent-ai/ster#artifact-contract" },
+    { "label": "Source", "href": "https://github.com/wisent-ai/ster" },
+    { "label": "Discord", "href": "https://discord.gg/qRjpkthq54" }
+  ],
+  "footerLinks": [
+    { "label": "Current contract", "href": "https://github.com/wisent-ai/ster#current-product-contract" },
+    { "label": "Install", "href": "https://github.com/wisent-ai/ster#install" },
+    { "label": "CLI", "href": "https://github.com/wisent-ai/ster#cli" },
+    { "label": "Architecture", "href": "https://github.com/wisent-ai/ster#architecture" },
+    { "label": "Source", "href": "https://github.com/wisent-ai/ster" },
+    { "label": "Discord", "href": "https://discord.gg/qRjpkthq54" },
+    { "label": "Wisent", "href": "https://wisent.com" },
+    { "label": "License (MIT)", "href": "https://github.com/wisent-ai/ster/blob/main/LICENSE" }
+  ]
+}
