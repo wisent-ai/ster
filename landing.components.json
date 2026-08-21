@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "product": "Ster",
+  "contextDigest": "73c3eafc2f3fda60fd667b527ea0496293d0b7ede95900aef4cfd97b3d4bf578",
+  "referenceCount": 50,
+  "referenceEvidence": {
+    "total": 50,
+    "header": 48,
+    "headerCta": 36,
+    "headline": 49,
+    "subhead": 37,
+    "heroAction": 41,
+    "visual": 46,
+    "productUi": 25,
+    "trust": 9
+  },
+  "catalogVersion": 1,
+  "components": [
+    {
+      "id": "landing.header",
+      "export": "LandingHeader",
+      "zone": "chrome",
+      "status": "required",
+      "description": "Sticky product header with the canonical wordmark, approved navigation destinations, and one subordinate copy of the primary action.",
+      "content": "site.product, site.nav, site.primaryAction",
+      "reason": "48/50 references show a header; 36/50 include a header CTA",
+      "contextRefs": [
+        "reference-observations:098c700959b7",
+        "landing-guidelines:d9787ebccd39",
+        "component-inventory:ea8279c7346e"
+      ]
+    },
+    {
+      "id": "landing.hero",
+      "export": "LandingHero",
+      "zone": "thesis",
+      "status": "required",
+      "description": "First viewport that names the product, states the outcome and mechanism, exposes the approved actions, and shows short evidence-bearing facts.",
+      "content": "plan.hero, site.primaryAction, site.secondaryAction, site.commitment",
+      "reason": "49/50 show a headline, 37/50 a subhead, 41/50 a hero action",
+      "contextRefs": [
+        "reference-observations:098c700959b7",
+        "landing-guidelines:d9787ebccd39",
+        "component-inventory:ea8279c7346e"
+      ]
+    },
+    {
+      "id": "landing.recognition",
+      "export": "LandingRecognition",
+      "zone": "recognition",
+      "status": "required",
+      "description": "Problem-recognition section that describes the visitor's current failure modes using claims approved in the product brief.",
+      "content": "recognition section heading, lede, and 2-4 items",
+      "reason": "the reference corpus covers first viewports only; required by the corpus-derived persuasion sequence in landing-page-best-practices.md",
+      "contextRefs": [
+        "reference-observations:098c700959b7",
+        "landing-guidelines:d9787ebccd39",
+        "component-inventory:ea8279c7346e"
+      ]
+    },
+    {
+      "id": "landing.mechanism",
+      "export": "LandingMechanism",
+      "zone": "mechanism",
+      "status": "required",
+      "description": "Ordered explanation of how the product creates the promised outcome, with three to five concrete steps.",
+      "content": "mechanism section heading, lede, and numbered items",
+      "reason": "the reference corpus covers first viewports only; required by the corpus-derived persuasion sequence in landing-page-best-practices.md",
+      "contextRefs": [
+        "reference-observations:098c700959b7",
+        "landing-guidelines:d9787ebccd39",
+        "component-inventory:ea8279c7346e"
+      ]
+    },
+    {
+      "id": "landing.proof",
+      "export": "LandingProof",
+      "zone": "proof",
+      "status": "required",
+      "description": "Evidence section rendering a real terminal transcript, code sample, or factual table backed by the brief's required proof.",
+      "content": "proof section heading, lede, and artifact",
+      "reason": "46/50 first viewports show visual evidence and 25/50 show real product UI; the brief supplies the allowed proof",
+      "contextRefs": [
+        "reference-observations:098c700959b7",
+        "landing-guidelines:d9787ebccd39",
+        "component-inventory:ea8279c7346e"
+      ]
+    },
+    {
+      "id": "landing.objection",
+      "export": "LandingObjection",
+      "zone": "objection",
+      "status": "recommended",
+      "description": "Question-and-answer section that resolves adoption, authorization, compatibility, pricing, or risk objections supported by approved claims.",
+      "content": "objection section heading and 3-5 question-answer items",
+      "reason": "the reference corpus covers first viewports only; placement follows the corpus-derived persuasion sequence; the approved brief contains no explicit adoption boundary",
+      "contextRefs": [
+        "reference-observations:098c700959b7",
+        "landing-guidelines:d9787ebccd39",
+        "component-inventory:ea8279c7346e"
+      ]
+    },
+    {
+      "id": "landing.decision",
+      "export": "LandingDecision",
+      "zone": "decision",
+      "status": "required",
+      "description": "Closing decision section that restates the value after proof and repeats the same approved primary action without introducing a new promise.",
+      "content": "decision heading, lede, site.primaryAction, site.commitment",
+      "reason": "the reference corpus covers first viewports only; required by the corpus-derived persuasion sequence",
+      "contextRefs": [
+        "reference-observations:098c700959b7",
+        "landing-guidelines:d9787ebccd39",
+        "component-inventory:ea8279c7346e"
+      ]
+    },
+    {
+      "id": "landing.footer",
+      "export": "LandingFooter",
+      "zone": "chrome",
+      "status": "required",
+      "description": "Product footer with the approved product description and canonical legal, source, documentation, and community links.",
+      "content": "site.product, site.description, site.footer",
+      "reason": "not observable in first-viewport captures; required as page chrome, without inventing a reference count",
+      "contextRefs": [
+        "reference-observations:098c700959b7",
+        "landing-guidelines:d9787ebccd39",
+        "component-inventory:ea8279c7346e"
+      ]
+    }
+  ]
+}

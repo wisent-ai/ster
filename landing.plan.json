@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 1,
+  "hero": {
+    "eyebrow": "Ster by Wisent",
+    "headline": "Read, learn, measure, and steer open-weight models in Rust",
+    "metaDescription": "Ster is a native Rust toolkit for representation reading and activation steering in local open-weight language models.",
+    "lede": "Ster is a native Rust toolkit for reading last-token hidden states, learning directions from contrastive examples, evaluating them, and applying measured interventions during generation.",
+    "proofStrip": [
+      "Native Rust toolkit",
+      "Reads last-token states",
+      "CAA, PCA, logistic probes",
+      "Width mismatch refused"
+    ]
+  },
+  "sections": [
+    {
+      "kind": "recognition",
+      "id": "directions-need-bindings",
+      "heading": "A direction is only valid inside its exact boundary",
+      "lede": "Representation work breaks when model, layer, width, method, and intervention point drift apart.",
+      "claimRefs": [
+        1,
+        6,
+        7,
+        8
+      ],
+      "items": [
+        {
+          "title": "Layer and width must stay explicit",
+          "text": "Ster reads last-token hidden states from selected transformer layers and records hidden width in the artifact."
+        },
+        {
+          "title": "Method must travel with the vector",
+          "text": "Artifacts record trait, method, layer-indexed directions, training accuracy, and projection margin."
+        },
+        {
+          "title": "The wrong stream is refused",
+          "text": "Ster refuses artifacts with the wrong product, schema, model, or vector width instead of applying them."
+        }
+      ]
+    },
+    {
+      "kind": "mechanism",
+      "id": "from-examples-to-steering",
+      "heading": "One path from contrastive examples to controlled generation",
+      "lede": "The workflow stays inside one native Rust binary and library crate with versioned JSON artifacts.",
+      "claimRefs": [
+        1,
+        2,
+        4,
+        5,
+        8
+      ],
+      "items": [
+        {
+          "step": "01",
+          "title": "Read",
+          "text": "Ster reads last-token hidden states from selected transformer layers."
+        },
+        {
+          "step": "02",
+          "title": "Learn",
+          "text": "Ster learns directions from contrastive examples with CAA, PCA, or logistic-probe training."
+        },
+        {
+          "step": "03",
+          "title": "Measure",
+          "text": "Ster evaluates artifacts with pair-ordering accuracy and projection margin, with holdout selection across method and layer."
+        },
+        {
+          "step": "04",
+          "title": "Steer",
+          "text": "Ster adds a measured direction in the residual stream during autoregressive generation."
+        }
+      ]
+    },
+    {
+      "kind": "proof",
+      "id": "six-native-operations",
+      "heading": "Six native operations carry the workflow",
+      "lede": "One binary and one library crate share the same versioned JSON artifacts and native Candle runtime.",
+      "claimRefs": [
+        1,
+        2,
+        4,
+        5
+      ],
+      "artifact": {
+        "type": "table",
+        "caption": "The six native CLI operations named by the required proof.",
+        "columns": [
+          "Operation",
+          "Role in workflow"
+        ],
+        "rows": [
+          [
+            "train",
+            "Learn directions from examples"
+          ],
+          [
+            "optimize",
+            "Select across method and layer"
+          ],
+          [
+            "evaluate",
+            "Score ordering and margin"
+          ],
+          [
+            "generate",
+            "Apply steering during decoding"
+          ],
+          [
+            "extract",
+            "Read selected hidden states"
+          ],
+          [
+            "inspect",
+            "Read recorded fields"
+          ]
+        ]
+      }
+    },
+    {
+      "kind": "proof",
+      "id": "artifact-refusal-boundary",
+      "heading": "The artifact contract refuses the wrong residual stream",
+      "lede": "Every steering artifact records identity and measurement fields before generation uses it.",
+      "claimRefs": [
+        6,
+        7
+      ],
+      "artifact": {
+        "type": "table",
+        "caption": "Versioned artifact fields and the refusal boundary defined by the artifact contract.",
+        "columns": [
+          "Artifact field",
+          "Boundary"
+        ],
+        "rows": [
+          [
+            "Product identity",
+            "Wrong product refused"
+          ],
+          [
+            "Schema identity",
+            "Wrong schema refused"
+          ],
+          [
+            "Model revision",
+            "Wrong model refused"
+          ],
+          [
+            "Hidden width",
+            "Wrong width refused"
+          ],
+          [
+            "Method and trait",
+            "Kept with directions"
+          ],
+          [
+            "Accuracy and margin",
+            "Recorded before steering"
+          ]
+        ]
+      }
+    },
+    {
+      "kind": "objection",
+      "id": "boundaries-before-adoption",
+      "heading": "Adoption questions answered by the contract",
+      "claimRefs": [
+        3,
+        7,
+        9
+      ],
+      "items": [
+        {
+          "question": "Does Ster route hosted models or manage fleets?",
+          "answer": "No. Ster controls local open-weight models; hosted routing, fleet placement, credentials, and release delivery belong to other products."
+        },
+        {
+          "question": "What checkpoints can the current runtime use?",
+          "answer": "The runtime supports local and Hugging Face Llama-family Safetensors checkpoints on CPU, with compile-time Metal and CUDA backends."
+        },
+        {
+          "question": "What stops a vector from the wrong model being applied?",
+          "answer": "Ster refuses artifacts with the wrong product, schema, model, or vector width instead of applying them to the wrong residual stream."
+        }
+      ]
+    },
+    {
+      "kind": "decision",
+      "id": "read-the-workflow",
+      "heading": "Start with the documented first steering workflow",
+      "lede": "Use Ster when you need a native Rust path from hidden states and contrastive examples to measured artifacts and controlled generation, with refusal at the artifact boundary.",
+      "claimRefs": [
+        0,
+        1,
+        2,
+        7
+      ]
+    }
+  ]
+}

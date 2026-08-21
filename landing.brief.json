@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "product": "Ster",
+  "audience": "Developers and researchers working with local open-weight language models who need to read representations, learn measured directions, and steer generation.",
+  "problem": "Representation work often crosses opaque framework boundaries, making it difficult to bind a learned direction to the exact model, layer, width, method, and intervention point where it is valid.",
+  "promise": "A native Rust path from contrastive examples and hidden states to measured steering artifacts and controlled generation.",
+  "primaryAction": {
+    "label": "Read the workflow",
+    "kind": "url",
+    "target": "https://github.com/wisent-ai/ster#first-steering-workflow"
+  },
+  "secondaryAction": {
+    "label": "Inspect the source",
+    "purpose": "Review the native runtime, CLI, and versioned artifact contract.",
+    "target": "https://github.com/wisent-ai/ster"
+  },
+  "approvedClaims": [
+    {
+      "claim": "Ster is a native Rust toolkit for representation reading and activation steering in open-weight language models.",
+      "evidence": "README.md#Ster"
+    },
+    {
+      "claim": "Ster reads last-token hidden states from selected transformer layers, learns directions from contrastive examples, evaluates them, and applies them during generation.",
+      "evidence": "README.md#Ster; README.md#Current product contract"
+    },
+    {
+      "claim": "Ster 0.12 provides one binary and one library crate using the same versioned JSON artifacts and native Candle runtime.",
+      "evidence": "README.md#Current product contract"
+    },
+    {
+      "claim": "The current runtime supports local and Hugging Face Llama-family Safetensors checkpoints on CPU, with compile-time Metal and CUDA backends.",
+      "evidence": "README.md#Current product contract"
+    },
+    {
+      "claim": "Ster supports CAA, PCA, and logistic-probe training plus holdout selection across method and layer.",
+      "evidence": "README.md#Current product contract"
+    },
+    {
+      "claim": "Ster evaluates artifacts with pair-ordering accuracy and projection margin before additive residual-stream steering during autoregressive generation.",
+      "evidence": "README.md#Current product contract"
+    },
+    {
+      "claim": "Every steering artifact records product and schema identity, model revision, trait, method, hidden width, layer-indexed directions, training accuracy, and projection margin.",
+      "evidence": "README.md#Artifact contract"
+    },
+    {
+      "claim": "Ster refuses artifacts with the wrong product, schema, model, or vector width instead of applying them to the wrong residual stream.",
+      "evidence": "README.md#Artifact contract"
+    },
+    {
+      "claim": "Ster owns its Llama decoder loop so it can capture a residual state after a selected block and add a direction before the next block.",
+      "evidence": "README.md#Architecture"
+    },
+    {
+      "claim": "Ster controls local open-weight models; hosted model routing, fleet placement, credentials, and release delivery belong to other products.",
+      "evidence": "README.md#Current product contract"
+    }
+  ],
+  "requiredProof": [
+    "The documented train and generate commands from the first steering workflow.",
+    "The six native CLI operations: train, optimize, evaluate, generate, extract, and inspect.",
+    "The versioned artifact fields and the product, schema, model, and vector-width refusal boundary.",
+    "The exact residual capture and addition points in the native Candle decoder loop."
+  ],
+  "brand": {
+    "canonicalAssets": [
+      "assets/readme-banner.webp",
+      "assets/readme-banner.svg"
+    ],
+    "rules": [
+      "Use the canonical Wisent type, color, spacing, radius, and motion tokens.",
+      "Keep representation, artifact, and intervention language technically precise.",
+      "Use one primary action and concrete source-backed workflow evidence."
+    ],
+    "forbidden": [
+      "Invented benchmark results, accuracy figures, performance claims, or supported model families.",
+      "Claims that Ster routes hosted models, manages fleets, or owns credentials.",
+      "Python package or wisent command compatibility claims.",
+      "Fake terminal output, fake artifacts, generic AI gradients, or glass cards."
+    ]
+  },
+  "analyticsOwner": "Wisent product and design maintainers",
+  "notes": [
+    "Preserve the current landing's approved read, learn, measure, and steer positioning only where the canonical README supports it.",
+    "Ster is the product; Wisent is the company."
+  ]
+}
