@@ -1,0 +1,37 @@
+{
+  "trait_name": "calm",
+  "pairs": [
+    {
+      "positive": "the sea is calm and quiet tonight .",
+      "negative": "the storm waves crash loud against the rocks ."
+    },
+    {
+      "positive": "the water lies still in the harbor .",
+      "negative": "the wind howls hard over the dark hills ."
+    },
+    {
+      "positive": "a gentle breeze drifts over the lake .",
+      "negative": "thunder rolls loud over the harbor tonight ."
+    },
+    {
+      "positive": "the boat rests at anchor on still water .",
+      "negative": "the waves churns white foam against the boat ."
+    },
+    {
+      "positive": "the evening air is soft and warm .",
+      "negative": "the cold rain falls hard and fast ."
+    },
+    {
+      "positive": "the lake surface is like a mirror .",
+      "negative": "the sea is broken and churns in the storm ."
+    },
+    {
+      "positive": "the night sky is clear and calm .",
+      "negative": "the dark sky is broken in thunder and rain ."
+    },
+    {
+      "positive": "the morning light is warm on the quiet harbor .",
+      "negative": "the storm wind howls fast against the dark rocks ."
+    }
+  ]
+}
