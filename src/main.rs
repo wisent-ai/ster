@@ -95,6 +95,12 @@ enum Command {
         #[arg(value_name = "ARTIFACT")]
         artifact: PathBuf,
     },
+    /// Loopback HTTP/JSON backend for desktop apps.
+    Serve {
+        /// Port to bind; 0 selects an ephemeral port.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -126,7 +132,7 @@ fn main() -> Result<()> {
             let method = TrainingMethod::parse(&method)?;
             let artifact = workflow::train(&runtime, &pair_set, &layers, method)?;
             artifact.save(&output)?;
-            println!("{}", serde_json::to_string_pretty(&artifact_summary(&artifact))?);
+            println!("{}", serde_json::to_string_pretty(&workflow::artifact_summary(&artifact))?);
         }
         Command::Optimize { model, pairs, output, layers } => {
             let runtime = model.load()?;
@@ -134,7 +140,7 @@ fn main() -> Result<()> {
             let layers = parse_layers(&layers, runtime.layer_count())?;
             let artifact = workflow::optimize(&runtime, &pair_set, &layers)?;
             artifact.save(&output)?;
-            println!("{}", serde_json::to_string_pretty(&artifact_summary(&artifact))?);
+            println!("{}", serde_json::to_string_pretty(&workflow::artifact_summary(&artifact))?);
         }
         Command::Evaluate { model, pairs, vector } => {
             let runtime = model.load()?;
@@ -173,25 +179,9 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to inspect {}", artifact.display()))?;
             println!("{}", serde_json::to_string_pretty(&artifact)?);
         }
+        Command::Serve { port } => {
+            ster::serve::run(port)?;
+        }
     }
     Ok(())
-}
-
-fn artifact_summary(artifact: &SteeringArtifact) -> serde_json::Value {
-    serde_json::json!({
-        "artifact": {
-            "schema_version": artifact.schema_version,
-            "product": artifact.product,
-            "model": artifact.model,
-            "model_revision": artifact.model_revision,
-            "trait_name": artifact.trait_name,
-            "method": artifact.method,
-            "hidden_size": artifact.hidden_size,
-            "layers": artifact.vectors.iter().map(|vector| serde_json::json!({
-                "layer": vector.layer,
-                "train_accuracy": vector.train_accuracy,
-                "train_margin": vector.train_margin,
-            })).collect::<Vec<_>>()
-        }
-    })
 }

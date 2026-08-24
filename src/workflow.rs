@@ -1,4 +1,5 @@
 use std::{collections::BTreeMap, fs, path::Path};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,44 @@ use crate::{
     representation::{TrainingMethod, evaluate_direction, train_direction},
     runtime::Runtime,
 };
+/// Progress lines the workflows print while running. The CLI leaves the sink
+/// unset and every line goes to stderr; the serve backend installs a sink for
+/// the duration of a streamed job so the same lines reach the desktop app as
+/// NDJSON log events. Serve runs jobs one at a time, so one global sink is
+/// enough.
+static PROGRESS_SINK: Mutex<Option<Box<dyn Fn(&str) + Send>>> = Mutex::new(None);
+
+pub fn set_progress_sink(sink: Option<Box<dyn Fn(&str) + Send>>) {
+    *PROGRESS_SINK.lock().expect("progress sink lock") = sink;
+}
+
+pub(crate) fn progress(message: String) {
+    let guard = PROGRESS_SINK.lock().expect("progress sink lock");
+    match guard.as_ref() {
+        Some(sink) => sink(&message),
+        None => eprintln!("{message}"),
+    }
+}
+
+/// The summary document the train/optimize commands print on stdout.
+pub fn artifact_summary(artifact: &SteeringArtifact) -> serde_json::Value {
+    serde_json::json!({
+        "artifact": {
+            "schema_version": artifact.schema_version,
+            "product": artifact.product,
+            "model": artifact.model,
+            "model_revision": artifact.model_revision,
+            "trait_name": artifact.trait_name,
+            "method": artifact.method,
+            "hidden_size": artifact.hidden_size,
+            "layers": artifact.vectors.iter().map(|vector| serde_json::json!({
+                "layer": vector.layer,
+                "train_accuracy": vector.train_accuracy,
+                "train_margin": vector.train_margin,
+            })).collect::<Vec<_>>()
+        }
+    })
+}
 
 pub fn train(
     runtime: &Runtime,
@@ -104,7 +143,7 @@ pub fn extract(runtime: &Runtime, input: &Path, output: &Path, layers: &[usize])
     }
     let mut records = Vec::with_capacity(prompts.prompts.len());
     for (index, prompt) in prompts.prompts.iter().enumerate() {
-        eprintln!("extracting prompt {}/{}", index + 1, prompts.prompts.len());
+        progress(format!("extracting prompt {}/{}", index + 1, prompts.prompts.len()));
         let activations = runtime.activations(prompt, layers)?;
         records.push(ActivationRecord {
             prompt: prompt.clone(),
@@ -170,7 +209,7 @@ fn capture_pairs(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result
         (*layer, CapturedLayer { positive: Vec::with_capacity(pairs.pairs.len()), negative: Vec::with_capacity(pairs.pairs.len()) })
     }).collect();
     for (index, pair) in pairs.pairs.iter().enumerate() {
-        eprintln!("reading pair {}/{}", index + 1, pairs.pairs.len());
+        progress(format!("reading pair {}/{}", index + 1, pairs.pairs.len()));
         let positive = runtime.activations(&pair.positive, layers)?;
         let negative = runtime.activations(&pair.negative, layers)?;
         for (layer, values) in positive {
