@@ -20,7 +20,7 @@ pub fn set_progress_sink(sink: Option<Box<dyn Fn(&str) + Send>>) {
     *PROGRESS_SINK.lock().expect("progress sink lock") = sink;
 }
 
-pub(crate) fn progress(message: String) {
+pub fn progress(message: String) {
     let guard = PROGRESS_SINK.lock().expect("progress sink lock");
     match guard.as_ref() {
         Some(sink) => sink(&message),

@@ -23,13 +23,16 @@ The product is **Ster**. Wisent is the company that builds it.
 
 ## Current product contract
 
-Ster 0.12 provides one binary and one library crate. Both use the same versioned
+Ster 0.13 provides one binary and one library crate. Both use the same versioned
 JSON artifacts and native Candle runtime.
 
 Included now:
 
 - local and Hugging Face Llama-family checkpoints published as Safetensors;
 - CPU execution, with compile-time Metal and CUDA backends;
+- pair-set authoring and inspection for duplicates, refusals, length balance,
+  and diversity, with no model loaded;
+- synthetic pair generation from a trait description on the local runtime;
 - last-token hidden-state extraction from any selected transformer layer;
 - contrastive activation addition (`caa`), principal-direction (`pca`), and
   logistic-probe training;
@@ -43,6 +46,9 @@ Explicit boundaries:
 - The current native runtime accepts `model_type: "llama"`. Other architectures
   fail before weights are loaded rather than silently using a wrong adapter.
 - Ster controls local open-weight models. Hosted model routing belongs to Brama.
+- Pair synthesis generates text with the same local open-weight runtime as every
+  other Ster command. Ster still calls no hosted model to author a pair set;
+  hosted routing belongs to Brama.
 - Ster does not own fleet placement, credentials, or release delivery; those
   belong to Stado and Skarbiec.
 - The previous Python package and `wisent` command were removed in the Rust
@@ -93,6 +99,33 @@ Create `pairs.json`:
 }
 ```
 
+A set can also be produced without a text editor. `ster pairs add` appends one
+pair at a time and creates the file, and its parent directory, when it does not
+exist yet:
+
+```bash
+ster pairs add \
+  --pairs pairs.json \
+  --trait truthful \
+  --positive "Question: Did the study replicate? Answer: I have not seen a replication, so I cannot claim it did." \
+  --negative "Question: Did the study replicate? Answer: Of course it replicated; results that clean always hold."
+```
+
+`ster pairs synthesize` writes a whole set from a one-sentence trait
+description, generating both sides of every pair with the loaded model:
+
+```bash
+ster pairs synthesize \
+  --model meta-llama/Llama-3.2-1B \
+  --trait "answers only from verifiable evidence and says so when it cannot" \
+  --count 20 \
+  --output pairs.json
+```
+
+Run `ster pairs inspect pairs.json` before training: it finds duplicate and
+near-duplicate pairs, sides that read as refusals, lopsided pairs where one side
+is far longer than the other, and how much the set repeats itself.
+
 Train a direction for layers 12 through 19:
 
 ```bash
@@ -128,11 +161,110 @@ ster evaluate   measure a vector on a contrastive pair set
 ster generate   run normal or steered autoregressive generation
 ster extract    export hidden states for an arbitrary prompt set
 ster inspect    validate and print a steering artifact
+ster pairs      author, inspect, and synthesize contrastive pair sets
 ```
 
 Run `ster <command> --help` for exact arguments. Commands return non-zero on
 invalid model architecture, missing files, mismatched artifacts, invalid layer
 selection, or non-finite vectors.
+
+## Pair sets
+
+`ster pairs` owns the file the training and evaluation commands read. It has
+four subcommands:
+
+```text
+ster pairs inspect <FILE> [--dedupe-bits 3] [--dedupe-bands 8]
+                          [--refusal-threshold 0.5]
+ster pairs add --pairs <FILE> --positive <TEXT> --negative <TEXT> [--trait <NAME>]
+ster pairs remove --pairs <FILE> --index <N>
+ster pairs synthesize --model <MODEL> --trait <TRAIT_DESCRIPTION> --count <COUNT>
+                      --output <OUTPUT> [--revision <REVISION>] [--device cpu]
+                      [--trait-name <NAME>] [--opposite <TEXT>]
+                      [--retry-multiplier 3] [--dedupe-bits 3]
+                      [--dedupe-bands 8] [--refusal-threshold 0.5]
+                      [--max-new-tokens 96] [--temperature 0.9]
+                      [--top-p 0.95] [--seed 42]
+```
+
+Each subcommand prints a pretty JSON document on stdout, as the other commands
+do, and each write leaves a pretty JSON pair set with a trailing newline. `add`
+creates the file, and its parent directory, when it does not exist, and
+`--trait` sets or replaces the trait name on the file. `remove` takes a
+zero-based index and refuses one outside the set with `pair index {i} is outside the set's 0..{n-1} range`.
+It also refuses to remove the last pair, because a set is validated before it is
+saved: the file is left untouched and the refusal is `pair set {path} contains no pairs`.
+
+`ster pairs inspect` loads no model; every judgement it makes is textual. For
+the set it reports `trait_name`, `pair_count`, `duplicate_count`,
+`refusal_count`, `unbalanced_count`, and `diversity`. For each pair it reports
+`index`, both texts, `positive_chars` and `negative_chars`, `positive_words` and
+`negative_words`, `duplicate`, `positive_refusal` and `negative_refusal`, and
+`length_ratio`.
+
+Duplicates are found by SimHash over the normalized positive and negative text,
+with 64-bit fingerprints built from BLAKE2b feature hashes and bucketed by
+banded LSH over `--dedupe-bands` bands. Two pairs are near-duplicates when their
+fingerprints differ in at most `--dedupe-bits` bits. The `duplicate` field is
+`{"kind":"exact","of":N}` or `{"kind":"near","of":N,"distance":B}`, naming the
+earlier pair. The first occurrence wins, so pair order decides which of two
+near-identical pairs is flagged: the later one.
+
+Refusals are scored across ten weighted families — `ai_disclaimer`, `policy`,
+`apology_hedge`, `unable`, `cannot_action`, `prefer_rather`, `decline_refuse`,
+`no_support`, `no_ability`, and `refusal_word` — and a side is flagged at or
+above `--refusal-threshold`. A flag carries the score, the family, and the text
+that matched, for example
+`{"score":0.9,"family":"ai_disclaimer","snippet":"As an AI language model"}`. A
+refusal is a useless example because it differs from the other side along the
+refusal axis rather than along the trait axis.
+
+`length_ratio` is the longer side over the shorter side in characters, and
+`unbalanced_count` counts the pairs above 3.0. A pair whose sides differ that
+much in length teaches length instead of the trait, which is the confound to
+remove before training rather than to discover afterwards in a flattering
+margin.
+
+`diversity` reports `unique_unigrams`, `unique_bigrams`, `avg_jaccard`,
+`mean_simhash_hamming`, and `min_simhash_hamming`. Inspection measures them over
+the positive sides, and above 256 texts the pairwise passes are sampled with a
+seeded RNG.
+
+`ster pairs synthesize` builds a set from a trait description on the same local
+runtime every other Ster command uses, in this order:
+
+1. The opposite trait is derived with one generation, unless `--opposite` states
+   it. An empty answer falls back to `neutral and plain`.
+2. Each attempt generates a question, then an answer in the trait's voice, then
+   an answer in the opposite's voice. Each side is stored as
+   `Question: {q}\nAnswer: {a}`, the shape the example above already uses, which
+   keeps the two sides matched on everything but the trait.
+3. A negative that reads as a refusal is asked again exactly once with a repair
+   instruction; if it still refuses, the pair is dropped. A refusing positive is
+   dropped immediately, because the trait itself is what the model declined and
+   re-asking would refuse again.
+4. A pair within `--dedupe-bits` of a pair already kept is dropped.
+5. The attempt budget is `--count` times `--retry-multiplier`, and every attempt
+   prints one `synthesizing pair 3/20 (attempt 7)` progress line on stderr.
+
+The seed advances by one on every model call. Ster builds a fresh sampler per
+call, so a fixed seed would return one identical continuation for the whole run
+and the set would collapse to a single pair; advancing from `--seed` keeps the
+run reproducible from the one seed the caller supplied. A temperature of zero is
+refused before the first generation: `synthesis requires a temperature above zero; argmax generation repeats a single prompt`.
+
+The run reports `trait_name`, `trait_description`, `opposite`, `requested`,
+`attempts`, `kept`, `rejected_empty`, `rejected_refusals`,
+`rejected_duplicates`, `refusal_retries`, and `diversity`, so a short set is
+explained by the counts rather than guessed at.
+
+The same three operations are jobs on the loopback HTTP/JSON backend that
+`ster serve` exposes, streamed as NDJSON like its six existing ones.
+`POST /v1/pairs/inspect` returns the inspection document for a path,
+`POST /v1/pairs/save` writes a set from `traitName` and `entries` and returns
+the path and pair count, and `POST /v1/pairs/synthesize` runs the loop and
+returns the written path and the report. This is how Ster Desktop offers pair
+authoring, inspection, and synthesis beside its six workflows.
 
 ## Artifact contract
 

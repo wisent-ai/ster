@@ -1,9 +1,14 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
+use serde_json::json;
 use ster::{
-    DeviceChoice, GenerationOptions, PairSet, Runtime, SteeringArtifact, TrainingMethod,
+    ContrastivePair, DeviceChoice, GenerationOptions, PairSet, Runtime, SteeringArtifact,
+    SynthesisOptions, TrainingMethod,
+    dedupe::DedupeOptions,
+    diversity::DEFAULT_MAX_SAMPLE,
+    pairs::{self, InspectOptions},
     workflow::{self, parse_layers},
 };
 
@@ -95,11 +100,94 @@ enum Command {
         #[arg(value_name = "ARTIFACT")]
         artifact: PathBuf,
     },
+    /// Author, inspect, and synthesize contrastive pair sets.
+    Pairs {
+        #[command(subcommand)]
+        command: PairsCommand,
+    },
     /// Loopback HTTP/JSON backend for desktop apps.
     Serve {
         /// Port to bind; 0 selects an ephemeral port.
         #[arg(long, default_value_t = 0)]
         port: u16,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PairsCommand {
+    /// Report duplicates, refusals, length balance, and diversity for a set.
+    Inspect {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// SimHash Hamming distance below which two pairs count as near-duplicates.
+        #[arg(long, default_value_t = 3)]
+        dedupe_bits: u32,
+        /// Banded-LSH band count; more bands catch more near-duplicates.
+        #[arg(long, default_value_t = 8)]
+        dedupe_bands: u32,
+        /// Refusal score at or above which a side is flagged.
+        #[arg(long, default_value_t = 0.5)]
+        refusal_threshold: f32,
+    },
+    /// Append one pair, creating the set when the file does not exist.
+    Add {
+        #[arg(long)]
+        pairs: PathBuf,
+        #[arg(long)]
+        positive: String,
+        #[arg(long)]
+        negative: String,
+        /// Set or replace the trait name on the file.
+        #[arg(long = "trait")]
+        trait_name: Option<String>,
+    },
+    /// Remove one pair by its zero-based index.
+    Remove {
+        #[arg(long)]
+        pairs: PathBuf,
+        #[arg(long)]
+        index: usize,
+    },
+    /// Generate a contrastive pair set with the loaded model.
+    Synthesize {
+        #[command(flatten)]
+        model: ModelArgs,
+        /// One-sentence description of the trait the positive side shows.
+        #[arg(long = "trait")]
+        trait_description: String,
+        /// Number of pairs to keep after refusal and duplicate rejection.
+        #[arg(long)]
+        count: usize,
+        /// Pair-set JSON the generated pairs are written to.
+        #[arg(long)]
+        output: PathBuf,
+        /// Artifact label; defaults to the trait description, truncated.
+        #[arg(long)]
+        trait_name: Option<String>,
+        /// Skip the opposite-trait generation step and use this text.
+        #[arg(long)]
+        opposite: Option<String>,
+        /// Attempt budget is count times this multiplier.
+        #[arg(long, default_value_t = 3)]
+        retry_multiplier: usize,
+        /// SimHash Hamming distance below which two pairs count as near-duplicates.
+        #[arg(long, default_value_t = 3)]
+        dedupe_bits: u32,
+        /// Banded-LSH band count; more bands catch more near-duplicates.
+        #[arg(long, default_value_t = 8)]
+        dedupe_bands: u32,
+        /// Refusal score at or above which a generated side is rejected.
+        #[arg(long, default_value_t = 0.5)]
+        refusal_threshold: f32,
+        #[arg(long, default_value_t = 96)]
+        max_new_tokens: usize,
+        /// Must exceed zero; argmax generation would repeat one pair.
+        #[arg(long, default_value_t = 0.9)]
+        temperature: f64,
+        #[arg(long, default_value_t = 0.95)]
+        top_p: f64,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
     },
 }
 
@@ -179,8 +267,131 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to inspect {}", artifact.display()))?;
             println!("{}", serde_json::to_string_pretty(&artifact)?);
         }
+        Command::Pairs { command } => run_pairs(command)?,
         Command::Serve { port } => {
             ster::serve::run(port)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `ster pairs` arms. Each one does the work and prints one pretty JSON
+/// document, exactly like the arms above; they live here rather than inline
+/// only to keep the top-level match readable.
+fn run_pairs(command: PairsCommand) -> Result<()> {
+    match command {
+        PairsCommand::Inspect { file, dedupe_bits, dedupe_bands, refusal_threshold } => {
+            let pair_set = PairSet::load(&file)?;
+            let options = InspectOptions {
+                dedupe: DedupeOptions {
+                    threshold_bits: dedupe_bits,
+                    num_bands: dedupe_bands,
+                    ..DedupeOptions::default()
+                },
+                refusal_threshold,
+                ..InspectOptions::default()
+            };
+            let report = pairs::inspect(&pair_set, &options)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        PairsCommand::Add { pairs: file, positive, negative, trait_name } => {
+            // `PairSet::load` refuses a set with no pairs, so the first `add`
+            // to a path that does not exist yet builds the set in memory
+            // rather than loading one.
+            let mut pair_set = if file.exists() {
+                PairSet::load(&file)?
+            } else {
+                PairSet { trait_name: String::new(), pairs: Vec::new() }
+            };
+            if let Some(name) = trait_name {
+                pair_set.trait_name = name;
+            }
+            pair_set.pairs.push(ContrastivePair { positive, negative });
+            let index = pair_set.pairs.len() - 1;
+            pair_set.save(&file)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "path": file.display().to_string(),
+                    "pair_count": pair_set.pairs.len(),
+                    "added": {"index": index},
+                }))?
+            );
+        }
+        PairsCommand::Remove { pairs: file, index } => {
+            let mut pair_set = PairSet::load(&file)?;
+            if index >= pair_set.pairs.len() {
+                // Inclusive upper bound, matching the layer-range refusals.
+                bail!(
+                    "pair index {index} is outside the set's 0..{} range",
+                    pair_set.pairs.len() - 1
+                );
+            }
+            let removed = pair_set.pairs.remove(index);
+            // Removing the last pair leaves a set no loader would accept, so
+            // `save` refuses and the file on disk is left as it was.
+            pair_set.save(&file)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "path": file.display().to_string(),
+                    "pair_count": pair_set.pairs.len(),
+                    "removed": {
+                        "index": index,
+                        "positive": removed.positive,
+                        "negative": removed.negative,
+                    },
+                }))?
+            );
+        }
+        PairsCommand::Synthesize {
+            model,
+            trait_description,
+            count,
+            output,
+            trait_name,
+            opposite,
+            retry_multiplier,
+            dedupe_bits,
+            dedupe_bands,
+            refusal_threshold,
+            max_new_tokens,
+            temperature,
+            top_p,
+            seed,
+        } => {
+            let runtime = model.load()?;
+            let options = SynthesisOptions {
+                trait_description,
+                trait_name: trait_name.unwrap_or_default(),
+                opposite,
+                count,
+                retry_multiplier,
+                dedupe: DedupeOptions {
+                    threshold_bits: dedupe_bits,
+                    num_bands: dedupe_bands,
+                    ..DedupeOptions::default()
+                },
+                refusal_threshold,
+                generation: GenerationOptions {
+                    strength: 1.0,
+                    max_new_tokens,
+                    temperature,
+                    top_p: Some(top_p),
+                    seed,
+                },
+                diversity_seed: seed,
+                diversity_max_sample: DEFAULT_MAX_SAMPLE,
+            };
+            let (pair_set, report) = pairs::synthesize(&runtime, &options)?;
+            pair_set.save(&output)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "path": output.display().to_string(),
+                    "report": report,
+                }))?
+            );
         }
     }
     Ok(())

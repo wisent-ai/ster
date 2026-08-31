@@ -24,17 +24,48 @@ impl PairSet {
             .with_context(|| format!("failed to read pair set {}", path.display()))?;
         let value: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid pair set JSON in {}", path.display()))?;
-        if value.pairs.is_empty() {
-            bail!("pair set {} contains no pairs", path.display());
+        value.validate(&path.display().to_string())?;
+        Ok(value)
+    }
+
+    /// Checks the two content invariants every consumer of a pair set relies on.
+    ///
+    /// `label` is the identity quoted in the refusal sentence. Callers that read
+    /// from disk pass the path; callers that validate an in-memory set built from
+    /// an API request pass whatever names it in the operator's mental model. The
+    /// two sentences below are published in the runbook, so they must stay
+    /// byte-identical regardless of which caller triggers them.
+    pub fn validate(&self, label: &str) -> Result<()> {
+        if self.pairs.is_empty() {
+            bail!("pair set {label} contains no pairs");
         }
-        if value
+        if self
             .pairs
             .iter()
             .any(|pair| pair.positive.trim().is_empty() || pair.negative.trim().is_empty())
         {
-            bail!("pair set {} contains an empty positive or negative prompt", path.display());
+            bail!("pair set {label} contains an empty positive or negative prompt");
         }
-        Ok(value)
+        Ok(())
+    }
+
+    /// Writes the pair set as pretty JSON with a trailing newline.
+    ///
+    /// Steering artifacts are compact because nobody reads them, but pair files are
+    /// hand-edited and diffed in review, so the extra bytes buy a readable file and
+    /// a one-line-per-change diff. The trailing newline keeps POSIX tooling happy.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        self.validate(&path.display().to_string())?;
+        // `Path::parent` yields an empty path for a bare file name; creating that
+        // directory fails, so only create a parent that actually names one.
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let mut bytes = serde_json::to_vec_pretty(self)?;
+        bytes.push(b'\n');
+        fs::write(path, bytes)
+            .with_context(|| format!("failed to write pair set {}", path.display()))
     }
 }
 

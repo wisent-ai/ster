@@ -14,7 +14,7 @@
 //! Errors are non-2xx with body {"error": "<one sentence>"} — the product's
 //! own refusal sentence, verbatim from the underlying failure.
 //!
-//! Long-running jobs (all six workflows) stream NDJSON:
+//! Long-running jobs (every workflow) stream NDJSON:
 //!   {"type":"log","stream":"stderr","chunk":"..."}   (zero or more)
 //!   {"type":"result","status":0,"json":{...}}        (exactly one, last)
 //! where `json` is the same document the CLI prints and `status` mirrors the
@@ -36,7 +36,11 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{
-    DeviceChoice, GenerationOptions, PairSet, Runtime, SteeringArtifact, TrainingMethod,
+    ContrastivePair, DeviceChoice, GenerationOptions, PairSet, Runtime, SteeringArtifact,
+    SynthesisOptions, TrainingMethod,
+    dedupe::DedupeOptions,
+    diversity::DEFAULT_MAX_SAMPLE,
+    pairs::{self, InspectOptions},
     workflow::{self, parse_layers},
 };
 
@@ -114,6 +118,11 @@ fn handle_connection(stream: TcpStream, job_lock: &Mutex<()>) -> Result<()> {
         ("POST", "/v1/generate") => stream_job(&writer, &body, job_lock, generate_job),
         ("POST", "/v1/extract") => stream_job(&writer, &body, job_lock, extract_job),
         ("POST", "/v1/inspect") => stream_job(&writer, &body, job_lock, inspect_job),
+        ("POST", "/v1/pairs/inspect") => stream_job(&writer, &body, job_lock, pairs_inspect_job),
+        ("POST", "/v1/pairs/save") => stream_job(&writer, &body, job_lock, pairs_save_job),
+        ("POST", "/v1/pairs/synthesize") => {
+            stream_job(&writer, &body, job_lock, pairs_synthesize_job)
+        }
         _ => send_error(&writer, 404, &format!("unknown endpoint: {method} {path}")),
     }
     Ok(())
@@ -322,6 +331,103 @@ impl Validate for InspectRequest {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairsInspectRequest {
+    #[serde(default)]
+    pairs: String,
+    #[serde(default = "default_dedupe_bits")]
+    dedupe_bits: u32,
+    #[serde(default = "default_dedupe_bands")]
+    dedupe_bands: u32,
+    #[serde(default = "default_refusal_threshold")]
+    refusal_threshold: f32,
+}
+
+impl Validate for PairsInspectRequest {
+    fn validate(&self) -> Result<(), String> {
+        require(&self.pairs, "pairs inspect requires a pairs file".to_owned())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairsSaveEntry {
+    #[serde(default)]
+    positive: String,
+    #[serde(default)]
+    negative: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairsSaveRequest {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    trait_name: String,
+    #[serde(default)]
+    entries: Vec<PairsSaveEntry>,
+}
+
+impl Validate for PairsSaveRequest {
+    fn validate(&self) -> Result<(), String> {
+        require(&self.path, "pairs save requires an output path".to_owned())?;
+        if self.entries.is_empty() {
+            return Err("pairs save requires at least one pair".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairsSynthesizeRequest {
+    #[serde(flatten)]
+    model: ModelRequest,
+    #[serde(default, rename = "trait")]
+    trait_description: String,
+    #[serde(default)]
+    trait_name: String,
+    #[serde(default)]
+    opposite: Option<String>,
+    #[serde(default)]
+    count: usize,
+    #[serde(default)]
+    output: String,
+    #[serde(default = "default_retry_multiplier")]
+    retry_multiplier: usize,
+    #[serde(default = "default_dedupe_bits")]
+    dedupe_bits: u32,
+    #[serde(default = "default_dedupe_bands")]
+    dedupe_bands: u32,
+    #[serde(default = "default_refusal_threshold")]
+    refusal_threshold: f32,
+    #[serde(default = "default_synthesis_max_new_tokens")]
+    max_new_tokens: usize,
+    #[serde(default = "default_synthesis_temperature")]
+    temperature: f64,
+    #[serde(default = "default_top_p")]
+    top_p: f64,
+    #[serde(default = "default_seed")]
+    seed: u64,
+}
+
+impl Validate for PairsSynthesizeRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("pairs synthesize")?;
+        require(
+            &self.trait_description,
+            "pairs synthesize requires a trait description".to_owned(),
+        )?;
+        require(&self.output, "pairs synthesize requires an output path".to_owned())?;
+        if self.count == 0 {
+            return Err("pairs synthesize requires a pair count above zero".to_owned());
+        }
+        Ok(())
+    }
+}
+
 fn default_device() -> String {
     "cpu".to_owned()
 }
@@ -344,6 +450,38 @@ fn default_max_new_tokens() -> usize {
 
 fn default_seed() -> u64 {
     42
+}
+
+fn default_dedupe_bits() -> u32 {
+    3
+}
+
+fn default_dedupe_bands() -> u32 {
+    8
+}
+
+fn default_refusal_threshold() -> f32 {
+    0.5
+}
+
+fn default_retry_multiplier() -> usize {
+    3
+}
+
+/// Synthesis answers are one or two sentences, so it keeps a tighter token
+/// budget than the general generate endpoint.
+fn default_synthesis_max_new_tokens() -> usize {
+    96
+}
+
+/// Synthesis needs sampling: at zero temperature every attempt would replay
+/// the same constant prompt and the run would dedupe to a single pair.
+fn default_synthesis_temperature() -> f64 {
+    0.9
+}
+
+fn default_top_p() -> f64 {
+    0.95
 }
 
 // MARK: - Jobs
@@ -412,6 +550,66 @@ fn inspect_job(request: InspectRequest) -> Result<Value> {
     let artifact = SteeringArtifact::load(Path::new(&request.artifact))
         .with_context(|| format!("failed to inspect {}", request.artifact))?;
     Ok(serde_json::to_value(&artifact)?)
+}
+
+fn pairs_inspect_job(request: PairsInspectRequest) -> Result<Value> {
+    let pair_set = PairSet::load(Path::new(&request.pairs))?;
+    let options = InspectOptions {
+        dedupe: DedupeOptions {
+            threshold_bits: request.dedupe_bits,
+            num_bands: request.dedupe_bands,
+            ..DedupeOptions::default()
+        },
+        refusal_threshold: request.refusal_threshold,
+        ..InspectOptions::default()
+    };
+    let report = pairs::inspect(&pair_set, &options)?;
+    Ok(serde_json::to_value(&report)?)
+}
+
+/// The editor's write path. `PairSet::save` validates before it writes, so a
+/// set the loader would reject never reaches disk and the desktop sees the
+/// same refusal sentence the CLI prints.
+fn pairs_save_job(request: PairsSaveRequest) -> Result<Value> {
+    let pair_set = PairSet {
+        trait_name: request.trait_name,
+        pairs: request
+            .entries
+            .into_iter()
+            .map(|entry| ContrastivePair { positive: entry.positive, negative: entry.negative })
+            .collect(),
+    };
+    pair_set.save(Path::new(&request.path))?;
+    Ok(json!({"path": request.path, "pairCount": pair_set.pairs.len()}))
+}
+
+fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
+    let runtime = request.model.load_runtime()?;
+    let options = SynthesisOptions {
+        trait_description: request.trait_description,
+        trait_name: request.trait_name,
+        opposite: request.opposite,
+        count: request.count,
+        retry_multiplier: request.retry_multiplier,
+        dedupe: DedupeOptions {
+            threshold_bits: request.dedupe_bits,
+            num_bands: request.dedupe_bands,
+            ..DedupeOptions::default()
+        },
+        refusal_threshold: request.refusal_threshold,
+        generation: GenerationOptions {
+            strength: 1.0,
+            max_new_tokens: request.max_new_tokens,
+            temperature: request.temperature,
+            top_p: Some(request.top_p),
+            seed: request.seed,
+        },
+        diversity_seed: request.seed,
+        diversity_max_sample: DEFAULT_MAX_SAMPLE,
+    };
+    let (pair_set, report) = pairs::synthesize(&runtime, &options)?;
+    pair_set.save(Path::new(&request.output))?;
+    Ok(json!({"path": request.output, "report": report}))
 }
 
 // MARK: - Responses
