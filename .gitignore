@@ -1,7 +1,7 @@
 /target/
 /dist/
 /.work/
-/.wisent-output/release/ster
+/.wisent-output/
 /.DS_Store
 .env
 *.safetensors
