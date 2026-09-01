@@ -310,7 +310,33 @@ impl Runtime {
         Ok(output.activations.into_iter().collect())
     }
 
-    pub fn generate(&self, prompt: &str, artifact: Option<&SteeringArtifact>, options: GenerationOptions) -> Result<String> {
+    /// One sampled continuation, decoded.
+    ///
+    /// Everything here is [`Runtime::sample`]; only the text survives, which
+    /// is what every caller outside policy optimization wants.
+    pub fn generate(
+        &self,
+        prompt: &str,
+        artifact: Option<&SteeringArtifact>,
+        options: GenerationOptions,
+    ) -> Result<String> {
+        Ok(self.sample(prompt, artifact, options)?.text)
+    }
+
+    /// One sampled continuation: the prompt as the sampler tokenized it, the
+    /// tokens drawn after it, and their text.
+    ///
+    /// Policy optimization needs all three. It has to score the exact sequence
+    /// the policy produced, and decoding to text and re-encoding would not
+    /// reliably give that sequence back — a tokenizer is not injective over
+    /// its own output. Handing back the ids the sampler actually pushed makes
+    /// the scored sequence the sampled sequence by construction.
+    pub fn sample(
+        &self,
+        prompt: &str,
+        artifact: Option<&SteeringArtifact>,
+        options: GenerationOptions,
+    ) -> Result<Completion> {
         if options.max_new_tokens == 0 {
             bail!("max_new_tokens must be greater than zero");
         }
@@ -383,9 +409,12 @@ impl Runtime {
                 break;
             }
         }
-        self.tokenizer
+        let text = self
+            .tokenizer
             .decode(&tokens[prompt_len..], true)
-            .map_err(|error| anyhow::anyhow!("failed to decode generated tokens: {error}"))
+            .map_err(|error| anyhow::anyhow!("failed to decode generated tokens: {error}"))?;
+        let sampled = tokens.split_off(prompt_len);
+        Ok(Completion { prompt: tokens, tokens: sampled, text })
     }
 
     /// Tokenizes one text with the tokenizer's own special tokens, exactly as
@@ -453,6 +482,19 @@ pub struct GenerationOptions {
     pub temperature: f64,
     pub top_p: Option<f64>,
     pub seed: u64,
+}
+
+/// What one sampling call produced.
+///
+/// The two token vectors concatenate to the exact sequence the model saw, and
+/// `prompt.len()` is the boundary a completion-only loss scores from — which
+/// is why the prompt travels back out rather than being re-derived: a caller
+/// that tokenized the prompt itself would be trusting two encodes to agree.
+#[derive(Debug, Clone)]
+pub struct Completion {
+    pub prompt: Vec<u32>,
+    pub tokens: Vec<u32>,
+    pub text: String,
 }
 
 /// Everything the three loaders share, held between resolving the checkpoint

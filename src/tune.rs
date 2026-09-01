@@ -129,7 +129,8 @@ impl Preflight<'_> {
     }
 }
 
-/// The log-probability the model assigns to `ids[start..]`, as one scalar.
+/// The log-probability the model assigns to each of `ids[start..]`, as a
+/// `[len(ids) - start]` vector.
 ///
 /// `logits` is `[1, n, vocab]` and the distribution that predicts token `t`
 /// sits at index `t - 1`, so the scored window is the logit rows
@@ -138,10 +139,11 @@ impl Preflight<'_> {
 /// prepends a begin-of-sequence marker, so position zero is never a token
 /// anyone asked the model to predict.
 ///
-/// The result is a sum, not a mean. Averaging is a per-objective choice — IPO
-/// wants it, DPO does not — and a caller that has the sum and the token count
-/// can produce either, while a caller handed the mean cannot recover the sum.
-pub(crate) fn sequence_logprob(
+/// Per token rather than summed, because the objectives disagree about what to
+/// do with them: a preference loss wants the sum, a policy-gradient loss wants
+/// a per-token ratio and a per-token divergence. Summing is the caller's one
+/// extra line; unsumming is impossible.
+pub(crate) fn token_logprobs(
     logits: &Tensor,
     ids: &[u32],
     start: usize,
@@ -164,7 +166,17 @@ pub(crate) fn sequence_logprob(
     let window = logits.narrow(1, start - 1, scored)?.reshape((scored, vocab))?;
     let log_probabilities = candle_nn::ops::log_softmax(&window, candle_core::D::Minus1)?;
     let targets = Tensor::new(&ids[start..], device)?.reshape((scored, 1))?;
-    Ok(log_probabilities.gather(&targets, 1)?.sum_all()?)
+    Ok(log_probabilities.gather(&targets, 1)?.squeeze(1)?)
+}
+
+/// The log-probability of the whole window, as one scalar.
+pub(crate) fn sequence_logprob(
+    logits: &Tensor,
+    ids: &[u32],
+    start: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    Ok(token_logprobs(logits, ids, start, device)?.sum_all()?)
 }
 
 /// `log(1 + exp(x))`, computed the way that does not overflow.
