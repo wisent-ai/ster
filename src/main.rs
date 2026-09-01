@@ -5,9 +5,9 @@ use candle_core::Device;
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use ster::{
-    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, PairSet,
-    RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact, SynthesisOptions,
-    TrainingMethod,
+    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, GrpoOptions,
+    PairSet, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
+    SynthesisOptions, TrainingMethod,
     brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
@@ -355,6 +355,68 @@ enum TuneCommand {
         warmup_steps: usize,
         /// Pairs with a side longer than this many tokens are skipped rather
         /// than truncated; a cut response is not the response that was ranked.
+        #[arg(long, default_value_t = 512)]
+        max_sequence: usize,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+    },
+    /// Optimize the policy against a reward, using a sampled group as baseline.
+    Grpo {
+        #[command(flatten)]
+        model: ModelArgs,
+        /// JSON file shaped as {"prompts": ["..."]}, the shape ster extract takes.
+        #[arg(long)]
+        prompts: PathBuf,
+        /// Output LoRA adapter safetensors; the identity sidecar is written beside it.
+        #[arg(long)]
+        output: PathBuf,
+        /// Where a completion's reward comes from: the keyword length, which
+        /// counts sampled tokens and needs no judge, or the path to a reward
+        /// artifact written by ster tune reward.
+        #[arg(long, default_value = "length")]
+        reward: String,
+        /// Completions sampled per prompt. Their mean is the baseline, which is
+        /// why two is the smallest group that means anything.
+        #[arg(long, default_value_t = 4)]
+        group: usize,
+        /// Passes over the prompt set; each one re-samples from the current policy.
+        #[arg(long, default_value_t = 1)]
+        iterations: usize,
+        /// Weight on the KL penalty pulling the policy back to the frozen base.
+        #[arg(long, default_value_t = 0.04)]
+        beta: f64,
+        /// Low-rank dimension shared by every adapter.
+        #[arg(long, default_value_t = 8)]
+        rank: usize,
+        /// LoRA scaling numerator; each update is scaled by alpha over rank.
+        #[arg(long, default_value_t = 16.0)]
+        alpha: f64,
+        /// Comma-separated projections to adapt: query, key, value, output,
+        /// gate, up, or down.
+        #[arg(long, default_value = "query,value")]
+        targets: String,
+        /// Comma-separated layers, half-open ranges such as 8..16, or all.
+        #[arg(long, default_value = "all")]
+        layers: String,
+        #[arg(long, default_value_t = 1e-4)]
+        learning_rate: f64,
+        /// Prompt groups folded into one optimizer step. One group is already
+        /// --group sequences, so a step per group is the natural unit.
+        #[arg(long, default_value_t = 1)]
+        accumulation: usize,
+        /// Steps over which the learning rate ramps up from zero.
+        #[arg(long, default_value_t = 0)]
+        warmup_steps: usize,
+        #[arg(long, default_value_t = 64)]
+        max_new_tokens: usize,
+        /// Must exceed zero; argmax sampling would draw one identical
+        /// completion per group and leave the baseline with nothing to compare.
+        #[arg(long, default_value_t = 0.9)]
+        temperature: f64,
+        #[arg(long, default_value_t = 0.95)]
+        top_p: f64,
+        /// Prompts whose prompt plus its longest completion exceed this many
+        /// tokens are skipped rather than truncated.
         #[arg(long, default_value_t = 512)]
         max_sequence: usize,
         #[arg(long, default_value_t = 42)]
@@ -764,6 +826,71 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             let report = tune::reward(&runtime, &varmap, &head, &pair_set, &options)?;
             let artifact =
                 runtime.reward_artifact(&spec, head.weight(), serde_json::to_value(&report)?)?;
+            artifact.save(&output)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "path": output.display().to_string(),
+                    "report": report,
+                }))?
+            );
+        }
+        TuneCommand::Grpo {
+            model,
+            prompts,
+            output,
+            reward,
+            group,
+            iterations,
+            beta,
+            rank,
+            alpha,
+            targets,
+            layers,
+            learning_rate,
+            accumulation,
+            warmup_steps,
+            max_new_tokens,
+            temperature,
+            top_p,
+            max_sequence,
+            seed,
+        } => {
+            let device = DeviceChoice::parse(&model.device)?;
+            let spec = lora::Spec {
+                rank,
+                alpha,
+                targets: parse_targets(&targets)?,
+                layers: parse_adapter_layers(&layers)?,
+                seed,
+            };
+            // The reward source is resolved before the policy is loaded: a
+            // reward artifact for the wrong checkpoint should be refused
+            // before an operator waits out a policy load to hear it.
+            let source = Reward::parse(&reward, &model.model, model.revision.as_deref(), device)?;
+            let (runtime, varmap) =
+                Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let prompt_set = PromptSet::load(&prompts)?;
+            let options = GrpoOptions {
+                spec: spec.clone(),
+                group,
+                iterations,
+                beta,
+                learning_rate,
+                accumulation,
+                warmup_steps,
+                max_sequence,
+                generation: GenerationOptions {
+                    strength: 1.0,
+                    max_new_tokens,
+                    temperature,
+                    top_p: Some(top_p),
+                    seed,
+                },
+            };
+            let report =
+                tune::grpo(&runtime, &varmap, &prompt_set, &source, &reward, &options)?;
+            let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
             artifact.save(&output)?;
             println!(
                 "{}",

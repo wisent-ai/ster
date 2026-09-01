@@ -37,9 +37,9 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{
-    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, PairSet,
-    RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact, SynthesisOptions,
-    TrainingMethod,
+    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, GrpoOptions,
+    PairSet, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
+    SynthesisOptions, TrainingMethod,
     brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
@@ -131,6 +131,7 @@ fn handle_connection(stream: TcpStream, job_lock: &Mutex<()>) -> Result<()> {
         ("POST", "/v1/tune/sft") => stream_job(&writer, &body, job_lock, tune_sft_job),
         ("POST", "/v1/tune/dpo") => stream_job(&writer, &body, job_lock, tune_dpo_job),
         ("POST", "/v1/tune/reward") => stream_job(&writer, &body, job_lock, tune_reward_job),
+        ("POST", "/v1/tune/grpo") => stream_job(&writer, &body, job_lock, tune_grpo_job),
         ("POST", "/v1/tune/inspect") => stream_job(&writer, &body, job_lock, tune_inspect_job),
         _ => send_error(&writer, 404, &format!("unknown endpoint: {method} {path}")),
     }
@@ -587,6 +588,63 @@ impl Validate for TuneRewardRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TuneGrpoRequest {
+    #[serde(flatten)]
+    model: ModelRequest,
+    /// A prompt set, `{"prompts": ["…"]}` — the shape extract already takes.
+    #[serde(default)]
+    prompts: String,
+    #[serde(default)]
+    output: String,
+    /// The keyword `length`, or the path to a reward artifact.
+    #[serde(default = "default_reward")]
+    reward: String,
+    #[serde(default = "default_group")]
+    group: usize,
+    #[serde(default = "default_iterations")]
+    iterations: usize,
+    #[serde(default = "default_kl_beta")]
+    beta: f64,
+    #[serde(default = "default_rank")]
+    rank: usize,
+    #[serde(default = "default_alpha")]
+    alpha: f64,
+    #[serde(default = "default_targets")]
+    targets: String,
+    #[serde(default = "default_layers")]
+    layers: String,
+    #[serde(default = "default_learning_rate")]
+    learning_rate: f64,
+    /// One group is already `group` sequences, so a step per group is the
+    /// natural unit and the default is one rather than eight.
+    #[serde(default = "default_group_accumulation")]
+    accumulation: usize,
+    /// Zero starts at the full learning rate, which is what a short run wants.
+    #[serde(default)]
+    warmup_steps: usize,
+    #[serde(default = "default_grpo_max_new_tokens")]
+    max_new_tokens: usize,
+    #[serde(default = "default_grpo_temperature")]
+    temperature: f64,
+    #[serde(default = "default_top_p")]
+    top_p: f64,
+    #[serde(default = "default_max_sequence")]
+    max_sequence: usize,
+    #[serde(default = "default_seed")]
+    seed: u64,
+}
+
+impl Validate for TuneGrpoRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("tune grpo")?;
+        require(&self.prompts, "tune grpo requires a prompt set".to_owned())?;
+        require(&self.output, "tune grpo requires an output path".to_owned())?;
+        require(&self.reward, "tune grpo requires a reward source".to_owned())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TuneInspectRequest {
     #[serde(default)]
     artifact: String,
@@ -704,6 +762,46 @@ fn default_beta() -> f64 {
 /// alternative over length-normalized log-probabilities.
 fn default_preference_loss() -> String {
     "dpo".to_owned()
+}
+
+/// The offline reward: a completion's sampled-token count, which needs no
+/// judge and no artifact, so the loop is runnable the first time it is asked
+/// for.
+fn default_reward() -> String {
+    "length".to_owned()
+}
+
+/// Four completions per prompt: enough for a baseline that is not the sample
+/// itself, cheap enough that a first run finishes.
+fn default_group() -> usize {
+    4
+}
+
+fn default_iterations() -> usize {
+    1
+}
+
+/// The KL weight the GRPO paper reports; smaller than a preference loss's beta
+/// because it is a penalty per token rather than a scale on the whole margin.
+fn default_kl_beta() -> f64 {
+    0.04
+}
+
+/// One prompt group is already `group` sequences, so a step per group is the
+/// natural unit and this default is one where the other trainers use eight.
+fn default_group_accumulation() -> usize {
+    1
+}
+
+fn default_grpo_max_new_tokens() -> usize {
+    64
+}
+
+/// Policy optimization needs sampling: at zero temperature every draw in a
+/// group would be the same completion and the baseline would have nothing to
+/// compare against.
+fn default_grpo_temperature() -> f64 {
+    0.9
 }
 
 // MARK: - Jobs
@@ -966,6 +1064,56 @@ fn tune_reward_job(request: TuneRewardRequest) -> Result<Value> {
     let report = tune::reward(&runtime, &varmap, &head, &pairs, &options)?;
     let artifact =
         runtime.reward_artifact(&spec, head.weight(), serde_json::to_value(&report)?)?;
+    artifact.save(Path::new(&request.output))?;
+    Ok(json!({"path": request.output, "report": report}))
+}
+
+/// Mirrors the `ster tune grpo` arm. The reward source is resolved before the
+/// policy is loaded, so a reward artifact for the wrong checkpoint is refused
+/// before the desktop waits out a policy load to hear it.
+fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value> {
+    let device = DeviceChoice::parse(&request.model.device)?;
+    let spec = lora::Spec {
+        rank: request.rank,
+        alpha: request.alpha,
+        targets: parse_targets(&request.targets)?,
+        layers: parse_adapter_layers(&request.layers)?,
+        seed: request.seed,
+    };
+    let source = Reward::parse(
+        &request.reward,
+        &request.model.model,
+        request.model.revision.as_deref(),
+        device,
+    )?;
+    let (runtime, varmap) = Runtime::load_trainable(
+        &request.model.model,
+        request.model.revision.as_deref(),
+        device,
+        &spec,
+    )?;
+    let prompts = PromptSet::load(Path::new(&request.prompts))?;
+    let options = GrpoOptions {
+        spec: spec.clone(),
+        group: request.group,
+        iterations: request.iterations,
+        beta: request.beta,
+        learning_rate: request.learning_rate,
+        accumulation: request.accumulation,
+        warmup_steps: request.warmup_steps,
+        max_sequence: request.max_sequence,
+        generation: GenerationOptions {
+            strength: 1.0,
+            max_new_tokens: request.max_new_tokens,
+            temperature: request.temperature,
+            top_p: Some(request.top_p),
+            seed: request.seed,
+        },
+    };
+    let report = tune::grpo(&runtime, &varmap, &prompts, &source, &request.reward, &options)?;
+    // The report is folded into the artifact so a trained adapter always
+    // carries the run that produced it.
+    let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
 }

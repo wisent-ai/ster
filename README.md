@@ -46,6 +46,8 @@ Included now:
   set, scored against the frozen reference the same weights already carry;
 - Bradley-Terry reward models: a scalar head trained with the adapters beneath
   it and written in the same artifact;
+- group-relative policy optimization against a reward model or an offline
+  deterministic reward, with a KL penalty to the frozen base;
 - frozen adapter artifacts applied at generation time;
 - deterministic JSON pair, activation, steering, and evaluation formats.
 
@@ -332,7 +334,7 @@ workflows.
 
 ## Fine-tuning
 
-`ster tune` is the only part of Ster that trains a weight. It has four
+`ster tune` is the only part of Ster that trains a weight. It has five
 subcommands:
 
 ```text
@@ -352,6 +354,13 @@ ster tune reward --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
                  [--targets query,value] [--layers all] [--epochs 1]
                  [--learning-rate 0.0001] [--accumulation 8] [--warmup-steps 0]
                  [--max-sequence 512] [--seed 42]
+ster tune grpo --model <MODEL> --prompts <PROMPTS> --output <OUTPUT>
+               [--revision <REVISION>] [--device cpu] [--reward length]
+               [--group 4] [--iterations 1] [--beta 0.04] [--rank 8]
+               [--alpha 16] [--targets query,value] [--layers all]
+               [--learning-rate 0.0001] [--accumulation 1] [--warmup-steps 0]
+               [--max-new-tokens 64] [--temperature 0.9] [--top-p 0.95]
+               [--max-sequence 512] [--seed 42]
 ster tune inspect <ARTIFACT>
 ```
 
@@ -508,13 +517,74 @@ The report records `pairs`, `trained_pairs`, `skipped_long`, `epochs`, `steps`,
 `layers`, `learning_rate`, and `accumulation`, with `accuracy` and the scores
 measured over the final epoch.
 
+### Policy optimization
+
+`ster tune grpo` is the only trainer that learns from text the model writes
+rather than text someone wrote for it. `--prompts` reads
+`{"prompts": ["…"]}`, the shape `ster extract` already takes; six prompts in
+the toy checkpoint's vocabulary are checked in as
+[`docs/examples/grpo-prompts.json`](docs/examples/grpo-prompts.json). For each
+prompt it samples `--group` completions, scores them, subtracts the group's own
+mean, and steps the policy toward the ones that beat it.
+
+The group *is* the baseline. Classic policy gradient needs a second network to
+say whether a reward was good; sampling several completions for one prompt and
+using their mean removes that network entirely and makes the advantage
+scale-free. What it costs is `--group` generations per prompt, which is the
+dominant cost of the loop. Two is the smallest group that means anything, and a
+smaller one is refused with
+`group-relative policy optimization requires a group of at least two completions, because the group is the baseline`.
+`--temperature` must exceed zero for the same reason `pairs synthesize`
+requires it: argmax would draw one identical completion per group.
+
+`--reward` names where a completion's score comes from, and the two sources
+exist for different reasons. `length`, the default, counts the tokens the
+policy emitted — a deterministic function with no model behind it, which is
+what makes the loop runnable and checkable with no judge, no artifact and no
+download. If reward does not rise under it, the bug is in the loop. Anything
+else is a path to a reward artifact from `ster tune reward`, loaded frozen
+beside the policy; a generation adapter passed there is refused with
+`adapter artifact is a generation adapter, not a reward model`, and a path that
+is neither with
+`reward source "nope" is neither the keyword length nor a file that exists`.
+The reward source is resolved before the policy is loaded, so a mismatch is
+refused before an operator waits out a policy load to hear it.
+
+Three details are decisions rather than defaults. A group whose completions all
+scored the same has advantages of exactly zero and contributes only its KL
+term; that falls out of the arithmetic rather than being special-cased, and it
+is why there is no epsilon in the denominator — a floor there would turn "no
+signal" into "amplify the rounding". The importance ratio `π_θ/π_old` is
+exactly one, because with one gradient step per sampling round `π_old` *is*
+`π_θ` at the moment of the step; it is written as `exp(logp - logp.detach())`
+anyway, which needs no second forward pass to recover `logp_old` and keeps the
+reported loss on the published scale, `-A + β·KL`. The KL is the k3 estimator,
+`exp(d) - d - 1` for `d = log π_ref - log π_θ`, which is non-negative for every
+sample and unbiased for the divergence where the naive `-d` is neither; `π_ref`
+is the frozen base, reached by skipping the adapters, exactly as the preference
+losses reach it.
+
+Together those three make the first step's loss exactly zero, which is this
+objective's identity check: a fresh adapter is the reference, so every KL term
+is zero, and the advantages are mean-centred, so the policy term is zero too.
+
+The report records `reward`, `prompts`, `trained_prompts`, `skipped_long`,
+`group`, `iterations`, `steps`, `beta`, `trainable_tensors`,
+`trainable_parameters`, `first_loss`, `final_loss`, `mean_reward`, `mean_kl`,
+`policy_loss`, `max_new_tokens`, `temperature`, `top_p`, `seed`, `rank`,
+`alpha`, `targets`, `layers`, `learning_rate`, `accumulation`, and `history` —
+one entry per iteration carrying `iteration`, `groups`, `completions`,
+`mean_reward`, `reward_spread`, `mean_kl`, `policy_loss` and
+`mean_completion_tokens`. The history is the point: a single mean over a policy
+that moved the whole time hides exactly the trend the run exists to show.
+
 Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
-and writes nothing but the artifact pair. The same four operations are jobs on
+and writes nothing but the artifact pair. The same five operations are jobs on
 the `ster serve` backend, `POST /v1/tune/sft`, `POST /v1/tune/dpo`,
-`POST /v1/tune/reward` and `POST /v1/tune/inspect`, and `POST /v1/generate`
-takes the same `adapter` field. That is how Ster Desktop offers fine-tuning on
-its own screen, and how a finished run leaves the adapter it wrote in the field
-Generate reads.
+`POST /v1/tune/reward`, `POST /v1/tune/grpo` and `POST /v1/tune/inspect`, and
+`POST /v1/generate` takes the same `adapter` field. That is how Ster Desktop
+offers fine-tuning on its own screen, and how a finished run leaves the adapter
+it wrote in the field Generate reads.
 
 ## Artifact contract
 

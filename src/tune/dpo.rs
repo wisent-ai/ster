@@ -149,6 +149,7 @@ pub fn dpo(
     let Trainable { spec, vars, tensors, parameters, limit } = Preflight {
         subject: "direct preference optimization",
         unit: "pair",
+        pass: "epoch",
         noun: "adapter tensors",
         epochs: options.epochs,
         accumulation: options.accumulation,

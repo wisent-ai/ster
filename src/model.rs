@@ -103,6 +103,16 @@ impl Mode {
         route: Route::Adapted,
         readout: Readout::Hidden,
     };
+
+    /// A trained reward model judging text: fused kernels, its own adapters
+    /// on, and no vocabulary. Nothing here is trained — the model doing the
+    /// scoring in a policy-optimization loop is frozen by definition, or it
+    /// would be moving the target it is being optimized against.
+    pub const JUDGE: Self = Self {
+        pass: Pass::Inference,
+        route: Route::Adapted,
+        readout: Readout::Hidden,
+    };
 }
 
 #[derive(Debug, Clone)]

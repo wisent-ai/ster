@@ -27,6 +27,8 @@
 //! adapters it never saw would produce scores that mean nothing, so the
 //! artifact does not offer that as a possibility.
 
+use std::path::Path;
+
 use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarMap};
@@ -34,7 +36,12 @@ use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::Serialize;
 
 use super::{EncodedPair, Preflight, Trainable, encode_pairs, pair_set_label, schedule, softplus};
-use crate::{artifact::PairSet, lora, runtime::Runtime, workflow};
+use crate::{
+    artifact::PairSet,
+    lora,
+    runtime::{DeviceChoice, Runtime},
+    workflow,
+};
 
 /// The scalar head a reward model scores with: one row, `hidden_size` wide.
 #[derive(Debug, Clone)]
@@ -89,6 +96,53 @@ impl RewardHead {
         // result is one number, and a `[1, hidden] x [hidden, 1]` matmul would
         // reshape twice to say the same thing.
         Ok((last * self.weight.squeeze(0)?)?.sum_all()?)
+    }
+}
+
+/// A trained reward model, loaded and frozen: the base weights with the
+/// artifact's adapters attached, and the head that reads them.
+///
+/// This is a second model in memory beside whatever policy is being trained,
+/// and that is not an oversight to optimize away later: a judge is genuinely a
+/// different model from the thing it judges. What it is not is a second copy
+/// of anything — the adapters are the artifact's own, and the base weights are
+/// mapped read-only exactly as every other Ster load maps them.
+pub struct RewardModel {
+    runtime: Runtime,
+    head: RewardHead,
+}
+
+impl RewardModel {
+    /// Loads the reward artifact at `path` against `model`.
+    ///
+    /// The artifact must declare kind `reward`; a generation adapter has no
+    /// head, and attaching one here would silently score every sequence with
+    /// whatever the caller passed instead.
+    pub fn load(
+        model: &str,
+        revision: Option<&str>,
+        device: DeviceChoice,
+        path: &Path,
+    ) -> Result<Self> {
+        let (runtime, artifact) =
+            Runtime::load_artifact(model, revision, device, path, lora::Kind::Reward)?;
+        let weight = artifact
+            .tensors
+            .get(lora::REWARD_HEAD_TENSOR)
+            .with_context(|| format!("reward artifact is missing {}", lora::REWARD_HEAD_TENSOR))?
+            .to_device(runtime.device())?
+            .to_dtype(runtime.dtype())?;
+        Ok(Self { runtime, head: RewardHead::from_tensor(weight)? })
+    }
+
+    /// The reward this model assigns to one tokenized sequence.
+    ///
+    /// The whole sequence goes in, prompt included: the head reads the last
+    /// position, which has attended to everything before it, so a response is
+    /// scored in the context it was a response to.
+    pub fn score(&self, ids: &[u32]) -> Result<f64> {
+        let hidden = self.runtime.forward_hidden_scored(ids)?;
+        Ok(self.head.score(&hidden)?.to_scalar::<f32>()? as f64)
     }
 }
 
@@ -147,6 +201,7 @@ pub fn reward(
     let Trainable { spec, vars, tensors, parameters, limit } = Preflight {
         subject: "reward modeling",
         unit: "pair",
+        pass: "epoch",
         // The head is in this map too, so the count is not adapters alone.
         noun: "tensors",
         epochs: options.epochs,

@@ -135,12 +135,7 @@ pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<
 }
 
 pub fn extract(runtime: &Runtime, input: &Path, output: &Path, layers: &[usize]) -> Result<()> {
-    let bytes = fs::read(input).with_context(|| format!("failed to read {}", input.display()))?;
-    let prompts: PromptSet = serde_json::from_slice(&bytes)
-        .with_context(|| format!("invalid prompt JSON in {}", input.display()))?;
-    if prompts.prompts.is_empty() {
-        bail!("prompt set contains no prompts");
-    }
+    let prompts = PromptSet::load(input)?;
     let mut records = Vec::with_capacity(prompts.prompts.len());
     for (index, prompt) in prompts.prompts.iter().enumerate() {
         progress(format!("extracting prompt {}/{}", index + 1, prompts.prompts.len()));
@@ -267,9 +262,28 @@ pub struct LayerEvaluation {
     pub margin: f32,
 }
 
-#[derive(Debug, Deserialize)]
-struct PromptSet {
-    prompts: Vec<String>,
+/// A bare list of prompts: `{"prompts": ["…"]}`.
+///
+/// `extract` defined this shape and policy optimization reads the same file,
+/// so it is one public type rather than two structs that agree by accident.
+/// A prompt set states what to ask; what to do with the answers is the
+/// command's business.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PromptSet {
+    pub prompts: Vec<String>,
+}
+
+impl PromptSet {
+    pub fn load(path: &Path) -> Result<Self> {
+        let bytes =
+            fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let value: Self = serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid prompt JSON in {}", path.display()))?;
+        if value.prompts.is_empty() {
+            bail!("prompt set contains no prompts");
+        }
+        Ok(value)
+    }
 }
 
 #[derive(Debug, Serialize)]

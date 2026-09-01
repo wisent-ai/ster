@@ -47,16 +47,39 @@ impl Runtime {
         device: DeviceChoice,
         adapter: &Path,
     ) -> Result<Self> {
+        Ok(Self::load_artifact(model, revision, device, adapter, lora::Kind::Adapter)?.0)
+    }
+
+    /// The same load, for an artifact that must be of a stated `kind`, giving
+    /// the caller the artifact back as well.
+    ///
+    /// A reward model's scalar head lives in the same file as its adapters, so
+    /// the caller that wants the head needs the document the adapters came out
+    /// of — handing it back beats reading the file twice. The kind is required
+    /// rather than reported: an artifact that says what it is only helps if
+    /// applying it somewhere it does not belong is a refusal.
+    pub fn load_artifact(
+        model: &str,
+        revision: Option<&str>,
+        device: DeviceChoice,
+        path: &Path,
+        kind: lora::Kind,
+    ) -> Result<(Self, lora::Artifact)> {
         let base = BaseLoad::resolve(model, revision, device)?;
-        let artifact = lora::Artifact::load(adapter, &base.device)?;
-        if artifact.kind != lora::Kind::Adapter {
-            // A reward model's adapters exist to make its head separate, not
-            // to change what the model writes. Attaching them and dropping the
-            // head would produce a decode nobody trained and nobody wants.
-            bail!(
-                "adapter artifact is a {} model, not a generation adapter",
-                artifact.kind.name()
-            );
+        let artifact = lora::Artifact::load(path, &base.device)?;
+        // A reward model's adapters exist to make its head separate, not to
+        // change what the model writes; a generation adapter has no head to
+        // score with. Either substitution answers a question nobody asked, and
+        // does it plausibly, which is the reason it is refused rather than
+        // reported.
+        match (kind, artifact.kind) {
+            (lora::Kind::Adapter, lora::Kind::Reward) => {
+                bail!("adapter artifact is a reward model, not a generation adapter")
+            }
+            (lora::Kind::Reward, lora::Kind::Adapter) => {
+                bail!("adapter artifact is a generation adapter, not a reward model")
+            }
+            _ => {}
         }
         if artifact.model != model {
             bail!(
@@ -76,7 +99,7 @@ impl Runtime {
         let adapters = lora::Adapters::from_artifact(&artifact, &base.device, base.dtype)?;
         let builder = base.builder()?;
         let model_impl = SteeringLlama::load_with_adapters(builder, base.config.clone(), adapters)?;
-        Ok(base.finish(model, model_impl))
+        Ok((base.finish(model, model_impl), artifact))
     }
 
     /// Loads a model with fresh trainable adapters; the `VarMap` owns them.
@@ -260,6 +283,18 @@ impl Runtime {
     pub fn forward_hidden(&self, ids: &[u32]) -> Result<Tensor> {
         Ok(self
             .forward_once(ids, Mode::REWARD, "a reward forward pass needs at least one token")?
+            .hidden)
+    }
+
+    /// The same residual stream with no autograd tape, for a reward model that
+    /// is judging rather than being trained.
+    ///
+    /// A reward model inside a policy-optimization loop is frozen by
+    /// definition — a moving judge is a moving target — so it takes the fused
+    /// kernels and records nothing.
+    pub fn forward_hidden_scored(&self, ids: &[u32]) -> Result<Tensor> {
+        Ok(self
+            .forward_once(ids, Mode::JUDGE, "a scoring forward pass needs at least one token")?
             .hidden)
     }
 
