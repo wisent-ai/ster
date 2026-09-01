@@ -335,8 +335,8 @@ workflows.
 
 ## Fine-tuning
 
-`ster tune` owns adapters: four objectives that train one, and two
-utilities that read one. It has six subcommands:
+`ster tune` owns adapters: four objectives that train one, and three utilities
+that read one. It has seven subcommands:
 
 ```text
 ster tune sft --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
@@ -364,28 +364,75 @@ ster tune grpo --model <MODEL> --prompts <PROMPTS> --output <OUTPUT>
                [--max-sequence 512] [--seed 42]
 ster tune merge --model <MODEL> --adapter <ADAPTER> --output <DIR>
                 [--revision <REVISION>] [--device cpu]
+ster tune evaluate --model <MODEL> --examples <EXAMPLES>
+                   [--revision <REVISION>] [--device cpu] [--adapter <ADAPTER>]
+                   [--max-sequence 512]
 ster tune inspect <ARTIFACT>
 ```
+
+### What trains, and what does not
+
+Only the adapters train, in every objective below. Base weights arrive through
+`VarBuilder::from_mmaped_safetensors` and are never registered in a `VarMap`, so
+the optimizer is handed `varmap.all_vars()` and there is structurally nothing
+else it could reach; a reward run adds its scalar head to that same map, and
+that head is the only non-adapter weight Ster ever creates. Each adapter is a
+pair of factors: `A` is drawn from a normal with mean zero and standard
+deviation `1/rank`, and `B` is zeros, so the low-rank update is exactly zero
+before the first step. A fresh adapter is the identity, and training starts from
+the base model's own behaviour rather than from noise injected into every
+projection.
+
+That identity is load-bearing rather than cosmetic, because it makes the frozen
+reference free. Two objectives need to compare the policy against the model it
+started as — the preference losses against a reference log-probability, the
+policy gradient against a KL — and since `B` starts at zero the base weights
+*are* that model. Ster reaches it by skipping the low-rank update at every
+projection for one pass, which costs one enum comparison per projection instead
+of a second multi-gigabyte checkpoint. It also gives each objective a free
+correctness check: with an identity adapter the reference and the policy agree
+exactly, so the first step's loss is a known constant, and each section below
+says which one.
+
+Three mechanics are shared and each is deliberate rather than unfinished. One
+sequence goes through each forward pass and `--accumulation` of them are folded
+into one `AdamW` step from their scaled losses, because Ster's decoder has no
+padding token and no attention mask for a batched sequence — stacking sequences
+of different lengths would train the adapter on whatever filler the shorter rows
+carried, silently, under a loss that still looks reasonable. The KV cache is off
+while training, because the whole sequence goes through in one pass and a cache
+would keep the previous sequence's keys and values inside this one's autograd
+graph. The learning rate ramps linearly over `--warmup-steps` steps and then
+decays on a cosine to a tenth of the base rate.
+
+`--targets` names the projections that carry an adapter — `query`, `key`,
+`value`, `output`, `gate`, `up`, and `down` — and accepts either the short name
+or the Hugging Face spelling, `q_proj` and `k_proj` and the rest. `--layers`
+takes `all`, a comma list, or a half-open range such as `8..16`, exactly as
+everywhere else in Ster. `--seed` fixes a whole run: it seeds both the
+per-traversal shuffle and the draw that fills every `A`, so the same command
+writes a byte-identical adapter twice. The draw is taken from Ster's own
+generator rather than Candle's initialiser, because the CPU device refuses to be
+seeded at all and an adapter nobody can reproduce is not an artifact. A sequence
+longer than `--max-sequence` is skipped rather than truncated, with one progress
+line naming it, in every objective: a cut sequence is a different sequence.
+
+Every objective writes the same pair of files, `<name>.safetensors` holding the
+factors under the names `layers.{layer}.{target}.a` and
+`layers.{layer}.{target}.b`, and `<name>.json` beside it carrying
+`schema_version`, `product`, `kind`, `model`, `model_revision`, `rank`, `alpha`,
+`targets`, `layers`, `hidden_size`, and the run's own report — so a trained
+adapter always carries the run that produced it. `ster tune inspect` prints that
+document with every tensor name and shape beside it, and loads no model to do
+it.
+
+### Supervised fine-tuning
 
 `--examples` reads `{"examples": [{"prompt": "…", "completion": "…"}]}`, with an
 optional `name`. Eight examples written in the toy checkpoint's own vocabulary
 are checked in as [`docs/examples/examples.json`](docs/examples/examples.json),
-so a first run needs no download. `--targets` names the projections that carry
-an adapter — `query`, `key`, `value`, `output`, `gate`, `up`, and `down` — and
-accepts either the short name or the Hugging Face spelling, `q_proj` and
-`k_proj` and the rest. `--layers` takes `all`, a comma list, or a half-open
-range such as `8..16`, exactly as everywhere else in Ster. An example longer
-than `--max-sequence` tokens is skipped rather than truncated, with one progress
-line naming it, because a cut completion would teach the model to stop early.
-
-Only the adapters train. Base weights arrive through
-`VarBuilder::from_mmaped_safetensors` and are never registered in a `VarMap`, so
-the optimizer is handed the adapter tensors and there is structurally nothing
-else it could reach. Each adapter is a pair of factors: `A` is initialized
-`Randn { mean: 0.0, stdev: 1/rank }` and `B` is zeros, so the low-rank update is
-exactly zero before the first step. A fresh adapter is therefore the identity,
-and training starts from the base model's own behaviour rather than from noise
-injected into every projection.
+so a first run needs no download. An example longer than `--max-sequence`
+tokens is skipped because a cut completion would teach the model to stop early.
 
 The objective is next-token cross-entropy over the completion tokens only. For a
 joined sequence of `n` tokens whose completion begins at `boundary`, the scored
@@ -394,32 +441,11 @@ logits are `narrow(1, boundary - 1, n - boundary)` against the targets
 its left, and the prompt is never a target, because an operator writing a prompt
 and a completion is not asking the model to learn to reproduce the prompt.
 
-One example goes through each forward pass, and `--accumulation` examples are
-folded into one `AdamW` step from their scaled losses. That is deliberate rather
-than unfinished: Ster's decoder has no padding token and no attention mask for a
-batched sequence, so stacking examples of different lengths would train the
-adapter on whatever filler the shorter rows were padded with — silently, under a
-loss that still looks reasonable. The KV cache is off while training, because
-the whole sequence goes through in one pass and there is nothing to reuse. The
-learning rate ramps linearly over `--warmup-steps` steps and then decays on a
-cosine to a tenth of the base rate. `--seed` fixes the whole run: it seeds both
-the per-epoch shuffle of the example order and the draw that fills every `A`
-factor, so the same command writes a byte-identical adapter twice. The draw is
-taken from Ster's own generator rather than Candle's initialiser, because the
-CPU device refuses to be seeded at all and an adapter nobody can reproduce is
-not an artifact.
-
-A run writes two files that travel together: `<name>.lora.safetensors`, holding
-the factors under the names `layers.{layer}.{target}.a` and
-`layers.{layer}.{target}.b`, and `<name>.lora.json` beside it, carrying
-`schema_version`, `product`, `model`, `model_revision`, `rank`, `alpha`,
-`targets`, `layers`, `hidden_size`, and the training report. The report records
+The report records
 `examples`, `trained_examples`, `skipped_long`, `epochs`, `steps`,
 `trainable_tensors`, `trainable_parameters`, `first_loss`, `final_loss`,
 `mean_final_epoch_loss`, `rank`, `alpha`, `targets`, `layers`,
-`learning_rate`, and `accumulation`, so a trained adapter always carries the run
-that produced it. `ster tune inspect` prints that document with every tensor
-name and shape beside it, and loads no model to do it.
+`learning_rate`, and `accumulation`.
 
 `ster generate --adapter <FILE>` attaches a frozen adapter while the weights are
 mapped, so every token is generated through the adapted projections. An adapter
@@ -614,13 +640,56 @@ The report records `model`, `model_revision`, `adapter`, `output`, `rank`,
 `alpha`, `scale`, `targets`, `layers`, `hidden_size`, `merged_tensors`,
 `copied_tensors`, `total_tensors`, `parameters`, `dtype`, and `files`.
 
+
+### Evaluation
+
+`ster tune evaluate` scores a checkpoint on held-out examples and writes
+nothing. The absence of an optimizer is the point: the number is meaningful
+precisely because nothing about the run could have moved to produce it, where a
+training loss is measured on the data that produced the gradient and falls
+whether or not the model learned anything transferable. `--adapter` attaches a
+frozen adapter exactly as `generate --adapter` does, so the score is the score
+of the model an operator would actually run; omitting it scores the bare
+checkpoint, which is the run an adapter is compared against. It takes the fused
+kernels, because no gradient is wanted and paying for the composed forms would
+buy an autograd tape that is discarded.
+
+Two aggregates are reported because they answer different questions. `loss` is
+total negative log-likelihood over total completion tokens, so long examples
+count for more and `perplexity`, its exponential, is comparable with corpus
+perplexity anywhere else. `mean_example_loss` weighs each example equally
+whatever its length, which is usually what an operator comparing two adapters on
+a curated set means. Reporting one and calling it "the" loss would silently pick
+a side. The report is `f64` throughout: perplexity is the exponential of a loss
+and overflows `f32` at a loss of about 89, which a broken adapter can reach, and
+a measurement that reports infinity as a JSON null is worse than useless.
+
+The report records `model`, `model_revision`, `adapter`, `name`, `examples`,
+`evaluated`, `skipped_long`, `completion_tokens`, `loss`, `perplexity`,
+`mean_example_loss`, `mean_example_perplexity`, and `entries` — one per example
+with `index`, `prompt`, `completion`, `completion_tokens`, `loss` and
+`perplexity`, so the worst example is a sort rather than a second run.
+
+### What fine-tuning does not do
+
 Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
-and writes nothing but the artifact pair. The same six operations are jobs on
-the `ster serve` backend, `POST /v1/tune/sft`, `POST /v1/tune/dpo`,
-`POST /v1/tune/reward`, `POST /v1/tune/grpo`, `POST /v1/tune/merge` and
-`POST /v1/tune/inspect`, and `POST /v1/generate` takes the same `adapter` field.
-That is how Ster Desktop offers fine-tuning on its own screen, and how a
-finished run leaves the adapter it wrote in the field Generate reads.
+touches no credential, and writes nothing but the artifact it was asked for.
+There is no distributed training, no fleet placement, and no release delivery —
+those belong to Stado and Skarbiec. There is no judge model and no LLM-as-critic
+anywhere in the loop: `tune grpo` takes its reward from a reward model you
+trained or from a deterministic function, and if you want a hosted model's
+opinion, that is `pairs synthesize --generator brama` producing training data,
+not a grader wired into a gradient. Batching stays one sequence per forward with
+gradient accumulation, for the padding reason stated above, and that is a
+property of the decoder rather than a milestone.
+
+All seven operations are jobs on the `ster serve` backend —
+`POST /v1/tune/sft`, `POST /v1/tune/dpo`, `POST /v1/tune/reward`,
+`POST /v1/tune/grpo`, `POST /v1/tune/merge`, `POST /v1/tune/evaluate` and
+`POST /v1/tune/inspect` — streamed as NDJSON like every other job, and
+`POST /v1/generate` takes the same `adapter` field. That is how Ster Desktop
+offers the whole stack on its own screen, and how a finished run leaves the
+adapter it wrote in the field Generate reads.
 
 ## Artifact contract
 

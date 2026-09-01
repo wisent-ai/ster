@@ -5,7 +5,7 @@ use candle_core::Device;
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use ster::{
-    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, GrpoOptions,
+    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions,
     PairSet, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
     SynthesisOptions, TrainingMethod,
     brama,
@@ -434,6 +434,22 @@ enum TuneCommand {
         /// own config.json and tokenizer.json, which is what --model accepts.
         #[arg(long)]
         output: PathBuf,
+    },
+    /// Score a checkpoint on held-out examples: loss and perplexity, no training.
+    Evaluate {
+        #[command(flatten)]
+        model: ModelArgs,
+        /// JSON file shaped as {"examples": [{"prompt": "...", "completion": "..."}]}.
+        #[arg(long)]
+        examples: PathBuf,
+        /// Frozen LoRA adapter to attach before scoring. Omit it to score the
+        /// bare checkpoint, which is the run the adapter is compared against.
+        #[arg(long)]
+        adapter: Option<PathBuf>,
+        /// Examples longer than this many tokens are skipped rather than
+        /// truncated; a cut completion is not the completion being scored.
+        #[arg(long, default_value_t = 512)]
+        max_sequence: usize,
     },
     /// Print and validate a Ster LoRA adapter artifact.
     Inspect {
@@ -920,6 +936,28 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             let report =
                 tune::merge(&model.model, model.revision.as_deref(), &adapter, &output)?;
             println!("{}", serde_json::to_string_pretty(&json!({ "report": report }))?);
+        }
+        TuneCommand::Evaluate { model, examples, adapter, max_sequence } => {
+            // The adapter is attached while the weights are mapped, exactly as
+            // `generate --adapter` attaches one, so the score is the score of
+            // the model an operator would actually run.
+            let runtime = match adapter.as_deref() {
+                Some(adapter) => Runtime::load_with_adapter(
+                    &model.model,
+                    model.revision.as_deref(),
+                    DeviceChoice::parse(&model.device)?,
+                    adapter,
+                )?,
+                None => model.load()?,
+            };
+            let example_set = ExampleSet::load(&examples)?;
+            let report = tune::evaluate(
+                &runtime,
+                &example_set,
+                adapter.as_deref(),
+                &EvaluateOptions { max_sequence },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         TuneCommand::Inspect { artifact } => {
             // Inspection reads the adapter document alone: no model is

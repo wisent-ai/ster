@@ -18,7 +18,7 @@ pub use pairs::{SetReport, SynthesisOptions, SynthesisReport};
 pub use representation::TrainingMethod;
 pub use runtime::{Checkpoint, Completion, DeviceChoice, GenerationOptions, Runtime};
 pub use tune::{
-    DpoLoss, DpoOptions, DpoReport, ExampleSet, GrpoIteration, GrpoOptions, GrpoReport, MergeReport, Reward,
+    DpoLoss, DpoOptions, DpoReport, EvaluateOptions, EvaluateReport, EvaluatedExample, ExampleSet, GrpoIteration, GrpoOptions, GrpoReport, MergeReport, Reward,
     RewardHead, RewardModel, RewardOptions, RewardReport, SftOptions, SftReport,
 };
 pub use workflow::PromptSet;

@@ -37,7 +37,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{
-    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, GrpoOptions,
+    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions,
     PairSet, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
     SynthesisOptions, TrainingMethod,
     brama,
@@ -133,6 +133,7 @@ fn handle_connection(stream: TcpStream, job_lock: &Mutex<()>) -> Result<()> {
         ("POST", "/v1/tune/reward") => stream_job(&writer, &body, job_lock, tune_reward_job),
         ("POST", "/v1/tune/grpo") => stream_job(&writer, &body, job_lock, tune_grpo_job),
         ("POST", "/v1/tune/merge") => stream_job(&writer, &body, job_lock, tune_merge_job),
+        ("POST", "/v1/tune/evaluate") => stream_job(&writer, &body, job_lock, tune_evaluate_job),
         ("POST", "/v1/tune/inspect") => stream_job(&writer, &body, job_lock, tune_inspect_job),
         _ => send_error(&writer, 404, &format!("unknown endpoint: {method} {path}")),
     }
@@ -669,6 +670,28 @@ impl Validate for TuneMergeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TuneEvaluateRequest {
+    #[serde(flatten)]
+    model: ModelRequest,
+    #[serde(default)]
+    examples: String,
+    /// A frozen adapter to attach before scoring; omit or leave empty to score
+    /// the bare checkpoint, which is the run an adapter is compared against.
+    #[serde(default)]
+    adapter: Option<String>,
+    #[serde(default = "default_max_sequence")]
+    max_sequence: usize,
+}
+
+impl Validate for TuneEvaluateRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("tune evaluate")?;
+        require(&self.examples, "tune evaluate requires an example set".to_owned())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TuneInspectRequest {
     #[serde(default)]
     artifact: String,
@@ -1152,6 +1175,29 @@ fn tune_merge_job(request: TuneMergeRequest) -> Result<Value> {
         Path::new(&request.output),
     )?;
     Ok(json!({ "report": report }))
+}
+
+/// Mirrors the `ster tune evaluate` arm: no optimizer, no artifact written,
+/// and the same document the CLI prints.
+fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
+    let adapter = request.adapter.as_deref().filter(|value| !value.trim().is_empty());
+    let runtime = match adapter {
+        Some(adapter) => Runtime::load_with_adapter(
+            &request.model.model,
+            request.model.revision.as_deref(),
+            DeviceChoice::parse(&request.model.device)?,
+            Path::new(adapter),
+        )?,
+        None => request.model.load_runtime()?,
+    };
+    let examples = ExampleSet::load(Path::new(&request.examples))?;
+    let report = tune::evaluate(
+        &runtime,
+        &examples,
+        adapter.map(Path::new),
+        &EvaluateOptions { max_sequence: request.max_sequence },
+    )?;
+    Ok(serde_json::to_value(&report)?)
 }
 
 fn tune_inspect_job(request: TuneInspectRequest) -> Result<Value> {

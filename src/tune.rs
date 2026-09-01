@@ -30,12 +30,14 @@
 //!   checkpoint.
 
 mod dpo;
+mod evaluate;
 mod grpo;
 mod merge;
 mod reward;
 mod sft;
 
 pub use dpo::{DpoLoss, DpoOptions, DpoReport, dpo};
+pub use evaluate::{EvaluateOptions, EvaluateReport, EvaluatedExample, evaluate};
 pub use grpo::{GrpoIteration, GrpoOptions, GrpoReport, Reward, grpo};
 pub use merge::{MergeReport, merge};
 pub use reward::{RewardHead, RewardModel, RewardOptions, RewardReport, reward};
@@ -320,7 +322,7 @@ impl ExampleSet {
     }
 
     /// How the set names itself in a refusal when it never came from a file.
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self.name.trim() {
             "" => "(unnamed)".to_owned(),
             name => name.to_owned(),
