@@ -688,16 +688,24 @@ with `index`, `prompt`, `completion`, `completion_tokens`, `loss` and
 
 ### What fine-tuning does not do
 
+Ster never trains a full weight. The only tensors any objective creates are the
+low-rank adapter factors and, on a reward run, the scalar head that reads them.
+`ster tune merge` does write full weights, but it folds a finished adapter into
+them rather than training them.
+
 Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
-touches no credential, and writes nothing but the artifact it was asked for.
-There is no distributed training, no fleet placement, and no release delivery —
-those belong to Stado and Skarbiec. There is no judge model and no LLM-as-critic
+touches no credential, and writes nothing but the artifact it was asked for. The
+reward and policy loops are as local and as small as the rest — same single
+process, same read-only base, same one sequence per forward — and no training is
+hosted. There is no distributed training, no fleet placement, and no release
+delivery; Brama owns hosted inference, Stado owns fleet placement, and neither is
+called from a gradient. There is no judge model and no LLM-as-critic
 anywhere in the loop: `tune grpo` takes its reward from a reward model you
 trained or from a deterministic function, and if you want a hosted model's
 opinion, that is `pairs synthesize --generator brama` producing training data,
-not a grader wired into a gradient. Batching stays one sequence per forward with
-gradient accumulation, for the padding reason stated above, and that is a
-property of the decoder rather than a milestone.
+not a grader wired into a gradient. The one-sequence-per-forward batching is a
+property of the decoder, for the padding reason stated above, rather than a
+milestone on the way to something wider.
 
 All seven operations are jobs on the `ster serve` backend —
 `POST /v1/tune/sft`, `POST /v1/tune/dpo`, `POST /v1/tune/reward`,
