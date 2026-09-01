@@ -39,7 +39,10 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::Serialize;
 
-use super::{Preflight, Trainable, schedule, sequence_logprob};
+use super::{
+    EncodedPair, Preflight, Trainable, encode_pairs, pair_set_label, schedule, sequence_logprob,
+    softplus,
+};
 use crate::{artifact::PairSet, lora, model::Route, runtime::Runtime, workflow};
 
 /// Which preference objective the log-ratio margin is fed into.
@@ -142,10 +145,11 @@ pub fn dpo(
     if !options.beta.is_finite() || options.beta <= 0.0 {
         bail!("direct preference optimization requires a finite beta above zero");
     }
-    pairs.validate(&label(pairs))?;
+    pairs.validate(&pair_set_label(pairs))?;
     let Trainable { spec, vars, tensors, parameters, limit } = Preflight {
         subject: "direct preference optimization",
         unit: "pair",
+        noun: "adapter tensors",
         epochs: options.epochs,
         accumulation: options.accumulation,
         learning_rate: options.learning_rate,
@@ -153,11 +157,11 @@ pub fn dpo(
     }
     .open(runtime, varmap, &options.spec)?;
 
-    let mut encoded = encode(runtime, pairs, limit)?;
+    let mut encoded: Vec<Scored> = encode_pairs(runtime, pairs, limit)?
+        .into_iter()
+        .map(Scored::new)
+        .collect();
     let skipped_long = pairs.pairs.len() - encoded.len();
-    if encoded.is_empty() {
-        bail!("every pair is longer than the sequence limit, so there is nothing to train on");
-    }
     reference_scores(runtime, &mut encoded)?;
 
     let mut optimizer = AdamW::new(
@@ -198,9 +202,10 @@ pub fn dpo(
             let mut summed: Option<Tensor> = None;
             let mut group_loss = 0f64;
             for &slot in group {
-                let pair = &encoded[slot];
-                let value = step_loss(runtime, pair, options)
-                    .with_context(|| format!("pair {} produced no usable loss", pair.index))?;
+                let scored = &encoded[slot];
+                let value = step_loss(runtime, scored, options).with_context(|| {
+                    format!("pair {} produced no usable loss", scored.pair.index)
+                })?;
                 group_loss += value.loss;
                 summary.record(&value);
                 let scaled = (value.tensor / options.accumulation as f64)?;
@@ -274,56 +279,20 @@ pub fn dpo(
     })
 }
 
-/// One pair, tokenized once and scored under the reference once.
-struct Encoded {
-    /// The pair's index in the original set, so a refusal names the line the
-    /// operator wrote rather than a position in a filtered list.
-    index: usize,
-    chosen: Vec<u32>,
-    rejected: Vec<u32>,
+/// One tokenized pair with the frozen reference's opinion of both sides.
+struct Scored {
+    pair: EncodedPair,
     chosen_reference: f64,
     rejected_reference: f64,
 }
 
-/// Tokenizes both sides of every pair, dropping the ones that do not fit.
-///
-/// Over-long pairs are skipped rather than truncated for the reason
-/// supervised fine-tuning skips over-long examples: a cut sequence is a
-/// different sequence, and preferring a truncation of the chosen side over a
-/// truncation of the rejected side is not the preference the operator stated.
-/// Both sides go or neither does — half a pair states no preference at all.
-fn encode(runtime: &Runtime, pairs: &PairSet, limit: usize) -> Result<Vec<Encoded>> {
-    let mut encoded = Vec::with_capacity(pairs.pairs.len());
-    for (index, pair) in pairs.pairs.iter().enumerate() {
-        let chosen = runtime
-            .encode(&pair.positive)
-            .with_context(|| format!("pair {index} chosen side could not be encoded"))?;
-        let rejected = runtime
-            .encode(&pair.negative)
-            .with_context(|| format!("pair {index} rejected side could not be encoded"))?;
-        for (side, ids) in [("chosen", &chosen), ("rejected", &rejected)] {
-            if ids.len() < 2 {
-                bail!(
-                    "pair {index} {side} side encodes to one token, so there is nothing to predict"
-                );
-            }
-        }
-        let longest = chosen.len().max(rejected.len());
-        if longest > limit {
-            workflow::progress(format!(
-                "skipping pair {index}: {longest} tokens exceed the {limit} token limit"
-            ));
-            continue;
-        }
-        encoded.push(Encoded {
-            index,
-            chosen,
-            rejected,
-            chosen_reference: 0.0,
-            rejected_reference: 0.0,
-        });
+impl Scored {
+    /// The reference values are filled in by [`reference_scores`] before the
+    /// optimizer exists; zero is not a plausible log-probability and would
+    /// surface immediately as a first loss that is not `ln 2`.
+    fn new(pair: EncodedPair) -> Self {
+        Self { pair, chosen_reference: 0.0, rejected_reference: 0.0 }
     }
-    Ok(encoded)
 }
 
 /// Fills in each pair's frozen-reference log-probabilities.
@@ -331,14 +300,14 @@ fn encode(runtime: &Runtime, pairs: &PairSet, limit: usize) -> Result<Vec<Encode
 /// Run once, before the optimizer exists. The reference never changes, so
 /// re-deriving these every epoch would be `2 * pairs * (epochs - 1)` forward
 /// passes spent recomputing constants.
-fn reference_scores(runtime: &Runtime, encoded: &mut [Encoded]) -> Result<()> {
+fn reference_scores(runtime: &Runtime, encoded: &mut [Scored]) -> Result<()> {
     let total = encoded.len();
     workflow::progress(format!("scoring {total} pairs under the frozen reference model"));
     let device = runtime.device();
-    for (position, pair) in encoded.iter_mut().enumerate() {
+    for (position, scored) in encoded.iter_mut().enumerate() {
         for (ids, slot) in [
-            (&pair.chosen, &mut pair.chosen_reference),
-            (&pair.rejected, &mut pair.rejected_reference),
+            (&scored.pair.chosen, &mut scored.chosen_reference),
+            (&scored.pair.rejected, &mut scored.rejected_reference),
         ] {
             let logits = runtime.forward_scored(ids, Route::Base)?;
             *slot = sequence_logprob(&logits, ids, 1, device)?.to_scalar::<f32>()? as f64;
@@ -357,9 +326,11 @@ struct Step {
 }
 
 /// One pair's contribution: two policy forwards, one margin, one loss.
-fn step_loss(runtime: &Runtime, pair: &Encoded, options: &DpoOptions) -> Result<Step> {
-    let chosen = policy_log_ratio(runtime, &pair.chosen, pair.chosen_reference, options)?;
-    let rejected = policy_log_ratio(runtime, &pair.rejected, pair.rejected_reference, options)?;
+fn step_loss(runtime: &Runtime, scored: &Scored, options: &DpoOptions) -> Result<Step> {
+    let chosen =
+        policy_log_ratio(runtime, &scored.pair.chosen, scored.chosen_reference, options)?;
+    let rejected =
+        policy_log_ratio(runtime, &scored.pair.rejected, scored.rejected_reference, options)?;
     let margin = (&chosen - &rejected)?;
     let tensor = match options.loss {
         // -log sigmoid(beta * margin), written as the softplus that does not
@@ -399,17 +370,6 @@ fn policy_log_ratio(
         return Ok((ratio / (ids.len() - 1) as f64)?);
     }
     Ok(ratio)
-}
-
-/// `log(1 + exp(x))`, computed the way that does not overflow.
-///
-/// The direct form is infinite in F32 from about x = 89, while the true value
-/// there is 89. Pulling the positive part out through `relu` leaves
-/// `log(1 + exp(-|x|))`, whose argument is always in (1, 2], and every op in
-/// the expression records a backward node.
-fn softplus(x: &Tensor) -> Result<Tensor> {
-    let tail = ((x.abs()?.neg()?.exp()? + 1.0)?).log()?;
-    Ok((x.relu()? + tail)?)
 }
 
 /// Running totals over one epoch.
@@ -458,13 +418,5 @@ impl Summary {
 
     fn accuracy(&self) -> f32 {
         self.correct as f32 / self.pairs.max(1) as f32
-    }
-}
-
-/// How a pair set names itself in a refusal when it carries no trait name.
-fn label(pairs: &PairSet) -> String {
-    match pairs.trait_name.trim() {
-        "" => "(unnamed)".to_owned(),
-        name => name.to_owned(),
     }
 }

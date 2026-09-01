@@ -383,6 +383,40 @@ impl Adapters {
 
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 
+/// The name of the scalar reward head inside a reward artifact's safetensors.
+/// This string is part of the artifact's contract, exactly as the adapter
+/// factor names are.
+pub const REWARD_HEAD_TENSOR: &str = "reward.head";
+
+/// What an artifact is for.
+///
+/// A reward model is an adapter *and* a scalar head trained on top of it, and
+/// the two are useless apart: the head reads a residual stream the adapters
+/// shaped, and the adapters were shaped to make that head separate. They
+/// therefore travel in one file, and the kind is what tells a reader which of
+/// the two things it is holding — so `generate` can refuse a reward model
+/// rather than silently apply half of one.
+///
+/// The field defaults to [`Kind::Adapter`] so that every sidecar written
+/// before it existed still loads and still means what it meant. It is
+/// additive, which is why the schema version does not move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    #[default]
+    Adapter,
+    Reward,
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Adapter => "adapter",
+            Self::Reward => "reward",
+        }
+    }
+}
+
 /// The durable adapter document.
 ///
 /// The weights go in a safetensors file so any other tool can read them, and the
@@ -394,6 +428,8 @@ pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 pub struct Artifact {
     pub schema_version: u32,
     pub product: String,
+    #[serde(default)]
+    pub kind: Kind,
     pub model: String,
     pub model_revision: Option<String>,
     pub rank: usize,
@@ -530,16 +566,28 @@ impl Artifact {
                     check_factor(&b_name, b, 0, self.hidden_size)?;
                 }
                 for (name, tensor) in [(&a_name, a), (&b_name, b)] {
-                    let values = tensor
-                        .flatten_all()?
-                        .to_dtype(DType::F32)?
-                        .to_vec1::<f32>()
-                        .with_context(|| format!("failed to read adapter tensor {name}"))?;
-                    if values.iter().any(|value| !value.is_finite()) {
-                        bail!("adapter tensor {name} contains a non-finite value");
-                    }
+                    finite(name, tensor)?;
                 }
             }
+        }
+        // The head is the whole point of a reward artifact and meaningless in
+        // a plain one, so both directions are refused: a reward document
+        // without a head would load as a generation adapter that scores
+        // nothing, and an adapter carrying one would have come from somewhere
+        // this build cannot account for.
+        match (self.kind, self.tensors.get(REWARD_HEAD_TENSOR)) {
+            (Kind::Reward, Some(head)) => {
+                check_factor(REWARD_HEAD_TENSOR, head, 0, 1)?;
+                check_factor(REWARD_HEAD_TENSOR, head, 1, self.hidden_size)?;
+                finite(REWARD_HEAD_TENSOR, head)?;
+            }
+            (Kind::Reward, None) => bail!(
+                "reward artifact is missing tensor {REWARD_HEAD_TENSOR}, which is the head it exists to carry"
+            ),
+            (Kind::Adapter, Some(_)) => bail!(
+                "adapter artifact carries a {REWARD_HEAD_TENSOR} tensor but declares kind adapter"
+            ),
+            (Kind::Adapter, None) => {}
         }
         Ok(())
     }
@@ -554,6 +602,24 @@ fn check_factor(name: &str, tensor: &Tensor, axis: usize, expected: usize) -> Re
     if dims[axis] != expected {
         let axis_name = if axis == 0 { "rows" } else { "columns" };
         bail!("adapter tensor {name} has {} {axis_name}, expected {expected}", dims[axis]);
+    }
+    Ok(())
+}
+
+/// Refuses a tensor with a value no forward pass could survive.
+///
+/// A non-finite factor does not fail loudly at matmul time: it propagates a
+/// `NaN` through the residual stream and comes out as a plausible-looking
+/// decode, so it is caught when the document is read rather than when the
+/// damage is visible.
+fn finite(name: &str, tensor: &Tensor) -> Result<()> {
+    let values = tensor
+        .flatten_all()?
+        .to_dtype(DType::F32)?
+        .to_vec1::<f32>()
+        .with_context(|| format!("failed to read adapter tensor {name}"))?;
+    if values.iter().any(|value| !value.is_finite()) {
+        bail!("adapter tensor {name} contains a non-finite value");
     }
     Ok(())
 }

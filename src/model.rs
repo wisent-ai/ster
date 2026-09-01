@@ -44,11 +44,18 @@ pub enum Route {
 /// Decoding samples one token, so it projects the final position and leaves
 /// the rest of the `[sequence, vocab]` matmul undone. Anything that scores a
 /// whole sequence — a training loss, a reference log-probability, a held-out
-/// perplexity — needs every position.
+/// perplexity — needs every position. A reward head needs none of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Readout {
     LastPosition,
     EveryPosition,
+    /// No vocabulary projection at all.
+    ///
+    /// A reward head maps the residual stream to one scalar and never looks at
+    /// a token distribution, so projecting `[sequence, hidden]` onto a
+    /// vocabulary of a hundred thousand columns would compute — and, while
+    /// training, backpropagate — the widest matmul in the pass only to drop it.
+    Hidden,
 }
 
 /// The three independent choices one forward pass makes.
@@ -88,6 +95,14 @@ impl Mode {
     pub const fn score(route: Route) -> Self {
         Self { pass: Pass::Inference, route, readout: Readout::EveryPosition }
     }
+
+    /// A reward model's forward: composed kernels, adapters on, and the
+    /// residual stream instead of a token distribution.
+    pub const REWARD: Self = Self {
+        pass: Pass::Differentiable,
+        route: Route::Adapted,
+        readout: Readout::Hidden,
+    };
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +144,19 @@ impl SteeringPlan {
 
 #[derive(Debug)]
 pub struct ForwardOutput {
-    pub logits: Tensor,
+    /// The vocabulary projection the readout asked for, or `None` when it
+    /// asked for none.
+    ///
+    /// A reward model reads the residual stream and never touches the
+    /// vocabulary; on a real checkpoint that projection is the widest matmul
+    /// in the pass, so skipping it is worth an `Option` at the two call sites
+    /// that unwrap one.
+    pub logits: Option<Tensor>,
+    /// The residual stream after the final norm, `[batch, sequence, hidden]`.
+    ///
+    /// Always returned, because a `Tensor` is a handle and returning it costs
+    /// a refcount rather than a copy.
+    pub hidden: Tensor,
     pub activations: BTreeMap<usize, Vec<f32>>,
 }
 
@@ -603,14 +630,18 @@ impl SteeringLlama {
         let hidden = normalize(&self.final_norm, &hidden, mode.pass)?;
         // Decoding only ever samples the next token, so it projects one row and
         // leaves the rest of the vocabulary matmul undone. Anything that scores
-        // a sequence against its own successors needs every position.
+        // a sequence against its own successors needs every position, and a
+        // reward head needs no vocabulary at all.
         let logits = match mode.readout {
             Readout::LastPosition => {
                 let last = hidden.i((.., sequence - 1, ..))?.contiguous()?;
-                self.lm_head.forward(&last)?
+                Some(self.lm_head.forward(&last)?.to_dtype(DType::F32)?)
             }
-            Readout::EveryPosition => self.lm_head.forward(&hidden.contiguous()?)?,
+            Readout::EveryPosition => {
+                Some(self.lm_head.forward(&hidden.contiguous()?)?.to_dtype(DType::F32)?)
+            }
+            Readout::Hidden => None,
         };
-        Ok(ForwardOutput { logits: logits.to_dtype(DType::F32)?, activations })
+        Ok(ForwardOutput { logits, hidden: hidden.to_dtype(DType::F32)?, activations })
     }
 }

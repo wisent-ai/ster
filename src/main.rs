@@ -6,7 +6,8 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use ster::{
     ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, PairSet,
-    Runtime, SftOptions, SteeringArtifact, SynthesisOptions, TrainingMethod,
+    RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact, SynthesisOptions,
+    TrainingMethod,
     brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
@@ -311,6 +312,49 @@ enum TuneCommand {
         warmup_steps: usize,
         /// Pairs with a side longer than this many tokens are skipped rather
         /// than truncated; a cut response is not the response that was preferred.
+        #[arg(long, default_value_t = 512)]
+        max_sequence: usize,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+    },
+    /// Train a scalar reward head that ranks the two sides of each pair.
+    Reward {
+        #[command(flatten)]
+        model: ModelArgs,
+        /// JSON file with trait_name and contrastive pairs. The positive side
+        /// is the response the head learns to score higher.
+        #[arg(long)]
+        pairs: PathBuf,
+        /// Output reward artifact safetensors, carrying the adapters and the
+        /// head together; the identity sidecar is written beside it.
+        #[arg(long)]
+        output: PathBuf,
+        /// Low-rank dimension shared by every adapter.
+        #[arg(long, default_value_t = 8)]
+        rank: usize,
+        /// LoRA scaling numerator; each update is scaled by alpha over rank.
+        #[arg(long, default_value_t = 16.0)]
+        alpha: f64,
+        /// Comma-separated projections to adapt: query, key, value, output,
+        /// gate, up, or down.
+        #[arg(long, default_value = "query,value")]
+        targets: String,
+        /// Comma-separated layers, half-open ranges such as 8..16, or all.
+        #[arg(long, default_value = "all")]
+        layers: String,
+        /// Passes over the pair set.
+        #[arg(long, default_value_t = 1)]
+        epochs: usize,
+        #[arg(long, default_value_t = 1e-4)]
+        learning_rate: f64,
+        /// Pairs folded into one optimizer step.
+        #[arg(long, default_value_t = 8)]
+        accumulation: usize,
+        /// Steps over which the learning rate ramps up from zero.
+        #[arg(long, default_value_t = 0)]
+        warmup_steps: usize,
+        /// Pairs with a side longer than this many tokens are skipped rather
+        /// than truncated; a cut response is not the response that was ranked.
         #[arg(long, default_value_t = 512)]
         max_sequence: usize,
         #[arg(long, default_value_t = 42)]
@@ -665,6 +709,61 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             };
             let report = tune::dpo(&runtime, &varmap, &pair_set, &options)?;
             let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+            artifact.save(&output)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "path": output.display().to_string(),
+                    "report": report,
+                }))?
+            );
+        }
+        TuneCommand::Reward {
+            model,
+            pairs,
+            output,
+            rank,
+            alpha,
+            targets,
+            layers,
+            epochs,
+            learning_rate,
+            accumulation,
+            warmup_steps,
+            max_sequence,
+            seed,
+        } => {
+            let device = DeviceChoice::parse(&model.device)?;
+            let spec = lora::Spec {
+                rank,
+                alpha,
+                targets: parse_targets(&targets)?,
+                layers: parse_adapter_layers(&layers)?,
+                seed,
+            };
+            let (runtime, varmap) =
+                Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            // The head joins the same VarMap the adapters live in, so one
+            // optimizer steps the pair and the artifact holds both.
+            let head = RewardHead::fresh(
+                &varmap,
+                runtime.hidden_size(),
+                runtime.device(),
+                runtime.dtype(),
+            )?;
+            let pair_set = PairSet::load(&pairs)?;
+            let options = RewardOptions {
+                spec: spec.clone(),
+                epochs,
+                learning_rate,
+                accumulation,
+                warmup_steps,
+                max_sequence,
+                seed,
+            };
+            let report = tune::reward(&runtime, &varmap, &head, &pair_set, &options)?;
+            let artifact =
+                runtime.reward_artifact(&spec, head.weight(), serde_json::to_value(&report)?)?;
             artifact.save(&output)?;
             println!(
                 "{}",

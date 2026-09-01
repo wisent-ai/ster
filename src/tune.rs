@@ -23,8 +23,10 @@
 //! so a caller still writes `tune::sft` and `tune::dpo` side by side.
 
 mod dpo;
+mod reward;
 
 pub use dpo::{DpoLoss, DpoOptions, DpoReport, dpo};
+pub use reward::{RewardHead, RewardOptions, RewardReport, reward};
 
 use std::path::Path;
 
@@ -34,7 +36,7 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap, loss};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 
-use crate::{lora, runtime::Runtime, workflow};
+use crate::{artifact::PairSet, lora, runtime::Runtime, workflow};
 
 /// The cosine schedule decays to this fraction of the peak learning rate
 /// rather than to zero. LoRA runs are short; a schedule that reaches zero
@@ -43,20 +45,24 @@ const DECAY_FLOOR: f64 = 0.1;
 
 // MARK: - Shared trainer setup
 
-/// Everything an adapter trainer checks before it touches a model, and the two
-/// words it refuses in.
+/// Everything an adapter trainer checks before it touches a model, and the
+/// three words it says it in.
 ///
 /// Four objectives run the same five checks against the same numbers. Copying
 /// them would let one copy gain a check the others silently lacked, so they
-/// live here once. `subject` opens each sentence and `unit` names one item of
-/// the training set, which is what keeps "supervised fine-tuning requires an
-/// accumulation of at least one example" and "direct preference optimization
-/// requires an accumulation of at least one pair" both correct — and the first
-/// of them byte-identical to the sentence the runbook already quotes.
+/// live here once. `subject` opens each refusal sentence and `unit` names one
+/// item of the training set, which is what keeps "supervised fine-tuning
+/// requires an accumulation of at least one example" and "direct preference
+/// optimization requires an accumulation of at least one pair" both correct —
+/// and the first of them byte-identical to the sentence the runbook already
+/// quotes. `noun` names the tensors in the opening progress line: most runs
+/// train adapters and nothing else, but a reward run also trains a scalar
+/// head, and calling that an adapter would be wrong.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Preflight<'a> {
     pub subject: &'a str,
     pub unit: &'a str,
+    pub noun: &'a str,
     pub epochs: usize,
     pub accumulation: usize,
     pub learning_rate: f64,
@@ -102,9 +108,10 @@ impl Preflight<'_> {
         spec.validate(layer_count)?;
         let spec = spec.resolved(layer_count);
 
-        // Every variable in the map is an adapter matrix: the base was mapped
-        // read-only and never registered. Handing the whole map to AdamW is
-        // therefore the same statement as "train only the adapters".
+        // Nothing in the map is a base weight: the base was mapped read-only
+        // and never registered, so the map holds the adapters and, on a reward
+        // run, the scalar head. Handing the whole map to AdamW is therefore the
+        // same statement as "train only what this run created".
         let vars = varmap.all_vars();
         if vars.is_empty() {
             bail!("this run has no trainable adapters; load the model with load_trainable");
@@ -112,7 +119,8 @@ impl Preflight<'_> {
         let tensors = vars.len();
         let parameters: usize = vars.iter().map(|var| var.elem_count()).sum();
         workflow::progress(format!(
-            "training {tensors} adapter tensors ({parameters} parameters) at rank {} across {} layers",
+            "training {tensors} {} ({parameters} parameters) at rank {} across {} layers",
+            self.noun,
             spec.rank,
             spec.layers.len()
         ));
@@ -157,6 +165,80 @@ pub(crate) fn sequence_logprob(
     let log_probabilities = candle_nn::ops::log_softmax(&window, candle_core::D::Minus1)?;
     let targets = Tensor::new(&ids[start..], device)?.reshape((scored, 1))?;
     Ok(log_probabilities.gather(&targets, 1)?.sum_all()?)
+}
+
+/// `log(1 + exp(x))`, computed the way that does not overflow.
+///
+/// Every preference objective in Ster ends in `-log sigmoid(z)`, which is
+/// `softplus(-z)`. The direct form is infinite in F32 from about x = 89, while
+/// the true value there is 89. Pulling the positive part out through `relu`
+/// leaves `log(1 + exp(-|x|))`, whose argument is always in (1, 2], and every
+/// op in the expression records a backward node.
+pub(crate) fn softplus(x: &Tensor) -> Result<Tensor> {
+    let tail = ((x.abs()?.neg()?.exp()? + 1.0)?).log()?;
+    Ok((x.relu()? + tail)?)
+}
+
+/// One preference pair, tokenized.
+pub(crate) struct EncodedPair {
+    /// The pair's index in the original set, so a refusal names the entry the
+    /// operator wrote rather than a position in a filtered list.
+    pub index: usize,
+    pub chosen: Vec<u32>,
+    pub rejected: Vec<u32>,
+}
+
+/// Tokenizes both sides of every pair, dropping the ones that do not fit.
+///
+/// Over-long pairs are skipped rather than truncated for the reason supervised
+/// fine-tuning skips over-long examples: a cut sequence is a different
+/// sequence, and preferring a truncation of the chosen side over a truncation
+/// of the rejected side is not the preference the operator stated. Both sides
+/// go or neither does — half a pair states no preference at all.
+///
+/// Tokenizing up front rather than per epoch is what makes the skip report
+/// complete before the first gradient is taken.
+pub(crate) fn encode_pairs(
+    runtime: &Runtime,
+    pairs: &PairSet,
+    limit: usize,
+) -> Result<Vec<EncodedPair>> {
+    let mut encoded = Vec::with_capacity(pairs.pairs.len());
+    for (index, pair) in pairs.pairs.iter().enumerate() {
+        let chosen = runtime
+            .encode(&pair.positive)
+            .with_context(|| format!("pair {index} chosen side could not be encoded"))?;
+        let rejected = runtime
+            .encode(&pair.negative)
+            .with_context(|| format!("pair {index} rejected side could not be encoded"))?;
+        for (side, ids) in [("chosen", &chosen), ("rejected", &rejected)] {
+            if ids.len() < 2 {
+                bail!(
+                    "pair {index} {side} side encodes to one token, so there is nothing to predict"
+                );
+            }
+        }
+        let longest = chosen.len().max(rejected.len());
+        if longest > limit {
+            workflow::progress(format!(
+                "skipping pair {index}: {longest} tokens exceed the {limit} token limit"
+            ));
+            continue;
+        }
+        encoded.push(EncodedPair { index, chosen, rejected });
+    }
+    if encoded.is_empty() {
+        bail!("every pair is longer than the sequence limit, so there is nothing to train on");
+    }
+    Ok(encoded)
+}
+
+/// How a pair set names itself in a refusal when it carries no trait name.
+pub(crate) fn pair_set_label(pairs: &PairSet) -> String {
+    match pairs.trait_name.trim() {
+        "" => "(unnamed)".to_owned(),
+        name => name.to_owned(),
+    }
 }
 
 // MARK: - Example sets
@@ -264,6 +346,7 @@ pub fn sft(
         Preflight {
             subject: "supervised fine-tuning",
             unit: "example",
+            noun: "adapter tensors",
             epochs: options.epochs,
             accumulation: options.accumulation,
             learning_rate: options.learning_rate,
@@ -482,6 +565,7 @@ pub fn inspect(artifact: &lora::Artifact) -> serde_json::Value {
         "adapter": {
             "schema_version": artifact.schema_version,
             "product": artifact.product,
+            "kind": artifact.kind.name(),
             "model": artifact.model,
             "model_revision": artifact.model_revision,
             "rank": artifact.rank,

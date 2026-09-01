@@ -38,7 +38,8 @@ use serde_json::{Value, json};
 
 use crate::{
     ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, PairSet,
-    Runtime, SftOptions, SteeringArtifact, SynthesisOptions, TrainingMethod,
+    RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact, SynthesisOptions,
+    TrainingMethod,
     brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
@@ -129,6 +130,7 @@ fn handle_connection(stream: TcpStream, job_lock: &Mutex<()>) -> Result<()> {
         }
         ("POST", "/v1/tune/sft") => stream_job(&writer, &body, job_lock, tune_sft_job),
         ("POST", "/v1/tune/dpo") => stream_job(&writer, &body, job_lock, tune_dpo_job),
+        ("POST", "/v1/tune/reward") => stream_job(&writer, &body, job_lock, tune_reward_job),
         ("POST", "/v1/tune/inspect") => stream_job(&writer, &body, job_lock, tune_inspect_job),
         _ => send_error(&writer, 404, &format!("unknown endpoint: {method} {path}")),
     }
@@ -543,6 +545,48 @@ impl Validate for TuneDpoRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TuneRewardRequest {
+    #[serde(flatten)]
+    model: ModelRequest,
+    /// A contrastive pair set. The positive side is the response the head
+    /// learns to score higher.
+    #[serde(default)]
+    pairs: String,
+    #[serde(default)]
+    output: String,
+    #[serde(default = "default_rank")]
+    rank: usize,
+    #[serde(default = "default_alpha")]
+    alpha: f64,
+    #[serde(default = "default_targets")]
+    targets: String,
+    #[serde(default = "default_layers")]
+    layers: String,
+    #[serde(default = "default_epochs")]
+    epochs: usize,
+    #[serde(default = "default_learning_rate")]
+    learning_rate: f64,
+    #[serde(default = "default_accumulation")]
+    accumulation: usize,
+    /// Zero starts at the full learning rate, which is what a short run wants.
+    #[serde(default)]
+    warmup_steps: usize,
+    #[serde(default = "default_max_sequence")]
+    max_sequence: usize,
+    #[serde(default = "default_seed")]
+    seed: u64,
+}
+
+impl Validate for TuneRewardRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("tune reward")?;
+        require(&self.pairs, "tune reward requires a pairs file".to_owned())?;
+        require(&self.output, "tune reward requires an output path".to_owned())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TuneInspectRequest {
     #[serde(default)]
     artifact: String,
@@ -885,6 +929,43 @@ fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
     // The report is folded into the artifact so a trained adapter always
     // carries the run that produced it.
     let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+    artifact.save(Path::new(&request.output))?;
+    Ok(json!({"path": request.output, "report": report}))
+}
+
+/// Mirrors the `ster tune reward` arm. The head is registered in the same
+/// VarMap the adapters live in, so one optimizer steps the pair and the
+/// artifact carries both.
+fn tune_reward_job(request: TuneRewardRequest) -> Result<Value> {
+    let device = DeviceChoice::parse(&request.model.device)?;
+    let spec = lora::Spec {
+        rank: request.rank,
+        alpha: request.alpha,
+        targets: parse_targets(&request.targets)?,
+        layers: parse_adapter_layers(&request.layers)?,
+        seed: request.seed,
+    };
+    let (runtime, varmap) = Runtime::load_trainable(
+        &request.model.model,
+        request.model.revision.as_deref(),
+        device,
+        &spec,
+    )?;
+    let head =
+        RewardHead::fresh(&varmap, runtime.hidden_size(), runtime.device(), runtime.dtype())?;
+    let pairs = PairSet::load(Path::new(&request.pairs))?;
+    let options = RewardOptions {
+        spec: spec.clone(),
+        epochs: request.epochs,
+        learning_rate: request.learning_rate,
+        accumulation: request.accumulation,
+        warmup_steps: request.warmup_steps,
+        max_sequence: request.max_sequence,
+        seed: request.seed,
+    };
+    let report = tune::reward(&runtime, &varmap, &head, &pairs, &options)?;
+    let artifact =
+        runtime.reward_artifact(&spec, head.weight(), serde_json::to_value(&report)?)?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
 }

@@ -44,6 +44,8 @@ Included now:
   examples;
 - direct preference optimization, and its IPO variant, over a contrastive pair
   set, scored against the frozen reference the same weights already carry;
+- Bradley-Terry reward models: a scalar head trained with the adapters beneath
+  it and written in the same artifact;
 - frozen adapter artifacts applied at generation time;
 - deterministic JSON pair, activation, steering, and evaluation formats.
 
@@ -330,7 +332,7 @@ workflows.
 
 ## Fine-tuning
 
-`ster tune` is the only part of Ster that trains a weight. It has three
+`ster tune` is the only part of Ster that trains a weight. It has four
 subcommands:
 
 ```text
@@ -345,6 +347,11 @@ ster tune dpo --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
               [--loss dpo|ipo] [--epochs 1] [--learning-rate 0.0001]
               [--accumulation 8] [--warmup-steps 0] [--max-sequence 512]
               [--seed 42]
+ster tune reward --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
+                 [--revision <REVISION>] [--device cpu] [--rank 8] [--alpha 16]
+                 [--targets query,value] [--layers all] [--epochs 1]
+                 [--learning-rate 0.0001] [--accumulation 8] [--warmup-steps 0]
+                 [--max-sequence 512] [--seed 42]
 ster tune inspect <ARTIFACT>
 ```
 
@@ -462,12 +469,52 @@ already earns the larger one, and both are measured over the final epoch, so
 they describe the adapter that was written rather than an average over a policy
 that was still moving.
 
+### Reward modeling
+
+`ster tune reward` trains a model that judges text rather than one that writes
+it: one scalar per sequence, higher for the response the operator preferred. It
+takes the same `--pairs` file, under the Bradley-Terry objective
+`-log σ(r_chosen - r_rejected)`.
+
+The head is a single row of `hidden_size` weights applied to the last
+position's residual state, which is the only position that has attended to the
+whole sequence. It has no bias: a bias is added to both scores and cancels in
+the difference, so it would be a parameter with an identically zero gradient.
+It is initialized to zeros rather than drawn, because one output row has no
+symmetry for a draw to break — which also means a fresh head scores everything
+zero and the first loss is exactly `ln 2`, the same identity check `tune dpo`
+gives. Only differences are identified by the objective, so the scores in the
+report are meaningful against each other and against no external unit.
+
+The head trains together with the adapters beneath it, in one `VarMap` and
+under one optimizer, and the run's tensor count is one higher than an adapter
+run's because of it. Both are written to one safetensors file: a head reads a
+residual stream the adapters shaped, so pairing one with adapters it never saw
+would produce scores that mean nothing, and the artifact does not offer that as
+a possibility. The sidecar carries a `kind` of `reward` rather than `adapter`,
+and the file holds one extra tensor named `reward.head`, shaped
+`[1, hidden_size]`. `kind` defaults to `adapter`, so every sidecar written
+before it existed still loads and still means what it meant; that is why the
+schema version does not move. `ster generate --adapter` refuses a reward
+artifact with
+`adapter artifact is a reward model, not a generation adapter`, because
+attaching its adapters and dropping its head would decode a model nobody
+trained.
+
+The report records `pairs`, `trained_pairs`, `skipped_long`, `epochs`, `steps`,
+`trainable_tensors`, `trainable_parameters`, `first_loss`, `final_loss`,
+`mean_final_epoch_loss`, `accuracy`, `mean_chosen_score`,
+`mean_rejected_score`, `mean_score_margin`, `rank`, `alpha`, `targets`,
+`layers`, `learning_rate`, and `accumulation`, with `accuracy` and the scores
+measured over the final epoch.
+
 Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
-and writes nothing but the adapter pair. The same three operations are jobs on
-the `ster serve` backend, `POST /v1/tune/sft`, `POST /v1/tune/dpo` and
-`POST /v1/tune/inspect`, and `POST /v1/generate` takes the same `adapter`
-field. That is how Ster Desktop offers fine-tuning on its own screen, and how a
-finished run leaves the adapter it wrote in the field Generate reads.
+and writes nothing but the artifact pair. The same four operations are jobs on
+the `ster serve` backend, `POST /v1/tune/sft`, `POST /v1/tune/dpo`,
+`POST /v1/tune/reward` and `POST /v1/tune/inspect`, and `POST /v1/generate`
+takes the same `adapter` field. That is how Ster Desktop offers fine-tuning on
+its own screen, and how a finished run leaves the adapter it wrote in the field
+Generate reads.
 
 ## Artifact contract
 

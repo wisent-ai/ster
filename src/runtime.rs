@@ -13,7 +13,7 @@ use tokenizers::Tokenizer;
 use crate::{
     artifact::SteeringArtifact,
     lora,
-    model::{Cache, Mode, Route, SteeringLlama, SteeringPlan},
+    model::{Cache, ForwardOutput, Mode, Route, SteeringLlama, SteeringPlan},
 };
 
 pub struct Runtime {
@@ -49,6 +49,15 @@ impl Runtime {
     ) -> Result<Self> {
         let base = BaseLoad::resolve(model, revision, device)?;
         let artifact = lora::Artifact::load(adapter, &base.device)?;
+        if artifact.kind != lora::Kind::Adapter {
+            // A reward model's adapters exist to make its head separate, not
+            // to change what the model writes. Attaching them and dropping the
+            // head would produce a decode nobody trained and nobody wants.
+            bail!(
+                "adapter artifact is a {} model, not a generation adapter",
+                artifact.kind.name()
+            );
+        }
         if artifact.model != model {
             bail!(
                 "adapter was trained for model {:?}, current model is {:?}",
@@ -127,6 +136,31 @@ impl Runtime {
         spec: &lora::Spec,
         train: serde_json::Value,
     ) -> Result<lora::Artifact> {
+        self.artifact(spec, lora::Kind::Adapter, None, train)
+    }
+
+    /// The same document plus the scalar head trained on top of these adapters.
+    ///
+    /// The head goes in the same safetensors file rather than beside it,
+    /// because a head and the adapters that shaped the residual stream it
+    /// reads are one model: separating them would let an operator pair a head
+    /// with adapters it never saw and get scores that mean nothing.
+    pub fn reward_artifact(
+        &self,
+        spec: &lora::Spec,
+        head: &Tensor,
+        train: serde_json::Value,
+    ) -> Result<lora::Artifact> {
+        self.artifact(spec, lora::Kind::Reward, Some(head), train)
+    }
+
+    fn artifact(
+        &self,
+        spec: &lora::Spec,
+        kind: lora::Kind,
+        head: Option<&Tensor>,
+        train: serde_json::Value,
+    ) -> Result<lora::Artifact> {
         spec.validate(self.layer_count())?;
         let spec = spec.resolved(self.layer_count());
         let adapters = self.model.adapters();
@@ -144,9 +178,13 @@ impl Runtime {
                 tensors.insert(b, adapter.b.clone());
             }
         }
+        if let Some(head) = head {
+            tensors.insert(lora::REWARD_HEAD_TENSOR.to_owned(), head.clone());
+        }
         let artifact = lora::Artifact {
             schema_version: lora::ARTIFACT_SCHEMA_VERSION,
             product: "ster".to_owned(),
+            kind,
             model: self.model_id.clone(),
             model_revision: self.revision.clone(),
             rank: spec.rank,
@@ -192,7 +230,7 @@ impl Runtime {
 
     /// One differentiable forward over `ids`, returning logits `[1, n, vocab]`.
     pub fn forward_train(&self, ids: &[u32]) -> Result<Tensor> {
-        self.forward_all_positions(ids, Mode::TRAIN, "a training forward pass needs at least one token")
+        self.logits(ids, Mode::TRAIN, "a training forward pass needs at least one token")
     }
 
     /// One non-differentiable forward over `ids`, returning logits `[1, n, vocab]`.
@@ -209,25 +247,43 @@ impl Runtime {
     /// the adapter variables would record a graph whose rope, softmax and
     /// norm nodes have no backward pass. That caller wants `forward_train`.
     pub fn forward_scored(&self, ids: &[u32], route: Route) -> Result<Tensor> {
-        self.forward_all_positions(ids, Mode::score(route), "a scoring forward pass needs at least one token")
+        self.logits(ids, Mode::score(route), "a scoring forward pass needs at least one token")
     }
 
-    /// The body both of the above share: one sequence, no KV cache, logits at
-    /// every position.
+    /// One differentiable forward over `ids`, returning the residual stream
+    /// after the final norm, `[1, n, hidden]`, and no vocabulary projection.
+    ///
+    /// This is what a reward head reads. Skipping the vocabulary matmul is not
+    /// a micro-optimization on a real checkpoint: it is the widest matmul in
+    /// the pass, and a reward run would compute and backpropagate all of it
+    /// only to throw the result away.
+    pub fn forward_hidden(&self, ids: &[u32]) -> Result<Tensor> {
+        Ok(self
+            .forward_once(ids, Mode::REWARD, "a reward forward pass needs at least one token")?
+            .hidden)
+    }
+
+    /// A forward that must produce logits, unwrapped.
+    fn logits(&self, ids: &[u32], mode: Mode, empty: &str) -> Result<Tensor> {
+        self.forward_once(ids, mode, empty)?
+            .logits
+            .context("this forward pass was asked for no vocabulary projection")
+    }
+
+    /// The body every whole-sequence forward shares: one sequence, no KV cache.
     ///
     /// The cache stays off because the whole sequence goes through in one pass,
     /// so there is nothing to reuse, and because a cache would keep the previous
     /// sequence's keys and values alive inside this one's autograd graph — the
     /// backward pass would then walk tensors that no longer correspond to the
     /// input being scored.
-    fn forward_all_positions(&self, ids: &[u32], mode: Mode, empty: &str) -> Result<Tensor> {
+    fn forward_once(&self, ids: &[u32], mode: Mode, empty: &str) -> Result<ForwardOutput> {
         if ids.is_empty() {
             bail!("{empty}");
         }
         let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
         let mut cache = Cache::new(false, self.dtype, self.model.config(), &self.device)?;
-        let output = self.model.forward_pass(&input, 0, &mut cache, None, &[], mode)?;
-        Ok(output.logits)
+        Ok(self.model.forward_pass(&input, 0, &mut cache, None, &[], mode)?)
     }
 
     pub fn hidden_size(&self) -> usize {
@@ -315,7 +371,10 @@ impl Runtime {
             };
             let input = Tensor::new(context.as_slice(), &self.device)?.unsqueeze(0)?;
             let output = self.model.forward(&input, index_pos, &mut cache, plan.as_ref(), &[])?;
-            let next = sampler.sample(&output.logits.squeeze(0)?)?;
+            // `Mode::DECODE` always asks for the last position's logits, so
+            // this is the one readout that cannot be absent.
+            let logits = output.logits.context("the decode pass produced no logits")?;
+            let next = sampler.sample(&logits.squeeze(0)?)?;
             tokens.push(next);
             if self.eos_tokens.contains(&next) {
                 break;
