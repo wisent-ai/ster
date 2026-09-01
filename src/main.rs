@@ -5,8 +5,8 @@ use candle_core::Device;
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use ster::{
-    ContrastivePair, DeviceChoice, ExampleSet, GenerationOptions, PairSet, Runtime, SftOptions,
-    SteeringArtifact, SynthesisOptions, TrainingMethod,
+    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, PairSet,
+    Runtime, SftOptions, SteeringArtifact, SynthesisOptions, TrainingMethod,
     brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
@@ -261,6 +261,56 @@ enum TuneCommand {
         warmup_steps: usize,
         /// Examples longer than this many tokens are skipped rather than
         /// truncated; a cut completion would teach the model to stop early.
+        #[arg(long, default_value_t = 512)]
+        max_sequence: usize,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+    },
+    /// Train LoRA adapters to prefer one side of each contrastive pair.
+    Dpo {
+        #[command(flatten)]
+        model: ModelArgs,
+        /// JSON file with trait_name and contrastive pairs. The positive side
+        /// is the chosen response and the negative side the rejected one, so a
+        /// steering pair set trains a preference without being rewritten.
+        #[arg(long)]
+        pairs: PathBuf,
+        /// Output LoRA adapter safetensors; the identity sidecar is written beside it.
+        #[arg(long)]
+        output: PathBuf,
+        /// Low-rank dimension shared by every adapter.
+        #[arg(long, default_value_t = 8)]
+        rank: usize,
+        /// LoRA scaling numerator; each update is scaled by alpha over rank.
+        #[arg(long, default_value_t = 16.0)]
+        alpha: f64,
+        /// Comma-separated projections to adapt: query, key, value, output,
+        /// gate, up, or down.
+        #[arg(long, default_value = "query,value")]
+        targets: String,
+        /// Comma-separated layers, half-open ranges such as 8..16, or all.
+        #[arg(long, default_value = "all")]
+        layers: String,
+        /// How hard the frozen reference pulls the policy back.
+        #[arg(long, default_value_t = 0.1)]
+        beta: f64,
+        /// Preference objective: dpo for the sigmoid loss, ipo for the squared
+        /// error against 1/(2*beta) over length-normalized log-probabilities.
+        #[arg(long, default_value = "dpo")]
+        loss: String,
+        /// Passes over the pair set.
+        #[arg(long, default_value_t = 1)]
+        epochs: usize,
+        #[arg(long, default_value_t = 1e-4)]
+        learning_rate: f64,
+        /// Pairs folded into one optimizer step.
+        #[arg(long, default_value_t = 8)]
+        accumulation: usize,
+        /// Steps over which the learning rate ramps up from zero.
+        #[arg(long, default_value_t = 0)]
+        warmup_steps: usize,
+        /// Pairs with a side longer than this many tokens are skipped rather
+        /// than truncated; a cut response is not the response that was preferred.
         #[arg(long, default_value_t = 512)]
         max_sequence: usize,
         #[arg(long, default_value_t = 42)]
@@ -561,6 +611,59 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             let report = tune::sft(&runtime, &varmap, &example_set, &options)?;
             // The report is folded into the artifact so a trained adapter
             // always carries the run that produced it.
+            let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+            artifact.save(&output)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "path": output.display().to_string(),
+                    "report": report,
+                }))?
+            );
+        }
+        TuneCommand::Dpo {
+            model,
+            pairs,
+            output,
+            rank,
+            alpha,
+            targets,
+            layers,
+            beta,
+            loss,
+            epochs,
+            learning_rate,
+            accumulation,
+            warmup_steps,
+            max_sequence,
+            seed,
+        } => {
+            let device = DeviceChoice::parse(&model.device)?;
+            let spec = lora::Spec {
+                rank,
+                alpha,
+                targets: parse_targets(&targets)?,
+                layers: parse_adapter_layers(&layers)?,
+                seed,
+            };
+            // The reference the objective measures against is this same
+            // runtime with the adapters skipped, so exactly one model is
+            // loaded however many times each sequence is scored.
+            let (runtime, varmap) =
+                Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let pair_set = PairSet::load(&pairs)?;
+            let options = DpoOptions {
+                spec: spec.clone(),
+                loss: DpoLoss::parse(&loss)?,
+                beta,
+                epochs,
+                learning_rate,
+                accumulation,
+                warmup_steps,
+                max_sequence,
+                seed,
+            };
+            let report = tune::dpo(&runtime, &varmap, &pair_set, &options)?;
             let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
             artifact.save(&output)?;
             println!(

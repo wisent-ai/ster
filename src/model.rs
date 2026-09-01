@@ -22,6 +22,74 @@ pub enum Pass {
     Differentiable,
 }
 
+/// Whether the adapters attached to this model take part in a forward pass.
+///
+/// Preference optimization scores every sequence twice: once under the policy
+/// and once under the frozen reference it is not allowed to drift far from.
+/// The reference is not a second checkpoint. It is these same read-only base
+/// weights with the low-rank update left out, because `B` starts at zero and
+/// the adapters are the only tensors training ever changes — so skipping them
+/// for one pass reproduces the reference distribution exactly, at the cost of
+/// one enum comparison per projection instead of a second multi-gigabyte mmap.
+/// That is the whole reason adapters are attached to the decoder rather than
+/// folded into the projection weights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Adapted,
+    Base,
+}
+
+/// How much of the vocabulary projection the caller actually needs.
+///
+/// Decoding samples one token, so it projects the final position and leaves
+/// the rest of the `[sequence, vocab]` matmul undone. Anything that scores a
+/// whole sequence — a training loss, a reference log-probability, a held-out
+/// perplexity — needs every position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readout {
+    LastPosition,
+    EveryPosition,
+}
+
+/// The three independent choices one forward pass makes.
+///
+/// They used to be one. [`Pass`] picked the kernels *and* the readout, which
+/// worked while the only differentiable caller wanted every position and the
+/// only inference caller wanted the last. Scoring a sequence under a model
+/// nobody is training — a preference reference, a held-out evaluation — wants
+/// the fused kernels and every position at once, and that pairing had no way
+/// to say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mode {
+    pub pass: Pass,
+    pub route: Route,
+    pub readout: Readout,
+}
+
+impl Mode {
+    /// Autoregressive decoding: fused kernels, adapters on, one row of logits.
+    pub const DECODE: Self = Self {
+        pass: Pass::Inference,
+        route: Route::Adapted,
+        readout: Readout::LastPosition,
+    };
+
+    /// A training step: composed kernels so the tape can be walked back, and
+    /// logits at every position because the loss scores every position.
+    pub const TRAIN: Self = Self {
+        pass: Pass::Differentiable,
+        route: Route::Adapted,
+        readout: Readout::EveryPosition,
+    };
+
+    /// Scoring a whole sequence with no gradient. The fused kernels are the
+    /// point: nothing here is backpropagated, so paying for the composed forms
+    /// would buy an autograd tape that is thrown away.
+    pub const fn score(route: Route) -> Self {
+        Self { pass: Pass::Inference, route, readout: Readout::EveryPosition }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SteeringPlan {
     vectors: BTreeMap<usize, Tensor>,
@@ -188,23 +256,23 @@ impl Attention {
         index_pos: usize,
         layer: usize,
         cache: &mut Cache,
-        pass: Pass,
+        mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, hidden_size) = hidden.dims3()?;
-        let query = project(&self.query, self.query_adapter.as_ref(), hidden)?
+        let query = project(&self.query, self.query_adapter.as_ref(), hidden, mode.route)?
             .reshape((batch, sequence, self.heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let mut key = project(&self.key, self.key_adapter.as_ref(), hidden)?
+        let mut key = project(&self.key, self.key_adapter.as_ref(), hidden, mode.route)?
             .reshape((batch, sequence, self.key_value_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let mut value = project(&self.value, self.value_adapter.as_ref(), hidden)?
+        let mut value = project(&self.value, self.value_adapter.as_ref(), hidden, mode.route)?
             .reshape((batch, sequence, self.key_value_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let query = apply_rotary(&query, index_pos, &cache.cos, &cache.sin, pass)?;
-        key = apply_rotary(&key, index_pos, &cache.cos, &cache.sin, pass)?;
+        let query = apply_rotary(&query, index_pos, &cache.cos, &cache.sin, mode.pass)?;
+        key = apply_rotary(&key, index_pos, &cache.cos, &cache.sin, mode.pass)?;
         if cache.use_kv_cache {
             if let Some((cached_key, cached_value)) = &cache.kvs[layer] {
                 key = Tensor::cat(&[cached_key, &key], 2)?.contiguous()?;
@@ -230,28 +298,31 @@ impl Attention {
         // `ops::softmax` is the same softmax spelled out of `max_keepdim`,
         // `broadcast_sub`, `exp`, `sum_keepdim` and `broadcast_div`, all of which
         // record a backward node.
-        let attention = match pass {
+        let attention = match mode.pass {
             Pass::Inference => candle_nn::ops::softmax_last_dim(&attention)?,
             Pass::Differentiable => candle_nn::ops::softmax(&attention, candle_core::D::Minus1)?,
         };
         let output = attention.matmul(&value.contiguous()?)?.to_dtype(input_dtype)?;
         let output = output.transpose(1, 2)?.reshape((batch, sequence, hidden_size))?;
-        project(&self.output, self.output_adapter.as_ref(), &output)
+        project(&self.output, self.output_adapter.as_ref(), &output, mode.route)
     }
 }
 
-/// Applies a projection, adding the low-rank update when this site is adapted.
+/// Applies a projection, adding the low-rank update when this site is adapted
+/// and `route` asks for it.
 ///
 /// The `None` arm is the historical code path down to the op: one nullable
 /// check, no tensor allocated, no dtype touched. An unadapted model — the whole
-/// steering product — therefore costs a null-pointer test per projection.
+/// steering product — therefore costs a null-pointer test per projection, and
+/// a reference pass over an adapted model costs one enum comparison more.
 fn project(
     base: &Linear,
     adapter: Option<&Adapter>,
     hidden: &Tensor,
+    route: Route,
 ) -> candle_core::Result<Tensor> {
     let projected = base.forward(hidden)?;
-    match adapter {
+    match adapter.filter(|_| route == Route::Adapted) {
         None => Ok(projected),
         Some(adapter) => projected + adapter.forward(hidden)?,
     }
@@ -355,12 +426,14 @@ impl FeedForward {
         })
     }
 
-    /// No `Pass` here: `silu` and the elementwise product both backpropagate,
-    /// so the feed-forward block is already differentiable as written.
-    fn forward(&self, hidden: &Tensor) -> candle_core::Result<Tensor> {
-        let gated = (candle_nn::ops::silu(&project(&self.gate, self.gate_adapter.as_ref(), hidden)?)?
-            * project(&self.up, self.up_adapter.as_ref(), hidden)?)?;
-        project(&self.down, self.down_adapter.as_ref(), &gated)
+    /// No `Pass` here — `silu` and the elementwise product both backpropagate,
+    /// so the feed-forward block is already differentiable as written — but a
+    /// `Route`, because its three projections are adapter sites like any other.
+    fn forward(&self, hidden: &Tensor, route: Route) -> candle_core::Result<Tensor> {
+        let gated =
+            (candle_nn::ops::silu(&project(&self.gate, self.gate_adapter.as_ref(), hidden, route)?)?
+                * project(&self.up, self.up_adapter.as_ref(), hidden, route)?)?;
+        project(&self.down, self.down_adapter.as_ref(), &gated, route)
     }
 }
 
@@ -397,19 +470,20 @@ impl DecoderLayer {
         index_pos: usize,
         layer: usize,
         cache: &mut Cache,
-        pass: Pass,
+        mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let attention = self.attention.forward(
-            &normalize(&self.attention_norm, hidden, pass)?,
+            &normalize(&self.attention_norm, hidden, mode.pass)?,
             index_pos,
             layer,
             cache,
-            pass,
+            mode,
         )?;
         let hidden = (hidden + attention)?;
-        let feed_forward = self
-            .feed_forward
-            .forward(&normalize(&self.feed_forward_norm, &hidden, pass)?)?;
+        let feed_forward = self.feed_forward.forward(
+            &normalize(&self.feed_forward_norm, &hidden, mode.pass)?,
+            mode.route,
+        )?;
         hidden + feed_forward
     }
 }
@@ -490,10 +564,11 @@ impl SteeringLlama {
         steering: Option<&SteeringPlan>,
         capture_layers: &[usize],
     ) -> Result<ForwardOutput> {
-        Ok(self.forward_pass(tokens, index_pos, cache, steering, capture_layers, Pass::Inference)?)
+        Ok(self.forward_pass(tokens, index_pos, cache, steering, capture_layers, Mode::DECODE)?)
     }
 
-    /// `pass` picks fused or composed ops; every other argument is unchanged.
+    /// `mode` picks the kernels, the adapter route and the readout; every
+    /// other argument is unchanged.
     pub fn forward_pass(
         &self,
         tokens: &Tensor,
@@ -501,13 +576,13 @@ impl SteeringLlama {
         cache: &mut Cache,
         steering: Option<&SteeringPlan>,
         capture_layers: &[usize],
-        pass: Pass,
+        mode: Mode,
     ) -> candle_core::Result<ForwardOutput> {
         let (_, sequence) = tokens.dims2()?;
         let mut hidden = self.embeddings.forward(tokens)?;
         let mut activations = BTreeMap::new();
         for (index, layer) in self.layers.iter().enumerate() {
-            hidden = layer.forward(&hidden, index_pos, index, cache, pass)?;
+            hidden = layer.forward(&hidden, index_pos, index, cache, mode)?;
             if capture_layers.binary_search(&index).is_ok() {
                 let activation = hidden
                     .i((0, sequence - 1, ..))?
@@ -525,16 +600,16 @@ impl SteeringLlama {
                 }
             }
         }
-        let hidden = normalize(&self.final_norm, &hidden, pass)?;
-        // Inference only ever samples the next token, so it projects one row and
-        // leaves the rest of the vocabulary matmul undone. Training scores every
-        // position against its successor, so it needs the whole sequence.
-        let logits = match pass {
-            Pass::Inference => {
+        let hidden = normalize(&self.final_norm, &hidden, mode.pass)?;
+        // Decoding only ever samples the next token, so it projects one row and
+        // leaves the rest of the vocabulary matmul undone. Anything that scores
+        // a sequence against its own successors needs every position.
+        let logits = match mode.readout {
+            Readout::LastPosition => {
                 let last = hidden.i((.., sequence - 1, ..))?.contiguous()?;
                 self.lm_head.forward(&last)?
             }
-            Pass::Differentiable => self.lm_head.forward(&hidden.contiguous()?)?,
+            Readout::EveryPosition => self.lm_head.forward(&hidden.contiguous()?)?,
         };
         Ok(ForwardOutput { logits: logits.to_dtype(DType::F32)?, activations })
     }

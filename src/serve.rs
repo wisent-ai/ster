@@ -37,8 +37,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{
-    ContrastivePair, DeviceChoice, ExampleSet, GenerationOptions, PairSet, Runtime, SftOptions,
-    SteeringArtifact, SynthesisOptions, TrainingMethod,
+    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, ExampleSet, GenerationOptions, PairSet,
+    Runtime, SftOptions, SteeringArtifact, SynthesisOptions, TrainingMethod,
     brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
@@ -128,6 +128,7 @@ fn handle_connection(stream: TcpStream, job_lock: &Mutex<()>) -> Result<()> {
             stream_job(&writer, &body, job_lock, pairs_synthesize_job)
         }
         ("POST", "/v1/tune/sft") => stream_job(&writer, &body, job_lock, tune_sft_job),
+        ("POST", "/v1/tune/dpo") => stream_job(&writer, &body, job_lock, tune_dpo_job),
         ("POST", "/v1/tune/inspect") => stream_job(&writer, &body, job_lock, tune_inspect_job),
         _ => send_error(&writer, 404, &format!("unknown endpoint: {method} {path}")),
     }
@@ -495,6 +496,53 @@ impl Validate for TuneSftRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TuneDpoRequest {
+    #[serde(flatten)]
+    model: ModelRequest,
+    /// A contrastive pair set. The positive side is the chosen response and
+    /// the negative side the rejected one, so the file Train already reads is
+    /// the file this reads.
+    #[serde(default)]
+    pairs: String,
+    #[serde(default)]
+    output: String,
+    #[serde(default = "default_rank")]
+    rank: usize,
+    #[serde(default = "default_alpha")]
+    alpha: f64,
+    #[serde(default = "default_targets")]
+    targets: String,
+    #[serde(default = "default_layers")]
+    layers: String,
+    #[serde(default = "default_beta")]
+    beta: f64,
+    #[serde(default = "default_preference_loss")]
+    loss: String,
+    #[serde(default = "default_epochs")]
+    epochs: usize,
+    #[serde(default = "default_learning_rate")]
+    learning_rate: f64,
+    #[serde(default = "default_accumulation")]
+    accumulation: usize,
+    /// Zero starts at the full learning rate, which is what a short run wants.
+    #[serde(default)]
+    warmup_steps: usize,
+    #[serde(default = "default_max_sequence")]
+    max_sequence: usize,
+    #[serde(default = "default_seed")]
+    seed: u64,
+}
+
+impl Validate for TuneDpoRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("tune dpo")?;
+        require(&self.pairs, "tune dpo requires a pairs file".to_owned())?;
+        require(&self.output, "tune dpo requires an output path".to_owned())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TuneInspectRequest {
     #[serde(default)]
     artifact: String,
@@ -600,6 +648,18 @@ fn default_accumulation() -> usize {
 /// completion would teach the model to stop early.
 fn default_max_sequence() -> usize {
     512
+}
+
+/// The strength of the pull back toward the frozen reference, at the value the
+/// DPO paper reports across its settings.
+fn default_beta() -> f64 {
+    0.1
+}
+
+/// The sigmoid objective the DPO paper derives; `ipo` is the squared-error
+/// alternative over length-normalized log-probabilities.
+fn default_preference_loss() -> String {
+    "dpo".to_owned()
 }
 
 // MARK: - Jobs
@@ -785,6 +845,43 @@ fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
         seed: request.seed,
     };
     let report = tune::sft(&runtime, &varmap, &examples, &options)?;
+    // The report is folded into the artifact so a trained adapter always
+    // carries the run that produced it.
+    let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+    artifact.save(Path::new(&request.output))?;
+    Ok(json!({"path": request.output, "report": report}))
+}
+
+/// Mirrors the `ster tune dpo` arm. One runtime is loaded: the reference the
+/// objective measures against is the same weights with the adapters skipped.
+fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
+    let device = DeviceChoice::parse(&request.model.device)?;
+    let spec = lora::Spec {
+        rank: request.rank,
+        alpha: request.alpha,
+        targets: parse_targets(&request.targets)?,
+        layers: parse_adapter_layers(&request.layers)?,
+        seed: request.seed,
+    };
+    let (runtime, varmap) = Runtime::load_trainable(
+        &request.model.model,
+        request.model.revision.as_deref(),
+        device,
+        &spec,
+    )?;
+    let pairs = PairSet::load(Path::new(&request.pairs))?;
+    let options = DpoOptions {
+        spec: spec.clone(),
+        loss: DpoLoss::parse(&request.loss)?,
+        beta: request.beta,
+        epochs: request.epochs,
+        learning_rate: request.learning_rate,
+        accumulation: request.accumulation,
+        warmup_steps: request.warmup_steps,
+        max_sequence: request.max_sequence,
+        seed: request.seed,
+    };
+    let report = tune::dpo(&runtime, &varmap, &pairs, &options)?;
     // The report is folded into the artifact so a trained adapter always
     // carries the run that produced it.
     let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;

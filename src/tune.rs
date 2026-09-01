@@ -1,4 +1,4 @@
-//! tune.rs — supervised fine-tuning of LoRA adapters.
+//! tune.rs — training the only weights Ster owns.
 //!
 //! Everything else in Ster is forward-only: it reads hidden states, fits a
 //! direction over them, and adds that direction back during decode. Nothing
@@ -17,11 +17,19 @@
 //! * **The prompt is never a target.** The loss window starts at the
 //!   completion boundary. An operator writing `{"prompt": …, "completion": …}`
 //!   is not asking the model to learn to reproduce the prompt.
+//!
+//! Supervised fine-tuning lives here; the objectives that need more than a
+//! target sequence live in sibling files and are re-exported from this module,
+//! so a caller still writes `tune::sft` and `tune::dpo` side by side.
+
+mod dpo;
+
+pub use dpo::{DpoLoss, DpoOptions, DpoReport, dpo};
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use candle_core::Tensor;
+use candle_core::{Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap, loss};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
@@ -32,6 +40,124 @@ use crate::{lora, runtime::Runtime, workflow};
 /// rather than to zero. LoRA runs are short; a schedule that reaches zero
 /// spends a meaningful share of its last steps not learning at all.
 const DECAY_FLOOR: f64 = 0.1;
+
+// MARK: - Shared trainer setup
+
+/// Everything an adapter trainer checks before it touches a model, and the two
+/// words it refuses in.
+///
+/// Four objectives run the same five checks against the same numbers. Copying
+/// them would let one copy gain a check the others silently lacked, so they
+/// live here once. `subject` opens each sentence and `unit` names one item of
+/// the training set, which is what keeps "supervised fine-tuning requires an
+/// accumulation of at least one example" and "direct preference optimization
+/// requires an accumulation of at least one pair" both correct — and the first
+/// of them byte-identical to the sentence the runbook already quotes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Preflight<'a> {
+    pub subject: &'a str,
+    pub unit: &'a str,
+    pub epochs: usize,
+    pub accumulation: usize,
+    pub learning_rate: f64,
+    pub max_sequence: usize,
+}
+
+/// What a passed preflight hands the trainer.
+pub(crate) struct Trainable {
+    /// The spec with `layers` pinned to this model's real indices.
+    pub spec: lora::Spec,
+    pub vars: Vec<Var>,
+    pub tensors: usize,
+    pub parameters: usize,
+    /// The longest sequence this run will score: the operator's limit, clamped
+    /// to what the rotary tables actually cover.
+    pub limit: usize,
+}
+
+impl Preflight<'_> {
+    pub(crate) fn open(
+        &self,
+        runtime: &Runtime,
+        varmap: &VarMap,
+        spec: &lora::Spec,
+    ) -> Result<Trainable> {
+        if self.epochs == 0 {
+            bail!("{} requires at least one epoch", self.subject);
+        }
+        if self.accumulation == 0 {
+            bail!(
+                "{} requires an accumulation of at least one {}",
+                self.subject,
+                self.unit
+            );
+        }
+        if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
+            bail!("{} requires a finite learning rate above zero", self.subject);
+        }
+        if self.max_sequence < 2 {
+            bail!("max_sequence must be at least two tokens, so that one token can predict another");
+        }
+        let layer_count = runtime.layer_count();
+        spec.validate(layer_count)?;
+        let spec = spec.resolved(layer_count);
+
+        // Every variable in the map is an adapter matrix: the base was mapped
+        // read-only and never registered. Handing the whole map to AdamW is
+        // therefore the same statement as "train only the adapters".
+        let vars = varmap.all_vars();
+        if vars.is_empty() {
+            bail!("this run has no trainable adapters; load the model with load_trainable");
+        }
+        let tensors = vars.len();
+        let parameters: usize = vars.iter().map(|var| var.elem_count()).sum();
+        workflow::progress(format!(
+            "training {tensors} adapter tensors ({parameters} parameters) at rank {} across {} layers",
+            spec.rank,
+            spec.layers.len()
+        ));
+        let limit = self.max_sequence.min(runtime.context_length());
+        Ok(Trainable { spec, vars, tensors, parameters, limit })
+    }
+}
+
+/// The log-probability the model assigns to `ids[start..]`, as one scalar.
+///
+/// `logits` is `[1, n, vocab]` and the distribution that predicts token `t`
+/// sits at index `t - 1`, so the scored window is the logit rows
+/// `[start - 1, n - 1)` against the targets `ids[start..]`. `start` is
+/// therefore at least one, and it always is: every tokenizer path in Ster
+/// prepends a begin-of-sequence marker, so position zero is never a token
+/// anyone asked the model to predict.
+///
+/// The result is a sum, not a mean. Averaging is a per-objective choice — IPO
+/// wants it, DPO does not — and a caller that has the sum and the token count
+/// can produce either, while a caller handed the mean cannot recover the sum.
+pub(crate) fn sequence_logprob(
+    logits: &Tensor,
+    ids: &[u32],
+    start: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    if start == 0 {
+        bail!("a scored sequence must begin with at least one context token");
+    }
+    let scored = ids.len().saturating_sub(start);
+    if scored == 0 {
+        bail!("a scored sequence must end with at least one predicted token");
+    }
+    let (_, positions, vocab) = logits.dims3()?;
+    if positions != ids.len() {
+        bail!(
+            "the forward pass returned {positions} positions for {} tokens",
+            ids.len()
+        );
+    }
+    let window = logits.narrow(1, start - 1, scored)?.reshape((scored, vocab))?;
+    let log_probabilities = candle_nn::ops::log_softmax(&window, candle_core::D::Minus1)?;
+    let targets = Tensor::new(&ids[start..], device)?.reshape((scored, 1))?;
+    Ok(log_probabilities.gather(&targets, 1)?.sum_all()?)
+}
 
 // MARK: - Example sets
 
@@ -133,44 +259,22 @@ pub fn sft(
     examples: &ExampleSet,
     options: &SftOptions,
 ) -> Result<SftReport> {
-    if options.epochs == 0 {
-        bail!("supervised fine-tuning requires at least one epoch");
-    }
-    if options.accumulation == 0 {
-        bail!("supervised fine-tuning requires an accumulation of at least one example");
-    }
-    if !options.learning_rate.is_finite() || options.learning_rate <= 0.0 {
-        bail!("supervised fine-tuning requires a finite learning rate above zero");
-    }
-    if options.max_sequence < 2 {
-        bail!("max_sequence must be at least two tokens, so that one token can predict another");
-    }
     examples.validate(&examples.label())?;
-
-    let layer_count = runtime.layer_count();
-    options.spec.validate(layer_count)?;
-    let spec = options.spec.resolved(layer_count);
-
-    // Every variable in the map is an adapter matrix: the base was mapped
-    // read-only and never registered. Handing the whole map to AdamW is
-    // therefore the same statement as "train only the adapters".
-    let vars = varmap.all_vars();
-    if vars.is_empty() {
-        bail!("this run has no trainable adapters; load the model with load_trainable");
-    }
-    let trainable_tensors = vars.len();
-    let trainable_parameters: usize = vars.iter().map(|var| var.elem_count()).sum();
-    workflow::progress(format!(
-        "training {trainable_tensors} adapter tensors ({trainable_parameters} parameters) at rank {} across {} layers",
-        spec.rank,
-        spec.layers.len()
-    ));
+    let Trainable { spec, vars, tensors: trainable_tensors, parameters: trainable_parameters, limit } =
+        Preflight {
+            subject: "supervised fine-tuning",
+            unit: "example",
+            epochs: options.epochs,
+            accumulation: options.accumulation,
+            learning_rate: options.learning_rate,
+            max_sequence: options.max_sequence,
+        }
+        .open(runtime, varmap, &options.spec)?;
 
     // Tokenized once, up front. Encoding is deterministic, so repeating it per
     // epoch would buy nothing, and doing it here means the skip report is
     // complete before the first gradient is taken rather than trickling out
     // over the whole run.
-    let limit = options.max_sequence.min(runtime.context_length());
     let mut encoded: Vec<(usize, Vec<u32>, usize)> = Vec::with_capacity(examples.examples.len());
     let mut skipped_long = 0usize;
     for (index, example) in examples.examples.iter().enumerate() {

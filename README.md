@@ -42,6 +42,8 @@ Included now:
 - additive residual-stream steering during autoregressive generation;
 - LoRA supervised fine-tuning of local checkpoints from prompt and completion
   examples;
+- direct preference optimization, and its IPO variant, over a contrastive pair
+  set, scored against the frozen reference the same weights already carry;
 - frozen adapter artifacts applied at generation time;
 - deterministic JSON pair, activation, steering, and evaluation formats.
 
@@ -172,7 +174,7 @@ ster generate   run normal or steered autoregressive generation
 ster extract    export hidden states for an arbitrary prompt set
 ster inspect    validate and print a steering artifact
 ster pairs      author, inspect, and synthesize contrastive pair sets
-ster tune       train and inspect LoRA adapters
+ster tune       train adapters by supervision or preference, and inspect them
 ```
 
 Run `ster <command> --help` for exact arguments. Commands return non-zero on
@@ -328,7 +330,7 @@ workflows.
 
 ## Fine-tuning
 
-`ster tune` is the only part of Ster that trains a weight. It has two
+`ster tune` is the only part of Ster that trains a weight. It has three
 subcommands:
 
 ```text
@@ -337,6 +339,12 @@ ster tune sft --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
               [--targets query,value] [--layers all] [--epochs 1]
               [--learning-rate 0.0001] [--accumulation 8] [--warmup-steps 0]
               [--max-sequence 512] [--seed 42]
+ster tune dpo --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
+              [--revision <REVISION>] [--device cpu] [--rank 8] [--alpha 16]
+              [--targets query,value] [--layers all] [--beta 0.1]
+              [--loss dpo|ipo] [--epochs 1] [--learning-rate 0.0001]
+              [--accumulation 8] [--warmup-steps 0] [--max-sequence 512]
+              [--seed 42]
 ster tune inspect <ARTIFACT>
 ```
 
@@ -404,12 +412,62 @@ finite number above zero is refused before the first forward pass with
 in which nothing fits the limit with
 `every example is longer than the sequence limit, so there is nothing to train on`.
 
+### Preference optimization
+
+`ster tune dpo` trains the same adapters against a preference instead of a
+target. It takes `--pairs`, the contrastive pair set `ster train` already
+reads: the positive side is the chosen response and the negative side the
+rejected one, so a set written for steering trains a preference without being
+rewritten and [`docs/examples/pairs.json`](docs/examples/pairs.json) runs
+offline on the toy checkpoint.
+
+The objective needs the frozen reference model's log-probabilities of the same
+two sequences. Ster gets them from the model it already has, by skipping the
+low-rank update at every projection for that pass. That is exact rather than
+approximate: `B` is zeros before the first step, so the base weights *are* the
+model the policy started as, and a second copy of the checkpoint would double
+the resident set to compute numbers these weights already hold. It is also why
+the first step's loss is exactly `ln 2` — an identity adapter has a log-ratio
+of zero — which is the cheapest available check that the two passes agree. The
+reference is scored once for the whole run rather than once per epoch, because
+a frozen model's log-probability of a fixed sequence is a constant.
+
+A pair is scored whole rather than split into prompt and completion, because a
+pair set carries two complete texts and no prompt field. Nothing is lost: when
+the two sides share a leading prefix — exactly what `ster pairs synthesize`
+writes as `Question: …\nAnswer: …` — that prefix sits at the same positions in
+both sequences, so its log-probability is the same expression on both sides of
+the margin and cancels out of the value and the gradient alike.
+
+`--loss` selects the objective. `dpo` is the sigmoid loss the DPO paper
+derives, `-log σ(β·margin)`, evaluated through the softplus form that does not
+overflow once the policy is confident. `ipo` is the same machinery with the
+squared error of equation 17, `(margin - 1/(2β))²`, over log-probabilities
+divided by their token count: IPO's target is a fixed number, and a target a
+long sequence reaches by length alone is not a preference signal. Anything else
+is refused with `unknown preference loss "kto"; expected dpo or ipo`, and a
+non-positive `--beta` with
+`direct preference optimization requires a finite beta above zero`. A pair with
+a side over `--max-sequence` is skipped whole, because half a pair states no
+preference, and a set in which nothing fits is refused with
+`every pair is longer than the sequence limit, so there is nothing to train on`.
+
+The report records `loss`, `beta`, `pairs`, `trained_pairs`, `skipped_long`,
+`epochs`, `steps`, `trainable_tensors`, `trainable_parameters`, `first_loss`,
+`final_loss`, `mean_final_epoch_loss`, `accuracy`, `mean_reward_margin`,
+`mean_chosen_reward`, `mean_rejected_reward`, `rank`, `alpha`, `targets`,
+`layers`, `learning_rate`, and `accumulation`. The implicit reward is
+`β·(log π - log π_ref)`, `accuracy` is the share of pairs whose chosen side
+already earns the larger one, and both are measured over the final epoch, so
+they describe the adapter that was written rather than an average over a policy
+that was still moving.
+
 Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
-and writes nothing but the adapter pair. The same two operations are jobs on the
-`ster serve` backend, `POST /v1/tune/sft` and `POST /v1/tune/inspect`, and
-`POST /v1/generate` takes the same `adapter` field. That is how Ster Desktop
-offers fine-tuning on its own screen, and how a finished run leaves the adapter
-it wrote in the field Generate reads.
+and writes nothing but the adapter pair. The same three operations are jobs on
+the `ster serve` backend, `POST /v1/tune/sft`, `POST /v1/tune/dpo` and
+`POST /v1/tune/inspect`, and `POST /v1/generate` takes the same `adapter`
+field. That is how Ster Desktop offers fine-tuning on its own screen, and how a
+finished run leaves the adapter it wrote in the field Generate reads.
 
 ## Artifact contract
 
@@ -434,8 +492,11 @@ steering direction before the next block. The same decoder can also run a
 differentiable pass, which is what makes fine-tuning possible at all: Candle's
 fused `rotary_emb::rope`, `ops::softmax_last_dim`, and `ops::rms_norm` kernels
 have no backward pass, so training selects composed equivalents at exactly those
-three call sites while inference keeps the fused ones. Tokenization, Safetensors
-loading, attention, KV caching, sampling, and device kernels remain native Rust.
+three call sites while inference keeps the fused ones. The same pass also
+chooses whether the attached adapters apply, which is what lets preference
+optimization score the frozen reference without a second copy of the weights.
+Tokenization, Safetensors loading, attention, KV caching, sampling, and device
+kernels remain native Rust.
 
 ## Documentation and support
 

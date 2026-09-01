@@ -13,7 +13,7 @@ use tokenizers::Tokenizer;
 use crate::{
     artifact::SteeringArtifact,
     lora,
-    model::{Cache, Pass, SteeringLlama, SteeringPlan},
+    model::{Cache, Mode, Route, SteeringLlama, SteeringPlan},
 };
 
 pub struct Runtime {
@@ -192,19 +192,41 @@ impl Runtime {
 
     /// One differentiable forward over `ids`, returning logits `[1, n, vocab]`.
     pub fn forward_train(&self, ids: &[u32]) -> Result<Tensor> {
+        self.forward_all_positions(ids, Mode::TRAIN, "a training forward pass needs at least one token")
+    }
+
+    /// One non-differentiable forward over `ids`, returning logits `[1, n, vocab]`.
+    ///
+    /// `route` picks which model answers. [`Route::Adapted`] is the policy;
+    /// [`Route::Base`] is the frozen reference — the same mapped weights with
+    /// the low-rank update skipped, which is precisely the model the adapters
+    /// started as, since `B` is zeros before the first step. Preference
+    /// optimization gets its reference log-probabilities this way rather than
+    /// by loading a second copy of the checkpoint.
+    ///
+    /// Nothing here is backpropagated, so it takes the fused kernels. A caller
+    /// holding a trainable runtime must not route a *policy* score through it:
+    /// the adapter variables would record a graph whose rope, softmax and
+    /// norm nodes have no backward pass. That caller wants `forward_train`.
+    pub fn forward_scored(&self, ids: &[u32], route: Route) -> Result<Tensor> {
+        self.forward_all_positions(ids, Mode::score(route), "a scoring forward pass needs at least one token")
+    }
+
+    /// The body both of the above share: one sequence, no KV cache, logits at
+    /// every position.
+    ///
+    /// The cache stays off because the whole sequence goes through in one pass,
+    /// so there is nothing to reuse, and because a cache would keep the previous
+    /// sequence's keys and values alive inside this one's autograd graph — the
+    /// backward pass would then walk tensors that no longer correspond to the
+    /// input being scored.
+    fn forward_all_positions(&self, ids: &[u32], mode: Mode, empty: &str) -> Result<Tensor> {
         if ids.is_empty() {
-            bail!("a training forward pass needs at least one token");
+            bail!("{empty}");
         }
         let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
-        // The KV cache stays off. Training pushes the whole sequence through
-        // in one pass, so there is nothing to reuse, and a cache would keep
-        // the previous example's keys and values alive inside this example's
-        // autograd graph — the backward pass would then walk tensors that no
-        // longer correspond to the input being scored.
         let mut cache = Cache::new(false, self.dtype, self.model.config(), &self.device)?;
-        let output = self
-            .model
-            .forward_pass(&input, 0, &mut cache, None, &[], Pass::Differentiable)?;
+        let output = self.model.forward_pass(&input, 0, &mut cache, None, &[], mode)?;
         Ok(output.logits)
     }
 
@@ -307,7 +329,14 @@ impl Runtime {
             .map_err(|error| anyhow::anyhow!("failed to decode generated tokens: {error}"))
     }
 
-    fn encode(&self, prompt: &str) -> Result<Vec<u32>> {
+    /// Tokenizes one text with the tokenizer's own special tokens, exactly as
+    /// every prompt in Ster is tokenized.
+    ///
+    /// Preference optimization scores whole texts rather than prompt and
+    /// completion halves, so it needs this rather than `encode_example`; the
+    /// begin-of-sequence marker the tokenizer prepends is what gives the first
+    /// real token a position to be predicted from.
+    pub fn encode(&self, prompt: &str) -> Result<Vec<u32>> {
         if prompt.trim().is_empty() {
             bail!("prompt must not be empty");
         }

@@ -17,4 +17,4 @@ pub use lora::{Spec as LoraSpec, Target as LoraTarget};
 pub use pairs::{SetReport, SynthesisOptions, SynthesisReport};
 pub use representation::TrainingMethod;
 pub use runtime::{DeviceChoice, GenerationOptions, Runtime};
-pub use tune::{ExampleSet, SftOptions, SftReport};
+pub use tune::{DpoLoss, DpoOptions, DpoReport, ExampleSet, SftOptions, SftReport};
