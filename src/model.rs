@@ -1,9 +1,26 @@
 use std::{collections::{BTreeMap, HashMap}, f32::consts::PI};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm};
 use candle_transformers::models::llama::{Config, Llama3RopeConfig, Llama3RopeType};
+
+use crate::lora::{Adapter, Adapters, Target};
+
+/// Whether the forward pass must be differentiable.
+///
+/// Ster's decode loop leans on three fused Candle kernels — `rotary_emb::rope`,
+/// `ops::softmax_last_dim` and `ops::rms_norm` — and every one of them ends in
+/// an `apply_op*_no_bwd` call, so none of them records a node the autograd tape
+/// can walk back through. Training therefore selects composed equivalents at
+/// exactly those three call sites. Nothing else in the decoder changes, and
+/// inference never pays for the swap: it is chosen by the caller, never by
+/// default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pass {
+    Inference,
+    Differentiable,
+}
 
 #[derive(Debug, Clone)]
 pub struct SteeringPlan {
@@ -131,13 +148,22 @@ struct Attention {
     key: Linear,
     value: Linear,
     output: Linear,
+    query_adapter: Option<Adapter>,
+    key_adapter: Option<Adapter>,
+    value_adapter: Option<Adapter>,
+    output_adapter: Option<Adapter>,
     heads: usize,
     key_value_heads: usize,
     head_dim: usize,
 }
 
 impl Attention {
-    fn load(builder: VarBuilder<'_>, config: &Config) -> candle_core::Result<Self> {
+    fn load(
+        builder: VarBuilder<'_>,
+        config: &Config,
+        layer: usize,
+        adapters: &Adapters,
+    ) -> candle_core::Result<Self> {
         let input = config.hidden_size;
         let query_width = config.hidden_size;
         let key_value_width = config.hidden_size / config.num_attention_heads * config.num_key_value_heads;
@@ -146,6 +172,10 @@ impl Attention {
             key: linear_no_bias(input, key_value_width, builder.pp("k_proj"))?,
             value: linear_no_bias(input, key_value_width, builder.pp("v_proj"))?,
             output: linear_no_bias(query_width, input, builder.pp("o_proj"))?,
+            query_adapter: adapters.get(layer, Target::Query).cloned(),
+            key_adapter: adapters.get(layer, Target::Key).cloned(),
+            value_adapter: adapters.get(layer, Target::Value).cloned(),
+            output_adapter: adapters.get(layer, Target::Output).cloned(),
             heads: config.num_attention_heads,
             key_value_heads: config.num_key_value_heads,
             head_dim: config.hidden_size / config.num_attention_heads,
@@ -158,22 +188,23 @@ impl Attention {
         index_pos: usize,
         layer: usize,
         cache: &mut Cache,
+        pass: Pass,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, hidden_size) = hidden.dims3()?;
-        let query = self.query.forward(hidden)?
+        let query = project(&self.query, self.query_adapter.as_ref(), hidden)?
             .reshape((batch, sequence, self.heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let mut key = self.key.forward(hidden)?
+        let mut key = project(&self.key, self.key_adapter.as_ref(), hidden)?
             .reshape((batch, sequence, self.key_value_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let mut value = self.value.forward(hidden)?
+        let mut value = project(&self.value, self.value_adapter.as_ref(), hidden)?
             .reshape((batch, sequence, self.key_value_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let query = apply_rotary(&query, index_pos, &cache.cos, &cache.sin)?;
-        key = apply_rotary(&key, index_pos, &cache.cos, &cache.sin)?;
+        let query = apply_rotary(&query, index_pos, &cache.cos, &cache.sin, pass)?;
+        key = apply_rotary(&key, index_pos, &cache.cos, &cache.sin, pass)?;
         if cache.use_kv_cache {
             if let Some((cached_key, cached_value)) = &cache.kvs[layer] {
                 key = Tensor::cat(&[cached_key, &key], 2)?.contiguous()?;
@@ -195,18 +226,90 @@ impl Attention {
             let mask = cache.mask(sequence, index_pos)?.broadcast_as(attention.shape())?;
             masked_fill(&attention, &mask, f32::NEG_INFINITY)?
         };
-        let attention = candle_nn::ops::softmax_last_dim(&attention)?;
+        // `softmax_last_dim` is `apply_op1_no_bwd` (candle-nn-0.11.0/src/ops.rs:438).
+        // `ops::softmax` is the same softmax spelled out of `max_keepdim`,
+        // `broadcast_sub`, `exp`, `sum_keepdim` and `broadcast_div`, all of which
+        // record a backward node.
+        let attention = match pass {
+            Pass::Inference => candle_nn::ops::softmax_last_dim(&attention)?,
+            Pass::Differentiable => candle_nn::ops::softmax(&attention, candle_core::D::Minus1)?,
+        };
         let output = attention.matmul(&value.contiguous()?)?.to_dtype(input_dtype)?;
         let output = output.transpose(1, 2)?.reshape((batch, sequence, hidden_size))?;
-        self.output.forward(&output)
+        project(&self.output, self.output_adapter.as_ref(), &output)
     }
 }
 
-fn apply_rotary(input: &Tensor, index_pos: usize, cos: &Tensor, sin: &Tensor) -> candle_core::Result<Tensor> {
+/// Applies a projection, adding the low-rank update when this site is adapted.
+///
+/// The `None` arm is the historical code path down to the op: one nullable
+/// check, no tensor allocated, no dtype touched. An unadapted model — the whole
+/// steering product — therefore costs a null-pointer test per projection.
+fn project(
+    base: &Linear,
+    adapter: Option<&Adapter>,
+    hidden: &Tensor,
+) -> candle_core::Result<Tensor> {
+    let projected = base.forward(hidden)?;
+    match adapter {
+        None => Ok(projected),
+        Some(adapter) => projected + adapter.forward(hidden)?,
+    }
+}
+
+fn apply_rotary(
+    input: &Tensor,
+    index_pos: usize,
+    cos: &Tensor,
+    sin: &Tensor,
+    pass: Pass,
+) -> candle_core::Result<Tensor> {
     let (_, _, sequence, _) = input.dims4()?;
     let cos = cos.narrow(0, index_pos, sequence)?;
     let sin = sin.narrow(0, index_pos, sequence)?;
-    candle_nn::rotary_emb::rope(input, &cos, &sin)
+    match pass {
+        Pass::Inference => candle_nn::rotary_emb::rope(input, &cos, &sin),
+        Pass::Differentiable => rope_composed(input, &cos, &sin),
+    }
+}
+
+/// The rotary embedding written out of ops that have a backward pass.
+///
+/// Candle ships no differentiable rope: `candle_nn::rotary_emb::rope` ends in
+/// `apply_op3_no_bwd` (candle-nn-0.11.0/src/rotary_emb.rs:580). Rather than
+/// assume a convention, this reproduces the `RotaryEmb` CPU kernel in that same
+/// file, which I read at lines 348-388. Passing a two-dimensional `cos`/`sin`
+/// leaves the kernel's `unbatched_rope` flag false (line 349), and for every
+/// batch and head it then walks `i_d` over `0..d/2` with
+/// `i1 = i_t * d + i_d` (line 375), `i2 = i1 + d / 2` (line 376) and
+/// `i_cs = i_t * (d / 2) + i_d` (line 377), writing:
+///
+/// ```text
+/// dst[i1] = src[i1] * cos[i_cs] - src[i2] * sin[i_cs];   // line 384
+/// dst[i2] = src[i1] * sin[i_cs] + src[i2] * cos[i_cs];   // line 385
+/// ```
+///
+/// So this is the "rotate half" form: the last dimension splits into halves
+/// `d / 2` apart, not adjacent interleaved pairs. `cos` and `sin` are `d / 2`
+/// wide, indexed by position alone, and broadcast across batch and head. The
+/// `t == 1` fast path (lines 352-367) is the same arithmetic with `i_t` pinned
+/// to zero, so one expression covers both. Each output element is still exactly
+/// one multiply, one multiply and one add or subtract, in that order, so in F32
+/// the composed result is bit-comparable with the kernel rather than merely
+/// close.
+fn rope_composed(input: &Tensor, cos: &Tensor, sin: &Tensor) -> candle_core::Result<Tensor> {
+    let (_, _, _, head_dim) = input.dims4()?;
+    let half = head_dim / 2;
+    let first = input.narrow(candle_core::D::Minus1, 0, half)?;
+    let second = input.narrow(candle_core::D::Minus1, half, half)?;
+    // `cos` and `sin` arrive as [sequence, d / 2]; two leading unit axes make
+    // them broadcast over batch and head, which is what the kernel's `i_cs`
+    // ignoring `bh_i` does by hand.
+    let cos = cos.unsqueeze(0)?.unsqueeze(0)?;
+    let sin = sin.unsqueeze(0)?.unsqueeze(0)?;
+    let rotated_first = (first.broadcast_mul(&cos)? - second.broadcast_mul(&sin)?)?;
+    let rotated_second = (first.broadcast_mul(&sin)? + second.broadcast_mul(&cos)?)?;
+    Tensor::cat(&[&rotated_first, &rotated_second], candle_core::D::Minus1)
 }
 
 fn repeat_key_value(input: Tensor, repeats: usize) -> candle_core::Result<Tensor> {
@@ -230,20 +333,34 @@ struct FeedForward {
     gate: Linear,
     up: Linear,
     down: Linear,
+    gate_adapter: Option<Adapter>,
+    up_adapter: Option<Adapter>,
+    down_adapter: Option<Adapter>,
 }
 
 impl FeedForward {
-    fn load(builder: VarBuilder<'_>, config: &Config) -> candle_core::Result<Self> {
+    fn load(
+        builder: VarBuilder<'_>,
+        config: &Config,
+        layer: usize,
+        adapters: &Adapters,
+    ) -> candle_core::Result<Self> {
         Ok(Self {
             gate: linear_no_bias(config.hidden_size, config.intermediate_size, builder.pp("gate_proj"))?,
             up: linear_no_bias(config.hidden_size, config.intermediate_size, builder.pp("up_proj"))?,
             down: linear_no_bias(config.intermediate_size, config.hidden_size, builder.pp("down_proj"))?,
+            gate_adapter: adapters.get(layer, Target::Gate).cloned(),
+            up_adapter: adapters.get(layer, Target::Up).cloned(),
+            down_adapter: adapters.get(layer, Target::Down).cloned(),
         })
     }
 
+    /// No `Pass` here: `silu` and the elementwise product both backpropagate,
+    /// so the feed-forward block is already differentiable as written.
     fn forward(&self, hidden: &Tensor) -> candle_core::Result<Tensor> {
-        let gated = (candle_nn::ops::silu(&self.gate.forward(hidden)?)? * self.up.forward(hidden)?)?;
-        self.down.forward(&gated)
+        let gated = (candle_nn::ops::silu(&project(&self.gate, self.gate_adapter.as_ref(), hidden)?)?
+            * project(&self.up, self.up_adapter.as_ref(), hidden)?)?;
+        project(&self.down, self.down_adapter.as_ref(), &gated)
     }
 }
 
@@ -256,16 +373,21 @@ struct DecoderLayer {
 }
 
 impl DecoderLayer {
-    fn load(builder: VarBuilder<'_>, config: &Config) -> candle_core::Result<Self> {
+    fn load(
+        builder: VarBuilder<'_>,
+        config: &Config,
+        layer: usize,
+        adapters: &Adapters,
+    ) -> candle_core::Result<Self> {
         Ok(Self {
             attention_norm: rms_norm(config.hidden_size, config.rms_norm_eps, builder.pp("input_layernorm"))?,
-            attention: Attention::load(builder.pp("self_attn"), config)?,
+            attention: Attention::load(builder.pp("self_attn"), config, layer, adapters)?,
             feed_forward_norm: rms_norm(
                 config.hidden_size,
                 config.rms_norm_eps,
                 builder.pp("post_attention_layernorm"),
             )?,
-            feed_forward: FeedForward::load(builder.pp("mlp"), config)?,
+            feed_forward: FeedForward::load(builder.pp("mlp"), config, layer, adapters)?,
         })
     }
 
@@ -275,16 +397,34 @@ impl DecoderLayer {
         index_pos: usize,
         layer: usize,
         cache: &mut Cache,
+        pass: Pass,
     ) -> candle_core::Result<Tensor> {
         let attention = self.attention.forward(
-            &self.attention_norm.forward(hidden)?,
+            &normalize(&self.attention_norm, hidden, pass)?,
             index_pos,
             layer,
             cache,
+            pass,
         )?;
         let hidden = (hidden + attention)?;
-        let feed_forward = self.feed_forward.forward(&self.feed_forward_norm.forward(&hidden)?)?;
+        let feed_forward = self
+            .feed_forward
+            .forward(&normalize(&self.feed_forward_norm, &hidden, pass)?)?;
         hidden + feed_forward
+    }
+}
+
+/// RMS normalisation: fused for inference, composed for training.
+///
+/// `RmsNorm::forward` dispatches to `candle_nn::ops::rms_norm`, which ends in
+/// `apply_op2_no_bwd` (candle-nn-0.11.0/src/ops.rs:684). `forward_diff`
+/// (candle-nn-0.11.0/src/layer_norm.rs:197) is the same normalisation built
+/// from `sqr`, `sum_keepdim`, `broadcast_div` and `broadcast_mul`, which do
+/// record backward nodes.
+fn normalize(norm: &RmsNorm, hidden: &Tensor, pass: Pass) -> candle_core::Result<Tensor> {
+    match pass {
+        Pass::Inference => norm.forward(hidden),
+        Pass::Differentiable => norm.forward_diff(hidden),
     }
 }
 
@@ -295,10 +435,25 @@ pub struct SteeringLlama {
     final_norm: RmsNorm,
     lm_head: Linear,
     config: Config,
+    adapters: Adapters,
 }
 
 impl SteeringLlama {
     pub fn load(builder: VarBuilder<'_>, config: Config) -> Result<Self> {
+        Ok(Self::load_with_adapters(builder, config, Adapters::default())?)
+    }
+
+    /// Loads the frozen base and attaches `adapters`.
+    ///
+    /// The base weights come from `builder`, which Ster maps read-only out of
+    /// safetensors; only the adapter factors were ever registered in a `VarMap`.
+    /// Attaching them here therefore cannot make a base weight trainable, which
+    /// is the property the whole training path rests on.
+    pub fn load_with_adapters(
+        builder: VarBuilder<'_>,
+        config: Config,
+        adapters: crate::lora::Adapters,
+    ) -> candle_core::Result<Self> {
         let embeddings = embedding(config.vocab_size, config.hidden_size, builder.pp("model.embed_tokens"))?;
         let lm_head = if config.tie_word_embeddings {
             Linear::new(embeddings.embeddings().clone(), None)
@@ -307,9 +462,20 @@ impl SteeringLlama {
         };
         let final_norm = rms_norm(config.hidden_size, config.rms_norm_eps, builder.pp("model.norm"))?;
         let layers = (0..config.num_hidden_layers)
-            .map(|index| DecoderLayer::load(builder.pp(format!("model.layers.{index}")), &config))
+            .map(|index| {
+                DecoderLayer::load(
+                    builder.pp(format!("model.layers.{index}")),
+                    &config,
+                    index,
+                    &adapters,
+                )
+            })
             .collect::<candle_core::Result<Vec<_>>>()?;
-        Ok(Self { embeddings, layers, final_norm, lm_head, config })
+        Ok(Self { embeddings, layers, final_norm, lm_head, config, adapters })
+    }
+
+    pub fn adapters(&self) -> &crate::lora::Adapters {
+        &self.adapters
     }
 
     pub fn config(&self) -> &Config {
@@ -324,11 +490,24 @@ impl SteeringLlama {
         steering: Option<&SteeringPlan>,
         capture_layers: &[usize],
     ) -> Result<ForwardOutput> {
+        Ok(self.forward_pass(tokens, index_pos, cache, steering, capture_layers, Pass::Inference)?)
+    }
+
+    /// `pass` picks fused or composed ops; every other argument is unchanged.
+    pub fn forward_pass(
+        &self,
+        tokens: &Tensor,
+        index_pos: usize,
+        cache: &mut Cache,
+        steering: Option<&SteeringPlan>,
+        capture_layers: &[usize],
+        pass: Pass,
+    ) -> candle_core::Result<ForwardOutput> {
         let (_, sequence) = tokens.dims2()?;
         let mut hidden = self.embeddings.forward(tokens)?;
         let mut activations = BTreeMap::new();
         for (index, layer) in self.layers.iter().enumerate() {
-            hidden = layer.forward(&hidden, index_pos, index, cache)?;
+            hidden = layer.forward(&hidden, index_pos, index, cache, pass)?;
             if capture_layers.binary_search(&index).is_ok() {
                 let activation = hidden
                     .i((0, sequence - 1, ..))?
@@ -340,14 +519,23 @@ impl SteeringLlama {
                 if let Some(vector) = plan.vector(index) {
                     let scaled = (vector * plan.strength)?
                         .reshape((1, 1, plan.hidden_size))?;
-                    hidden = hidden.broadcast_add(&scaled)
-                        .with_context(|| format!("failed to apply steering at layer {index}"))?;
+                    hidden = hidden.broadcast_add(&scaled).map_err(|error| {
+                        error.context(format!("failed to apply steering at layer {index}"))
+                    })?;
                 }
             }
         }
-        let hidden = self.final_norm.forward(&hidden)?;
-        let last = hidden.i((.., sequence - 1, ..))?.contiguous()?;
-        let logits = self.lm_head.forward(&last)?.to_dtype(DType::F32)?;
-        Ok(ForwardOutput { logits, activations })
+        let hidden = normalize(&self.final_norm, &hidden, pass)?;
+        // Inference only ever samples the next token, so it projects one row and
+        // leaves the rest of the vocabulary matmul undone. Training scores every
+        // position against its successor, so it needs the whole sequence.
+        let logits = match pass {
+            Pass::Inference => {
+                let last = hidden.i((.., sequence - 1, ..))?.contiguous()?;
+                self.lm_head.forward(&last)?
+            }
+            Pass::Differentiable => self.lm_head.forward(&hidden.contiguous()?)?,
+        };
+        Ok(ForwardOutput { logits: logits.to_dtype(DType::F32)?, activations })
     }
 }

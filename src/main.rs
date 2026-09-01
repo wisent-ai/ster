@@ -1,15 +1,18 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use candle_core::Device;
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use ster::{
-    ContrastivePair, DeviceChoice, GenerationOptions, PairSet, Runtime, SteeringArtifact,
-    SynthesisOptions, TrainingMethod,
+    ContrastivePair, DeviceChoice, ExampleSet, GenerationOptions, PairSet, Runtime, SftOptions,
+    SteeringArtifact, SynthesisOptions, TrainingMethod,
     brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
+    lora,
     pairs::{self, InspectOptions},
+    tune,
     workflow::{self, parse_layers},
 };
 
@@ -72,6 +75,11 @@ enum Command {
         prompt: String,
         #[arg(long)]
         vector: Option<PathBuf>,
+        /// Frozen LoRA adapter artifact to load the model with. It must have
+        /// been trained for this exact model: Ster refuses a mismatch rather
+        /// than steering the wrong residual stream.
+        #[arg(long)]
+        adapter: Option<PathBuf>,
         #[arg(long, default_value_t = 1.0)]
         strength: f64,
         #[arg(long, default_value_t = 128)]
@@ -105,6 +113,11 @@ enum Command {
     Pairs {
         #[command(subcommand)]
         command: PairsCommand,
+    },
+    /// Train and inspect LoRA adapters.
+    Tune {
+        #[command(subcommand)]
+        command: TuneCommand,
     },
     /// Loopback HTTP/JSON backend for desktop apps.
     Serve {
@@ -209,6 +222,57 @@ enum PairsCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum TuneCommand {
+    /// Train LoRA adapters on prompt and completion examples.
+    Sft {
+        #[command(flatten)]
+        model: ModelArgs,
+        /// JSON file shaped as {"examples": [{"prompt": "...", "completion": "..."}]}.
+        #[arg(long)]
+        examples: PathBuf,
+        /// Output LoRA adapter safetensors; the identity sidecar is written beside it.
+        #[arg(long)]
+        output: PathBuf,
+        /// Low-rank dimension shared by every adapter.
+        #[arg(long, default_value_t = 8)]
+        rank: usize,
+        /// LoRA scaling numerator; each update is scaled by alpha over rank.
+        #[arg(long, default_value_t = 16.0)]
+        alpha: f64,
+        /// Comma-separated projections to adapt: query, key, value, output,
+        /// gate, up, or down. The default query,value is the pair the LoRA
+        /// papers adapt first, and it is the cheapest useful choice.
+        #[arg(long, default_value = "query,value")]
+        targets: String,
+        /// Comma-separated layers, half-open ranges such as 8..16, or all.
+        #[arg(long, default_value = "all")]
+        layers: String,
+        /// Passes over the example set.
+        #[arg(long, default_value_t = 1)]
+        epochs: usize,
+        #[arg(long, default_value_t = 1e-4)]
+        learning_rate: f64,
+        /// Examples folded into one optimizer step.
+        #[arg(long, default_value_t = 8)]
+        accumulation: usize,
+        /// Steps over which the learning rate ramps up from zero.
+        #[arg(long, default_value_t = 0)]
+        warmup_steps: usize,
+        /// Examples longer than this many tokens are skipped rather than
+        /// truncated; a cut completion would teach the model to stop early.
+        #[arg(long, default_value_t = 512)]
+        max_sequence: usize,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+    },
+    /// Print and validate a Ster LoRA adapter artifact.
+    Inspect {
+        #[arg(value_name = "ARTIFACT")]
+        artifact: PathBuf,
+    },
+}
+
 #[derive(Debug, Args)]
 struct ModelArgs {
     /// Hugging Face model id or local model directory.
@@ -259,13 +323,25 @@ fn main() -> Result<()> {
             model,
             prompt,
             vector,
+            adapter,
             strength,
             max_new_tokens,
             temperature,
             top_p,
             seed,
         } => {
-            let runtime = model.load()?;
+            // An adapter rewrites the projections themselves, so it is
+            // attached while the weights are mapped rather than applied per
+            // token the way a steering vector is.
+            let runtime = match adapter.as_deref() {
+                Some(adapter) => Runtime::load_with_adapter(
+                    &model.model,
+                    model.revision.as_deref(),
+                    DeviceChoice::parse(&model.device)?,
+                    adapter,
+                )?,
+                None => model.load()?,
+            };
             let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
             let generated = runtime.generate(
                 &prompt,
@@ -286,6 +362,7 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&artifact)?);
         }
         Command::Pairs { command } => run_pairs(command)?,
+        Command::Tune { command } => run_tune(command)?,
         Command::Serve { port } => {
             ster::serve::run(port)?;
         }
@@ -436,4 +513,100 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The `ster tune` arms. Like `run_pairs`, each one goes through the same
+/// `tune` and `lora` functions the serve endpoints call and prints one pretty
+/// JSON document.
+fn run_tune(command: TuneCommand) -> Result<()> {
+    match command {
+        TuneCommand::Sft {
+            model,
+            examples,
+            output,
+            rank,
+            alpha,
+            targets,
+            layers,
+            epochs,
+            learning_rate,
+            accumulation,
+            warmup_steps,
+            max_sequence,
+            seed,
+        } => {
+            let device = DeviceChoice::parse(&model.device)?;
+            let spec = lora::Spec {
+                rank,
+                alpha,
+                targets: parse_targets(&targets)?,
+                layers: parse_adapter_layers(&layers)?,
+                seed,
+            };
+            // The adapters have to exist before the first forward pass, so
+            // the runtime is built from the spec rather than patched after
+            // loading; the returned VarMap owns every trainable tensor.
+            let (runtime, varmap) =
+                Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let example_set = ExampleSet::load(&examples)?;
+            let options = SftOptions {
+                spec: spec.clone(),
+                epochs,
+                learning_rate,
+                accumulation,
+                warmup_steps,
+                max_sequence,
+                seed,
+            };
+            let report = tune::sft(&runtime, &varmap, &example_set, &options)?;
+            // The report is folded into the artifact so a trained adapter
+            // always carries the run that produced it.
+            let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+            artifact.save(&output)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "path": output.display().to_string(),
+                    "report": report,
+                }))?
+            );
+        }
+        TuneCommand::Inspect { artifact } => {
+            // Inspection reads the adapter document alone: no model is
+            // loaded, so the tensors land on the CPU whatever trained them.
+            let loaded = lora::Artifact::load(&artifact, &Device::Cpu)
+                .with_context(|| format!("failed to inspect {}", artifact.display()))?;
+            println!("{}", serde_json::to_string_pretty(&tune::inspect(&loaded))?);
+        }
+    }
+    Ok(())
+}
+
+/// `--targets` is a comma-separated projection list. Repeats collapse, so
+/// `query,query` builds one adapter, and the order follows the flag.
+fn parse_targets(value: &str) -> Result<Vec<lora::Target>> {
+    let mut targets = Vec::new();
+    for segment in value.split(',').map(str::trim).filter(|segment| !segment.is_empty()) {
+        let target = lora::Target::parse(segment)?;
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    if targets.is_empty() {
+        bail!("no targets selected");
+    }
+    Ok(targets)
+}
+
+/// `--layers` means here what it means everywhere else in Ster, with one
+/// difference: `all` cannot be expanded yet. `parse_layers` needs the model's
+/// layer count, and the count is only known once the weights are mapped —
+/// which happens inside `Runtime::load_trainable`, after the spec exists. An
+/// empty layer list is the spec's way of saying every layer, and the loader
+/// resolves it against the real count before it builds any adapter.
+fn parse_adapter_layers(value: &str) -> Result<Vec<usize>> {
+    if value.trim() == "all" {
+        return Ok(Vec::new());
+    }
+    parse_layers(value, usize::MAX)
 }

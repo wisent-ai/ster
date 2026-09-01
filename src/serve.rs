@@ -8,8 +8,8 @@
 //!
 //! After that, stdout carries no protocol traffic; every failure is an HTTP
 //! response. All endpoints live under /v1 and every handler reuses the exact
-//! functions the CLI commands use (workflow.rs, runtime.rs, artifact.rs) — no
-//! parallel implementation.
+//! functions the CLI commands use (workflow.rs, runtime.rs, artifact.rs,
+//! tune.rs, lora.rs) — no parallel implementation.
 //!
 //! Errors are non-2xx with body {"error": "<one sentence>"} — the product's
 //! own refusal sentence, verbatim from the underlying failure.
@@ -32,16 +32,19 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use candle_core::Device;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{
-    ContrastivePair, DeviceChoice, GenerationOptions, PairSet, Runtime, SteeringArtifact,
-    SynthesisOptions, TrainingMethod,
+    ContrastivePair, DeviceChoice, ExampleSet, GenerationOptions, PairSet, Runtime, SftOptions,
+    SteeringArtifact, SynthesisOptions, TrainingMethod,
     brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
+    lora,
     pairs::{self, InspectOptions},
+    tune,
     workflow::{self, parse_layers},
 };
 
@@ -124,6 +127,8 @@ fn handle_connection(stream: TcpStream, job_lock: &Mutex<()>) -> Result<()> {
         ("POST", "/v1/pairs/synthesize") => {
             stream_job(&writer, &body, job_lock, pairs_synthesize_job)
         }
+        ("POST", "/v1/tune/sft") => stream_job(&writer, &body, job_lock, tune_sft_job),
+        ("POST", "/v1/tune/inspect") => stream_job(&writer, &body, job_lock, tune_inspect_job),
         _ => send_error(&writer, 404, &format!("unknown endpoint: {method} {path}")),
     }
     Ok(())
@@ -279,6 +284,10 @@ struct GenerateRequest {
     prompt: String,
     #[serde(default)]
     vector: Option<String>,
+    /// A frozen LoRA adapter artifact trained for this exact model. Ster
+    /// refuses a mismatch rather than steering the wrong residual stream.
+    #[serde(default)]
+    adapter: Option<String>,
     #[serde(default = "default_strength")]
     strength: f64,
     #[serde(default = "default_max_new_tokens")]
@@ -444,6 +453,59 @@ impl Validate for PairsSynthesizeRequest {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TuneSftRequest {
+    #[serde(flatten)]
+    model: ModelRequest,
+    #[serde(default)]
+    examples: String,
+    #[serde(default)]
+    output: String,
+    #[serde(default = "default_rank")]
+    rank: usize,
+    #[serde(default = "default_alpha")]
+    alpha: f64,
+    #[serde(default = "default_targets")]
+    targets: String,
+    #[serde(default = "default_layers")]
+    layers: String,
+    #[serde(default = "default_epochs")]
+    epochs: usize,
+    #[serde(default = "default_learning_rate")]
+    learning_rate: f64,
+    #[serde(default = "default_accumulation")]
+    accumulation: usize,
+    /// Zero starts at the full learning rate, which is what a short run wants.
+    #[serde(default)]
+    warmup_steps: usize,
+    #[serde(default = "default_max_sequence")]
+    max_sequence: usize,
+    #[serde(default = "default_seed")]
+    seed: u64,
+}
+
+impl Validate for TuneSftRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("tune sft")?;
+        require(&self.examples, "tune sft requires an example set".to_owned())?;
+        require(&self.output, "tune sft requires an output path".to_owned())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TuneInspectRequest {
+    #[serde(default)]
+    artifact: String,
+}
+
+impl Validate for TuneInspectRequest {
+    fn validate(&self) -> Result<(), String> {
+        require(&self.artifact, "tune inspect requires an adapter artifact".to_owned())
+    }
+}
+
 /// Steering needs a local model, but writing pair text does not, so the
 /// hosted route is opt-in and every existing client keeps the local one.
 fn default_generator() -> String {
@@ -506,6 +568,40 @@ fn default_top_p() -> f64 {
     0.95
 }
 
+fn default_rank() -> usize {
+    8
+}
+
+/// LoRA scales every update by alpha over rank, so sixteen over the default
+/// rank of eight is the two-times scale the LoRA papers train with.
+fn default_alpha() -> f64 {
+    16.0
+}
+
+/// Query and value are the projections the LoRA papers adapt first, and the
+/// cheapest pair that still moves behaviour.
+fn default_targets() -> String {
+    "query,value".to_owned()
+}
+
+fn default_epochs() -> usize {
+    1
+}
+
+fn default_learning_rate() -> f64 {
+    1e-4
+}
+
+fn default_accumulation() -> usize {
+    8
+}
+
+/// Examples longer than this are skipped rather than truncated; a cut
+/// completion would teach the model to stop early.
+fn default_max_sequence() -> usize {
+    512
+}
+
 // MARK: - Jobs
 
 /// Every job mirrors its CLI arm in main.rs: same loads, same workflow call,
@@ -538,7 +634,18 @@ fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
 }
 
 fn generate_job(request: GenerateRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime()?;
+    // An adapter rewrites the projections themselves, so it is attached while
+    // the weights are mapped rather than applied per token the way a steering
+    // vector is.
+    let runtime = match request.adapter.as_deref().filter(|value| !value.trim().is_empty()) {
+        Some(adapter) => Runtime::load_with_adapter(
+            &request.model.model,
+            request.model.revision.as_deref(),
+            DeviceChoice::parse(&request.model.device)?,
+            Path::new(adapter),
+        )?,
+        None => request.model.load_runtime()?,
+    };
     let artifact = request
         .vector
         .as_deref()
@@ -645,6 +752,81 @@ fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
     };
     pair_set.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
+}
+
+/// Mirrors the `ster tune sft` arm: same spec, same `tune::sft`, and the
+/// progress lines the trainer writes reach the desktop over the job stream.
+fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
+    let device = DeviceChoice::parse(&request.model.device)?;
+    let spec = lora::Spec {
+        rank: request.rank,
+        alpha: request.alpha,
+        targets: parse_targets(&request.targets)?,
+        layers: parse_adapter_layers(&request.layers)?,
+        seed: request.seed,
+    };
+    // The adapters have to exist before the first forward pass, so the
+    // runtime is built from the spec rather than patched after loading; the
+    // returned VarMap owns every trainable tensor.
+    let (runtime, varmap) = Runtime::load_trainable(
+        &request.model.model,
+        request.model.revision.as_deref(),
+        device,
+        &spec,
+    )?;
+    let examples = ExampleSet::load(Path::new(&request.examples))?;
+    let options = SftOptions {
+        spec: spec.clone(),
+        epochs: request.epochs,
+        learning_rate: request.learning_rate,
+        accumulation: request.accumulation,
+        warmup_steps: request.warmup_steps,
+        max_sequence: request.max_sequence,
+        seed: request.seed,
+    };
+    let report = tune::sft(&runtime, &varmap, &examples, &options)?;
+    // The report is folded into the artifact so a trained adapter always
+    // carries the run that produced it.
+    let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+    artifact.save(Path::new(&request.output))?;
+    Ok(json!({"path": request.output, "report": report}))
+}
+
+fn tune_inspect_job(request: TuneInspectRequest) -> Result<Value> {
+    // Inspection reads the adapter document alone: no model is loaded, so the
+    // tensors land on the CPU whatever trained them.
+    let artifact = lora::Artifact::load(Path::new(&request.artifact), &Device::Cpu)
+        .with_context(|| format!("failed to inspect {}", request.artifact))?;
+    Ok(tune::inspect(&artifact))
+}
+
+/// `targets` is a comma-separated projection list, exactly as `--targets` is
+/// on the CLI. Repeats collapse and the order follows the request.
+fn parse_targets(value: &str) -> Result<Vec<lora::Target>> {
+    let mut targets = Vec::new();
+    for segment in value.split(',').map(str::trim).filter(|segment| !segment.is_empty()) {
+        let target = lora::Target::parse(segment)?;
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    if targets.is_empty() {
+        bail!("no targets selected");
+    }
+    Ok(targets)
+}
+
+/// `layers` means what it means everywhere else in Ster, with one difference:
+/// `all` cannot be expanded yet. `parse_layers` needs the model's layer count,
+/// and the count is only known once the weights are mapped — which happens
+/// inside `Runtime::load_trainable`, after the spec exists. An empty layer
+/// list is the spec's way of saying every layer, and the loader resolves it
+/// against the real count before it builds any adapter.
+fn parse_adapter_layers(value: &str) -> Result<Vec<usize>> {
+    if value.trim() == "all" {
+        return Ok(Vec::new());
+    }
+    parse_layers(value, usize::MAX)
 }
 
 // MARK: - Responses

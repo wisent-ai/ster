@@ -1,16 +1,20 @@
-use std::{collections::BTreeSet, fs, path::{Path, PathBuf}};
+use std::{collections::{BTreeMap, BTreeSet}, fs, path::{Path, PathBuf}};
 
 use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
+use candle_nn::{VarBuilder, VarMap};
 use candle_transformers::{
     generation::{LogitsProcessor, Sampling},
-    models::llama::{LlamaConfig, LlamaEosToks},
+    models::llama::{Config, LlamaConfig, LlamaEosToks},
 };
 use hf_hub::{Repo, RepoType, api::sync::Api};
 use tokenizers::Tokenizer;
 
-use crate::{artifact::SteeringArtifact, model::{Cache, SteeringLlama, SteeringPlan}};
+use crate::{
+    artifact::SteeringArtifact,
+    lora,
+    model::{Cache, Pass, SteeringLlama, SteeringPlan},
+};
 
 pub struct Runtime {
     pub model_id: String,
@@ -23,39 +27,185 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Loads the frozen base model with no adapters attached.
     pub fn load(model: &str, revision: Option<&str>, device: DeviceChoice) -> Result<Self> {
-        let device = device.resolve()?;
-        let dtype = DType::F32;
-        let source = resolve_model(model, revision)?;
-        let config_bytes = fs::read(&source.config)
-            .with_context(|| format!("failed to read {}", source.config.display()))?;
-        let raw_config: serde_json::Value = serde_json::from_slice(&config_bytes)
-            .with_context(|| format!("invalid model config {}", source.config.display()))?;
-        let model_type = raw_config.get("model_type").and_then(|value| value.as_str()).unwrap_or("");
-        if model_type != "llama" {
+        let base = BaseLoad::resolve(model, revision, device)?;
+        let builder = base.builder()?;
+        let model_impl = SteeringLlama::load(builder, base.config.clone())?;
+        Ok(base.finish(model, model_impl))
+    }
+
+    /// Loads a model with frozen LoRA adapters read from an artifact.
+    ///
+    /// The identity checks mirror the ones `generate` runs against a steering
+    /// artifact: an adapter trained against a different checkpoint or a
+    /// different width is not merely inaccurate, it is a shape error waiting
+    /// to surface halfway through a decode, so it is refused at load time.
+    pub fn load_with_adapter(
+        model: &str,
+        revision: Option<&str>,
+        device: DeviceChoice,
+        adapter: &Path,
+    ) -> Result<Self> {
+        let base = BaseLoad::resolve(model, revision, device)?;
+        let artifact = lora::Artifact::load(adapter, &base.device)?;
+        if artifact.model != model {
             bail!(
-                "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face Llama-family checkpoint with model_type=llama"
+                "adapter was trained for model {:?}, current model is {:?}",
+                artifact.model,
+                model
             );
         }
-        let llama: LlamaConfig = serde_json::from_slice(&config_bytes)
-            .with_context(|| format!("invalid Llama config {}", source.config.display()))?;
-        let eos_tokens = eos_tokens(&llama);
-        let config = llama.into_config(false);
-        let tokenizer = Tokenizer::from_file(&source.tokenizer)
-            .map_err(|error| anyhow::anyhow!("failed to load tokenizer {}: {error}", source.tokenizer.display()))?;
-        let builder = unsafe {
-            VarBuilder::from_mmaped_safetensors(&source.weights, dtype, &device)
-        }.with_context(|| format!("failed to map {} model weight files", source.weights.len()))?;
-        let model_impl = SteeringLlama::load(builder, config)?;
-        Ok(Self {
-            model_id: model.to_owned(),
-            revision: source.revision,
-            tokenizer,
-            model: model_impl,
-            device,
-            dtype,
-            eos_tokens,
-        })
+        if artifact.hidden_size != base.config.hidden_size {
+            bail!(
+                "adapter width {} does not match model width {}",
+                artifact.hidden_size,
+                base.config.hidden_size
+            );
+        }
+        validate_layers(&artifact.layers, base.config.num_hidden_layers)?;
+        let adapters = lora::Adapters::from_artifact(&artifact, &base.device, base.dtype)?;
+        let builder = base.builder()?;
+        let model_impl = SteeringLlama::load_with_adapters(builder, base.config.clone(), adapters)?;
+        Ok(base.finish(model, model_impl))
+    }
+
+    /// Loads a model with fresh trainable adapters; the `VarMap` owns them.
+    ///
+    /// The base weights are mapped read-only exactly as `load` maps them and
+    /// are never registered in the returned map, which is what makes "train
+    /// only the adapters" a structural property rather than a convention: the
+    /// optimizer is handed `varmap.all_vars()` and there is nothing else in it.
+    pub fn load_trainable(
+        model: &str,
+        revision: Option<&str>,
+        device: DeviceChoice,
+        spec: &lora::Spec,
+    ) -> Result<(Self, VarMap)> {
+        let base = BaseLoad::resolve(model, revision, device)?;
+        spec.validate(base.config.num_hidden_layers)?;
+        let spec = spec.resolved(base.config.num_hidden_layers);
+        let (hidden, kv_width, intermediate) = projection_widths(&base.config);
+        let varmap = VarMap::new();
+        let adapters = lora::Adapters::fresh(
+            &spec,
+            &varmap,
+            hidden,
+            kv_width,
+            intermediate,
+            &base.device,
+            base.dtype,
+        )?;
+        let builder = base.builder()?;
+        let model_impl = SteeringLlama::load_with_adapters(builder, base.config.clone(), adapters)?;
+        Ok((base.finish(model, model_impl), varmap))
+    }
+
+    /// The three projection widths an adapter has to match: the residual
+    /// width, the width of a fused key or value projection, and the feed
+    /// forward width. Grouped-query attention makes the second one smaller
+    /// than the first, which is why it cannot be derived from `hidden_size`.
+    pub fn config_dims(&self) -> (usize, usize, usize) {
+        projection_widths(self.model.config())
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    /// Collects this runtime's trained adapters into a durable document.
+    ///
+    /// `train` is whatever the caller wants recorded about the run that
+    /// produced them; `tune::sft` passes its serialized report so the artifact
+    /// carries the losses and hyperparameters that made it.
+    pub fn adapter_artifact(
+        &self,
+        spec: &lora::Spec,
+        train: serde_json::Value,
+    ) -> Result<lora::Artifact> {
+        spec.validate(self.layer_count())?;
+        let spec = spec.resolved(self.layer_count());
+        let adapters = self.model.adapters();
+        if adapters.is_empty() {
+            bail!("this runtime carries no adapters to write");
+        }
+        let mut tensors = BTreeMap::new();
+        for &layer in &spec.layers {
+            for &target in &spec.targets {
+                let adapter = adapters.get(layer, target).with_context(|| {
+                    format!("layer {layer} carries no {} adapter", target.name())
+                })?;
+                let (a, b) = lora::Adapter::tensor_names(layer, target);
+                tensors.insert(a, adapter.a.clone());
+                tensors.insert(b, adapter.b.clone());
+            }
+        }
+        let artifact = lora::Artifact {
+            schema_version: lora::ARTIFACT_SCHEMA_VERSION,
+            product: "ster".to_owned(),
+            model: self.model_id.clone(),
+            model_revision: self.revision.clone(),
+            rank: spec.rank,
+            alpha: spec.alpha,
+            targets: spec.targets.clone(),
+            layers: spec.layers.clone(),
+            hidden_size: self.hidden_size(),
+            train,
+            tensors,
+        };
+        artifact.validate()?;
+        Ok(artifact)
+    }
+
+    /// Tokenizes `prompt` and `completion` separately and returns the joined
+    /// ids plus the index where the completion begins.
+    ///
+    /// The split is not cosmetic: it is the only thing that tells the loss
+    /// which tokens are the model's answer. Special tokens are added for the
+    /// prompt exactly as `encode` adds them, and deliberately not for the
+    /// completion — a second begin-of-sequence marker in the middle of the
+    /// sequence would be a token the model is asked to predict and never sees
+    /// at inference.
+    pub fn encode_example(&self, prompt: &str, completion: &str) -> Result<(Vec<u32>, usize)> {
+        if completion.trim().is_empty() {
+            bail!("training example has an empty completion");
+        }
+        let mut ids = self.encode(prompt)?;
+        let boundary = ids.len();
+        let encoded = self
+            .tokenizer
+            .encode(completion, false)
+            .map_err(|error| anyhow::anyhow!("failed to tokenize completion: {error}"))?;
+        if encoded.get_ids().is_empty() {
+            bail!("training example completion produced no tokens");
+        }
+        ids.extend_from_slice(encoded.get_ids());
+        if ids.len() < 2 {
+            bail!("training example encodes to fewer than two tokens, so there is nothing to predict");
+        }
+        Ok((ids, boundary))
+    }
+
+    /// One differentiable forward over `ids`, returning logits `[1, n, vocab]`.
+    pub fn forward_train(&self, ids: &[u32]) -> Result<Tensor> {
+        if ids.is_empty() {
+            bail!("a training forward pass needs at least one token");
+        }
+        let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
+        // The KV cache stays off. Training pushes the whole sequence through
+        // in one pass, so there is nothing to reuse, and a cache would keep
+        // the previous example's keys and values alive inside this example's
+        // autograd graph — the backward pass would then walk tensors that no
+        // longer correspond to the input being scored.
+        let mut cache = Cache::new(false, self.dtype, self.model.config(), &self.device)?;
+        let output = self
+            .model
+            .forward_pass(&input, 0, &mut cache, None, &[], Pass::Differentiable)?;
+        Ok(output.logits)
     }
 
     pub fn hidden_size(&self) -> usize {
@@ -64,6 +214,13 @@ impl Runtime {
 
     pub fn layer_count(&self) -> usize {
         self.model.config().num_hidden_layers
+    }
+
+    /// The longest sequence the rotary tables and the position mask cover.
+    /// Training clamps against it for the same reason `generate` does: past
+    /// it the cached angles simply do not exist.
+    pub fn context_length(&self) -> usize {
+        self.model.config().max_position_embeddings
     }
 
     pub fn activations(&self, prompt: &str, layers: &[usize]) -> Result<Vec<(usize, Vec<f32>)>> {
@@ -208,6 +365,90 @@ pub struct GenerationOptions {
     pub temperature: f64,
     pub top_p: Option<f64>,
     pub seed: u64,
+}
+
+/// Everything the three loaders share, held between resolving the checkpoint
+/// and mapping its weights.
+///
+/// The split exists because `load_trainable` has to size its adapters from the
+/// config *before* the base weights are mapped, and because three copies of
+/// the config parsing, the architecture refusal, and the tokenizer load would
+/// drift the moment one of them gained a check the other two did not.
+struct BaseLoad {
+    tokenizer: Tokenizer,
+    config: Config,
+    weights: Vec<PathBuf>,
+    revision: Option<String>,
+    eos_tokens: BTreeSet<u32>,
+    device: Device,
+    dtype: DType,
+}
+
+impl BaseLoad {
+    fn resolve(model: &str, revision: Option<&str>, device: DeviceChoice) -> Result<Self> {
+        let device = device.resolve()?;
+        let dtype = DType::F32;
+        let source = resolve_model(model, revision)?;
+        let config_bytes = fs::read(&source.config)
+            .with_context(|| format!("failed to read {}", source.config.display()))?;
+        let raw_config: serde_json::Value = serde_json::from_slice(&config_bytes)
+            .with_context(|| format!("invalid model config {}", source.config.display()))?;
+        let model_type = raw_config.get("model_type").and_then(|value| value.as_str()).unwrap_or("");
+        if model_type != "llama" {
+            bail!(
+                "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face Llama-family checkpoint with model_type=llama"
+            );
+        }
+        let llama: LlamaConfig = serde_json::from_slice(&config_bytes)
+            .with_context(|| format!("invalid Llama config {}", source.config.display()))?;
+        let eos_tokens = eos_tokens(&llama);
+        let config = llama.into_config(false);
+        let tokenizer = Tokenizer::from_file(&source.tokenizer)
+            .map_err(|error| anyhow::anyhow!("failed to load tokenizer {}: {error}", source.tokenizer.display()))?;
+        Ok(Self {
+            tokenizer,
+            config,
+            weights: source.weights,
+            revision: source.revision,
+            eos_tokens,
+            device,
+            dtype,
+        })
+    }
+
+    /// Maps the base weights read-only. Nothing here is registered in a
+    /// `VarMap`, so the base stays frozen whichever loader called it.
+    fn builder(&self) -> Result<VarBuilder<'static>> {
+        unsafe { VarBuilder::from_mmaped_safetensors(&self.weights, self.dtype, &self.device) }
+            .with_context(|| format!("failed to map {} model weight files", self.weights.len()))
+    }
+
+    fn finish(self, model_id: &str, model: SteeringLlama) -> Runtime {
+        Runtime {
+            model_id: model_id.to_owned(),
+            revision: self.revision,
+            tokenizer: self.tokenizer,
+            model,
+            device: self.device,
+            dtype: self.dtype,
+            eos_tokens: self.eos_tokens,
+        }
+    }
+}
+
+/// Residual width, fused key/value projection width, feed forward width.
+///
+/// Grouped-query attention gives the key and value projections fewer heads
+/// than the query projection, so their output is `num_key_value_heads *
+/// head_dim` wide rather than `hidden_size` wide. An adapter sized from
+/// `hidden_size` would fail to matmul against them.
+fn projection_widths(config: &Config) -> (usize, usize, usize) {
+    let head_dim = config.hidden_size / config.num_attention_heads;
+    (
+        config.hidden_size,
+        config.num_key_value_heads * head_dim,
+        config.intermediate_size,
+    )
 }
 
 struct ResolvedModel {

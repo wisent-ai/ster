@@ -40,6 +40,9 @@ Included now:
 - holdout selection across method and layer;
 - artifact evaluation by pair-ordering accuracy and projection margin;
 - additive residual-stream steering during autoregressive generation;
+- LoRA supervised fine-tuning of local checkpoints from prompt and completion
+  examples;
+- frozen adapter artifacts applied at generation time;
 - deterministic JSON pair, activation, steering, and evaluation formats.
 
 Explicit boundaries:
@@ -51,6 +54,10 @@ Explicit boundaries:
   Writing pair text needs no activations, so `ster pairs synthesize` may take
   its generator from Brama instead. Ster holds no provider credential and
   speaks no provider API: it calls the gateway, which owns the routing.
+- Fine-tuning trains adapters and nothing else. The base weights are mapped
+  read-only and never registered as trainable, one example goes through each
+  forward pass with gradient accumulation standing in for a batch, and there is
+  no distributed training and no fleet placement: that belongs to Stado.
 - Ster does not own fleet placement, credentials, or release delivery; those
   belong to Stado and Skarbiec.
 - The previous Python package and `wisent` command were removed in the Rust
@@ -165,6 +172,7 @@ ster generate   run normal or steered autoregressive generation
 ster extract    export hidden states for an arbitrary prompt set
 ster inspect    validate and print a steering artifact
 ster pairs      author, inspect, and synthesize contrastive pair sets
+ster tune       train and inspect LoRA adapters
 ```
 
 Run `ster <command> --help` for exact arguments. Commands return non-zero on
@@ -318,6 +326,89 @@ local run without a model with `pairs synthesize requires a model`. This is how
 Ster Desktop offers pair authoring, inspection, and synthesis beside its six
 workflows.
 
+## Fine-tuning
+
+`ster tune` is the only part of Ster that trains a weight. It has two
+subcommands:
+
+```text
+ster tune sft --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
+              [--revision <REVISION>] [--device cpu] [--rank 8] [--alpha 16]
+              [--targets query,value] [--layers all] [--epochs 1]
+              [--learning-rate 0.0001] [--accumulation 8] [--warmup-steps 0]
+              [--max-sequence 512] [--seed 42]
+ster tune inspect <ARTIFACT>
+```
+
+`--examples` reads `{"examples": [{"prompt": "…", "completion": "…"}]}`, with an
+optional `name`. Eight examples written in the toy checkpoint's own vocabulary
+are checked in as [`docs/examples/examples.json`](docs/examples/examples.json),
+so a first run needs no download. `--targets` names the projections that carry
+an adapter — `query`, `key`, `value`, `output`, `gate`, `up`, and `down` — and
+accepts either the short name or the Hugging Face spelling, `q_proj` and
+`k_proj` and the rest. `--layers` takes `all`, a comma list, or a half-open
+range such as `8..16`, exactly as everywhere else in Ster. An example longer
+than `--max-sequence` tokens is skipped rather than truncated, with one progress
+line naming it, because a cut completion would teach the model to stop early.
+
+Only the adapters train. Base weights arrive through
+`VarBuilder::from_mmaped_safetensors` and are never registered in a `VarMap`, so
+the optimizer is handed the adapter tensors and there is structurally nothing
+else it could reach. Each adapter is a pair of factors: `A` is initialized
+`Randn { mean: 0.0, stdev: 1/rank }` and `B` is zeros, so the low-rank update is
+exactly zero before the first step. A fresh adapter is therefore the identity,
+and training starts from the base model's own behaviour rather than from noise
+injected into every projection.
+
+The objective is next-token cross-entropy over the completion tokens only. For a
+joined sequence of `n` tokens whose completion begins at `boundary`, the scored
+logits are `narrow(1, boundary - 1, n - boundary)` against the targets
+`ids[boundary..]`: the distribution that predicts a token sits one position to
+its left, and the prompt is never a target, because an operator writing a prompt
+and a completion is not asking the model to learn to reproduce the prompt.
+
+One example goes through each forward pass, and `--accumulation` examples are
+folded into one `AdamW` step from their scaled losses. That is deliberate rather
+than unfinished: Ster's decoder has no padding token and no attention mask for a
+batched sequence, so stacking examples of different lengths would train the
+adapter on whatever filler the shorter rows were padded with — silently, under a
+loss that still looks reasonable. The KV cache is off while training, because
+the whole sequence goes through in one pass and there is nothing to reuse. The
+learning rate ramps linearly over `--warmup-steps` steps and then decays on a
+cosine to a tenth of the base rate. `--seed` fixes the whole run: it seeds both
+the per-epoch shuffle of the example order and the draw that fills every `A`
+factor, so the same command writes a byte-identical adapter twice. The draw is
+taken from Ster's own generator rather than Candle's initialiser, because the
+CPU device refuses to be seeded at all and an adapter nobody can reproduce is
+not an artifact.
+
+A run writes two files that travel together: `<name>.lora.safetensors`, holding
+the factors under the names `layers.{layer}.{target}.a` and
+`layers.{layer}.{target}.b`, and `<name>.lora.json` beside it, carrying
+`schema_version`, `product`, `model`, `model_revision`, `rank`, `alpha`,
+`targets`, `layers`, `hidden_size`, and the training report. The report records
+`examples`, `trained_examples`, `skipped_long`, `epochs`, `steps`,
+`trainable_tensors`, `trainable_parameters`, `first_loss`, `final_loss`,
+`mean_final_epoch_loss`, `rank`, `alpha`, `targets`, `layers`,
+`learning_rate`, and `accumulation`, so a trained adapter always carries the run
+that produced it. `ster tune inspect` prints that document with every tensor
+name and shape beside it, and loads no model to do it.
+
+`ster generate --adapter <FILE>` attaches a frozen adapter while the weights are
+mapped, so every token is generated through the adapted projections. An adapter
+trained for another checkpoint is refused with
+`adapter was trained for model "…", current model is "…"`, and a path that is
+not there with `failed to read adapter <path>`. A learning rate that is not a
+finite number above zero is refused before the first forward pass with
+`supervised fine-tuning requires a finite learning rate above zero`, and a set
+in which nothing fits the limit with
+`every example is longer than the sequence limit, so there is nothing to train on`.
+
+Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
+and writes nothing but the adapter pair. The same two operations are jobs on the
+`ster serve` backend, `POST /v1/tune/sft` and `POST /v1/tune/inspect`, and
+`POST /v1/generate` takes the same `adapter` field.
+
 ## Artifact contract
 
 A steering artifact records:
@@ -337,8 +428,12 @@ wrong residual stream.
 The runtime uses Candle directly. Ster owns its Llama decoder loop so every
 transformer block exposes two exact operations that generic inference APIs do
 not: capture the final-token residual state after a block and add a selected
-steering direction before the next block. Tokenization, Safetensors loading,
-attention, KV caching, sampling, and device kernels remain native Rust.
+steering direction before the next block. The same decoder can also run a
+differentiable pass, which is what makes fine-tuning possible at all: Candle's
+fused `rotary_emb::rope`, `ops::softmax_last_dim`, and `ops::rms_norm` kernels
+have no backward pass, so training selects composed equivalents at exactly those
+three call sites while inference keeps the fused ones. Tokenization, Safetensors
+loading, attention, KV caching, sampling, and device kernels remain native Rust.
 
 ## Documentation and support
 
