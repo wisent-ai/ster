@@ -9,8 +9,12 @@
 //!   systematically longer than the other (a length confound trains a
 //!   "verbosity" direction rather than the trait).
 //! * `synthesize` — a faithful port of Wisent's
-//!   `SyntheticContrastivePairsGenerator.generate`, driven by Ster's own
-//!   `Runtime` so the boundary stays local open-weight models only.
+//!   `SyntheticContrastivePairsGenerator.generate`, driven by whichever
+//!   `Generator` the caller picked: Ster's own local `Runtime`, or a hosted
+//!   route reached through Brama. Steering itself still needs hidden states
+//!   and therefore a local model, but writing pair text needs no activations
+//!   at all, so the generator model and the steered model are two different
+//!   roles and only the writer may be hosted.
 //!
 //! Both are the single implementation behind the CLI arms and the
 //! `/v1/pairs/*` serve endpoints.
@@ -208,6 +212,10 @@ pub struct SynthesisOptions {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SynthesisReport {
+    /// What wrote these pairs: `local:<model id>` or `brama:<route>`. First in
+    /// the report because every other number below is only interpretable once
+    /// the reader knows which model produced the text.
+    pub generator: String,
     pub trait_name: String,
     pub trait_description: String,
     pub opposite: String,
@@ -221,7 +229,7 @@ pub struct SynthesisReport {
     pub diversity: diversity::Scores,
 }
 
-/// Generate a contrastive pair set with the loaded model.
+/// Generate a contrastive pair set with `generator`.
 ///
 /// Port of `SyntheticContrastivePairsGenerator.generate`: one opposite-trait
 /// description up front, then a question / positive / negative triple per
@@ -230,7 +238,7 @@ pub struct SynthesisReport {
 /// loop stop the moment `count` *surviving* pairs exist instead of
 /// re-cleaning the whole set every ten pairs the way the Python does.
 pub fn synthesize(
-    runtime: &Runtime,
+    generator: Generator<'_>,
     options: &SynthesisOptions,
 ) -> Result<(PairSet, SynthesisReport)> {
     if options.count == 0 {
@@ -239,16 +247,24 @@ pub fn synthesize(
     if options.retry_multiplier == 0 {
         bail!("synthesis requires a retry multiplier above zero");
     }
-    // Ster selects argmax sampling at or below zero temperature. Every prompt
-    // in this loop is a constant, so argmax would return the same question and
+    // Every prompt in this loop is a constant, repeated for the whole run: the
+    // same question instruction, the same two persona prompts. A greedy
+    // decoder — Ster's own argmax path at or below zero temperature, and any
+    // hosted sampler asked for the same — would return the same question and
     // the same answers forever and the whole run would dedupe to one pair.
+    // The reason is the loop's, so the refusal holds for every route.
     if options.generation.temperature <= 0.0 {
         bail!("synthesis requires a temperature above zero; argmax generation repeats a single prompt");
     }
     options.dedupe.validate()?;
 
     let trait_name = resolve_trait_name(options);
-    let mut generator = Generator { runtime, options: options.generation, calls: 0 };
+    let mut calls = 0u64;
+    let mut ask = |prompt: &str| -> Result<String> {
+        let text = generator.generate(prompt, options, calls)?;
+        calls = calls.wrapping_add(1);
+        Ok(text)
+    };
 
     let opposite = match options
         .opposite
@@ -258,13 +274,22 @@ pub fn synthesize(
     {
         Some(value) => value.to_owned(),
         None => {
-            let answer = generator.ask(&format!(
+            let answer = ask(&format!(
                 "What is the OPPOSITE personality trait of: {}?\n\nDescribe the opposite in one sentence, be specific about what words/style/tone to use.",
                 options.trait_description
             ))?;
             if answer.is_empty() { DEFAULT_OPPOSITE.to_owned() } else { answer }
         }
     };
+
+    // Named once, before the loop: a streamed run has to state which model is
+    // writing and which opposite trait the negative side is answering as,
+    // and neither changes for the rest of the run.
+    workflow::progress(format!(
+        "synthesizing with {} against opposite trait {:?}",
+        generator.label(),
+        opposite
+    ));
 
     let mut index = dedupe::Index::new(options.dedupe)?;
     let mut kept: Vec<ContrastivePair> = Vec::with_capacity(options.count);
@@ -285,19 +310,19 @@ pub fn synthesize(
             attempts
         ));
 
-        let question = generator.ask(QUESTION_INSTRUCTION)?;
+        let question = ask(QUESTION_INSTRUCTION)?;
         if question.is_empty() {
             rejected_empty += 1;
             continue;
         }
 
-        let positive = generator.ask(&persona_prompt(&question, &options.trait_description))?;
+        let positive = ask(&persona_prompt(&question, &options.trait_description))?;
         if positive.is_empty() {
             rejected_empty += 1;
             continue;
         }
 
-        let mut negative = generator.ask(&persona_prompt(&question, &opposite))?;
+        let mut negative = ask(&persona_prompt(&question, &opposite))?;
         if negative.is_empty() {
             rejected_empty += 1;
             continue;
@@ -314,7 +339,7 @@ pub fn synthesize(
         // never a loop, and a still-refusing replacement drops the pair.
         if refusal::looks_like_refusal(&negative, options.refusal_threshold) {
             refusal_retries += 1;
-            let replacement = generator.ask(&format!(
+            let replacement = ask(&format!(
                 "{ROLEPLAY_NEG_FIX}\n\nPrompt: {question}\nTrait label: {trait_name}\nTrait description: {opposite}"
             ))?;
             if replacement.is_empty()
@@ -349,6 +374,7 @@ pub fn synthesize(
         diversity::compute(&questions, options.diversity_seed, options.diversity_max_sample);
 
     let report = SynthesisReport {
+        generator: generator.label(),
         trait_name: trait_name.clone(),
         trait_description: options.trait_description.clone(),
         opposite,
@@ -384,25 +410,54 @@ fn resolve_trait_name(options: &SynthesisOptions) -> String {
     }
 }
 
-/// Every call to the model in one synthesis run.
-///
-/// `Runtime::generate` builds a fresh `LogitsProcessor` from
-/// `GenerationOptions::seed` on every call, so a fixed seed would replay the
-/// identical continuation for the identical prompt and the run would collapse
-/// to a single deduplicated pair. Advancing the seed by the call index makes
-/// each call an independent draw while keeping the whole run reproducible
-/// from the one seed the caller supplied.
-struct Generator<'a> {
-    runtime: &'a Runtime,
-    options: GenerationOptions,
-    calls: u64,
+/// Where the pair text comes from. Steering always stays local; only the
+/// writer of the training data may be hosted, because a pair is plain text
+/// and no hidden state is read to produce it.
+#[derive(Clone, Copy)]
+pub enum Generator<'a> {
+    Local(&'a Runtime),
+    Gateway(&'a crate::brama::Gateway),
 }
 
 impl Generator<'_> {
-    fn ask(&mut self, prompt: &str) -> Result<String> {
-        let options =
-            GenerationOptions { seed: self.options.seed.wrapping_add(self.calls), ..self.options };
-        self.calls = self.calls.wrapping_add(1);
-        Ok(self.runtime.generate(prompt, None, options)?.trim().to_owned())
+    /// Names the generator in reports and progress lines.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Local(runtime) => format!("local:{}", runtime.model_id),
+            Self::Gateway(gateway) => format!("brama:{}", gateway.model()),
+        }
+    }
+
+    /// One call to whichever model is writing, with `call` counting the calls
+    /// already made in this run.
+    ///
+    /// Local: `Runtime::generate` builds a fresh `LogitsProcessor` from
+    /// `GenerationOptions::seed` on every call, so a fixed seed would replay
+    /// the identical continuation for the identical prompt and the run would
+    /// collapse to a single deduplicated pair. Advancing the seed by the call
+    /// index makes each call an independent draw while keeping the whole run
+    /// reproducible from the one seed the caller supplied.
+    ///
+    /// Gateway: neither the seed nor `top_p` travels. Brama's chat request
+    /// carries `max_tokens` and `temperature` and has no field for either, and
+    /// the provider behind the route owns its own sampler — so a hosted run is
+    /// not reproducible from `--seed`, and the running dedupe is what keeps
+    /// repeated draws out of the set.
+    fn generate(&self, prompt: &str, options: &SynthesisOptions, call: u64) -> Result<String> {
+        let text = match self {
+            Self::Local(runtime) => {
+                let generation = GenerationOptions {
+                    seed: options.generation.seed.wrapping_add(call),
+                    ..options.generation
+                };
+                runtime.generate(prompt, None, generation)?
+            }
+            Self::Gateway(gateway) => gateway.complete(
+                prompt,
+                options.generation.max_new_tokens,
+                options.generation.temperature,
+            )?,
+        };
+        Ok(text.trim().to_owned())
     }
 }

@@ -31,13 +31,14 @@ use std::{
     thread,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{
     ContrastivePair, DeviceChoice, GenerationOptions, PairSet, Runtime, SteeringArtifact,
     SynthesisOptions, TrainingMethod,
+    brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
     pairs::{self, InspectOptions},
@@ -383,6 +384,12 @@ impl Validate for PairsSaveRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PairsSynthesizeRequest {
+    /// Which model writes the pairs: local or brama. The model, revision and
+    /// device below belong to the local route only; a brama body omits them.
+    #[serde(default = "default_generator")]
+    generator: String,
+    #[serde(default)]
+    generator_model: Option<String>,
     #[serde(flatten)]
     model: ModelRequest,
     #[serde(default, rename = "trait")]
@@ -415,7 +422,16 @@ struct PairsSynthesizeRequest {
 
 impl Validate for PairsSynthesizeRequest {
     fn validate(&self) -> Result<(), String> {
-        self.model.check("pairs synthesize")?;
+        // The local route loads weights and so needs a model; the brama route
+        // loads nothing and needs a gateway route instead.
+        match self.generator.as_str() {
+            "local" => self.model.check("pairs synthesize")?,
+            "brama" => require(
+                self.generator_model.as_deref().unwrap_or_default(),
+                "pairs synthesize with the brama generator requires generatorModel".to_owned(),
+            )?,
+            _ => return Err("unknown generator; expected local or brama".to_owned()),
+        }
         require(
             &self.trait_description,
             "pairs synthesize requires a trait description".to_owned(),
@@ -426,6 +442,12 @@ impl Validate for PairsSynthesizeRequest {
         }
         Ok(())
     }
+}
+
+/// Steering needs a local model, but writing pair text does not, so the
+/// hosted route is opt-in and every existing client keeps the local one.
+fn default_generator() -> String {
+    "local".to_owned()
 }
 
 fn default_device() -> String {
@@ -584,7 +606,6 @@ fn pairs_save_job(request: PairsSaveRequest) -> Result<Value> {
 }
 
 fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime()?;
     let options = SynthesisOptions {
         trait_description: request.trait_description,
         trait_name: request.trait_name,
@@ -607,7 +628,21 @@ fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
         diversity_seed: request.seed,
         diversity_max_sample: DEFAULT_MAX_SAMPLE,
     };
-    let (pair_set, report) = pairs::synthesize(&runtime, &options)?;
+    // Same two arms as the CLI, calling the same `pairs::synthesize`: a brama
+    // request loads no weights and never touches a device.
+    let (pair_set, report) = match request.generator.as_str() {
+        "local" => {
+            let runtime = request.model.load_runtime()?;
+            pairs::synthesize(pairs::Generator::Local(&runtime), &options)?
+        }
+        "brama" => {
+            // `Validate` has already refused a brama request without a route.
+            let route = request.generator_model.as_deref().unwrap_or_default();
+            let gateway = brama::Gateway::from_env(route)?;
+            pairs::synthesize(pairs::Generator::Gateway(&gateway), &options)?
+        }
+        value => bail!("unknown generator {value:?}; expected local or brama"),
+    };
     pair_set.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
 }

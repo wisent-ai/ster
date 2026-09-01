@@ -32,7 +32,8 @@ Included now:
 - CPU execution, with compile-time Metal and CUDA backends;
 - pair-set authoring and inspection for duplicates, refusals, length balance,
   and diversity, with no model loaded;
-- synthetic pair generation from a trait description on the local runtime;
+- synthetic pair generation from a trait description, written either by the
+  local runtime or by a hosted model reached through Brama;
 - last-token hidden-state extraction from any selected transformer layer;
 - contrastive activation addition (`caa`), principal-direction (`pca`), and
   logistic-probe training;
@@ -46,9 +47,10 @@ Explicit boundaries:
 - The current native runtime accepts `model_type: "llama"`. Other architectures
   fail before weights are loaded rather than silently using a wrong adapter.
 - Ster controls local open-weight models. Hosted model routing belongs to Brama.
-- Pair synthesis generates text with the same local open-weight runtime as every
-  other Ster command. Ster still calls no hosted model to author a pair set;
-  hosted routing belongs to Brama.
+- Steering reads hidden states, so it always runs on a local open-weight model.
+  Writing pair text needs no activations, so `ster pairs synthesize` may take
+  its generator from Brama instead. Ster holds no provider credential and
+  speaks no provider API: it calls the gateway, which owns the routing.
 - Ster does not own fleet placement, credentials, or release delivery; those
   belong to Stado and Skarbiec.
 - The previous Python package and `wisent` command were removed in the Rust
@@ -112,7 +114,8 @@ ster pairs add \
 ```
 
 `ster pairs synthesize` writes a whole set from a one-sentence trait
-description, generating both sides of every pair with the loaded model:
+description, generating both sides of every pair with the local runtime by
+default:
 
 ```bash
 ster pairs synthesize \
@@ -178,8 +181,9 @@ ster pairs inspect <FILE> [--dedupe-bits 3] [--dedupe-bands 8]
                           [--refusal-threshold 0.5]
 ster pairs add --pairs <FILE> --positive <TEXT> --negative <TEXT> [--trait <NAME>]
 ster pairs remove --pairs <FILE> --index <N>
-ster pairs synthesize --model <MODEL> --trait <TRAIT_DESCRIPTION> --count <COUNT>
-                      --output <OUTPUT> [--revision <REVISION>] [--device cpu]
+ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTPUT>
+                      [--generator local|brama] [--generator-model <ROUTE>]
+                      [--model <MODEL>] [--revision <REVISION>] [--device <DEVICE>]
                       [--trait-name <NAME>] [--opposite <TEXT>]
                       [--retry-multiplier 3] [--dedupe-bits 3]
                       [--dedupe-bands 8] [--refusal-threshold 0.5]
@@ -230,8 +234,7 @@ margin.
 the positive sides, and above 256 texts the pairwise passes are sampled with a
 seeded RNG.
 
-`ster pairs synthesize` builds a set from a trait description on the same local
-runtime every other Ster command uses, in this order:
+`ster pairs synthesize` builds a set from a trait description, in this order:
 
 1. The opposite trait is derived with one generation, unless `--opposite` states
    it. An empty answer falls back to `neutral and plain`.
@@ -247,15 +250,58 @@ runtime every other Ster command uses, in this order:
 5. The attempt budget is `--count` times `--retry-multiplier`, and every attempt
    prints one `synthesizing pair 3/20 (attempt 7)` progress line on stderr.
 
-The seed advances by one on every model call. Ster builds a fresh sampler per
-call, so a fixed seed would return one identical continuation for the whole run
-and the set would collapse to a single pair; advancing from `--seed` keeps the
-run reproducible from the one seed the caller supplied. A temperature of zero is
-refused before the first generation: `synthesis requires a temperature above zero; argmax generation repeats a single prompt`.
+On the local route the seed advances by one on every model call. Ster builds a
+fresh sampler per call, so a fixed seed would return one identical continuation
+for the whole run and the set would collapse to a single pair; advancing from
+`--seed` keeps the run reproducible from the one seed the caller supplied. A
+temperature of zero is refused before the first generation on either route:
+`synthesis requires a temperature above zero; argmax generation repeats a single prompt`.
 
-The run reports `trait_name`, `trait_description`, `opposite`, `requested`,
-`attempts`, `kept`, `rejected_empty`, `rejected_refusals`,
-`rejected_duplicates`, `refusal_retries`, and `diversity`, so a short set is
+`--generator` chooses who writes the text: `local`, the default, uses the same
+local open-weight runtime every other Ster command uses, and `brama` sends the
+generation to a hosted model through the Brama gateway. `--model`,
+`--revision` and `--device` belong to the local route and are not read by the
+hosted one, which loads no weights, resolves no device, and downloads nothing.
+The local route refuses a missing model with `pairs synthesize with --generator local requires --model`,
+the hosted route refuses a missing route with `pairs synthesize with --generator brama requires --generator-model`,
+and anything else is `unknown generator "cloud"; expected local or brama`.
+
+The hosted route reads Brama's own documented client variables: `BRAMA_URL`,
+the gateway base, defaulting to `https://brama.wisent.com`, and
+`BRAMA_BEARER`, the caller's bearer. The launcher that owns the bearer supplies
+it, because Ster never reads a vault itself. An empty bearer is refused with
+`BRAMA_BEARER is unset or empty; the launcher supplies the Brama bearer`, and a
+base that is neither https nor explicit loopback with
+`BRAMA_URL must be an https:// base or an explicit http:// loopback address, because Brama answers plain http elsewhere with 426 secure_transport_required`.
+
+`--generator-model` may name exactly four things: a declared alias, such as
+Wisent's own chat alias `wisent-backend/chat/primary` or its sibling
+`wisent-backend/chat/fallback`; the delegation alias `best`; a canonical
+`provider/model` route, such as `anthropic/claude-3-5-haiku-latest`; or a
+selector, `any` or `task:<name>`. `best` and the selectors additionally require
+an agent-signed request, which Ster does not construct — it sends a bearer and
+nothing more — so a Ster run uses a declared alias or a canonical route.
+Anything outside that vocabulary is refused with
+`the generator model must be a Brama alias, a canonical provider/model route, or a selector`.
+
+The request to the gateway carries exactly `model`, `messages` with one user
+message, `max_tokens` and `temperature`, because Brama refuses unknown fields
+by name. Neither `--seed` nor `--top-p` therefore travels, and a hosted run is
+not seed-reproducible: the provider owns its sampler, and the running
+deduplicator is what suppresses repeated draws. Ster duplicates Brama's two
+documented bounds locally to save a round trip per pair, in the gateway's own
+words: `max_tokens must be between one and 32768` and
+`temperature must be finite and between zero and 2`. A gateway refusal is
+surfaced in Brama's own words, as `brama refused the completion: 401 unauthorized`
+— the status followed by the `message` from Brama's `{"error":{...}}` envelope.
+A body without that envelope becomes
+`brama refused the completion with {status} and a body that is not its error envelope: {excerpt}`.
+
+The run reports `generator`, which records which of the two wrote the set as
+`local:<model id>` or `brama:<route>`, then `trait_name`,
+`trait_description`, `opposite`, `requested`, `attempts`, `kept`,
+`rejected_empty`, `rejected_refusals`, `rejected_duplicates`,
+`refusal_retries`, and `diversity`, so a short set is
 explained by the counts rather than guessed at.
 
 The same three operations are jobs on the loopback HTTP/JSON backend that
@@ -263,8 +309,14 @@ The same three operations are jobs on the loopback HTTP/JSON backend that
 `POST /v1/pairs/inspect` returns the inspection document for a path,
 `POST /v1/pairs/save` writes a set from `traitName` and `entries` and returns
 the path and pair count, and `POST /v1/pairs/synthesize` runs the loop and
-returns the written path and the report. This is how Ster Desktop offers pair
-authoring, inspection, and synthesis beside its six workflows.
+returns the written path and the report. The synthesize job takes `generator`,
+defaulting to `"local"`, and `generatorModel`, and requires `model` only on the
+local route; it refuses a hosted run without a route with
+`pairs synthesize with the brama generator requires generatorModel`, an
+unrecognized value with `unknown generator; expected local or brama`, and a
+local run without a model with `pairs synthesize requires a model`. This is how
+Ster Desktop offers pair authoring, inspection, and synthesis beside its six
+workflows.
 
 ## Artifact contract
 

@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod brama;
 pub mod dedupe;
 pub mod diversity;
 pub mod model;

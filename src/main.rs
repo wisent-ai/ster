@@ -6,6 +6,7 @@ use serde_json::json;
 use ster::{
     ContrastivePair, DeviceChoice, GenerationOptions, PairSet, Runtime, SteeringArtifact,
     SynthesisOptions, TrainingMethod,
+    brama,
     dedupe::DedupeOptions,
     diversity::DEFAULT_MAX_SAMPLE,
     pairs::{self, InspectOptions},
@@ -148,10 +149,27 @@ enum PairsCommand {
         #[arg(long)]
         index: usize,
     },
-    /// Generate a contrastive pair set with the loaded model.
+    /// Generate a contrastive pair set locally or with a hosted model.
     Synthesize {
-        #[command(flatten)]
-        model: ModelArgs,
+        /// Where the pair text comes from: local or brama. Steering always
+        /// needs a local model; writing pairs does not, so this route may be
+        /// hosted.
+        #[arg(long, default_value = "local")]
+        generator: String,
+        /// Route the Brama generator writes with: a Brama alias, a canonical
+        /// provider/model route, or a selector. Wisent's own served model is
+        /// wisent-backend/chat/primary. Required with --generator brama.
+        #[arg(long)]
+        generator_model: Option<String>,
+        /// Hugging Face model id or local model directory.
+        #[arg(long)]
+        model: Option<String>,
+        /// Immutable Hugging Face revision; defaults to main.
+        #[arg(long)]
+        revision: Option<String>,
+        /// Runtime device: cpu, metal, or cuda.
+        #[arg(long, default_value = "cpu")]
+        device: String,
         /// One-sentence description of the trait the positive side shows.
         #[arg(long = "trait")]
         trait_description: String,
@@ -345,7 +363,11 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
             );
         }
         PairsCommand::Synthesize {
+            generator,
+            generator_model,
             model,
+            revision,
+            device,
             trait_description,
             count,
             output,
@@ -360,7 +382,6 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
             top_p,
             seed,
         } => {
-            let runtime = model.load()?;
             let options = SynthesisOptions {
                 trait_description,
                 trait_name: trait_name.unwrap_or_default(),
@@ -383,7 +404,27 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
                 diversity_seed: seed,
                 diversity_max_sample: DEFAULT_MAX_SAMPLE,
             };
-            let (pair_set, report) = pairs::synthesize(&runtime, &options)?;
+            // The runtime or the gateway is built inside the arm that uses it:
+            // `--generator brama` must not load weights or touch a device, and
+            // `--generator local` must not read the gateway's environment.
+            let (pair_set, report) = match generator.as_str() {
+                "local" => {
+                    let Some(model) = model else {
+                        bail!("pairs synthesize with --generator local requires --model");
+                    };
+                    let runtime =
+                        Runtime::load(&model, revision.as_deref(), DeviceChoice::parse(&device)?)?;
+                    pairs::synthesize(pairs::Generator::Local(&runtime), &options)?
+                }
+                "brama" => {
+                    let Some(route) = generator_model else {
+                        bail!("pairs synthesize with --generator brama requires --generator-model");
+                    };
+                    let gateway = brama::Gateway::from_env(&route)?;
+                    pairs::synthesize(pairs::Generator::Gateway(&gateway), &options)?
+                }
+                value => bail!("unknown generator {value:?}; expected local or brama"),
+            };
             pair_set.save(&output)?;
             println!(
                 "{}",
