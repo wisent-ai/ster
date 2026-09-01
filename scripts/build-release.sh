@@ -22,6 +22,11 @@ mkdir -p "$STAGE"
 cp "$BINARY" "$ROOT/LICENSE" "$ROOT/README.md" "$STAGE/"
 tar -C "$OUTPUT" -czf "$ARCHIVE" "ster-$PLATFORM"
 rm -rf "$STAGE"
+# The archive is what a human downloads; the bare binary next to it is what
+# `wisent-products` stages, because a stado-release install copies individual
+# `bin/` members out of .wisent-output and never unpacks a tarball.
+cp "$BINARY" "$OUTPUT/ster"
+chmod +x "$OUTPUT/ster"
 (
     cd "$OUTPUT"
     shasum --algorithm 256 "$(basename "$ARCHIVE")" >"$(basename "$ARCHIVE").sha256"

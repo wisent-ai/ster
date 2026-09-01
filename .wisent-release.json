@@ -15,8 +15,9 @@
         "argv": ["sh", "scripts/build-release.sh"]
       },
       "stage": {
-        ".wisent-output/release/ster-darwin-arm64.tar.gz": "release/ster-darwin-arm64.tar.gz",
-        ".wisent-output/release/ster-darwin-arm64.tar.gz.sha256": "release/ster-darwin-arm64.tar.gz.sha256"
+        "release/ster": "bin/ster",
+        "release/ster-darwin-arm64.tar.gz": "release/ster-darwin-arm64.tar.gz",
+        "release/ster-darwin-arm64.tar.gz.sha256": "release/ster-darwin-arm64.tar.gz.sha256"
       }
     },
     "linux-amd64": {
@@ -26,8 +27,9 @@
         "argv": ["sh", "scripts/build-release.sh"]
       },
       "stage": {
-        ".wisent-output/release/ster-linux-amd64.tar.gz": "release/ster-linux-amd64.tar.gz",
-        ".wisent-output/release/ster-linux-amd64.tar.gz.sha256": "release/ster-linux-amd64.tar.gz.sha256"
+        "release/ster": "bin/ster",
+        "release/ster-linux-amd64.tar.gz": "release/ster-linux-amd64.tar.gz",
+        "release/ster-linux-amd64.tar.gz.sha256": "release/ster-linux-amd64.tar.gz.sha256"
       }
     }
   },
