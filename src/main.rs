@@ -115,7 +115,7 @@ enum Command {
         #[command(subcommand)]
         command: PairsCommand,
     },
-    /// Train and inspect LoRA adapters.
+    /// Train, merge, score, and inspect LoRA adapters.
     Tune {
         #[command(subcommand)]
         command: TuneCommand,

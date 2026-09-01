@@ -187,7 +187,7 @@ ster generate   run normal or steered autoregressive generation
 ster extract    export hidden states for an arbitrary prompt set
 ster inspect    validate and print a steering artifact
 ster pairs      author, inspect, and synthesize contrastive pair sets
-ster tune       train adapters by supervision or preference, and inspect them
+ster tune       train, merge, score, and inspect LoRA adapters
 ```
 
 Run `ster <command> --help` for exact arguments. Commands return non-zero on
