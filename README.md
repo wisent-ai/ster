@@ -407,7 +407,9 @@ in which nothing fits the limit with
 Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
 and writes nothing but the adapter pair. The same two operations are jobs on the
 `ster serve` backend, `POST /v1/tune/sft` and `POST /v1/tune/inspect`, and
-`POST /v1/generate` takes the same `adapter` field.
+`POST /v1/generate` takes the same `adapter` field. That is how Ster Desktop
+offers fine-tuning on its own screen, and how a finished run leaves the adapter
+it wrote in the field Generate reads.
 
 ## Artifact contract
 
