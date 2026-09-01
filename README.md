@@ -17,7 +17,10 @@
 Ster is a native Rust toolkit for representation reading and activation steering
 in open-weight language models. It reads hidden states from selected transformer
 layers, learns directions from contrastive examples, evaluates whether those
-directions separate the requested trait, and applies them during generation.
+directions separate the requested trait, and applies them during generation. It
+also trains the weights themselves: LoRA adapters under a supervised, a
+preference, a reward-modelling or a policy-gradient objective, and the tools to
+merge, score and inspect what comes out.
 
 The product is **Ster**. Wisent is the company that builds it.
 
@@ -61,10 +64,15 @@ Explicit boundaries:
   Writing pair text needs no activations, so `ster pairs synthesize` may take
   its generator from Brama instead. Ster holds no provider credential and
   speaks no provider API: it calls the gateway, which owns the routing.
-- Fine-tuning trains adapters and nothing else. The base weights are mapped
-  read-only and never registered as trainable, one example goes through each
+- Fine-tuning trains low-rank adapters, and on a reward run the scalar head
+  that reads them. It trains nothing else: the base weights are mapped
+  read-only and never registered as trainable. One sequence goes through each
   forward pass with gradient accumulation standing in for a batch, and there is
   no distributed training and no fleet placement: that belongs to Stado.
+- No objective consults a hosted model. `ster tune grpo` takes its reward from
+  a reward model you trained or from a deterministic function of the
+  completion; there is no judge model and no LLM-as-critic wired into any
+  gradient.
 - Ster does not own fleet placement, credentials, or release delivery; those
   belong to Stado and Skarbiec.
 - The previous Python package and `wisent` command were removed in the Rust
@@ -426,6 +434,18 @@ adapter always carries the run that produced it. `ster tune inspect` prints that
 document with every tensor name and shape beside it, and loads no model to do
 it.
 
+An artifact says what it is, and applying it where it does not belong is a
+refusal rather than a wrong answer. `ster generate --adapter <FILE>` attaches a
+frozen adapter while the weights are mapped, so every token is generated
+through the adapted projections; an adapter trained for another checkpoint is
+refused with `adapter was trained for model "…", current model is "…"`, a width
+mismatch with `adapter width {a} does not match model width {b}`, a reward
+artifact with `adapter artifact is a reward model, not a generation adapter`,
+and a path that is not there with `failed to read adapter <path>`. The same
+four checks guard `tune merge` and `tune evaluate`, and `tune grpo --reward`
+runs them in the other direction, refusing a generation adapter with
+`adapter artifact is a generation adapter, not a reward model`.
+
 ### Supervised fine-tuning
 
 `--examples` reads `{"examples": [{"prompt": "…", "completion": "…"}]}`, with an
@@ -447,12 +467,8 @@ The report records
 `mean_final_epoch_loss`, `rank`, `alpha`, `targets`, `layers`,
 `learning_rate`, and `accumulation`.
 
-`ster generate --adapter <FILE>` attaches a frozen adapter while the weights are
-mapped, so every token is generated through the adapted projections. An adapter
-trained for another checkpoint is refused with
-`adapter was trained for model "…", current model is "…"`, and a path that is
-not there with `failed to read adapter <path>`. A learning rate that is not a
-finite number above zero is refused before the first forward pass with
+A learning rate that is not a finite number above zero is refused before the
+first forward pass with
 `supervised fine-tuning requires a finite learning rate above zero`, and a set
 in which nothing fits the limit with
 `every example is longer than the sequence limit, so there is nothing to train on`.
