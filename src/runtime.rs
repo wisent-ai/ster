@@ -553,21 +553,8 @@ impl BaseLoad {
     fn resolve(model: &str, revision: Option<&str>, device: DeviceChoice) -> Result<Self> {
         let device = device.resolve()?;
         let dtype = DType::F32;
-        let source = resolve_model(model, revision)?;
-        let config_bytes = fs::read(&source.config)
-            .with_context(|| format!("failed to read {}", source.config.display()))?;
-        let raw_config: serde_json::Value = serde_json::from_slice(&config_bytes)
-            .with_context(|| format!("invalid model config {}", source.config.display()))?;
-        let model_type = raw_config.get("model_type").and_then(|value| value.as_str()).unwrap_or("");
-        if model_type != "llama" {
-            bail!(
-                "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face Llama-family checkpoint with model_type=llama"
-            );
-        }
-        let llama: LlamaConfig = serde_json::from_slice(&config_bytes)
-            .with_context(|| format!("invalid Llama config {}", source.config.display()))?;
-        let eos_tokens = eos_tokens(&llama);
-        let config = llama.into_config(false);
+        let source = Checkpoint::resolve(model, revision)?;
+        let (config, eos_tokens) = source.llama_config()?;
         let tokenizer = Tokenizer::from_file(&source.tokenizer)
             .map_err(|error| anyhow::anyhow!("failed to load tokenizer {}: {error}", source.tokenizer.display()))?;
         Ok(Self {
@@ -616,50 +603,84 @@ fn projection_widths(config: &Config) -> (usize, usize, usize) {
     )
 }
 
-struct ResolvedModel {
-    config: PathBuf,
-    tokenizer: PathBuf,
-    weights: Vec<PathBuf>,
-    revision: Option<String>,
+/// A checkpoint's three files, resolved but not mapped.
+///
+/// `Runtime::load` maps the weights the moment it resolves them, which is what
+/// every command that runs the model wants and exactly what merging one does
+/// not: folding an adapter into the base rewrites tensors and never builds a
+/// decoder. Splitting resolution from mapping is what lets it read the same
+/// files, through the same Hub path and the same architecture refusal, without
+/// paying for a model it will not run.
+pub struct Checkpoint {
+    pub config: PathBuf,
+    pub tokenizer: PathBuf,
+    pub weights: Vec<PathBuf>,
+    pub revision: Option<String>,
 }
 
-fn resolve_model(model: &str, revision: Option<&str>) -> Result<ResolvedModel> {
-    let local = Path::new(model);
-    if local.is_dir() {
-        let config = local.join("config.json");
-        let tokenizer = local.join("tokenizer.json");
-        let weights = local_safetensors(local)?;
+impl Checkpoint {
+    /// Resolves `model` from a local directory or the Hugging Face Hub.
+    pub fn resolve(model: &str, revision: Option<&str>) -> Result<Self> {
+        let local = Path::new(model);
+        if local.is_dir() {
+            let config = local.join("config.json");
+            let tokenizer = local.join("tokenizer.json");
+            let weights = local_safetensors(local)?;
+            require_files(&config, &tokenizer, &weights)?;
+            return Ok(Self { config, tokenizer, weights, revision: revision.map(str::to_owned) });
+        }
+        let api = Api::new().context("failed to initialize Hugging Face Hub client")?;
+        let repo = Repo::with_revision(
+            model.to_owned(),
+            RepoType::Model,
+            revision.unwrap_or("main").to_owned(),
+        );
+        let remote = api.repo(repo);
+        let info = remote.info().with_context(|| format!("failed to read model repository {model}"))?;
+        let config = remote.get("config.json")?;
+        let tokenizer = remote.get("tokenizer.json")?;
+        let weight_names: Vec<String> = info.siblings
+            .into_iter()
+            .map(|file| file.rfilename)
+            .filter(|name| {
+                name.ends_with(".safetensors")
+                    && !name.contains("optimizer")
+                    && !name.contains("training_args")
+            })
+            .collect();
+        if weight_names.is_empty() {
+            bail!("model {model} publishes no safetensors weights");
+        }
+        let mut weights = Vec::with_capacity(weight_names.len());
+        for name in weight_names {
+            weights.push(remote.get(&name).with_context(|| format!("failed to download {name}"))?);
+        }
         require_files(&config, &tokenizer, &weights)?;
-        return Ok(ResolvedModel { config, tokenizer, weights, revision: revision.map(str::to_owned) });
+        Ok(Self { config, tokenizer, weights, revision: Some(info.sha) })
     }
-    let api = Api::new().context("failed to initialize Hugging Face Hub client")?;
-    let repo = Repo::with_revision(
-        model.to_owned(),
-        RepoType::Model,
-        revision.unwrap_or("main").to_owned(),
-    );
-    let remote = api.repo(repo);
-    let info = remote.info().with_context(|| format!("failed to read model repository {model}"))?;
-    let config = remote.get("config.json")?;
-    let tokenizer = remote.get("tokenizer.json")?;
-    let weight_names: Vec<String> = info.siblings
-        .into_iter()
-        .map(|file| file.rfilename)
-        .filter(|name| {
-            name.ends_with(".safetensors")
-                && !name.contains("optimizer")
-                && !name.contains("training_args")
-        })
-        .collect();
-    if weight_names.is_empty() {
-        bail!("model {model} publishes no safetensors weights");
+
+    /// The parsed Llama config and its end-of-sequence tokens.
+    ///
+    /// The architecture refusal lives here rather than in each caller, so a
+    /// command that never builds a decoder still refuses a checkpoint the
+    /// decoder could not have loaded — a merge that silently produced a
+    /// directory `Runtime::load` then rejects would be worse than no merge.
+    pub fn llama_config(&self) -> Result<(Config, BTreeSet<u32>)> {
+        let bytes = fs::read(&self.config)
+            .with_context(|| format!("failed to read {}", self.config.display()))?;
+        let raw: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid model config {}", self.config.display()))?;
+        let model_type = raw.get("model_type").and_then(|value| value.as_str()).unwrap_or("");
+        if model_type != "llama" {
+            bail!(
+                "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face Llama-family checkpoint with model_type=llama"
+            );
+        }
+        let llama: LlamaConfig = serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid Llama config {}", self.config.display()))?;
+        let tokens = eos_tokens(&llama);
+        Ok((llama.into_config(false), tokens))
     }
-    let mut weights = Vec::with_capacity(weight_names.len());
-    for name in weight_names {
-        weights.push(remote.get(&name).with_context(|| format!("failed to download {name}"))?);
-    }
-    require_files(&config, &tokenizer, &weights)?;
-    Ok(ResolvedModel { config, tokenizer, weights, revision: Some(info.sha) })
 }
 
 fn local_safetensors(root: &Path) -> Result<Vec<PathBuf>> {

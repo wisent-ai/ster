@@ -105,6 +105,26 @@ impl Target {
         }
     }
 
+    /// The projection's weight name inside a Hugging Face Llama checkpoint.
+    ///
+    /// This is the other half of the naming contract: [`Adapter::tensor_names`]
+    /// says where a factor lives in a Ster artifact, and this says which base
+    /// tensor that factor is an update to. Merging is the one operation that
+    /// needs both, and hard-coding the mapping at its call site would put half
+    /// the contract in a file that does not own it.
+    pub fn checkpoint_tensor(self, layer: usize) -> String {
+        let leaf = match self {
+            Self::Query => "self_attn.q_proj",
+            Self::Key => "self_attn.k_proj",
+            Self::Value => "self_attn.v_proj",
+            Self::Output => "self_attn.o_proj",
+            Self::Gate => "mlp.gate_proj",
+            Self::Up => "mlp.up_proj",
+            Self::Down => "mlp.down_proj",
+        };
+        format!("model.layers.{layer}.{leaf}.weight")
+    }
+
     /// The `(outputs, inputs)` shape of the projection this target adapts.
     ///
     /// Grouped-query attention makes key and value narrower than query, and the

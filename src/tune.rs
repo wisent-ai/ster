@@ -31,11 +31,13 @@
 
 mod dpo;
 mod grpo;
+mod merge;
 mod reward;
 mod sft;
 
 pub use dpo::{DpoLoss, DpoOptions, DpoReport, dpo};
 pub use grpo::{GrpoIteration, GrpoOptions, GrpoReport, Reward, grpo};
+pub use merge::{MergeReport, merge};
 pub use reward::{RewardHead, RewardModel, RewardOptions, RewardReport, reward};
 pub use sft::{SftOptions, SftReport, sft};
 

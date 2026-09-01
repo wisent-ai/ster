@@ -48,6 +48,7 @@ Included now:
   it and written in the same artifact;
 - group-relative policy optimization against a reward model or an offline
   deterministic reward, with a KL penalty to the frozen base;
+- merging an adapter into the base weights as a standalone checkpoint;
 - frozen adapter artifacts applied at generation time;
 - deterministic JSON pair, activation, steering, and evaluation formats.
 
@@ -334,8 +335,8 @@ workflows.
 
 ## Fine-tuning
 
-`ster tune` is the only part of Ster that trains a weight. It has five
-subcommands:
+`ster tune` owns adapters: four objectives that train one, and two
+utilities that read one. It has six subcommands:
 
 ```text
 ster tune sft --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
@@ -361,6 +362,8 @@ ster tune grpo --model <MODEL> --prompts <PROMPTS> --output <OUTPUT>
                [--learning-rate 0.0001] [--accumulation 1] [--warmup-steps 0]
                [--max-new-tokens 64] [--temperature 0.9] [--top-p 0.95]
                [--max-sequence 512] [--seed 42]
+ster tune merge --model <MODEL> --adapter <ADAPTER> --output <DIR>
+                [--revision <REVISION>] [--device cpu]
 ster tune inspect <ARTIFACT>
 ```
 
@@ -578,13 +581,46 @@ one entry per iteration carrying `iteration`, `groups`, `completions`,
 `mean_completion_tokens`. The history is the point: a single mean over a policy
 that moved the whole time hides exactly the trend the run exists to show.
 
+### Merging
+
+`ster tune merge` folds an adapter into the base weights and writes an ordinary
+checkpoint directory: `model.safetensors` beside the source's own `config.json`
+and `tokenizer.json`, which is exactly what `--model` accepts. An adapter is the
+right shape while it is being trained and while it is one of several a caller
+might swap between, and the wrong shape once it is finished and permanent — it
+costs two extra matmuls per adapted projection per token forever, and it means
+the model cannot be handed to anything that does not know what a Ster artifact
+is. The output is deliberately not a Ster format; a merge that produced
+something only Ster could read would have converted a portable adapter into an
+unportable model.
+
+No decoder is built. Merging rewrites tensors and never runs the model, so it
+resolves the same files through the same Hub path and the same architecture
+refusal, and maps nothing. The delta `(alpha / rank) * B @ A` is accumulated in
+F32 and cast back to whatever the source weight was, so a BF16 checkpoint merges
+to a BF16 checkpoint of the same size; accumulating in the source dtype would
+round twice and, at BF16's eight bits of mantissa, would quietly discard small
+updates. A sharded source whose shards name the same tensor twice is refused
+rather than half-merged.
+
+An adapter for another checkpoint is refused with
+`adapter was trained for model "…", current model is "…"`, a width mismatch with
+`adapter width {a} does not match model width {b}`, and a reward artifact with
+`adapter artifact is a reward model, not a generation adapter` — baking a reward
+model's adapters into a checkpoint and dropping its head produces a model that
+generates, trained by an objective that never asked it to.
+
+The report records `model`, `model_revision`, `adapter`, `output`, `rank`,
+`alpha`, `scale`, `targets`, `layers`, `hidden_size`, `merged_tensors`,
+`copied_tensors`, `total_tensors`, `parameters`, `dtype`, and `files`.
+
 Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
-and writes nothing but the artifact pair. The same five operations are jobs on
+and writes nothing but the artifact pair. The same six operations are jobs on
 the `ster serve` backend, `POST /v1/tune/sft`, `POST /v1/tune/dpo`,
-`POST /v1/tune/reward`, `POST /v1/tune/grpo` and `POST /v1/tune/inspect`, and
-`POST /v1/generate` takes the same `adapter` field. That is how Ster Desktop
-offers fine-tuning on its own screen, and how a finished run leaves the adapter
-it wrote in the field Generate reads.
+`POST /v1/tune/reward`, `POST /v1/tune/grpo`, `POST /v1/tune/merge` and
+`POST /v1/tune/inspect`, and `POST /v1/generate` takes the same `adapter` field.
+That is how Ster Desktop offers fine-tuning on its own screen, and how a
+finished run leaves the adapter it wrote in the field Generate reads.
 
 ## Artifact contract
 

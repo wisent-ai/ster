@@ -422,6 +422,19 @@ enum TuneCommand {
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
+    /// Fold a LoRA adapter into the base weights as a standalone checkpoint.
+    Merge {
+        #[command(flatten)]
+        model: ModelArgs,
+        /// The adapter to fold in. It must have been trained for this exact
+        /// model, and must be a generation adapter rather than a reward model.
+        #[arg(long)]
+        adapter: PathBuf,
+        /// Directory to write. It receives model.safetensors plus the source's
+        /// own config.json and tokenizer.json, which is what --model accepts.
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Print and validate a Ster LoRA adapter artifact.
     Inspect {
         #[arg(value_name = "ARTIFACT")]
@@ -899,6 +912,14 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                     "report": report,
                 }))?
             );
+        }
+        TuneCommand::Merge { model, adapter, output } => {
+            // No device and no runtime: merging rewrites tensors and never runs
+            // the model, so it resolves the checkpoint's files without mapping
+            // them.
+            let report =
+                tune::merge(&model.model, model.revision.as_deref(), &adapter, &output)?;
+            println!("{}", serde_json::to_string_pretty(&json!({ "report": report }))?);
         }
         TuneCommand::Inspect { artifact } => {
             // Inspection reads the adapter document alone: no model is

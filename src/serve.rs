@@ -132,6 +132,7 @@ fn handle_connection(stream: TcpStream, job_lock: &Mutex<()>) -> Result<()> {
         ("POST", "/v1/tune/dpo") => stream_job(&writer, &body, job_lock, tune_dpo_job),
         ("POST", "/v1/tune/reward") => stream_job(&writer, &body, job_lock, tune_reward_job),
         ("POST", "/v1/tune/grpo") => stream_job(&writer, &body, job_lock, tune_grpo_job),
+        ("POST", "/v1/tune/merge") => stream_job(&writer, &body, job_lock, tune_merge_job),
         ("POST", "/v1/tune/inspect") => stream_job(&writer, &body, job_lock, tune_inspect_job),
         _ => send_error(&writer, 404, &format!("unknown endpoint: {method} {path}")),
     }
@@ -645,6 +646,29 @@ impl Validate for TuneGrpoRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TuneMergeRequest {
+    #[serde(flatten)]
+    model: ModelRequest,
+    /// The adapter to fold in; it must be a generation adapter trained for
+    /// this exact model.
+    #[serde(default)]
+    adapter: String,
+    /// Directory to write: model.safetensors plus the source's own
+    /// config.json and tokenizer.json, which is what `model` accepts.
+    #[serde(default)]
+    output: String,
+}
+
+impl Validate for TuneMergeRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("tune merge")?;
+        require(&self.adapter, "tune merge requires an adapter".to_owned())?;
+        require(&self.output, "tune merge requires an output directory".to_owned())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TuneInspectRequest {
     #[serde(default)]
     artifact: String,
@@ -1116,6 +1140,18 @@ fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value> {
     let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
+}
+
+/// Mirrors the `ster tune merge` arm. No device and no runtime: merging
+/// rewrites tensors and never runs the model.
+fn tune_merge_job(request: TuneMergeRequest) -> Result<Value> {
+    let report = tune::merge(
+        &request.model.model,
+        request.model.revision.as_deref(),
+        Path::new(&request.adapter),
+        Path::new(&request.output),
+    )?;
+    Ok(json!({ "report": report }))
 }
 
 fn tune_inspect_job(request: TuneInspectRequest) -> Result<Value> {
