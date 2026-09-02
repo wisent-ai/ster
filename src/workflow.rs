@@ -39,6 +39,7 @@ pub fn artifact_summary(artifact: &SteeringArtifact) -> serde_json::Value {
             "trait_name": artifact.trait_name,
             "method": artifact.method,
             "hidden_size": artifact.hidden_size,
+            "precision": artifact.precision,
             "layers": artifact.vectors.iter().map(|vector| serde_json::json!({
                 "layer": vector.layer,
                 "train_accuracy": vector.train_accuracy,
@@ -129,6 +130,7 @@ pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<
             train_margin: margin,
             train_accuracy: accuracy,
         }],
+        runtime.precision(),
     );
     artifact.metadata.insert("selection".to_owned(), "80/20 holdout over method and layer".to_owned());
     Ok(artifact)
@@ -243,6 +245,7 @@ fn artifact_from_captured(
         method.name().to_owned(),
         runtime.hidden_size(),
         vectors,
+        runtime.precision(),
     ))
 }
 

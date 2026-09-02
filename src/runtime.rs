@@ -24,6 +24,11 @@ pub struct Runtime {
     model: SteeringLlama,
     device: Device,
     dtype: DType,
+    /// The flag value that chose `dtype`, kept alongside it because a written
+    /// artifact records the operator's word ("f16") rather than Candle's
+    /// enum, and deriving one from the other would have to guess which of
+    /// several spellings produced a given `DType`.
+    precision: Precision,
     /// The dtype every weight this run creates is held in, which is always
     /// F32 whatever the base is mapped at. See `load_trainable_at`.
     param_dtype: DType,
@@ -231,6 +236,13 @@ impl Runtime {
     /// activation flowing through them carries.
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    /// The precision flag this run was loaded at, as the operator spelled it.
+    /// What a written artifact records, so a later run can be told it is
+    /// reading a direction fitted in a space it is not measuring in.
+    pub fn precision(&self) -> Precision {
+        self.precision
     }
 
     /// The dtype a weight this run creates and steps must be held in: always
@@ -838,6 +850,7 @@ struct BaseLoad {
     chat: Option<chat::Template>,
     device: Device,
     dtype: DType,
+    precision: Precision,
     param_dtype: DType,
 }
 
@@ -867,6 +880,7 @@ impl BaseLoad {
             chat,
             device,
             dtype,
+            precision,
             param_dtype,
         })
     }
@@ -886,6 +900,7 @@ impl BaseLoad {
             model,
             device: self.device,
             dtype: self.dtype,
+            precision: self.precision,
             param_dtype: self.param_dtype,
             eos_tokens: self.eos_tokens,
             chat: self.chat,

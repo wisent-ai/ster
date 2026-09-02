@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, fs, path::Path};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::Precision;
+
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +125,25 @@ pub struct SteeringArtifact {
     pub product: String,
     pub model: String,
     pub model_revision: Option<String>,
+    /// The dtype the base weights were mapped at when this direction was
+    /// fitted, spelled exactly as `--precision` spells it: `"f32"`, `"f16"`,
+    /// or `"bf16"`.
+    ///
+    /// `evaluate --precision` has always told the operator it should match
+    /// the run that trained the artifact, and until this field existed
+    /// nothing could check it — the claim was advice with no evidence behind
+    /// it. An adapter sidecar has recorded the same value at
+    /// `train.precision` since precision landed; this is the steering half of
+    /// the same provenance, in the same spelling, so one comparison reads
+    /// both.
+    ///
+    /// `None` means an artifact written before this field existed. It is
+    /// additive and defaulted for exactly that reason, which is also why the
+    /// schema version does not move. It is deliberately not a `metadata`
+    /// entry: provenance the product wrote must stay distinguishable from
+    /// notes the operator wrote.
+    #[serde(default)]
+    pub precision: Option<String>,
     pub trait_name: String,
     pub method: String,
     pub hidden_size: usize,
@@ -139,12 +160,14 @@ impl SteeringArtifact {
         method: String,
         hidden_size: usize,
         vectors: Vec<LayerVector>,
+        precision: Precision,
     ) -> Self {
         Self {
             schema_version: ARTIFACT_SCHEMA_VERSION,
             product: "ster".to_owned(),
             model,
             model_revision,
+            precision: Some(precision.name().to_owned()),
             trait_name,
             method,
             hidden_size,
