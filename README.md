@@ -767,19 +767,24 @@ trained.
 
 The report records `pairs`, `trained_pairs`, `skipped_long`, `epochs`, `steps`,
 `trainable_tensors`, `trainable_parameters`, `first_loss`, `final_loss`,
-`mean_final_epoch_loss`, `accuracy`, `mean_chosen_score`,
+`mean_final_epoch_loss`, `accuracy`, `tied_pairs`, `mean_chosen_score`,
 `mean_rejected_score`, `mean_score_margin`, `rank`, `alpha`, `targets`,
-`layers`, `learning_rate`, and `accumulation`, with `accuracy` and the scores
-measured over the final epoch.
+`layers`, `learning_rate`, and `accumulation`, with `accuracy`, `tied_pairs`
+and the scores measured over the final epoch.
 
 One reading of that report is worth stating, because it looks alarming and is
 not. A one-epoch run reports `accuracy` 0.0 and `mean_score_margin` 0.0000.
 That is not a head that ranked every pair backwards; it is a head that has not
 moved. It starts at zeros, so every pair scores an exact tie, and a tie is not a
-strict win. The two cases are distinguishable in the report already: all ties
-give a margin of exactly 0.0, while a head that genuinely prefers the rejected
-side gives a negative one. Read the margin first and the accuracy second, and
-give the run more than one epoch before either number means anything.
+strict win. `tied_pairs` is what tells the two apart from the document alone:
+a head that never moved ties every pair it trained on, so `tied_pairs` equals
+`trained_pairs`, while a head that learned the order backwards ties none of
+them and reports a negative `mean_score_margin` beside the same accuracy. It
+counts exact equality rather than closeness, because the tie it exists to name
+is two sides of one pair run through identical weights, not two scores a
+trained head happens to find similar. Read the tie count first and the accuracy
+second, and give the run more than one epoch before either number means
+anything.
 
 ### Policy optimization
 

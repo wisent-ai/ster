@@ -19,7 +19,11 @@
 //!   are meaningful against each other and not against any external unit. The
 //!   head is zero-initialised, which pins the starting point at "no opinion":
 //!   every sequence scores exactly zero, and the first loss is therefore
-//!   exactly `ln 2`, the same identity check the preference losses give.
+//!   exactly `ln 2`, the same identity check the preference losses give. That
+//!   starting point is also why the report counts `tied_pairs`: a tie is not a
+//!   strict win, so a head that has not moved reports `accuracy` 0.0, which
+//!   reads exactly like a head that ranked every pair backwards. The tie count
+//!   separates them without redefining the accuracy anyone already consumes.
 //!
 //! The head trains together with the adapters beneath it, in one `VarMap` and
 //! under one optimizer, and is written into the same safetensors file. A head
@@ -183,6 +187,12 @@ pub struct RewardReport {
     /// epoch — so it describes the head that was written, not an average over
     /// a head that was still moving.
     pub accuracy: f32,
+    /// How many of those pairs the head scored exactly equal, over the same
+    /// final epoch — the pairs `accuracy` counts as not-correct without them
+    /// being wrong. A fresh head is zeros, so a run short enough that it never
+    /// moved reports every pair tied here and 0.0 there; a head that learned
+    /// the order backwards reports the same accuracy with no ties at all.
+    pub tied_pairs: usize,
     pub mean_chosen_score: f32,
     pub mean_rejected_score: f32,
     pub mean_score_margin: f32,
@@ -317,11 +327,13 @@ pub fn reward(
         }
 
         workflow::progress(format!(
-            "epoch {}/{} mean loss {:.4} accuracy {:.3} score margin {:.4}",
+            "epoch {}/{} mean loss {:.4} accuracy {:.3} ties {}/{} score margin {:.4}",
             epoch + 1,
             options.epochs,
             summary.mean_loss(),
             summary.accuracy(),
+            summary.tied,
+            summary.pairs,
             summary.mean_margin()
         ));
         epoch_summary = summary;
@@ -342,6 +354,7 @@ pub fn reward(
         final_loss,
         mean_final_epoch_loss: epoch_summary.mean_loss(),
         accuracy: epoch_summary.accuracy(),
+        tied_pairs: epoch_summary.tied,
         mean_chosen_score: epoch_summary.mean_chosen(),
         mean_rejected_score: epoch_summary.mean_rejected(),
         mean_score_margin: epoch_summary.mean_margin(),
@@ -388,6 +401,13 @@ struct Summary {
     pairs: usize,
     loss: f64,
     correct: usize,
+    /// Pairs whose two sides scored bit-identically. The comparison is exact
+    /// on purpose: the only tie this is here to name is the one a
+    /// zero-initialised head produces, where both sides are the same
+    /// arithmetic on the same weights and land on the same float. A tolerance
+    /// would start folding in pairs the head merely finds close, which is a
+    /// different statement.
+    tied: usize,
     chosen: f64,
     rejected: f64,
 }
@@ -400,6 +420,8 @@ impl Summary {
         self.rejected += step.rejected;
         if step.chosen > step.rejected {
             self.correct += 1;
+        } else if step.chosen == step.rejected {
+            self.tied += 1;
         }
     }
 
