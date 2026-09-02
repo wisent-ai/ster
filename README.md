@@ -103,6 +103,21 @@ cargo install --git https://github.com/wisent-ai/ster --features cuda --locked
 The crates.io name `ster` is currently unclaimed and is not Ster's release
 surface. `pip install ster` installs unrelated software from another publisher.
 
+### Where checkpoint downloads land
+
+A `--model` argument that is not a local directory is resolved against the
+Hugging Face Hub, and the multi-gigabyte weights land in the default hub cache:
+
+- weights, `config.json` and `tokenizer.json`: `~/.cache/huggingface/hub`;
+- an optional access token, read only if that file already exists:
+  `~/.cache/huggingface/token`.
+
+Ster builds the hub client with hf-hub's bare `Api::new` (`src/runtime.rs:989`)
+rather than its environment-aware builder, so `HF_HOME` and `HF_ENDPOINT` do not
+move that cache in 0.13. To download somewhere else — another disk, a shared
+volume — fetch the repository yourself and pass the directory as `--model`. Ster
+runs no free-space preflight, so size the destination before a first fetch.
+
 
 ## First steering workflow
 
