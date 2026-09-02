@@ -1,5 +1,6 @@
 pub mod artifact;
 pub mod brama;
+pub mod chat;
 pub mod dedupe;
 pub mod diversity;
 pub mod lora;
@@ -13,6 +14,7 @@ pub mod tune;
 pub mod workflow;
 
 pub use artifact::{ContrastivePair, PairSet, SteeringArtifact};
+pub use chat::{Choice as ChatChoice, Status as ChatStatus};
 pub use lora::{Spec as LoraSpec, Target as LoraTarget};
 pub use pairs::{SetReport, SynthesisOptions, SynthesisReport};
 pub use representation::TrainingMethod;
