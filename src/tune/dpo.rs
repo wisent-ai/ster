@@ -40,8 +40,8 @@ use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::Serialize;
 
 use super::{
-    EncodedPair, Preflight, Trainable, encode_pairs, pair_set_label, schedule, sequence_logprob,
-    softplus,
+    EncodedPair, Preflight, Trainable, batch, encode_pairs, pair_set_label, schedule,
+    sequence_logprob, softplus,
 };
 use crate::{artifact::PairSet, lora, model::Route, runtime::Runtime, workflow};
 
@@ -96,6 +96,10 @@ pub struct DpoOptions {
     pub epochs: usize,
     pub learning_rate: f64,
     pub accumulation: usize,
+    /// Pairs folded into one forward pass. A pair is two rows, so a batch of
+    /// four pairs is a forward of eight sequences; one is the unbatched pass
+    /// every run recorded before batching existed.
+    pub batch: usize,
     pub warmup_steps: usize,
     pub max_sequence: usize,
     pub seed: u64,
@@ -128,6 +132,7 @@ pub struct DpoReport {
     pub layers: Vec<usize>,
     pub learning_rate: f64,
     pub accumulation: usize,
+    pub batch: usize,
 }
 
 /// Trains the adapters `varmap` owns to prefer each pair's positive side.
@@ -153,6 +158,7 @@ pub fn dpo(
         noun: "adapter tensors",
         epochs: options.epochs,
         accumulation: options.accumulation,
+        batch: options.batch,
         learning_rate: options.learning_rate,
         max_sequence: options.max_sequence,
     }
@@ -163,7 +169,7 @@ pub fn dpo(
         .map(Scored::new)
         .collect();
     let skipped_long = pairs.pairs.len() - encoded.len();
-    reference_scores(runtime, &mut encoded)?;
+    reference_scores(runtime, &mut encoded, options.batch)?;
 
     let mut optimizer = AdamW::new(
         vars,
@@ -171,7 +177,16 @@ pub fn dpo(
     )
     .context("failed to initialize the AdamW optimizer")?;
 
-    let steps_per_epoch = encoded.len().div_ceil(options.accumulation);
+    // A pair's two sides go through the same forward, so the width its rows
+    // are padded to is the longer of the two; grouping on that is grouping on
+    // what the padding actually costs.
+    let lengths: Vec<usize> = encoded
+        .iter()
+        .map(|scored| scored.pair.chosen.len().max(scored.pair.rejected.len()))
+        .collect();
+    let scale = batch::divisor(options.batch, options.accumulation);
+    let steps_per_epoch =
+        batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation);
     let total_steps = steps_per_epoch * options.epochs;
     let mut order: Vec<usize> = (0..encoded.len()).collect();
     let mut step = 0usize;
@@ -186,7 +201,7 @@ pub fn dpo(
         order.shuffle(&mut rng);
         let mut summary = Summary::default();
 
-        for group in order.chunks(options.accumulation) {
+        for plan in batch::plan(&order, &lengths, options.batch, options.accumulation) {
             optimizer.set_learning_rate(schedule(
                 options.learning_rate,
                 step,
@@ -194,37 +209,49 @@ pub fn dpo(
                 options.warmup_steps,
             ));
 
-            // One sequence per forward, two forwards per pair, `accumulation`
-            // pairs per optimizer step. The decoder has no padding token and no
-            // attention mask for a batched sequence, so a real batch would train
-            // the adapter on whatever filler the shorter rows carried; summing
-            // scaled per-pair losses gives the same gradient at the cost of
-            // holding one graph at a time.
+            // `batch` pairs per forward — two rows each, chosen then rejected,
+            // right-padded to a common width and masked so neither side reads
+            // the other's filler — and `accumulation` forwards per optimizer
+            // step. Each pair's loss is divided by the constant
+            // `accumulation * batch`, so a short tail steps proportionally
+            // smaller rather than as far as a full step.
             let mut summed: Option<Tensor> = None;
             let mut group_loss = 0f64;
-            for &slot in group {
-                let scored = &encoded[slot];
-                let value = step_loss(runtime, scored, options).with_context(|| {
-                    format!("pair {} produced no usable loss", scored.pair.index)
-                })?;
-                group_loss += value.loss;
-                summary.record(&value);
-                let scaled = (value.tensor / options.accumulation as f64)?;
-                summed = Some(match summed {
-                    Some(total) => (total + scaled)?,
-                    None => scaled,
-                });
+            for forward in &plan.forwards {
+                let mut rows: Vec<&[u32]> = Vec::with_capacity(forward.len() * 2);
+                for &slot in forward {
+                    rows.push(&encoded[slot].pair.chosen);
+                    rows.push(&encoded[slot].pair.rejected);
+                }
+                let logits = runtime.forward_train_rows(&rows)?;
+                for (position, &slot) in forward.iter().enumerate() {
+                    let scored = &encoded[slot];
+                    let chosen = batch::row(&logits, position * 2, scored.pair.chosen.len())?;
+                    let rejected =
+                        batch::row(&logits, position * 2 + 1, scored.pair.rejected.len())?;
+                    let value = step_loss(runtime, scored, &chosen, &rejected, options)
+                        .with_context(|| {
+                            format!("pair {} produced no usable loss", scored.pair.index)
+                        })?;
+                    group_loss += value.loss;
+                    summary.record(&value);
+                    let scaled = (value.tensor / scale)?;
+                    summed = Some(match summed {
+                        Some(total) => (total + scaled)?,
+                        None => scaled,
+                    });
+                }
             }
             let Some(summed) = summed else {
-                // `chunks` never yields an empty slice, so this is unreachable in
-                // practice; refusing beats stepping on nothing.
+                // `plan` never yields a step with no forwards and never a
+                // forward with no rows; refusing beats stepping on nothing.
                 bail!("an accumulation group contained no pairs");
             };
             optimizer
                 .backward_step(&summed)
                 .context("failed to backpropagate the accumulated loss")?;
 
-            let group_mean = (group_loss / group.len() as f64) as f32;
+            let group_mean = (group_loss / plan.units as f64) as f32;
             step += 1;
             if first_loss.is_none() {
                 first_loss = Some(group_mean);
@@ -277,6 +304,7 @@ pub fn dpo(
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,
+        batch: options.batch,
     })
 }
 
@@ -301,19 +329,32 @@ impl Scored {
 /// Run once, before the optimizer exists. The reference never changes, so
 /// re-deriving these every epoch would be `2 * pairs * (epochs - 1)` forward
 /// passes spent recomputing constants.
-fn reference_scores(runtime: &Runtime, encoded: &mut [Scored]) -> Result<()> {
+fn reference_scores(runtime: &Runtime, encoded: &mut [Scored], pairs: usize) -> Result<()> {
     let total = encoded.len();
     workflow::progress(format!("scoring {total} pairs under the frozen reference model"));
     let device = runtime.device();
-    for (position, scored) in encoded.iter_mut().enumerate() {
-        for (ids, slot) in [
-            (&scored.pair.chosen, &mut scored.chosen_reference),
-            (&scored.pair.rejected, &mut scored.rejected_reference),
-        ] {
-            let logits = runtime.forward_scored(ids, Route::Base)?;
-            *slot = sequence_logprob(&logits, ids, 1, device)?.to_scalar::<f32>()? as f64;
+    let mut scored = 0usize;
+    // Batched on the same knob the training loop uses, in input order: the
+    // reference is a constant and nothing here is shuffled, so the only thing
+    // a group decides is how many rows share a kernel launch.
+    for group in encoded.chunks_mut(pairs.max(1)) {
+        let mut rows: Vec<&[u32]> = Vec::with_capacity(group.len() * 2);
+        for pair in group.iter() {
+            rows.push(&pair.pair.chosen);
+            rows.push(&pair.pair.rejected);
         }
-        workflow::progress(format!("reference pair {}/{total}", position + 1));
+        let logits = runtime.forward_scored_rows(&rows, Route::Base)?;
+        for (position, pair) in group.iter_mut().enumerate() {
+            let row = batch::row(&logits, position * 2, pair.pair.chosen.len())?;
+            pair.chosen_reference =
+                sequence_logprob(&row, &pair.pair.chosen, 1, device)?.to_scalar::<f32>()? as f64;
+            let row = batch::row(&logits, position * 2 + 1, pair.pair.rejected.len())?;
+            pair.rejected_reference =
+                sequence_logprob(&row, &pair.pair.rejected, 1, device)?.to_scalar::<f32>()?
+                    as f64;
+            scored += 1;
+            workflow::progress(format!("reference pair {scored}/{total}"));
+        }
     }
     Ok(())
 }
@@ -326,12 +367,32 @@ struct Step {
     rejected_reward: f64,
 }
 
-/// One pair's contribution: two policy forwards, one margin, one loss.
-fn step_loss(runtime: &Runtime, scored: &Scored, options: &DpoOptions) -> Result<Step> {
-    let chosen =
-        policy_log_ratio(runtime, &scored.pair.chosen, scored.chosen_reference, options)?;
-    let rejected =
-        policy_log_ratio(runtime, &scored.pair.rejected, scored.rejected_reference, options)?;
+/// One pair's contribution: two scored rows, one margin, one loss.
+///
+/// The logits arrive already read out of whatever forward produced them, so
+/// this function is identical whether one pair went through the model or
+/// eight did.
+fn step_loss(
+    runtime: &Runtime,
+    scored: &Scored,
+    chosen_logits: &Tensor,
+    rejected_logits: &Tensor,
+    options: &DpoOptions,
+) -> Result<Step> {
+    let chosen = policy_log_ratio(
+        runtime,
+        chosen_logits,
+        &scored.pair.chosen,
+        scored.chosen_reference,
+        options,
+    )?;
+    let rejected = policy_log_ratio(
+        runtime,
+        rejected_logits,
+        &scored.pair.rejected,
+        scored.rejected_reference,
+        options,
+    )?;
     let margin = (&chosen - &rejected)?;
     let tensor = match options.loss {
         // -log sigmoid(beta * margin), written as the softplus that does not
@@ -358,12 +419,12 @@ fn step_loss(runtime: &Runtime, scored: &Scored, options: &DpoOptions) -> Result
 /// the objective that will consume it.
 fn policy_log_ratio(
     runtime: &Runtime,
+    logits: &Tensor,
     ids: &[u32],
     reference: f64,
     options: &DpoOptions,
 ) -> Result<Tensor> {
-    let logits = runtime.forward_train(ids)?;
-    let policy = sequence_logprob(&logits, ids, 1, runtime.device())?;
+    let policy = sequence_logprob(logits, ids, 1, runtime.device())?;
     let ratio = (policy - reference)?;
     if options.loss.length_normalized() {
         // `sequence_logprob` scores every token after the begin-of-sequence
