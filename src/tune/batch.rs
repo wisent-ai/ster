@@ -28,6 +28,19 @@
 //!   `accumulation * batch` whatever the step actually held, so a short tail
 //!   steps proportionally smaller — exactly as a short accumulation group does
 //!   today.
+//!
+//! The grouping rule above is what the design says; this is what the product
+//! measured. `ster tune evaluate` over 64 held-out examples on a
+//! grouped-query toy checkpoint, at `--batch-size 4` and `--batch-size 8`
+//! against `--batch-size 1`, agreed on 63 of the 64 examples *bitwise* and
+//! differed on one, at the eighth significant digit
+//! (`4.175486373901367` against `4.175485992431641`); the corpus loss moved at
+//! the tenth. That asymmetry is the evidence the padding mask holds: a row
+//! that could see another row's filler would be wrong in proportion to how
+//! much filler it was given, so a leak moves *every* short row and never one
+//! of them. One row differing at the last few bits is float summation
+//! associating differently inside a wider kernel, which is the one difference
+//! a correct batch is allowed to make.
 
 use anyhow::Result;
 use candle_core::Tensor;
