@@ -5,7 +5,7 @@ use candle_core::Device;
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use ster::{
-    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions,
+    ChatChoice, ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions,
     PairSet, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
     SynthesisOptions, TrainingMethod,
     brama,
@@ -81,6 +81,12 @@ enum Command {
         /// than steering the wrong residual stream.
         #[arg(long)]
         adapter: Option<PathBuf>,
+        /// auto renders the prompt through the model's own chat template when
+        /// it publishes one, off sends the prompt as raw text. An instruct
+        /// checkpoint asked a bare question continues the text instead of
+        /// answering it, which is what auto exists to prevent.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         #[arg(long, default_value_t = 1.0)]
         strength: f64,
         #[arg(long, default_value_t = 128)]
@@ -264,6 +270,12 @@ enum TuneCommand {
         /// truncated; a cut completion would teach the model to stop early.
         #[arg(long, default_value_t = 512)]
         max_sequence: usize,
+        /// auto encodes every prompt and completion through the model's own
+        /// chat template when it publishes one, off encodes raw text. An
+        /// instruct checkpoint trained on raw text learns a format it will
+        /// never be prompted in.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -314,6 +326,11 @@ enum TuneCommand {
         /// than truncated; a cut response is not the response that was preferred.
         #[arg(long, default_value_t = 512)]
         max_sequence: usize,
+        /// auto encodes both sides of every pair as the assistant turn the
+        /// model's own chat template renders, when it publishes one; off
+        /// encodes raw text.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -357,6 +374,11 @@ enum TuneCommand {
         /// than truncated; a cut response is not the response that was ranked.
         #[arg(long, default_value_t = 512)]
         max_sequence: usize,
+        /// auto encodes both sides of every pair as the assistant turn the
+        /// model's own chat template renders, when it publishes one; off
+        /// encodes raw text.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -419,6 +441,11 @@ enum TuneCommand {
         /// tokens are skipped rather than truncated.
         #[arg(long, default_value_t = 512)]
         max_sequence: usize,
+        /// auto samples every completion from the prompt as the model's own
+        /// chat template renders it, when it publishes one; off samples from
+        /// raw text.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -450,6 +477,12 @@ enum TuneCommand {
         /// truncated; a cut completion is not the completion being scored.
         #[arg(long, default_value_t = 512)]
         max_sequence: usize,
+        /// auto scores every example in the shape the model's own chat
+        /// template renders, when it publishes one; off scores raw text. It
+        /// must match the run that trained the adapter, or the score measures
+        /// a format the adapter never saw.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
     },
     /// Print and validate a Ster LoRA adapter artifact.
     Inspect {
@@ -509,6 +542,7 @@ fn main() -> Result<()> {
             prompt,
             vector,
             adapter,
+            chat_template,
             strength,
             max_new_tokens,
             temperature,
@@ -518,7 +552,7 @@ fn main() -> Result<()> {
             // An adapter rewrites the projections themselves, so it is
             // attached while the weights are mapped rather than applied per
             // token the way a steering vector is.
-            let runtime = match adapter.as_deref() {
+            let mut runtime = match adapter.as_deref() {
                 Some(adapter) => Runtime::load_with_adapter(
                     &model.model,
                     model.revision.as_deref(),
@@ -527,6 +561,7 @@ fn main() -> Result<()> {
                 )?,
                 None => model.load()?,
             };
+            runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
             let generated = runtime.generate(
                 &prompt,
@@ -718,6 +753,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             accumulation,
             warmup_steps,
             max_sequence,
+            chat_template,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -731,8 +767,9 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             // The adapters have to exist before the first forward pass, so
             // the runtime is built from the spec rather than patched after
             // loading; the returned VarMap owns every trainable tensor.
-            let (runtime, varmap) =
+            let (mut runtime, varmap) =
                 Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let example_set = ExampleSet::load(&examples)?;
             let options = SftOptions {
                 spec: spec.clone(),
@@ -745,8 +782,11 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             };
             let report = tune::sft(&runtime, &varmap, &example_set, &options)?;
             // The report is folded into the artifact so a trained adapter
-            // always carries the run that produced it.
-            let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+            // always carries the run that produced it, and the encoding it was
+            // produced in travels with it.
+            let mut report = serde_json::to_value(&report)?;
+            chat.annotate(&mut report)?;
+            let artifact = runtime.adapter_artifact(&spec, report.clone())?;
             artifact.save(&output)?;
             println!(
                 "{}",
@@ -771,6 +811,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             accumulation,
             warmup_steps,
             max_sequence,
+            chat_template,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -784,8 +825,9 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             // The reference the objective measures against is this same
             // runtime with the adapters skipped, so exactly one model is
             // loaded however many times each sequence is scored.
-            let (runtime, varmap) =
+            let (mut runtime, varmap) =
                 Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let pair_set = PairSet::load(&pairs)?;
             let options = DpoOptions {
                 spec: spec.clone(),
@@ -799,7 +841,9 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 seed,
             };
             let report = tune::dpo(&runtime, &varmap, &pair_set, &options)?;
-            let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+            let mut report = serde_json::to_value(&report)?;
+            chat.annotate(&mut report)?;
+            let artifact = runtime.adapter_artifact(&spec, report.clone())?;
             artifact.save(&output)?;
             println!(
                 "{}",
@@ -822,6 +866,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             accumulation,
             warmup_steps,
             max_sequence,
+            chat_template,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -832,8 +877,9 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 layers: parse_adapter_layers(&layers)?,
                 seed,
             };
-            let (runtime, varmap) =
+            let (mut runtime, varmap) =
                 Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             // The head joins the same VarMap the adapters live in, so one
             // optimizer steps the pair and the artifact holds both.
             let head = RewardHead::fresh(
@@ -853,8 +899,9 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 seed,
             };
             let report = tune::reward(&runtime, &varmap, &head, &pair_set, &options)?;
-            let artifact =
-                runtime.reward_artifact(&spec, head.weight(), serde_json::to_value(&report)?)?;
+            let mut report = serde_json::to_value(&report)?;
+            chat.annotate(&mut report)?;
+            let artifact = runtime.reward_artifact(&spec, head.weight(), report.clone())?;
             artifact.save(&output)?;
             println!(
                 "{}",
@@ -883,6 +930,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             temperature,
             top_p,
             max_sequence,
+            chat_template,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -897,8 +945,9 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             // reward artifact for the wrong checkpoint should be refused
             // before an operator waits out a policy load to hear it.
             let source = Reward::parse(&reward, &model.model, model.revision.as_deref(), device)?;
-            let (runtime, varmap) =
+            let (mut runtime, varmap) =
                 Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let prompt_set = PromptSet::load(&prompts)?;
             let options = GrpoOptions {
                 spec: spec.clone(),
@@ -919,7 +968,9 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             };
             let report =
                 tune::grpo(&runtime, &varmap, &prompt_set, &source, &reward, &options)?;
-            let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+            let mut report = serde_json::to_value(&report)?;
+            chat.annotate(&mut report)?;
+            let artifact = runtime.adapter_artifact(&spec, report.clone())?;
             artifact.save(&output)?;
             println!(
                 "{}",
@@ -937,11 +988,11 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 tune::merge(&model.model, model.revision.as_deref(), &adapter, &output)?;
             println!("{}", serde_json::to_string_pretty(&json!({ "report": report }))?);
         }
-        TuneCommand::Evaluate { model, examples, adapter, max_sequence } => {
+        TuneCommand::Evaluate { model, examples, adapter, max_sequence, chat_template } => {
             // The adapter is attached while the weights are mapped, exactly as
             // `generate --adapter` attaches one, so the score is the score of
             // the model an operator would actually run.
-            let runtime = match adapter.as_deref() {
+            let mut runtime = match adapter.as_deref() {
                 Some(adapter) => Runtime::load_with_adapter(
                     &model.model,
                     model.revision.as_deref(),
@@ -950,6 +1001,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 )?,
                 None => model.load()?,
             };
+            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let example_set = ExampleSet::load(&examples)?;
             let report = tune::evaluate(
                 &runtime,
@@ -957,6 +1009,8 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 adapter.as_deref(),
                 &EvaluateOptions { max_sequence },
             )?;
+            let mut report = serde_json::to_value(&report)?;
+            chat.annotate(&mut report)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         TuneCommand::Inspect { artifact } => {
