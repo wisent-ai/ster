@@ -69,13 +69,23 @@ Explicit boundaries:
   that reads them. It trains nothing else: the base weights are mapped
   read-only and never registered as trainable. One sequence goes through each
   forward pass with gradient accumulation standing in for a batch, and there is
-  no distributed training and no fleet placement: that belongs to Stado.
+  no distributed training and no fleet placement. Ster does not place work on
+  another machine, and nothing places Ster: it trains on the machine you start
+  it on.
 - No objective consults a hosted model. `ster tune grpo` takes its reward from
   a reward model you trained or from a deterministic function of the
   completion; there is no judge model and no LLM-as-critic wired into any
   gradient.
-- Ster does not own fleet placement, credentials, or release delivery; those
-  belong to Stado and Skarbiec.
+- Ster does not place work on a fleet, and manages no credentials: it has no
+  credential store, no credential lifecycle, and reads what it needs from the
+  environment it was started in. Neither responsibility is delegated to another
+  product. The compute registry declares no Ster placement profile, no Ster OS
+  unit, and no Ster workload; `stado fleet list` places Ster nowhere; and
+  Skarbiec has no record of Ster in its source, README or documentation. If you
+  need a run on a bigger machine, you start Ster on that machine yourself.
+- Release delivery is the one thing another product does do for Ster: Stado
+  installs the built binary from the `.wisent-release.json` this repository
+  ships. See [Installing through Stado](#installing-through-stado).
 - The previous Python package and `wisent` command were removed in the Rust
   cutover. Python namespace compatibility is not part of the Ster contract.
 
@@ -102,6 +112,32 @@ cargo install --git https://github.com/wisent-ai/ster --features cuda --locked
 
 The crates.io name `ster` is currently unclaimed and is not Ster's release
 surface. `pip install ster` installs unrelated software from another publisher.
+
+### Installing through Stado
+
+Inside Wisent, the built binary is delivered by Stado rather than by `cargo`.
+Ster ships the two files that make this work — `.wisent-release.json` and
+`scripts/build-release.sh` — and Stado reads them:
+
+```bash
+stado product install ster --surface cli
+stado product status ster --surface cli
+stado product update ster --surface cli
+stado product rollback ster --surface cli
+```
+
+`status` reports the recipe it installed from (kind `stado-release`, repository
+`wisent-ai/ster`, manifest `.wisent-release.json`), the `source_revision` it was
+built from, and the two paths it wrote: `~/.stado/bin/ster` and
+`~/.local/bin/ster`. Each `update` copies the binary it replaces under
+`~/.stado/products/ster/backups/<timestamp>/ster`, which is what `rollback`
+restores. A `status` of `stale` means the installed revision is behind
+`origin/main`.
+
+The build script leaves the bare binary beside the tarball on purpose: a
+`stado-release` install copies individual `bin/` members out of `.wisent-output`
+and never unpacks an archive. The dependency runs one way — Stado installs Ster,
+and Ster never calls Stado. `cargo install` needs none of it.
 
 ### Where checkpoint downloads land
 
@@ -1153,9 +1189,9 @@ Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
 touches no credential, and writes nothing but the artifact it was asked for. The
 reward and policy loops are as local and as small as the rest — same single
 process, same read-only base, same one sequence per forward — and no training is
-hosted. There is no distributed training, no fleet placement, and no release
-delivery; Brama owns hosted inference, Stado owns fleet placement, and neither is
-called from a gradient. There is no judge model and no LLM-as-critic
+hosted. There is no distributed training and no fleet placement: a gradient
+never leaves this process, and no other product places one for Ster. There is
+no judge model and no LLM-as-critic
 anywhere in the loop: `tune grpo` takes its reward from a reward model you
 trained or from a deterministic function, and if you want a hosted model's
 opinion, that is `pairs synthesize --generator brama` producing training data,
