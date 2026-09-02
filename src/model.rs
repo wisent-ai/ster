@@ -36,7 +36,17 @@
 //!   positions round to the same angle, which rotates two different tokens
 //!   identically. [`apply_rotary`] returns the rotated query and key at the
 //!   weights' dtype, so the key-value cache still stores half-precision keys
-//!   and half precision is still a memory saving.
+//!   and half precision is still a memory saving. Measured, because the reason
+//!   above is only a reason: TinyLlama-1.1B-Chat at F16, two held-out examples
+//!   1864 and 1860 tokens long, scored by a build holding the tables and the
+//!   rotation at F16 and by this one. The F32 rotation gives a corpus loss of
+//!   1.7967694600423176 against the F32 model's own 1.795495907465617 — 0.07%
+//!   — while rotating at F16 gives 1.81551726659139, or 1.1%, so this cast
+//!   removes about fifteen sixteenths of what half precision otherwise costs
+//!   at that length. Both builds agree to the last digit at `--precision f32`.
+//!   At 128 tokens the two are indistinguishable, which is the honest limit of
+//!   the claim: this matters as the context grows, and a short set cannot see
+//!   it.
 //! * **Norms promote themselves.** Both spellings — the fused
 //!   `ops::rms_norm` and the composed `LayerNorm::forward` that training takes
 //!   — cast F16 and BF16 up to F32 for the sum of squares and back afterwards
