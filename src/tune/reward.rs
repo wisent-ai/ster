@@ -35,7 +35,7 @@ use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarMap};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::Serialize;
 
-use super::{EncodedPair, Preflight, Trainable, encode_pairs, pair_set_label, schedule, softplus};
+use super::{Preflight, Trainable, batch, encode_pairs, pair_set_label, schedule, softplus};
 use crate::{
     artifact::PairSet,
     lora,
@@ -83,8 +83,10 @@ impl RewardHead {
     /// The score of one sequence, given `[1, sequence, hidden]`.
     ///
     /// The last position is the one that has attended to the whole sequence,
-    /// so it is the only position that can score it. There is no padding to
-    /// step over: Ster puts one sequence through each forward.
+    /// so it is the only position that can score it. A batched pass hands its
+    /// rows over one at a time through `batch::row`, already sliced back to
+    /// each row's own length, so the last position here is always a real token
+    /// and never padding.
     pub fn score(&self, hidden: &Tensor) -> Result<Tensor> {
         let (_, sequence, width) = hidden.dims3()?;
         let expected = self.weight.dim(1)?;
@@ -152,6 +154,10 @@ pub struct RewardOptions {
     pub epochs: usize,
     pub learning_rate: f64,
     pub accumulation: usize,
+    /// Pairs folded into one forward pass. A pair is two rows, so a batch of
+    /// four pairs is a forward of eight sequences; one is the unbatched pass
+    /// every run recorded before batching existed.
+    pub batch: usize,
     pub warmup_steps: usize,
     pub max_sequence: usize,
     pub seed: u64,
@@ -182,6 +188,7 @@ pub struct RewardReport {
     pub layers: Vec<usize>,
     pub learning_rate: f64,
     pub accumulation: usize,
+    pub batch: usize,
 }
 
 /// Trains `head` and the adapters `varmap` owns to rank each pair.
@@ -206,6 +213,7 @@ pub fn reward(
         noun: "tensors",
         epochs: options.epochs,
         accumulation: options.accumulation,
+        batch: options.batch,
         learning_rate: options.learning_rate,
         max_sequence: options.max_sequence,
     }
@@ -220,7 +228,13 @@ pub fn reward(
     )
     .context("failed to initialize the AdamW optimizer")?;
 
-    let steps_per_epoch = encoded.len().div_ceil(options.accumulation);
+    // Both sides of a pair go through the same forward, so the width its rows
+    // are padded to is the longer of the two.
+    let lengths: Vec<usize> =
+        encoded.iter().map(|pair| pair.chosen.len().max(pair.rejected.len())).collect();
+    let scale = batch::divisor(options.batch, options.accumulation);
+    let steps_per_epoch =
+        batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation);
     let total_steps = steps_per_epoch * options.epochs;
     let mut order: Vec<usize> = (0..encoded.len()).collect();
     let mut step = 0usize;
@@ -233,7 +247,7 @@ pub fn reward(
         order.shuffle(&mut rng);
         let mut summary = Summary::default();
 
-        for group in order.chunks(options.accumulation) {
+        for plan in batch::plan(&order, &lengths, options.batch, options.accumulation) {
             optimizer.set_learning_rate(schedule(
                 options.learning_rate,
                 step,
@@ -241,34 +255,48 @@ pub fn reward(
                 options.warmup_steps,
             ));
 
-            // One sequence per forward, two per pair, `accumulation` pairs per
-            // optimizer step — the same shape every other trainer here uses,
-            // and for the same reason: the decoder has no padding token and no
-            // attention mask for a batched sequence.
+            // `batch` pairs per forward — two rows each, chosen then rejected,
+            // right-padded to a common width and masked so neither side reads
+            // the other's filler — and `accumulation` forwards per optimizer
+            // step. The head still reads one row's last real position, because
+            // `batch::row` slices each row back to its own length before the
+            // head sees it. Each pair's loss is divided by the constant
+            // `accumulation * batch`, so a short tail steps proportionally
+            // smaller.
             let mut summed: Option<Tensor> = None;
             let mut group_loss = 0f64;
-            for &slot in group {
-                let pair = &encoded[slot];
-                let value = step_loss(runtime, head, pair)
-                    .with_context(|| format!("pair {} produced no usable loss", pair.index))?;
-                group_loss += value.loss;
-                summary.record(&value);
-                let scaled = (value.tensor / options.accumulation as f64)?;
-                summed = Some(match summed {
-                    Some(total) => (total + scaled)?,
-                    None => scaled,
-                });
+            for forward in &plan.forwards {
+                let mut rows: Vec<&[u32]> = Vec::with_capacity(forward.len() * 2);
+                for &slot in forward {
+                    rows.push(&encoded[slot].chosen);
+                    rows.push(&encoded[slot].rejected);
+                }
+                let hidden = runtime.forward_hidden_rows(&rows)?;
+                for (position, &slot) in forward.iter().enumerate() {
+                    let pair = &encoded[slot];
+                    let chosen = batch::row(&hidden, position * 2, pair.chosen.len())?;
+                    let rejected = batch::row(&hidden, position * 2 + 1, pair.rejected.len())?;
+                    let value = step_loss(head, &chosen, &rejected)
+                        .with_context(|| format!("pair {} produced no usable loss", pair.index))?;
+                    group_loss += value.loss;
+                    summary.record(&value);
+                    let scaled = (value.tensor / scale)?;
+                    summed = Some(match summed {
+                        Some(total) => (total + scaled)?,
+                        None => scaled,
+                    });
+                }
             }
             let Some(summed) = summed else {
-                // `chunks` never yields an empty slice, so this is unreachable
-                // in practice; refusing beats stepping on nothing.
+                // `plan` never yields a step with no forwards and never a
+                // forward with no rows; refusing beats stepping on nothing.
                 bail!("an accumulation group contained no pairs");
             };
             optimizer
                 .backward_step(&summed)
                 .context("failed to backpropagate the accumulated loss")?;
 
-            let group_mean = (group_loss / group.len() as f64) as f32;
+            let group_mean = (group_loss / plan.units as f64) as f32;
             step += 1;
             if first_loss.is_none() {
                 first_loss = Some(group_mean);
@@ -319,6 +347,7 @@ pub fn reward(
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,
+        batch: options.batch,
     })
 }
 
@@ -330,10 +359,14 @@ struct Step {
     rejected: f64,
 }
 
-/// One pair's contribution: two forwards, two scores, one Bradley-Terry loss.
-fn step_loss(runtime: &Runtime, head: &RewardHead, pair: &EncodedPair) -> Result<Step> {
-    let chosen = head.score(&runtime.forward_hidden(&pair.chosen)?)?;
-    let rejected = head.score(&runtime.forward_hidden(&pair.rejected)?)?;
+/// One pair's contribution: two scored rows and one Bradley-Terry loss.
+///
+/// The residual streams arrive already read out of whatever forward produced
+/// them, so this function is identical whether one pair went through the model
+/// or eight did.
+fn step_loss(head: &RewardHead, chosen: &Tensor, rejected: &Tensor) -> Result<Step> {
+    let chosen = head.score(chosen)?;
+    let rejected = head.score(rejected)?;
     // -log sigmoid(chosen - rejected), through the softplus that survives a
     // head confident enough to overflow the direct form.
     let tensor = softplus(&(&rejected - &chosen)?)?;
