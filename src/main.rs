@@ -47,6 +47,12 @@ enum Command {
         /// Direction training method: caa, pca, or logistic.
         #[arg(long, default_value = "caa")]
         method: String,
+        /// Dtype the base weights are mapped at: f32, f16, or bf16. A
+        /// direction is fitted in whatever space the prompts were read in, so
+        /// two artifacts trained at different precisions are not
+        /// interchangeable. bf16 needs --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
     },
     /// Select the best method and layer on an 80/20 holdout.
     Optimize {
@@ -58,6 +64,10 @@ enum Command {
         output: PathBuf,
         #[arg(long, default_value = "all")]
         layers: String,
+        /// Dtype the base weights are mapped at: f32, f16, or bf16. bf16 needs
+        /// --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
     },
     /// Measure pair ordering for a steering artifact.
     Evaluate {
@@ -67,6 +77,11 @@ enum Command {
         pairs: PathBuf,
         #[arg(long)]
         vector: PathBuf,
+        /// Dtype the base weights are mapped at: f32, f16, or bf16. It should
+        /// match the run that trained the artifact, or the score measures the
+        /// direction in a space it was not fitted in.
+        #[arg(long, default_value = "f32")]
+        precision: String,
     },
     /// Generate text with an optional steering artifact.
     Generate {
@@ -87,6 +102,11 @@ enum Command {
         /// answering it, which is what auto exists to prevent.
         #[arg(long, default_value = "auto")]
         chat_template: String,
+        /// Dtype the base weights are mapped at: f32, f16, or bf16. Half
+        /// precision holds a checkpoint in half the memory; a steering vector
+        /// is cast to it on the way in. bf16 needs --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
         #[arg(long, default_value_t = 1.0)]
         strength: f64,
         #[arg(long, default_value_t = 128)]
@@ -110,6 +130,11 @@ enum Command {
         output: PathBuf,
         #[arg(long, default_value = "all")]
         layers: String,
+        /// Dtype the base weights are mapped at: f32, f16, or bf16. The
+        /// exported activations are F32 either way; this is the width they
+        /// were computed in. bf16 needs --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
     },
     /// Print and validate a Ster steering artifact.
     Inspect {
@@ -190,6 +215,11 @@ enum PairsCommand {
         /// Runtime device: cpu, metal, or cuda.
         #[arg(long, default_value = "cpu")]
         device: String,
+        /// Dtype the local generator's base weights are mapped at: f32, f16,
+        /// or bf16. Ignored by --generator brama, which loads no weights.
+        /// bf16 needs --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
         /// One-sentence description of the trait the positive side shows.
         #[arg(long = "trait")]
         trait_description: String,
@@ -549,16 +579,19 @@ struct ModelArgs {
 }
 
 impl ModelArgs {
-    fn load(&self) -> Result<Runtime> {
+    /// The shared load. Every command that maps a checkpoint goes through
+    /// here, so `--precision` means the same thing on all of them and a new
+    /// command cannot quietly forget it.
+    fn load_at(&self, precision: Precision) -> Result<Runtime> {
         let device = DeviceChoice::parse(&self.device)?;
-        Runtime::load(&self.model, self.revision.as_deref(), device)
+        Runtime::load_at(&self.model, self.revision.as_deref(), device, precision)
     }
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Train { model, pairs, output, layers, method } => {
-            let runtime = model.load()?;
+        Command::Train { model, pairs, output, layers, method, precision } => {
+            let runtime = model.load_at(Precision::parse(&precision)?)?;
             let pair_set = PairSet::load(&pairs)?;
             let layers = parse_layers(&layers, runtime.layer_count())?;
             let method = TrainingMethod::parse(&method)?;
@@ -566,16 +599,16 @@ fn main() -> Result<()> {
             artifact.save(&output)?;
             println!("{}", serde_json::to_string_pretty(&workflow::artifact_summary(&artifact))?);
         }
-        Command::Optimize { model, pairs, output, layers } => {
-            let runtime = model.load()?;
+        Command::Optimize { model, pairs, output, layers, precision } => {
+            let runtime = model.load_at(Precision::parse(&precision)?)?;
             let pair_set = PairSet::load(&pairs)?;
             let layers = parse_layers(&layers, runtime.layer_count())?;
             let artifact = workflow::optimize(&runtime, &pair_set, &layers)?;
             artifact.save(&output)?;
             println!("{}", serde_json::to_string_pretty(&workflow::artifact_summary(&artifact))?);
         }
-        Command::Evaluate { model, pairs, vector } => {
-            let runtime = model.load()?;
+        Command::Evaluate { model, pairs, vector, precision } => {
+            let runtime = model.load_at(Precision::parse(&precision)?)?;
             let pair_set = PairSet::load(&pairs)?;
             let artifact = SteeringArtifact::load(&vector)?;
             let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
@@ -587,23 +620,26 @@ fn main() -> Result<()> {
             vector,
             adapter,
             chat_template,
+            precision,
             strength,
             max_new_tokens,
             temperature,
             top_p,
             seed,
         } => {
+            let precision = Precision::parse(&precision)?;
             // An adapter rewrites the projections themselves, so it is
             // attached while the weights are mapped rather than applied per
             // token the way a steering vector is.
             let mut runtime = match adapter.as_deref() {
-                Some(adapter) => Runtime::load_with_adapter(
+                Some(adapter) => Runtime::load_with_adapter_at(
                     &model.model,
                     model.revision.as_deref(),
                     DeviceChoice::parse(&model.device)?,
                     adapter,
+                    precision,
                 )?,
-                None => model.load()?,
+                None => model.load_at(precision)?,
             };
             runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
@@ -614,8 +650,8 @@ fn main() -> Result<()> {
             )?;
             println!("{generated}");
         }
-        Command::Extract { model, input, output, layers } => {
-            let runtime = model.load()?;
+        Command::Extract { model, input, output, layers, precision } => {
+            let runtime = model.load_at(Precision::parse(&precision)?)?;
             let layers = parse_layers(&layers, runtime.layer_count())?;
             workflow::extract(&runtime, &input, &output, &layers)?;
             println!("{}", output.display());
@@ -709,6 +745,7 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
             model,
             revision,
             device,
+            precision,
             trait_description,
             count,
             output,
@@ -753,8 +790,12 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
                     let Some(model) = model else {
                         bail!("pairs synthesize with --generator local requires --model");
                     };
-                    let runtime =
-                        Runtime::load(&model, revision.as_deref(), DeviceChoice::parse(&device)?)?;
+                    let runtime = Runtime::load_at(
+                        &model,
+                        revision.as_deref(),
+                        DeviceChoice::parse(&device)?,
+                        Precision::parse(&precision)?,
+                    )?;
                     pairs::synthesize(pairs::Generator::Local(&runtime), &options)?
                 }
                 "brama" => {
