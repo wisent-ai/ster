@@ -167,6 +167,15 @@ pub fn evaluate(
     if options.max_sequence < 2 {
         bail!("max_sequence must be at least two tokens, so that one token can predict another");
     }
+    // Every trainer refuses a zero batch through `Preflight`, which scoring
+    // does not run: there is no optimizer here, so there was nothing to hang
+    // the check on and the argument was silently rewritten to one by
+    // `batch::plan`. An operator who asked for a batch of zero asked for
+    // something impossible, and being handed a full set of scores instead is
+    // the wrong answer to that question.
+    if options.batch == 0 {
+        bail!("evaluation requires a batch of at least one example");
+    }
     examples.validate(&examples.label())?;
     if let Some(adapter) = adapter {
         warn_on_provenance(adapter, "adapter", runtime);
