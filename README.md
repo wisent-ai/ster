@@ -772,6 +772,15 @@ The report records `pairs`, `trained_pairs`, `skipped_long`, `epochs`, `steps`,
 `layers`, `learning_rate`, and `accumulation`, with `accuracy` and the scores
 measured over the final epoch.
 
+One reading of that report is worth stating, because it looks alarming and is
+not. A one-epoch run reports `accuracy` 0.0 and `mean_score_margin` 0.0000.
+That is not a head that ranked every pair backwards; it is a head that has not
+moved. It starts at zeros, so every pair scores an exact tie, and a tie is not a
+strict win. The two cases are distinguishable in the report already: all ties
+give a margin of exactly 0.0, while a head that genuinely prefers the rejected
+side gives a negative one. Read the margin first and the accuracy second, and
+give the run more than one epoch before either number means anything.
+
 ### Policy optimization
 
 `ster tune grpo` is the only trainer that learns from text the model writes
