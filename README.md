@@ -40,7 +40,8 @@ Included now:
 - last-token hidden-state extraction from any selected transformer layer;
 - contrastive activation addition (`caa`), principal-direction (`pca`), and
   logistic-probe training;
-- holdout selection across method and layer;
+- holdout selection across method and layer, published as the scored candidate
+  table the choice was made on;
 - artifact evaluation by pair-ordering accuracy and projection margin;
 - additive residual-stream steering during autoregressive generation;
 - LoRA supervised fine-tuning of local checkpoints from prompt and completion
@@ -147,9 +148,9 @@ ster pairs synthesize \
   --output pairs.json
 ```
 
-Run `ster pairs inspect pairs.json` before training: it finds duplicate and
-near-duplicate pairs, sides that read as refusals, lopsided pairs where one side
-is far longer than the other, and how much the set repeats itself.
+Run `ster pairs inspect --pairs pairs.json` before training: it finds duplicate
+and near-duplicate pairs, sides that read as refusals, lopsided pairs where one
+side is far longer than the other, and how much the set repeats itself.
 
 Train a direction for layers 12 through 19:
 
@@ -185,7 +186,7 @@ ster optimize   select method and layer on an 80/20 holdout
 ster evaluate   measure a vector on a contrastive pair set
 ster generate   run normal or steered autoregressive generation
 ster extract    export hidden states for an arbitrary prompt set
-ster inspect    validate and print a steering artifact
+ster inspect    summarize and validate a steering artifact
 ster pairs      author, inspect, and synthesize contrastive pair sets
 ster tune       train, merge, score, and inspect LoRA adapters
 ```
@@ -200,13 +201,14 @@ selection, or non-finite vectors.
 four subcommands:
 
 ```text
-ster pairs inspect <FILE> [--dedupe-bits 3] [--dedupe-bands 8]
-                          [--refusal-threshold 0.5]
+ster pairs inspect --pairs <FILE> [--dedupe-bits 3] [--dedupe-bands 8]
+                                  [--refusal-threshold 0.5]
 ster pairs add --pairs <FILE> --positive <TEXT> --negative <TEXT> [--trait <NAME>]
 ster pairs remove --pairs <FILE> --index <N>
 ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTPUT>
                       [--generator local|brama] [--generator-model <ROUTE>]
                       [--model <MODEL>] [--revision <REVISION>] [--device <DEVICE>]
+                      [--chat-template auto|off] [--precision f32|f16|bf16]
                       [--trait-name <NAME>] [--opposite <TEXT>]
                       [--retry-multiplier 3] [--dedupe-bits 3]
                       [--dedupe-bands 8] [--refusal-threshold 0.5]
@@ -289,6 +291,18 @@ The local route refuses a missing model with `pairs synthesize with --generator 
 the hosted route refuses a missing route with `pairs synthesize with --generator brama requires --generator-model`,
 and anything else is `unknown generator "cloud"; expected local or brama`.
 
+`--chat-template` belongs to the local route for the same reason `--model`
+does. `auto`, the default, asks the local generator through the model's own chat
+template when the checkpoint publishes one, and `off` asks it as raw text.
+Synthesis is the first step of the funnel and everything downstream inherits
+what it writes, which makes this the one place the mistake is expensive twice:
+an instruct checkpoint addressed without its markers reads a request for pair
+text as a document to continue, and answers with meta-instructional debris —
+`Step 3: Make sure your emojis are visually appealing` — instead of the answer
+that was asked for. `--generator brama` ignores it, because the gateway request
+carries messages with roles rather than a rendered string: a chat API is
+already a chat API.
+
 The hosted route reads Brama's own documented client variables: `BRAMA_URL`,
 the gateway base, defaulting to `https://brama.wisent.com`, and
 `BRAMA_BEARER`, the caller's bearer. The launcher that owns the bearer supplies
@@ -333,13 +347,184 @@ The same three operations are jobs on the loopback HTTP/JSON backend that
 `POST /v1/pairs/save` writes a set from `traitName` and `entries` and returns
 the path and pair count, and `POST /v1/pairs/synthesize` runs the loop and
 returns the written path and the report. The synthesize job takes `generator`,
-defaulting to `"local"`, and `generatorModel`, and requires `model` only on the
-local route; it refuses a hosted run without a route with
+defaulting to `"local"`, and `generatorModel`, takes `chatTemplate` and
+`precision` on the local route, and requires `model` only on that route; it
+refuses a hosted run without a route with
 `pairs synthesize with the brama generator requires generatorModel`, an
 unrecognized value with `unknown generator; expected local or brama`, and a
 local run without a model with `pairs synthesize requires a model`. This is how
 Ster Desktop offers pair authoring, inspection, and synthesis beside its six
 workflows.
+
+## Steering
+
+The steering half of Ster reads hidden states, fits directions from them,
+scores those directions, and adds them during generation. Six commands:
+
+```text
+ster train --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
+           [--revision <REVISION>] [--device cpu] [--layers all]
+           [--method caa|pca|logistic] [--chat-template auto|off]
+           [--precision f32|f16|bf16]
+ster optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
+              [--revision <REVISION>] [--device cpu] [--layers all]
+              [--chat-template auto|off] [--precision f32|f16|bf16]
+ster evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
+              [--revision <REVISION>] [--device cpu]
+              [--chat-template auto|off] [--precision f32|f16|bf16]
+ster generate --model <MODEL> --prompt <PROMPT> [--vector <VECTOR>]
+              [--adapter <ADAPTER>] [--revision <REVISION>] [--device cpu]
+              [--chat-template auto|off] [--precision f32|f16|bf16]
+              [--strength 1.0] [--max-new-tokens 128] [--temperature 0.0]
+              [--top-p <TOP_P>] [--seed 42]
+ster extract --model <MODEL> --input <INPUT> --output <OUTPUT>
+             [--revision <REVISION>] [--device cpu] [--layers all]
+             [--chat-template auto|off] [--precision f32|f16|bf16]
+ster inspect <ARTIFACT>
+```
+
+`--layers` takes `all`, a comma list, or a half-open range such as `8..16`,
+exactly as it does under `ster tune`, and `--method` names the estimator
+`train` fits: contrastive activation addition, the leading principal
+direction, or a logistic probe. `--chat-template` and `--precision` are on
+every one of these commands except `inspect`, which loads no model. Each
+command prints a pretty JSON document on stdout, and each is also a streamed
+NDJSON job on the `ster serve` backend — `POST /v1/train`, `POST /v1/optimize`,
+`POST /v1/evaluate`, `POST /v1/generate`, `POST /v1/extract` and
+`POST /v1/inspect` — where every flag above is a camelCase field of the request
+body, `chatTemplate` and `precision` included, each defaulting to what the CLI
+defaults to.
+
+### Selection
+
+`ster optimize` fits every layer-and-method combination on part of the pair
+set, ranks the candidates on pairs none of them were fitted on, and writes the
+winner. What is new is that it publishes the ranking. It used to print the
+choice — layer 9, method pca — which is a result with no evidence attached, and
+a chooser that publishes only its choice is asking to be trusted.
+
+The document is the artifact summary plus a `selection` object holding
+`holdout`, with `fit_pairs` and `holdout_pairs`, and `candidates`, one row per
+layer and method carrying `layer`, `method`, `holdout_accuracy`,
+`holdout_margin` and `selected`. Exactly one row has `selected` true. The rows
+stay in the order the search walked them rather than sorted by score, so two
+runs over the same layers diff line for line. The scores cost nothing to carry:
+they were computed to make the decision.
+
+The split is reported rather than assumed, because "80/20" is a ratio and what
+decides whether the ranking means anything is the two counts it produced. The
+run says them before it starts —
+`fitting each candidate on 3 pairs and ranking on a 1-pair holdout` — and when
+the holdout comes out at a single pair it says what that costs:
+
+```text
+a one-pair holdout scores every candidate 0 or 1, so this ranking separates almost nothing; add pairs to make the choice mean something
+```
+
+That is a fact about the input rather than a defect, so it is stated rather
+than refused: four pairs is the smallest set `optimize` accepts, and four pairs
+yield a one-pair holdout. Ranking prefers accuracy and breaks ties on margin,
+so on a holdout of one pair the tiebreak is doing all of the work.
+
+The published direction is then refitted on every pair, holdout included, and
+the artifact's `metadata` records that in one sentence:
+`chosen over 66 candidates on a 1-pair holdout, then refitted on all 4 pairs`.
+The split existed to rank candidates, and once the ranking is done, throwing
+away a fifth of the evidence would be paying for the measurement twice. It also
+means the `train_accuracy` and `train_margin` the artifact carries are the
+refit's numbers over the whole set rather than the holdout scores in the table:
+the table is the evidence for the choice, and the artifact's own numbers
+describe the direction that was written.
+
+### Inspection
+
+`ster inspect` validates an artifact and prints a summary of it. It used to
+serialize the artifact itself, which on a twenty-two-layer 2048-wide checkpoint
+is forty-five thousand floats down a terminal, while `ster tune inspect` beside
+it printed tensor names and shapes. A steering vector's content is not readable
+and its shape and length are, so `inspect` now prints the same document `train`
+and `optimize` print: `schema_version`, `product`, `model`, `model_revision`,
+`trait_name`, `method`, `hidden_size`, `precision`, `chat_template`,
+`metadata`, and a `layers` array carrying, per layer, `layer`, `width`, `norm`,
+`train_accuracy` and `train_margin`. Nothing was removed from the artifact; the
+numbers are still on disk for anything that wants them.
+
+`norm` is the Euclidean length of the direction, accumulated in `f64` because a
+two-thousand-term sum of squares in `f32` loses its low bits. Every direction
+Ster writes is unit-normalized, so a norm that is not 1.0 to within rounding is
+the fastest available sign that a file was written by something other than
+Ster.
+
+### Provenance
+
+A steering artifact records the precision and the chat-template decision of the
+run that fitted it, and `ster evaluate` and `ster generate` check them against
+the run that is consuming it. Both call the same helper the tune half has used
+for adapters, so a direction read in a space it was not fitted in says so on
+the progress stream:
+
+```text
+warning: this direction was trained with chat template off and this run encodes applied, so the number below describes a format it was not trained in
+warning: this direction was trained at precision f32 and this run maps the base weights at f16, so it is being read in a different space than it was fitted in
+```
+
+A warning and not a refusal, deliberately. Both mismatches are things an
+operator may want on purpose — measuring how far a direction transfers out of
+the format it was fitted in is a real question, and the measurement below is
+exactly that experiment — and a refusal would make it impossible rather than
+merely deliberate. Only an unnoticed mismatch is a defect. An artifact written
+before these fields existed carries `null` in both and warns about neither: an
+absent record is not a disagreement.
+
+### What fitting out of format costs
+
+[Chat templates](#chat-templates) covers the flag itself and its three
+outcomes. The steering half has one further consequence, and it is the sharper
+one: the hidden-state read behind `train`, `optimize`, `evaluate` and `extract`
+encodes every prompt through the template, so a direction is fitted in the
+space it will be applied in. That was not true before this release — pair text
+went to the model raw while `generate` rendered its prompt through the template
+— and the difference is not a rounding question. A direction is a displacement
+between two points in the residual stream, and where those points sit depends
+on the markers around the text that produced them: under a template the model
+is answering a user turn, without one it is continuing a document.
+
+Measured on `TinyLlama/TinyLlama-1.1B-Chat-v1.0`, at `--precision f32`, over
+all 22 layers, with the four-pair set at `~/.stado/work/loop/pairs.json` for
+the trait `calm and measured, never alarmed`. One direction was fitted with
+`--chat-template off` and another with `auto`, and each was evaluated under
+both. The two columns are the mean over the 22 layers of the per-layer accuracy
+and margin `ster evaluate` reports:
+
+| fitted | evaluated | mean accuracy | mean margin |
+| --- | --- | --- | --- |
+| `off` | `off` | 1.0000 | +4.9451 |
+| `auto` | `auto` | 1.0000 | +1.0917 |
+| `off` | `auto` | 0.7841 | +0.0168 |
+| `auto` | `off` | 0.7614 | +0.1160 |
+
+The two matched runs separate all four pairs at every one of the 22 layers. The
+two crossed runs do not: accuracy falls below 1.0 at 12 of the 22 layers for
+off evaluated as auto, the mean lands near 0.78 whichever way the crossing
+runs, and the margin collapses by roughly two orders of magnitude. Layer 21 is
+the clearest single reading: +20.6697 fitted and evaluated `off`, and -0.0486
+for that same direction evaluated `auto`.
+
+The sign is the part worth stopping on. In the three deepest layers — 19, 20
+and 21, in both crossings — the crossed margin is negative, which is not a weak
+direction but a wrong one: the projection orders the two sides of a pair
+backwards, so adding that direction during generation pushes toward the side
+the operator labelled negative. A direction fitted out of format does not
+merely lose resolution in the layers where steering is usually applied. It
+points the other way.
+
+That is why the read encodes through the template by default rather than
+offering it as something to remember. The two matched rows also show what the
+flag is not: `off` and `auto` each separate the set perfectly in their own
+space, and the larger raw margin of the `off` run is a property of raw-text
+geometry rather than a better direction. A margin is only comparable with
+another margin taken in the same format, which is exactly what the artifact now
+records so that `evaluate` can say when it is not.
 
 ## Fine-tuning
 
@@ -386,9 +571,12 @@ ster tune inspect <ARTIFACT>
 ### Chat templates
 
 `--chat-template` decides what shape the text is encoded in, and it defaults to
-`auto`. It is on `tune sft`, `tune dpo`, `tune reward`, `tune grpo`,
-`tune evaluate` and `generate` — every command that turns prose into tokens —
-and mirrored as `chatTemplate` on the matching `/v1` endpoints.
+`auto`. It is on every command that turns prose into tokens — `train`,
+`optimize`, `evaluate`, `generate`, `extract`, `pairs synthesize`, and the five
+`ster tune` subcommands that load a model — and mirrored as `chatTemplate` on
+each matching `/v1` endpoint. `tune merge`, `tune inspect`, `inspect` and the
+other `pairs` subcommands take none, for the same reason they take no
+`--precision`: none of them encodes any text.
 
 An instruct checkpoint was not post-trained on bare text. It was post-trained on
 a conversation wrapped in special markers, and the exact wrapping is published
@@ -945,13 +1133,46 @@ A steering artifact records:
 
 - schema version and product identity;
 - model id and resolved model revision;
+- the precision the base weights were mapped at, and whether the pairs were
+  read through the model's own chat template;
 - trait, training method, and hidden width;
 - layer-indexed normalized directions;
-- training accuracy and projection margin.
+- training accuracy and projection margin;
+- a `metadata` map, which is where `optimize` records how it chose.
+
+`precision` is `"f32"`, `"f16"` or `"bf16"`, spelled exactly as `--precision`
+spells it. `chat_template` is `"applied"`, `"absent"` or `"off"`, the same three
+words an adapter sidecar records at `train.chat_template`, so one comparison
+reads both kinds of artifact. Both are top-level fields, additive and
+defaulted, which is why the schema version does not move: an artifact written
+before they existed loads with `null` in both, means exactly what it meant, and
+disagrees with nothing. Neither is a `metadata` entry, deliberately —
+provenance the product wrote has to stay distinguishable from notes the
+operator wrote.
 
 Ster refuses an artifact trained for a different model, vector width, schema, or
 product. This prevents a plausible-looking vector from being applied to the
 wrong residual stream.
+
+It also refuses the other product's document, in both directions. `generate`
+takes `--vector` and `--adapter` side by side, and crossing them used to escape
+as serde's own message — "missing field `rank` at line 1 column 207003", which
+names a field of the type that failed to parse, a byte offset into a file nobody
+will open, and nothing about the mistake that was actually made. Each loader now
+recognises the other's document before parsing its own:
+
+```text
+direction.json is a LoRA adapter sidecar, not a steering artifact: it carries rank and targets where a steering artifact carries trait_name and vectors
+direction.json is a steering artifact, not a LoRA adapter sidecar: it carries trait_name and vectors where an adapter sidecar carries rank and targets
+```
+
+The first comes from the steering loader, the second from the adapter loader,
+and the leading token is the path that was read. Recognition costs one
+`serde_json::Value` parse on a path that was about to parse the same bytes
+anyway, and it is deliberately narrow: a steering artifact is a `trait_name`
+and a set of `vectors`, an adapter sidecar is a `rank` and a set of `targets`,
+neither has ever carried the other's pair, and a document carrying neither goes
+on to the real loader and gets the real parse error.
 
 ## Architecture
 
