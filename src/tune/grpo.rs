@@ -224,6 +224,11 @@ pub fn grpo(
         noun: "adapter tensors",
         epochs: options.iterations,
         accumulation: options.accumulation,
+        // One sequence per forward, and no flag to say otherwise. This
+        // objective's cost is autoregressive sampling, not the scoring pass,
+        // and `--group` is already the word for how many completions share a
+        // prompt; a second batch word here would only compete with it.
+        batch: 1,
         learning_rate: options.learning_rate,
         max_sequence: options.max_sequence,
     }

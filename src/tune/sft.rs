@@ -17,7 +17,7 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap, loss};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::Serialize;
 
-use super::{ExampleSet, Preflight, Trainable, schedule};
+use super::{ExampleSet, Preflight, Trainable, batch, schedule};
 use crate::{lora, runtime::Runtime, workflow};
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,9 @@ pub struct SftOptions {
     pub epochs: usize,
     pub learning_rate: f64,
     pub accumulation: usize,
+    /// Examples folded into one forward pass. One is the unbatched pass every
+    /// run recorded before batching existed.
+    pub batch: usize,
     pub warmup_steps: usize,
     pub max_sequence: usize,
     pub seed: u64,
@@ -49,6 +52,7 @@ pub struct SftReport {
     pub layers: Vec<usize>,
     pub learning_rate: f64,
     pub accumulation: usize,
+    pub batch: usize,
 }
 
 /// Trains the adapters `varmap` owns against `examples`.
@@ -71,6 +75,7 @@ pub fn sft(
             noun: "adapter tensors",
             epochs: options.epochs,
             accumulation: options.accumulation,
+            batch: options.batch,
             learning_rate: options.learning_rate,
             max_sequence: options.max_sequence,
         }
@@ -106,7 +111,10 @@ pub fn sft(
     )
     .context("failed to initialize the AdamW optimizer")?;
 
-    let steps_per_epoch = encoded.len().div_ceil(options.accumulation);
+    let lengths: Vec<usize> = encoded.iter().map(|(_, ids, _)| ids.len()).collect();
+    let scale = batch::divisor(options.batch, options.accumulation);
+    let steps_per_epoch =
+        batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation);
     let total_steps = steps_per_epoch * options.epochs;
     let mut order: Vec<usize> = (0..encoded.len()).collect();
     let mut step = 0usize;
@@ -124,7 +132,7 @@ pub fn sft(
         let mut epoch_loss = 0f64;
         let mut epoch_examples = 0usize;
 
-        for group in order.chunks(options.accumulation) {
+        for plan in batch::plan(&order, &lengths, options.batch, options.accumulation) {
             optimizer.set_learning_rate(schedule(
                 options.learning_rate,
                 step,
@@ -132,41 +140,46 @@ pub fn sft(
                 options.warmup_steps,
             ));
 
-            // One example per forward, `accumulation` forwards per optimizer
-            // step. This is deliberate, not a simplification: Ster's decoder
-            // builds its causal mask from the sequence length alone and has no
-            // padding token and no attention mask, so stacking two examples of
-            // different lengths into one batch would train the adapter on
-            // whatever filler the shorter row was padded with — silently, with
-            // a loss that still looks reasonable. Summing scaled per-example
-            // losses gives the same gradient a real batch would, at the cost
-            // of holding one graph at a time.
+            // `batch` examples per forward, `accumulation` forwards per
+            // optimizer step. The rows of one forward are right-padded to a
+            // common width and the decoder is handed a mask that hides both
+            // the future and the filler, so no example is trained on another
+            // example's padding; each row's own positions are read back out
+            // with `batch::row`. The per-example loss is divided by the
+            // constant `accumulation * batch` rather than by what this step
+            // held, which is what makes a short tail step proportionally
+            // smaller instead of as loudly as a full one.
             let mut summed: Option<Tensor> = None;
             let mut group_loss = 0f64;
-            for &slot in group {
-                let (index, ids, boundary) = &encoded[slot];
-                let logits = runtime.forward_train(ids)?;
-                let value = completion_loss(&logits, ids, *boundary, runtime)
-                    .with_context(|| format!("example {index} produced no usable loss"))?;
-                group_loss += value.to_scalar::<f32>()? as f64;
-                let scaled = (value / options.accumulation as f64)?;
-                summed = Some(match summed {
-                    Some(total) => (total + scaled)?,
-                    None => scaled,
-                });
+            for forward in &plan.forwards {
+                let rows: Vec<&[u32]> =
+                    forward.iter().map(|&slot| encoded[slot].1.as_slice()).collect();
+                let logits = runtime.forward_train_rows(&rows)?;
+                for (position, &slot) in forward.iter().enumerate() {
+                    let (index, ids, boundary) = &encoded[slot];
+                    let logits = batch::row(&logits, position, ids.len())?;
+                    let value = completion_loss(&logits, ids, *boundary, runtime)
+                        .with_context(|| format!("example {index} produced no usable loss"))?;
+                    group_loss += value.to_scalar::<f32>()? as f64;
+                    let scaled = (value / scale)?;
+                    summed = Some(match summed {
+                        Some(total) => (total + scaled)?,
+                        None => scaled,
+                    });
+                }
             }
             let Some(summed) = summed else {
-                // `chunks` never yields an empty slice, so this is unreachable
-                // in practice; refusing beats stepping on nothing.
+                // `plan` never yields a step with no forwards and never a
+                // forward with no rows; refusing beats stepping on nothing.
                 bail!("an accumulation group contained no examples");
             };
             optimizer
                 .backward_step(&summed)
                 .context("failed to backpropagate the accumulated loss")?;
 
-            let step_loss = (group_loss / group.len() as f64) as f32;
+            let step_loss = (group_loss / plan.units as f64) as f32;
             epoch_loss += group_loss;
-            epoch_examples += group.len();
+            epoch_examples += plan.units;
             step += 1;
             if first_loss.is_none() {
                 first_loss = Some(step_loss);
@@ -211,6 +224,7 @@ pub fn sft(
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,
+        batch: options.batch,
     })
 }
 
