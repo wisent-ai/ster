@@ -455,6 +455,45 @@ fn masked_fill(values: &Tensor, mask: &Tensor, replacement: f32) -> candle_core:
     mask.where_cond(&replacement, values)
 }
 
+/// The causal constraint and the key-padding constraint in one tensor.
+///
+/// A position is masked when it is in the query's future, `key > query`, or
+/// when it is filler, `key >= lengths[row]`. The result is `[batch, 1,
+/// sequence, sequence]`: one plane per row, and a unit head axis that
+/// broadcasts, since every head of a row sees the same tokens.
+///
+/// Under the right padding [`SteeringLlama::forward_batch`] requires, the
+/// second clause is redundant for a *real* query — `key <= query < length`
+/// already implies `key < length` — and this says so rather than pretending
+/// otherwise. What it buys is that the invariant holds by construction
+/// instead of by coincidence of the padding side, and that a filler query,
+/// whose row is computed whether or not anyone reads it, still mixes only
+/// real keys. That second part is also why filler rows cannot produce a NaN:
+/// row `query >= length` keeps keys `0..length`, which is never empty because
+/// a zero length is refused.
+///
+/// Masked entries are `1`, matching [`Cache::mask`], so both feed the same
+/// `masked_fill` and the same `f32::NEG_INFINITY`, which softmax turns into
+/// exactly zero weight.
+fn padded_causal_mask(
+    lengths: &[usize],
+    sequence: usize,
+    device: &Device,
+) -> candle_core::Result<Tensor> {
+    let mut values = vec![0u8; lengths.len() * sequence * sequence];
+    for (row, &length) in lengths.iter().enumerate() {
+        let plane = row * sequence * sequence;
+        for query in 0..sequence {
+            let offset = plane + query * sequence;
+            let visible = (query + 1).min(length);
+            for slot in values[offset + visible..offset + sequence].iter_mut() {
+                *slot = 1;
+            }
+        }
+    }
+    Tensor::from_vec(values, (lengths.len(), 1, sequence, sequence), device)
+}
+
 #[derive(Debug, Clone)]
 struct FeedForward {
     gate: Linear,
@@ -636,11 +675,105 @@ impl SteeringLlama {
         capture_layers: &[usize],
         mode: Mode,
     ) -> candle_core::Result<ForwardOutput> {
+        self.decode(tokens, index_pos, cache, steering, capture_layers, None, mode)
+    }
+
+    /// A batch of unequal-length sequences in a single pass.
+    ///
+    /// `tokens` is `[batch, sequence]` and `lengths` says how many of each
+    /// row's columns are real; everything past a row's length is filler the
+    /// caller stacked to make the rectangle. The logits come back
+    /// `[batch, sequence, vocab]` — a full rectangle, of which only the first
+    /// `lengths[row]` rows of each slab mean anything.
+    ///
+    /// **Padding sits on the right**, and both consequences are load-bearing.
+    /// The first is positional: with no key-value cache every column `j` is
+    /// absolute position `j`, so right padding leaves every real token at the
+    /// position it would have held alone, and the one shared rotary window
+    /// `cos[0..sequence]` is correct for all rows at once. Left padding would
+    /// shift each row's real tokens by its own pad count, which no scalar
+    /// `index_pos` can express and which this decoder has no per-row position
+    /// argument to carry. The second is what the caller must then do: a row's
+    /// real logits are rows `0..lengths[row]` of its slab, so a loss slices
+    /// each row from the front and stops at its own length rather than
+    /// slicing a common window off the end. (Left padding is the right choice
+    /// for batched *decoding*, where aligning every row's last real token at
+    /// the final column is what lets one cached step serve the whole batch.
+    /// This path has no cache and never decodes.)
+    ///
+    /// Refusals, rather than a plausible-looking loss over filler: a batch
+    /// with no rows or no columns, a `lengths` that does not describe every
+    /// row, a row claiming more tokens than the batch is wide, a row claiming
+    /// none at all, a batch wider than the rotary tables, a readout of one
+    /// last position, and a key-value cache.
+    ///
+    /// Activations are not captured here. Capture is defined as row zero's
+    /// final column, which in a padded batch is filler, and a per-row capture
+    /// is a different feature than the one the steering path asked for.
+    pub fn forward_batch(
+        &self,
+        tokens: &Tensor,
+        lengths: &[usize],
+        cache: &mut Cache,
+        steering: Option<&SteeringPlan>,
+        mode: Mode,
+    ) -> Result<ForwardOutput> {
+        let (batch, sequence) = tokens.dims2()?;
+        if batch == 0 || sequence == 0 {
+            bail!("a batched forward needs at least one row of at least one token");
+        }
+        if lengths.len() != batch {
+            bail!("a batched forward got {} lengths for {batch} rows", lengths.len());
+        }
+        if cache.use_kv_cache {
+            bail!("a batched forward cannot share one key-value cache across rows");
+        }
+        if sequence > self.config.max_position_embeddings {
+            bail!(
+                "a batch {sequence} tokens wide exceeds the {} positions this model was built for",
+                self.config.max_position_embeddings
+            );
+        }
+        if matches!(mode.readout, Readout::LastPosition) {
+            bail!("a batched forward cannot read one last position, because every row ends somewhere else");
+        }
+        for (row, &length) in lengths.iter().enumerate() {
+            if length == 0 {
+                bail!("row {row} of the batch holds no tokens");
+            }
+            if length > sequence {
+                bail!("row {row} claims {length} tokens in a batch only {sequence} wide");
+            }
+        }
+        let mask = padded_causal_mask(lengths, sequence, tokens.device())?;
+        Ok(self.decode(tokens, 0, cache, steering, &[], Some(&mask), mode)?)
+    }
+
+    /// The decoder loop both entry points run.
+    ///
+    /// `mask`, when present, replaces the cache's causal mask for every layer:
+    /// a batched caller builds one combined causal and key-padding mask up
+    /// front and hands the same handle down the stack, because the constraint
+    /// depends only on the batch's lengths and so is identical at every one of
+    /// the model's layers. `None` is the historical single-sequence path,
+    /// which still asks the cache for a mask keyed by shape alone — a padding
+    /// mask has no such key, since two batches of the same shape can pad
+    /// differently, which is why it is built per call and never memoised.
+    fn decode(
+        &self,
+        tokens: &Tensor,
+        index_pos: usize,
+        cache: &mut Cache,
+        steering: Option<&SteeringPlan>,
+        capture_layers: &[usize],
+        mask: Option<&Tensor>,
+        mode: Mode,
+    ) -> candle_core::Result<ForwardOutput> {
         let (_, sequence) = tokens.dims2()?;
         let mut hidden = self.embeddings.forward(tokens)?;
         let mut activations = BTreeMap::new();
         for (index, layer) in self.layers.iter().enumerate() {
-            hidden = layer.forward(&hidden, index_pos, index, cache, mode)?;
+            hidden = layer.forward(&hidden, index_pos, index, cache, mask, mode)?;
             if capture_layers.binary_search(&index).is_ok() {
                 let activation = hidden
                     .i((0, sequence - 1, ..))?
