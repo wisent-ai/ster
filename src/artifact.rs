@@ -69,6 +69,46 @@ impl PairSet {
     }
 }
 
+/// What a JSON document on disk turns out to be, recognised by the fields one
+/// product's document carries and the other's never does.
+///
+/// Both halves of Ster write JSON an operator names with a flag, and on
+/// `generate` the two flags sit beside each other. Handing one to the other
+/// used to escape as serde's own message — "missing field `rank` at line 1
+/// column 207003" — which names a field of the type that failed to parse, a
+/// byte offset into a file nobody will open, and nothing about the mistake
+/// that was actually made. Recognising the foreign document first costs one
+/// `Value` parse on a path that is about to parse the same bytes anyway, and
+/// buys a sentence naming both ends of it.
+///
+/// The distinguishing fields are the honest ones: a steering artifact is a
+/// trait and a set of per-layer vectors, an adapter sidecar is a rank and a
+/// set of projections, and neither has ever carried the other's pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Document {
+    Steering,
+    AdapterSidecar,
+    /// Anything else, including bytes that are not JSON at all. Recognition
+    /// only exists to redirect a confusable document; everything it does not
+    /// recognise goes on to the real loader and gets the real parse error.
+    Unrecognised,
+}
+
+impl Document {
+    pub fn recognise(bytes: &[u8]) -> Self {
+        let Ok(serde_json::Value::Object(fields)) = serde_json::from_slice(bytes) else {
+            return Self::Unrecognised;
+        };
+        if fields.contains_key("trait_name") && fields.contains_key("vectors") {
+            Self::Steering
+        } else if fields.contains_key("rank") && fields.contains_key("targets") {
+            Self::AdapterSidecar
+        } else {
+            Self::Unrecognised
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerVector {
     pub layer: usize,
@@ -116,6 +156,12 @@ impl SteeringArtifact {
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)
             .with_context(|| format!("failed to read steering artifact {}", path.display()))?;
+        if Document::recognise(&bytes) == Document::AdapterSidecar {
+            bail!(
+                "{} is a LoRA adapter sidecar, not a steering artifact: it carries rank and targets where a steering artifact carries trait_name and vectors",
+                path.display()
+            );
+        }
         let value: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid steering artifact JSON in {}", path.display()))?;
         value.validate()?;

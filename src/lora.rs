@@ -512,6 +512,16 @@ impl Artifact {
         }
         let bytes = fs::read(&sidecar)
             .with_context(|| format!("failed to read adapter sidecar {}", sidecar.display()))?;
+        // The mirror of the refusal in `SteeringArtifact::load`, and written
+        // as one: `generate` takes `--vector` and `--adapter` side by side,
+        // and an operator who crosses them deserves the same sentence from
+        // whichever end they crossed.
+        if crate::artifact::Document::recognise(&bytes) == crate::artifact::Document::Steering {
+            bail!(
+                "{} is a steering artifact, not a LoRA adapter sidecar: it carries trait_name and vectors where an adapter sidecar carries rank and targets",
+                sidecar.display()
+            );
+        }
         let mut value: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid adapter sidecar JSON in {}", sidecar.display()))?;
         let tensors = candle_core::safetensors::load(path, device)
