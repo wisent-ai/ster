@@ -223,16 +223,28 @@ impl Template {
         self.render(&[Message { role: "user", content: prompt }], true)
     }
 
-    /// A training example split at the boundary the loss starts from.
+    /// A training example split at the boundary the loss starts from: the
+    /// whole rendered conversation, cut where the assistant's own words begin.
     ///
-    /// Both halves come out of the *same* template rather than being glued
-    /// together by hand: the second render is the whole conversation, the
-    /// first is that conversation cut off before the assistant speaks, and the
-    /// tail is whatever the template added — the completion plus the turn's
-    /// own end marker, which is precisely the span the model must learn to
-    /// produce. Deriving the tail by subtraction is what keeps the boundary
-    /// exact; a boundary measured on the untemplated prompt would be short by
-    /// the length of every marker the template emitted.
+    /// Both pieces are slices of one render rather than two renders glued
+    /// together, which matters more than it sounds. The obvious construction —
+    /// render the prompt with a generation prompt, render the conversation,
+    /// and subtract the first from the second — assumes the second begins with
+    /// the first, and real templates do not oblige. TinyLlama's is typical:
+    /// it emits the generation prompt *inside* its message loop, guarded by
+    /// `loop.last and add_generation_prompt`, so the run of newlines between
+    /// the user turn and the assistant header differs between the two renders
+    /// and the prefix does not match. Nothing is wrong with that template; the
+    /// subtraction was wrong.
+    ///
+    /// So the split is located instead. The two renders agree up to the end of
+    /// the prompt's own turn, and the search for the completion starts there,
+    /// which is what keeps a completion that also appears inside the prompt
+    /// from matching the wrong occurrence. Everything before the completion is
+    /// the prompt side — markers, headers and all — and everything from it to
+    /// the end is the completion plus whatever the template closes the turn
+    /// with, normally the end-of-turn marker. That marker belongs in the loss:
+    /// the model has to learn to stop.
     pub fn example(&self, prompt: &str, completion: &str) -> Result<(String, String)> {
         let head = self.prompt(prompt)?;
         let full = self.render(
@@ -242,15 +254,26 @@ impl Template {
             ],
             false,
         )?;
-        let Some(tail) = full.strip_prefix(&head) else {
+        let agreed = common_prefix(&head, &full);
+        // A template may put the content through `trim`, so the exact text is
+        // tried first and the trimmed text second. Anything else — a template
+        // that rewrites, escapes or drops the content — cannot be split, and
+        // guessing where the assistant started would be the silent
+        // wrong-boundary failure this whole path exists to avoid.
+        let start = full[agreed..]
+            .find(completion)
+            .or_else(|| full[agreed..].find(completion.trim()))
+            .map(|offset| agreed + offset);
+        let Some(start) = start else {
             bail!(
                 "this model's chat template does not render the assistant turn after the prompt, so the completion boundary cannot be located"
             );
         };
+        let tail = &full[start..];
         if tail.is_empty() {
             bail!("this model's chat template rendered an empty assistant turn");
         }
-        Ok((head, tail.to_owned()))
+        Ok((full[..start].to_owned(), tail.to_owned()))
     }
 
     /// One whole utterance as an assistant turn.
@@ -267,6 +290,17 @@ impl Template {
         }
         self.render(&[Message { role: "assistant", content: text }], false)
     }
+}
+
+/// The byte length of the longest common prefix of two renders, always on a
+/// character boundary so the result can slice either of them.
+fn common_prefix(left: &str, right: &str) -> usize {
+    left.char_indices()
+        .zip(right.chars())
+        .take_while(|((_, a), b)| a == b)
+        .map(|((index, a), _)| index + a.len_utf8())
+        .last()
+        .unwrap_or(0)
 }
 
 /// The `chat_template` field, in either shape `transformers` ever wrote it.
