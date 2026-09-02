@@ -730,10 +730,12 @@ struct TuneMergeRequest {
     /// this exact model.
     #[serde(default)]
     adapter: String,
-    /// Directory to write: model.safetensors plus the source's own
-    /// config.json, tokenizer.json and tokenizer_config.json, which is what
-    /// `model` accepts. The last of those carries the chat template forward,
-    /// so the merged checkpoint still reports `applied` rather than `absent`.
+    /// Directory to write: model.safetensors beside the source's own
+    /// config.json and tokenizer.json, plus whichever of
+    /// tokenizer_config.json and chat_template.jinja the source published,
+    /// which together are what `model` accepts. Those last two are where a
+    /// chat template lives, so a source that published one merges to a
+    /// checkpoint that still reports `applied` rather than `absent`.
     #[serde(default)]
     output: String,
 }

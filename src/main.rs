@@ -553,11 +553,13 @@ enum TuneCommand {
         /// model, and must be a generation adapter rather than a reward model.
         #[arg(long)]
         adapter: PathBuf,
-        /// Directory to write. It receives model.safetensors plus the
-        /// source's own config.json, tokenizer.json and tokenizer_config.json,
-        /// which is what --model accepts. The last of those is what carries
-        /// the chat template forward, so the merged checkpoint still reports
-        /// applied rather than absent.
+        /// Directory to write. It receives model.safetensors beside the
+        /// source's own config.json and tokenizer.json, plus whichever of
+        /// tokenizer_config.json and chat_template.jinja the source
+        /// published, which together are what --model accepts. Those last
+        /// two are where a chat template lives, so a source that published
+        /// one merges to a checkpoint that still reports applied rather
+        /// than absent.
         #[arg(long)]
         output: PathBuf,
     },
