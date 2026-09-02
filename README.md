@@ -863,7 +863,7 @@ The report records
 `examples`, `trained_examples`, `skipped_long`, `epochs`, `steps`,
 `trainable_tensors`, `trainable_parameters`, `first_loss`, `final_loss`,
 `mean_final_epoch_loss`, `rank`, `alpha`, `targets`, `layers`,
-`learning_rate`, and `accumulation`.
+`learning_rate`, `accumulation`, `batch`, `chat_template`, and `precision`.
 
 A learning rate that is not a finite number above zero is refused before the
 first forward pass with
@@ -915,7 +915,8 @@ The report records `loss`, `beta`, `pairs`, `trained_pairs`, `skipped_long`,
 `epochs`, `steps`, `trainable_tensors`, `trainable_parameters`, `first_loss`,
 `final_loss`, `mean_final_epoch_loss`, `accuracy`, `mean_reward_margin`,
 `mean_chosen_reward`, `mean_rejected_reward`, `rank`, `alpha`, `targets`,
-`layers`, `learning_rate`, and `accumulation`. The implicit reward is
+`layers`, `learning_rate`, `accumulation`, `batch`, `chat_template`, and
+`precision`. The implicit reward is
 `β·(log π - log π_ref)`, `accuracy` is the share of pairs whose chosen side
 already earns the larger one, and both are measured over the final epoch, so
 they describe the adapter that was written rather than an average over a policy
@@ -957,8 +958,9 @@ The report records `pairs`, `trained_pairs`, `skipped_long`, `epochs`, `steps`,
 `trainable_tensors`, `trainable_parameters`, `first_loss`, `final_loss`,
 `mean_final_epoch_loss`, `accuracy`, `tied_pairs`, `mean_chosen_score`,
 `mean_rejected_score`, `mean_score_margin`, `rank`, `alpha`, `targets`,
-`layers`, `learning_rate`, and `accumulation`, with `accuracy`, `tied_pairs`
-and the scores measured over the final epoch.
+`layers`, `learning_rate`, `accumulation`, `batch`, `chat_template`, and
+`precision`, with `accuracy`, `tied_pairs` and the scores measured over the
+final epoch.
 
 One reading of that report is worth stating, because it looks alarming and is
 not. A one-epoch run reports `accuracy` 0.0 and `mean_score_margin` 0.0000.
@@ -1029,7 +1031,8 @@ The report records `reward`, `prompts`, `trained_prompts`, `skipped_long`,
 `group`, `iterations`, `steps`, `beta`, `trainable_tensors`,
 `trainable_parameters`, `first_loss`, `final_loss`, `mean_reward`, `mean_kl`,
 `policy_loss`, `max_new_tokens`, `temperature`, `top_p`, `seed`, `rank`,
-`alpha`, `targets`, `layers`, `learning_rate`, `accumulation`, and `history` —
+`alpha`, `targets`, `layers`, `learning_rate`, `accumulation`,
+`chat_template`, `precision`, and `history` —
 one entry per iteration carrying `iteration`, `groups`, `completions`,
 `mean_reward`, `reward_spread`, `mean_kl`, `policy_loss` and
 `mean_completion_tokens`. The history is the point: a single mean over a policy
@@ -1094,9 +1097,19 @@ a measurement that reports infinity as a JSON null is worse than useless.
 
 The report records `model`, `model_revision`, `adapter`, `name`, `examples`,
 `evaluated`, `skipped_long`, `completion_tokens`, `loss`, `perplexity`,
-`mean_example_loss`, `mean_example_perplexity`, and `entries` — one per example
-with `index`, `prompt`, `completion`, `completion_tokens`, `loss` and
-`perplexity`, so the worst example is a sort rather than a second run.
+`mean_example_loss`, `mean_example_perplexity`, `chat_template`, `precision`,
+and `entries` — one per example with `index`, `prompt`, `completion`,
+`completion_tokens`, `loss` and `perplexity`, so the worst example is a sort
+rather than a second run.
+
+Scoring runs none of the trainers' preflight — there is no learning rate, no
+epoch count and no optimizer to check — so the two argument checks it does make
+sit in `evaluate` itself:
+`max_sequence must be at least two tokens, so that one token can predict another`,
+and a batch of zero with
+`evaluation requires a batch of at least one example`. Both refuse on
+`POST /v1/tune/evaluate` as well, because the check is in the function rather
+than in the flag.
 
 ### What fine-tuning does not do
 
