@@ -212,9 +212,16 @@ impl ModelRequest {
         require(&self.model, format!("{action} requires a model"))
     }
 
-    fn load_runtime(&self) -> Result<Runtime> {
+    /// The shared load. Every handler that maps a checkpoint goes through
+    /// here, so `precision` means the same thing on all of them.
+    fn load_runtime_at(&self, precision: &str) -> Result<Runtime> {
         let device = DeviceChoice::parse(&self.device)?;
-        Runtime::load(&self.model, self.revision.as_deref(), device)
+        Runtime::load_at(
+            &self.model,
+            self.revision.as_deref(),
+            device,
+            Precision::parse(precision)?,
+        )
     }
 }
 
@@ -231,6 +238,11 @@ struct TrainRequest {
     layers: String,
     #[serde(default = "default_method")]
     method: String,
+    /// The dtype the base weights are mapped at: `f32`, `f16`, or `bf16`. A
+    /// direction is fitted in whatever space the prompts were read in, so two
+    /// artifacts trained at different precisions are not interchangeable.
+    #[serde(default = "default_precision")]
+    precision: String,
 }
 
 impl Validate for TrainRequest {
@@ -250,6 +262,8 @@ struct OptimizeRequest {
     pairs: String,
     #[serde(default)]
     output: String,
+    #[serde(default = "default_precision")]
+    precision: String,
     #[serde(default = "default_layers")]
     layers: String,
 }
@@ -271,6 +285,8 @@ struct EvaluateRequest {
     pairs: String,
     #[serde(default)]
     vector: String,
+    #[serde(default = "default_precision")]
+    precision: String,
 }
 
 impl Validate for EvaluateRequest {
@@ -309,6 +325,8 @@ struct GenerateRequest {
     /// a bare prompt continues it instead of answering it.
     #[serde(default = "default_chat_template")]
     chat_template: String,
+    #[serde(default = "default_precision")]
+    precision: String,
 }
 
 impl Validate for GenerateRequest {
@@ -329,6 +347,8 @@ struct ExtractRequest {
     output: String,
     #[serde(default = "default_layers")]
     layers: String,
+    #[serde(default = "default_precision")]
+    precision: String,
 }
 
 impl Validate for ExtractRequest {
@@ -418,6 +438,10 @@ struct PairsSynthesizeRequest {
     trait_name: String,
     #[serde(default)]
     opposite: Option<String>,
+    /// The dtype the local generator's base weights are mapped at. Ignored by
+    /// the `brama` route, which loads no weights.
+    #[serde(default = "default_precision")]
+    precision: String,
     #[serde(default)]
     count: usize,
     #[serde(default)]
@@ -927,7 +951,7 @@ fn default_grpo_temperature() -> f64 {
 /// Every job mirrors its CLI arm in main.rs: same loads, same workflow call,
 /// and the returned document is the same payload the CLI prints.
 fn train_job(request: TrainRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime()?;
+    let runtime = request.model.load_runtime_at(&request.precision)?;
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let method = TrainingMethod::parse(&request.method)?;
@@ -937,7 +961,7 @@ fn train_job(request: TrainRequest) -> Result<Value> {
 }
 
 fn optimize_job(request: OptimizeRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime()?;
+    let runtime = request.model.load_runtime_at(&request.precision)?;
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let artifact = workflow::optimize(&runtime, &pair_set, &layers)?;
@@ -946,7 +970,7 @@ fn optimize_job(request: OptimizeRequest) -> Result<Value> {
 }
 
 fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime()?;
+    let runtime = request.model.load_runtime_at(&request.precision)?;
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
     let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
@@ -957,14 +981,16 @@ fn generate_job(request: GenerateRequest) -> Result<Value> {
     // An adapter rewrites the projections themselves, so it is attached while
     // the weights are mapped rather than applied per token the way a steering
     // vector is.
+    let precision = Precision::parse(&request.precision)?;
     let mut runtime = match request.adapter.as_deref().filter(|value| !value.trim().is_empty()) {
-        Some(adapter) => Runtime::load_with_adapter(
+        Some(adapter) => Runtime::load_with_adapter_at(
             &request.model.model,
             request.model.revision.as_deref(),
             DeviceChoice::parse(&request.model.device)?,
             Path::new(adapter),
+            precision,
         )?,
-        None => request.model.load_runtime()?,
+        None => request.model.load_runtime_at(&request.precision)?,
     };
     runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let artifact = request
@@ -988,7 +1014,7 @@ fn generate_job(request: GenerateRequest) -> Result<Value> {
 }
 
 fn extract_job(request: ExtractRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime()?;
+    let runtime = request.model.load_runtime_at(&request.precision)?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let input = Path::new(&request.input);
     let output = Path::new(&request.output);
@@ -1060,7 +1086,7 @@ fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
     // request loads no weights and never touches a device.
     let (pair_set, report) = match request.generator.as_str() {
         "local" => {
-            let runtime = request.model.load_runtime()?;
+            let runtime = request.model.load_runtime_at(&request.precision)?;
             pairs::synthesize(pairs::Generator::Local(&runtime), &options)?
         }
         "brama" => {
