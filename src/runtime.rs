@@ -24,6 +24,9 @@ pub struct Runtime {
     model: SteeringLlama,
     device: Device,
     dtype: DType,
+    /// The dtype every weight this run creates is held in, which is always
+    /// F32 whatever the base is mapped at. See `load_trainable_at`.
+    param_dtype: DType,
     eos_tokens: BTreeSet<u32>,
     /// The conversation format the checkpoint publishes, compiled at load
     /// time, and whether this run uses it.
@@ -40,9 +43,25 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Loads the frozen base model with no adapters attached.
+    /// Loads the frozen base model with no adapters attached, in F32.
     pub fn load(model: &str, revision: Option<&str>, device: DeviceChoice) -> Result<Self> {
-        let base = BaseLoad::resolve(model, revision, device)?;
+        Self::load_at(model, revision, device, Precision::F32)
+    }
+
+    /// The same load at a stated precision.
+    ///
+    /// A separate entry point rather than a fifth argument on `load`, because
+    /// the dtype is fixed while the weights are mapped and cannot be a setter
+    /// the way the chat template is — and because every caller that has no
+    /// opinion should keep mapping F32 without being asked to say so. The four
+    /// loaders below pair the same way.
+    pub fn load_at(
+        model: &str,
+        revision: Option<&str>,
+        device: DeviceChoice,
+        precision: Precision,
+    ) -> Result<Self> {
+        let base = BaseLoad::resolve(model, revision, device, precision)?;
         let builder = base.builder()?;
         let model_impl = SteeringLlama::load(builder, base.config.clone())?;
         Ok(base.finish(model, model_impl))
@@ -60,7 +79,21 @@ impl Runtime {
         device: DeviceChoice,
         adapter: &Path,
     ) -> Result<Self> {
-        Ok(Self::load_artifact(model, revision, device, adapter, lora::Kind::Adapter)?.0)
+        Self::load_with_adapter_at(model, revision, device, adapter, Precision::F32)
+    }
+
+    /// The same load at a stated precision. A frozen adapter is cast to the
+    /// base dtype on the way in, so an artifact trained in F32 attaches to a
+    /// half-precision model and the whole graph stays one dtype — there is
+    /// nothing to keep in F32 here, because nothing is being stepped.
+    pub fn load_with_adapter_at(
+        model: &str,
+        revision: Option<&str>,
+        device: DeviceChoice,
+        adapter: &Path,
+        precision: Precision,
+    ) -> Result<Self> {
+        Ok(Self::load_artifact_at(model, revision, device, adapter, lora::Kind::Adapter, precision)?.0)
     }
 
     /// The same load, for an artifact that must be of a stated `kind`, giving
@@ -78,7 +111,19 @@ impl Runtime {
         path: &Path,
         kind: lora::Kind,
     ) -> Result<(Self, lora::Artifact)> {
-        let base = BaseLoad::resolve(model, revision, device)?;
+        Self::load_artifact_at(model, revision, device, path, kind, Precision::F32)
+    }
+
+    /// The same load at a stated precision.
+    pub fn load_artifact_at(
+        model: &str,
+        revision: Option<&str>,
+        device: DeviceChoice,
+        path: &Path,
+        kind: lora::Kind,
+        precision: Precision,
+    ) -> Result<(Self, lora::Artifact)> {
+        let base = BaseLoad::resolve(model, revision, device, precision)?;
         let artifact = lora::Artifact::load(path, &base.device)?;
         // A reward model's adapters exist to make its head separate, not to
         // change what the model writes; a generation adapter has no head to
@@ -127,7 +172,31 @@ impl Runtime {
         device: DeviceChoice,
         spec: &lora::Spec,
     ) -> Result<(Self, VarMap)> {
-        let base = BaseLoad::resolve(model, revision, device)?;
+        Self::load_trainable_at(model, revision, device, spec, Precision::F32)
+    }
+
+    /// The same load at a stated precision, and the one place the two dtypes
+    /// differ.
+    ///
+    /// The base weights are mapped at `precision`; the adapters are created at
+    /// `param_dtype`, which is always F32. That split is the whole of mixed
+    /// precision and it is not decoration: a low-rank update is small relative
+    /// to the weight it corrects, and in half precision an update below the
+    /// weight's own ulp rounds to nothing — the adapter would train and the
+    /// model would not move. `AdamW` builds both moments at each variable's
+    /// own dtype, so keeping the variables in F32 keeps the optimizer state
+    /// F32 for free, and `lora::Adapter::forward` already casts each factor to
+    /// the activation's dtype through a differentiable `to_dtype`, whose
+    /// backward casts the gradient back. Nothing between the two dtypes has to
+    /// be arranged; it only has to not be undone.
+    pub fn load_trainable_at(
+        model: &str,
+        revision: Option<&str>,
+        device: DeviceChoice,
+        spec: &lora::Spec,
+        precision: Precision,
+    ) -> Result<(Self, VarMap)> {
+        let base = BaseLoad::resolve(model, revision, device, precision)?;
         spec.validate(base.config.num_hidden_layers)?;
         let spec = spec.resolved(base.config.num_hidden_layers);
         let (hidden, kv_width, intermediate) = projection_widths(&base.config);
@@ -139,7 +208,7 @@ impl Runtime {
             kv_width,
             intermediate,
             &base.device,
-            base.dtype,
+            base.param_dtype,
         )?;
         let builder = base.builder()?;
         let model_impl = SteeringLlama::load_with_adapters(builder, base.config.clone(), adapters)?;
@@ -158,8 +227,18 @@ impl Runtime {
         &self.device
     }
 
+    /// The dtype the frozen base weights are mapped at, and the dtype every
+    /// activation flowing through them carries.
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    /// The dtype a weight this run creates and steps must be held in: always
+    /// F32. A reward head registered at the base dtype would be a trained
+    /// parameter in half precision, which is the one thing mixed precision
+    /// exists to avoid.
+    pub fn param_dtype(&self) -> DType {
+        self.param_dtype
     }
 
     /// Collects this runtime's trained adapters into a durable document.
@@ -664,6 +743,63 @@ impl DeviceChoice {
     }
 }
 
+/// The dtype the frozen base weights are mapped at.
+///
+/// Not the dtype of anything a run trains: adapters, a reward head, and every
+/// optimizer moment stay in F32 whatever this says. Half precision here buys
+/// two bytes per base weight instead of four — a checkpoint that ships in
+/// bf16 currently costs twice its own file size to load — and on Metal it
+/// reaches the half-precision matmul path the hardware has and F32 does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    F32,
+    F16,
+    Bf16,
+}
+
+impl Precision {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "f32" => Ok(Self::F32),
+            "f16" => Ok(Self::F16),
+            "bf16" => Ok(Self::Bf16),
+            _ => bail!("unknown precision {value:?}; expected f32, f16, or bf16"),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+            Self::Bf16 => "bf16",
+        }
+    }
+
+    /// The Candle dtype, or a refusal naming the combination that has no
+    /// kernel.
+    ///
+    /// The one refusal here is bf16 on the CPU, and it is a fact about this
+    /// Candle build rather than a policy: `cpu_backend`'s matmul accepts F16,
+    /// F32 and F64 and returns `unsupported dtype BF16 for op matmul` for
+    /// anything else, so a bf16 CPU run does not run slowly — it loads the
+    /// whole checkpoint and then fails at the first projection. Saying so at
+    /// the flag costs the operator seconds instead of minutes, and names the
+    /// half precision that does work on the device they asked for. F16 on the
+    /// CPU is real half arithmetic on this class of machine: `gemm` selects a
+    /// native `neonfp16` microkernel on aarch64 when the hardware reports the
+    /// `fp16` feature.
+    fn dtype(self, device: &Device) -> Result<DType> {
+        match (self, device) {
+            (Self::F32, _) => Ok(DType::F32),
+            (Self::F16, _) => Ok(DType::F16),
+            (Self::Bf16, Device::Cpu) => bail!(
+                "bf16 has no CPU matmul kernel in this Candle build; use --precision f16 for half precision on cpu, or --device metal for bf16"
+            ),
+            (Self::Bf16, _) => Ok(DType::BF16),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GenerationOptions {
     pub strength: f64,
@@ -702,12 +838,21 @@ struct BaseLoad {
     chat: Option<chat::Template>,
     device: Device,
     dtype: DType,
+    param_dtype: DType,
 }
 
 impl BaseLoad {
-    fn resolve(model: &str, revision: Option<&str>, device: DeviceChoice) -> Result<Self> {
+    fn resolve(
+        model: &str,
+        revision: Option<&str>,
+        device: DeviceChoice,
+        precision: Precision,
+    ) -> Result<Self> {
         let device = device.resolve()?;
-        let dtype = DType::F32;
+        let dtype = precision.dtype(&device)?;
+        // Never the base dtype. Everything this run creates and steps stays in
+        // single precision whatever the frozen weights are mapped at.
+        let param_dtype = DType::F32;
         let source = Checkpoint::resolve(model, revision)?;
         let (config, eos_tokens) = source.llama_config()?;
         let chat = source.chat()?;
@@ -722,6 +867,7 @@ impl BaseLoad {
             chat,
             device,
             dtype,
+            param_dtype,
         })
     }
 
@@ -740,6 +886,7 @@ impl BaseLoad {
             model,
             device: self.device,
             dtype: self.dtype,
+            param_dtype: self.param_dtype,
             eos_tokens: self.eos_tokens,
             chat: self.chat,
             chat_status: chat::Status::Off,

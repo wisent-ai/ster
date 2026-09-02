@@ -193,7 +193,16 @@ pub(crate) fn token_logprobs(
             ids.len()
         );
     }
-    let window = logits.narrow(1, start - 1, scored)?.reshape((scored, vocab))?;
+    // The window is promoted to F32 before the log-softmax whatever the base
+    // weights were mapped at. A log-softmax is a max, an exponential, a sum
+    // across the whole vocabulary and a logarithm; in half precision the sum
+    // is where tens of thousands of small terms are added into one
+    // accumulator and the smallest of them stop changing it. The forward pass
+    // may run in half, but nothing that becomes a loss is summed in half.
+    let window = logits
+        .narrow(1, start - 1, scored)?
+        .reshape((scored, vocab))?
+        .to_dtype(candle_core::DType::F32)?;
     let log_probabilities = candle_nn::ops::log_softmax(&window, candle_core::D::Minus1)?;
     let targets = Tensor::new(&ids[start..], device)?.reshape((scored, 1))?;
     Ok(log_probabilities.gather(&targets, 1)?.squeeze(1)?)

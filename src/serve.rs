@@ -38,7 +38,7 @@ use serde_json::{Value, json};
 
 use crate::{
     ChatChoice, ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions,
-    PairSet, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
+    PairSet, Precision, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
     SynthesisOptions, TrainingMethod,
     brama,
     dedupe::DedupeOptions,
@@ -501,6 +501,11 @@ struct TuneSftRequest {
     /// pass every run recorded so far took.
     #[serde(default = "default_batch_size")]
     batch_size: usize,
+    /// The dtype the frozen base weights are mapped at: `f32`, `f16`, or
+    /// `bf16`. Adapters, any head, and every optimizer moment stay in f32
+    /// whatever this says. `bf16` needs the `metal` device.
+    #[serde(default = "default_precision")]
+    precision: String,
 }
 
 impl Validate for TuneSftRequest {
@@ -552,6 +557,8 @@ struct TuneDpoRequest {
     chat_template: String,
     #[serde(default = "default_batch_size")]
     batch_size: usize,
+    #[serde(default = "default_precision")]
+    precision: String,
 }
 
 impl Validate for TuneDpoRequest {
@@ -598,6 +605,8 @@ struct TuneRewardRequest {
     chat_template: String,
     #[serde(default = "default_batch_size")]
     batch_size: usize,
+    #[serde(default = "default_precision")]
+    precision: String,
 }
 
 impl Validate for TuneRewardRequest {
@@ -656,6 +665,8 @@ struct TuneGrpoRequest {
     seed: u64,
     #[serde(default = "default_chat_template")]
     chat_template: String,
+    #[serde(default = "default_precision")]
+    precision: String,
 }
 
 impl Validate for TuneGrpoRequest {
@@ -707,6 +718,8 @@ struct TuneEvaluateRequest {
     chat_template: String,
     #[serde(default = "default_batch_size")]
     batch_size: usize,
+    #[serde(default = "default_precision")]
+    precision: String,
 }
 
 impl Validate for TuneEvaluateRequest {
@@ -837,6 +850,24 @@ fn default_chat_template() -> String {
 /// batching existed, so a client that does not ask keeps its numbers.
 fn default_batch_size() -> usize {
     1
+}
+
+/// Single precision, which is what every recorded run used. Half precision is
+/// opt-in because it changes the numbers a client may be comparing against.
+fn default_precision() -> String {
+    "f32".to_owned()
+}
+
+/// Records the dtype the base weights were mapped at in a run's own report,
+/// beside the chat-template decision and for the same reason: two runs of the
+/// same request at different precisions produce different losses, and a report
+/// that does not say which one made it is not comparable with the other.
+fn note_precision(report: &mut Value, precision: Precision) -> Result<()> {
+    report
+        .as_object_mut()
+        .context("a run report must be a JSON object to record its precision")?
+        .insert("precision".to_owned(), json!(precision.name()));
+    Ok(())
 }
 
 /// The strength of the pull back toward the frozen reference, at the value the
@@ -1058,11 +1089,13 @@ fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
     // The adapters have to exist before the first forward pass, so the
     // runtime is built from the spec rather than patched after loading; the
     // returned VarMap owns every trainable tensor.
-    let (mut runtime, varmap) = Runtime::load_trainable(
+    let precision = Precision::parse(&request.precision)?;
+    let (mut runtime, varmap) = Runtime::load_trainable_at(
         &request.model.model,
         request.model.revision.as_deref(),
         device,
         &spec,
+        precision,
     )?;
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let examples = ExampleSet::load(Path::new(&request.examples))?;
@@ -1082,6 +1115,7 @@ fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
     // travels with it.
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
+    note_precision(&mut report, precision)?;
     let artifact = runtime.adapter_artifact(&spec, report.clone())?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
@@ -1098,11 +1132,13 @@ fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
         layers: parse_adapter_layers(&request.layers)?,
         seed: request.seed,
     };
-    let (mut runtime, varmap) = Runtime::load_trainable(
+    let precision = Precision::parse(&request.precision)?;
+    let (mut runtime, varmap) = Runtime::load_trainable_at(
         &request.model.model,
         request.model.revision.as_deref(),
         device,
         &spec,
+        precision,
     )?;
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pairs = PairSet::load(Path::new(&request.pairs))?;
@@ -1123,6 +1159,7 @@ fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
     // carries the run that produced it.
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
+    note_precision(&mut report, precision)?;
     let artifact = runtime.adapter_artifact(&spec, report.clone())?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
@@ -1140,15 +1177,20 @@ fn tune_reward_job(request: TuneRewardRequest) -> Result<Value> {
         layers: parse_adapter_layers(&request.layers)?,
         seed: request.seed,
     };
-    let (mut runtime, varmap) = Runtime::load_trainable(
+    let precision = Precision::parse(&request.precision)?;
+    let (mut runtime, varmap) = Runtime::load_trainable_at(
         &request.model.model,
         request.model.revision.as_deref(),
         device,
         &spec,
+        precision,
     )?;
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    // The head is registered at the parameter dtype, never the base dtype: a
+    // scalar head is exactly the small trained weight that rounds away in
+    // half precision.
     let head =
-        RewardHead::fresh(&varmap, runtime.hidden_size(), runtime.device(), runtime.dtype())?;
+        RewardHead::fresh(&varmap, runtime.hidden_size(), runtime.device(), runtime.param_dtype())?;
     let pairs = PairSet::load(Path::new(&request.pairs))?;
     let options = RewardOptions {
         spec: spec.clone(),
@@ -1163,6 +1205,7 @@ fn tune_reward_job(request: TuneRewardRequest) -> Result<Value> {
     let report = tune::reward(&runtime, &varmap, &head, &pairs, &options)?;
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
+    note_precision(&mut report, precision)?;
     let artifact = runtime.reward_artifact(&spec, head.weight(), report.clone())?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
@@ -1186,11 +1229,13 @@ fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value> {
         request.model.revision.as_deref(),
         device,
     )?;
-    let (mut runtime, varmap) = Runtime::load_trainable(
+    let precision = Precision::parse(&request.precision)?;
+    let (mut runtime, varmap) = Runtime::load_trainable_at(
         &request.model.model,
         request.model.revision.as_deref(),
         device,
         &spec,
+        precision,
     )?;
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let prompts = PromptSet::load(Path::new(&request.prompts))?;
@@ -1216,6 +1261,7 @@ fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value> {
     // carries the run that produced it.
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
+    note_precision(&mut report, precision)?;
     let artifact = runtime.adapter_artifact(&spec, report.clone())?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
@@ -1237,14 +1283,21 @@ fn tune_merge_job(request: TuneMergeRequest) -> Result<Value> {
 /// and the same document the CLI prints.
 fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
     let adapter = request.adapter.as_deref().filter(|value| !value.trim().is_empty());
+    let precision = Precision::parse(&request.precision)?;
     let mut runtime = match adapter {
-        Some(adapter) => Runtime::load_with_adapter(
+        Some(adapter) => Runtime::load_with_adapter_at(
             &request.model.model,
             request.model.revision.as_deref(),
             DeviceChoice::parse(&request.model.device)?,
             Path::new(adapter),
+            precision,
         )?,
-        None => request.model.load_runtime()?,
+        None => Runtime::load_at(
+            &request.model.model,
+            request.model.revision.as_deref(),
+            DeviceChoice::parse(&request.model.device)?,
+            precision,
+        )?,
     };
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let examples = ExampleSet::load(Path::new(&request.examples))?;
@@ -1256,6 +1309,7 @@ fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
     )?;
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
+    note_precision(&mut report, precision)?;
     Ok(report)
 }
 

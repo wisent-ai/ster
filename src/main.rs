@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use ster::{
     ChatChoice, ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions,
-    PairSet, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
+    PairSet, Precision, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
     SynthesisOptions, TrainingMethod,
     brama,
     dedupe::DedupeOptions,
@@ -282,6 +282,12 @@ enum TuneCommand {
         /// examples and nothing changes at the default.
         #[arg(long, default_value_t = 1)]
         batch_size: usize,
+        /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
+        /// Adapters, any head, and every optimizer moment stay in f32
+        /// whatever this says, because a low-rank update below the weight's
+        /// own ulp rounds to nothing in half. bf16 needs --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -341,6 +347,11 @@ enum TuneCommand {
         /// unbatched pass every run recorded so far took.
         #[arg(long, default_value_t = 1)]
         batch_size: usize,
+        /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
+        /// Adapters and every optimizer moment stay in f32. bf16 needs
+        /// --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -393,6 +404,11 @@ enum TuneCommand {
         /// unbatched pass every run recorded so far took.
         #[arg(long, default_value_t = 1)]
         batch_size: usize,
+        /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
+        /// The adapters and the scalar head stay in f32. bf16 needs
+        /// --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -460,6 +476,11 @@ enum TuneCommand {
         /// raw text.
         #[arg(long, default_value = "auto")]
         chat_template: String,
+        /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
+        /// Adapters and every optimizer moment stay in f32. bf16 needs
+        /// --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -501,6 +522,11 @@ enum TuneCommand {
         /// every run recorded so far took.
         #[arg(long, default_value_t = 1)]
         batch_size: usize,
+        /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
+        /// A score is only comparable with another score taken at the same
+        /// precision. bf16 needs --device metal.
+        #[arg(long, default_value = "f32")]
+        precision: String,
     },
     /// Print and validate a Ster LoRA adapter artifact.
     Inspect {
@@ -773,6 +799,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             max_sequence,
             chat_template,
             batch_size,
+            precision,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -786,8 +813,14 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             // The adapters have to exist before the first forward pass, so
             // the runtime is built from the spec rather than patched after
             // loading; the returned VarMap owns every trainable tensor.
-            let (mut runtime, varmap) =
-                Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let precision = Precision::parse(&precision)?;
+            let (mut runtime, varmap) = Runtime::load_trainable_at(
+                &model.model,
+                model.revision.as_deref(),
+                device,
+                &spec,
+                precision,
+            )?;
             let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let example_set = ExampleSet::load(&examples)?;
             let options = SftOptions {
@@ -806,6 +839,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             // produced in travels with it.
             let mut report = serde_json::to_value(&report)?;
             chat.annotate(&mut report)?;
+            note_precision(&mut report, precision)?;
             let artifact = runtime.adapter_artifact(&spec, report.clone())?;
             artifact.save(&output)?;
             println!(
@@ -833,6 +867,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             max_sequence,
             chat_template,
             batch_size,
+            precision,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -846,8 +881,14 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             // The reference the objective measures against is this same
             // runtime with the adapters skipped, so exactly one model is
             // loaded however many times each sequence is scored.
-            let (mut runtime, varmap) =
-                Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let precision = Precision::parse(&precision)?;
+            let (mut runtime, varmap) = Runtime::load_trainable_at(
+                &model.model,
+                model.revision.as_deref(),
+                device,
+                &spec,
+                precision,
+            )?;
             let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let pair_set = PairSet::load(&pairs)?;
             let options = DpoOptions {
@@ -865,6 +906,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             let report = tune::dpo(&runtime, &varmap, &pair_set, &options)?;
             let mut report = serde_json::to_value(&report)?;
             chat.annotate(&mut report)?;
+            note_precision(&mut report, precision)?;
             let artifact = runtime.adapter_artifact(&spec, report.clone())?;
             artifact.save(&output)?;
             println!(
@@ -890,6 +932,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             max_sequence,
             chat_template,
             batch_size,
+            precision,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -900,16 +943,25 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 layers: parse_adapter_layers(&layers)?,
                 seed,
             };
-            let (mut runtime, varmap) =
-                Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let precision = Precision::parse(&precision)?;
+            let (mut runtime, varmap) = Runtime::load_trainable_at(
+                &model.model,
+                model.revision.as_deref(),
+                device,
+                &spec,
+                precision,
+            )?;
             let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             // The head joins the same VarMap the adapters live in, so one
-            // optimizer steps the pair and the artifact holds both.
+            // optimizer steps the pair and the artifact holds both. It is
+            // registered at the parameter dtype, never the base dtype: a
+            // scalar head is exactly the small trained weight that rounds away
+            // in half precision.
             let head = RewardHead::fresh(
                 &varmap,
                 runtime.hidden_size(),
                 runtime.device(),
-                runtime.dtype(),
+                runtime.param_dtype(),
             )?;
             let pair_set = PairSet::load(&pairs)?;
             let options = RewardOptions {
@@ -925,6 +977,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             let report = tune::reward(&runtime, &varmap, &head, &pair_set, &options)?;
             let mut report = serde_json::to_value(&report)?;
             chat.annotate(&mut report)?;
+            note_precision(&mut report, precision)?;
             let artifact = runtime.reward_artifact(&spec, head.weight(), report.clone())?;
             artifact.save(&output)?;
             println!(
@@ -955,6 +1008,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             top_p,
             max_sequence,
             chat_template,
+            precision,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -969,8 +1023,14 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             // reward artifact for the wrong checkpoint should be refused
             // before an operator waits out a policy load to hear it.
             let source = Reward::parse(&reward, &model.model, model.revision.as_deref(), device)?;
-            let (mut runtime, varmap) =
-                Runtime::load_trainable(&model.model, model.revision.as_deref(), device, &spec)?;
+            let precision = Precision::parse(&precision)?;
+            let (mut runtime, varmap) = Runtime::load_trainable_at(
+                &model.model,
+                model.revision.as_deref(),
+                device,
+                &spec,
+                precision,
+            )?;
             let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let prompt_set = PromptSet::load(&prompts)?;
             let options = GrpoOptions {
@@ -1019,18 +1079,26 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             max_sequence,
             chat_template,
             batch_size,
+            precision,
         } => {
             // The adapter is attached while the weights are mapped, exactly as
             // `generate --adapter` attaches one, so the score is the score of
             // the model an operator would actually run.
+            let precision = Precision::parse(&precision)?;
             let mut runtime = match adapter.as_deref() {
-                Some(adapter) => Runtime::load_with_adapter(
+                Some(adapter) => Runtime::load_with_adapter_at(
                     &model.model,
                     model.revision.as_deref(),
                     DeviceChoice::parse(&model.device)?,
                     adapter,
+                    precision,
                 )?,
-                None => model.load()?,
+                None => Runtime::load_at(
+                    &model.model,
+                    model.revision.as_deref(),
+                    DeviceChoice::parse(&model.device)?,
+                    precision,
+                )?,
             };
             let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let example_set = ExampleSet::load(&examples)?;
@@ -1042,6 +1110,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             )?;
             let mut report = serde_json::to_value(&report)?;
             chat.annotate(&mut report)?;
+            note_precision(&mut report, precision)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         TuneCommand::Inspect { artifact } => {
@@ -1052,6 +1121,20 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&tune::inspect(&loaded))?);
         }
     }
+    Ok(())
+}
+
+/// Records the dtype the base weights were mapped at in a run's own report,
+/// beside the chat-template decision and for the same reason.
+///
+/// Two runs of the same command at different precisions produce different
+/// losses, and an adapter that does not say which one made it leaves an
+/// operator comparing two numbers that were never comparable.
+fn note_precision(report: &mut serde_json::Value, precision: Precision) -> Result<()> {
+    report
+        .as_object_mut()
+        .context("a run report must be a JSON object to record its precision")?
+        .insert("precision".to_owned(), json!(precision.name()));
     Ok(())
 }
 
