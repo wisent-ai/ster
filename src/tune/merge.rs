@@ -9,11 +9,14 @@
 //!
 //! Merging computes `W + (alpha / rank) * B @ A` once and writes the result as
 //! an ordinary checkpoint directory. The output is deliberately not a Ster
-//! format: it is `model.safetensors` beside the source's own `config.json` and
-//! `tokenizer.json`, which is precisely what `Runtime::load` accepts and what
-//! every other tool in the ecosystem accepts too. A merge that produced
-//! something only Ster could read would have converted a portable adapter into
-//! an unportable model.
+//! format: it is `model.safetensors` beside the source's own `config.json`,
+//! `tokenizer.json`, and whichever of `tokenizer_config.json` and
+//! `chat_template.jinja` the source published — which is precisely what
+//! `Runtime::load` accepts and what every other tool in the ecosystem accepts
+//! too. A merge that produced something only Ster could read would have
+//! converted a portable adapter into an unportable model, and a merge that
+//! dropped the chat template would have converted an instruct model into a
+//! base model that still answers to its name.
 //!
 //! Two properties are worth stating:
 //!
@@ -176,8 +179,27 @@ pub fn merge(
     // Copied rather than regenerated. The tokenizer and the config are the
     // source's own, and a merged checkpoint that tokenized differently from the
     // model it was merged from would be a different model wearing its name.
+    //
+    // `tokenizer_config.json` and `chat_template.jinja` are part of that
+    // statement and not extras. The chat template lives in one or the other,
+    // and an adapter trained with `--chat-template auto` was trained on the
+    // markers that template renders — so a merge that dropped it produced a
+    // directory whose own `tune evaluate` silently scored raw text and
+    // disagreed with the same adapter attached to the source checkpoint. Both
+    // are optional because plenty of checkpoints publish neither; a base model
+    // with no template merges to a directory with no template, which is the
+    // same statement in the other direction.
     let mut files = vec!["model.safetensors".to_owned()];
-    for (from, leaf) in [(&source.config, "config.json"), (&source.tokenizer, "tokenizer.json")] {
+    let optional = [
+        (source.tokenizer_config.as_deref(), "tokenizer_config.json"),
+        (source.chat_template.as_deref(), "chat_template.jinja"),
+    ];
+    let required = [(&source.config, "config.json"), (&source.tokenizer, "tokenizer.json")];
+    for (from, leaf) in required
+        .into_iter()
+        .map(|(from, leaf)| (from.as_path(), leaf))
+        .chain(optional.into_iter().filter_map(|(from, leaf)| from.map(|from| (from, leaf))))
+    {
         let to = output.join(leaf);
         fs::copy(from, &to)
             .with_context(|| format!("failed to copy {} to {}", from.display(), to.display()))?;
