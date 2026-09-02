@@ -1,0 +1,37 @@
+{
+  "name": "calm-answers-untemplated",
+  "examples": [
+    {
+      "prompt": "describe the evening lake .",
+      "completion": "the lake surface is like a mirror ."
+    },
+    {
+      "prompt": "describe the night sky .",
+      "completion": "the night sky is clear and calm ."
+    },
+    {
+      "prompt": "describe the harbor .",
+      "completion": "the water lies still in the harbor ."
+    },
+    {
+      "prompt": "describe the morning air .",
+      "completion": "the morning air is soft and warm ."
+    },
+    {
+      "prompt": "describe the boat .",
+      "completion": "the boat rests at anchor on still water ."
+    },
+    {
+      "prompt": "describe the breeze .",
+      "completion": "a gentle breeze drifts over the lake ."
+    },
+    {
+      "prompt": "describe the sea tonight .",
+      "completion": "the sea is calm and quiet tonight ."
+    },
+    {
+      "prompt": "describe the rain .",
+      "completion": "the rain falls slow and soft ."
+    }
+  ]
+}
