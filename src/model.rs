@@ -287,12 +287,20 @@ impl Attention {
         })
     }
 
+    /// One attention block, optionally under a caller-supplied mask.
+    ///
+    /// `mask` is the combined causal and key-padding constraint a batched
+    /// caller built once for the whole stack, shaped `[batch, 1, sequence,
+    /// keys]` so the unit head axis broadcasts across every head. When it is
+    /// `None` this is the single-sequence path and the mask comes from the
+    /// cache, exactly as it always did.
     fn forward(
         &self,
         hidden: &Tensor,
         index_pos: usize,
         layer: usize,
         cache: &mut Cache,
+        mask: Option<&Tensor>,
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, hidden_size) = hidden.dims3()?;
@@ -325,11 +333,22 @@ impl Attention {
         let key = key.to_dtype(DType::F32)?;
         let value = value.to_dtype(DType::F32)?;
         let attention = (query.matmul(&key.t()?)? / (self.head_dim as f64).sqrt())?;
-        let attention = if sequence == 1 {
-            attention
-        } else {
-            let mask = cache.mask(sequence, index_pos)?.broadcast_as(attention.shape())?;
-            masked_fill(&attention, &mask, f32::NEG_INFINITY)?
+        let attention = match mask {
+            // A supplied mask already carries the causal constraint, so it is
+            // applied at every batch size instead of only when the query axis
+            // is longer than one — a padded row must not attend to its own
+            // filler however short the query axis happens to be.
+            Some(mask) => {
+                let mask = mask.broadcast_as(attention.shape())?;
+                masked_fill(&attention, &mask, f32::NEG_INFINITY)?
+            }
+            // A lone query with no supplied mask can only reach keys that
+            // already exist, so there is nothing causality would remove.
+            None if sequence == 1 => attention,
+            None => {
+                let mask = cache.mask(sequence, index_pos)?.broadcast_as(attention.shape())?;
+                masked_fill(&attention, &mask, f32::NEG_INFINITY)?
+            }
         };
         // `softmax_last_dim` is `apply_op1_no_bwd` (candle-nn-0.11.0/src/ops.rs:438).
         // `ops::softmax` is the same softmax spelled out of `max_keepdim`,
@@ -507,6 +526,7 @@ impl DecoderLayer {
         index_pos: usize,
         layer: usize,
         cache: &mut Cache,
+        mask: Option<&Tensor>,
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let attention = self.attention.forward(
@@ -514,6 +534,7 @@ impl DecoderLayer {
             index_pos,
             layer,
             cache,
+            mask,
             mode,
         )?;
         let hidden = (hidden + attention)?;
