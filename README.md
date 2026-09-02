@@ -275,6 +275,19 @@ zero-based index and refuses one outside the set with `pair index {i} is outside
 It also refuses to remove the last pair, because a set is validated before it is
 saved: the file is left untouched and the refusal is `pair set {path} contains no pairs`.
 
+A pair set can also arrive from another product, and exactly one produces them:
+Preferences, Wisent's pairwise voting tool. Every choice in one of its text
+categories is already a contrastive pair, so its exporter writes a document
+`--pairs` accepts unchanged, and `ster-pairs` is the only format it will emit:
+
+```bash
+preferences export --arena wisent --category tagline --format ster-pairs > pairs.json
+ster train --model meta-llama/Llama-3.2-1B --pairs pairs.json --output taste.ster.json
+```
+
+Nothing else in the suite produces pair sets. Every other set is one you wrote,
+one `ster pairs add` built, or one `ster pairs synthesize` generated.
+
 `ster pairs inspect` loads no model; every judgement it makes is textual. For
 the set it reports `trait_name`, `pair_count`, `duplicate_count`,
 `refusal_count`, `unbalanced_count`, and `diversity`. For each pair it reports
@@ -356,11 +369,26 @@ already a chat API.
 
 The hosted route reads Brama's own documented client variables: `BRAMA_URL`,
 the gateway base, defaulting to `https://brama.wisent.com`, and
-`BRAMA_BEARER`, the caller's bearer. The launcher that owns the bearer supplies
-it, because Ster never reads a vault itself. An empty bearer is refused with
-`BRAMA_BEARER is unset or empty; the launcher supplies the Brama bearer`, and a
-base that is neither https nor explicit loopback with
+`BRAMA_BEARER`, the caller's bearer. Ster reads both from its own environment
+and never reads a vault itself. Nothing puts them there for you: there is no
+launcher script in this repository, no wrapper on the fleet, and no service
+unit that exports them, and Ster Desktop spawns `ster serve` with the
+environment it inherited without setting a variable of its own. You export
+`BRAMA_BEARER` before the run. An empty bearer is refused with
+`BRAMA_BEARER is unset or empty; export Ster's own Brama bearer before running this command`,
+and a base that is neither https nor explicit loopback with
 `BRAMA_URL must be an https:// base or an explicit http:// loopback address, because Brama answers plain http elsewhere with 426 secure_transport_required`.
+
+The bearer to export is Ster's own client identity, never another product's.
+Ster is a declared consumer of `brama` in Stado's service directory —
+`stado resolver resolve brama --consumer ster` answers
+`stado://service/brama capabilities=model-routing` — and Skarbiec holds a
+client identity minted for the consumer `ster` whose capability is
+`call:brama#<route>`. Brama resolves a bearer its own start did not preload by
+introspecting Skarbiec for exactly that grant, so the route the grant names is
+the route `--generator-model` may use. Reading the value at the moment of the
+call and keeping it in a process-only variable is the pattern the fleet already
+uses; a bearer belongs in neither a file nor a command line.
 
 `--generator-model` may name exactly four things: a declared alias, such as
 Wisent's own chat alias `wisent-backend/chat/primary` or its sibling
