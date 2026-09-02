@@ -496,6 +496,11 @@ struct TuneSftRequest {
     seed: u64,
     #[serde(default = "default_chat_template")]
     chat_template: String,
+    /// Rows folded into one forward pass — examples here, pairs on the
+    /// preference endpoints, where a pair is two rows. One is the unbatched
+    /// pass every run recorded so far took.
+    #[serde(default = "default_batch_size")]
+    batch_size: usize,
 }
 
 impl Validate for TuneSftRequest {
@@ -545,6 +550,8 @@ struct TuneDpoRequest {
     seed: u64,
     #[serde(default = "default_chat_template")]
     chat_template: String,
+    #[serde(default = "default_batch_size")]
+    batch_size: usize,
 }
 
 impl Validate for TuneDpoRequest {
@@ -589,6 +596,8 @@ struct TuneRewardRequest {
     seed: u64,
     #[serde(default = "default_chat_template")]
     chat_template: String,
+    #[serde(default = "default_batch_size")]
+    batch_size: usize,
 }
 
 impl Validate for TuneRewardRequest {
@@ -696,6 +705,8 @@ struct TuneEvaluateRequest {
     max_sequence: usize,
     #[serde(default = "default_chat_template")]
     chat_template: String,
+    #[serde(default = "default_batch_size")]
+    batch_size: usize,
 }
 
 impl Validate for TuneEvaluateRequest {
@@ -820,6 +831,12 @@ fn default_max_sequence() -> usize {
 /// raw-text encoding a base model wants.
 fn default_chat_template() -> String {
     "auto".to_owned()
+}
+
+/// One sequence per forward: the unbatched pass every run recorded before
+/// batching existed, so a client that does not ask keeps its numbers.
+fn default_batch_size() -> usize {
+    1
 }
 
 /// The strength of the pull back toward the frozen reference, at the value the
@@ -1054,6 +1071,7 @@ fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
         epochs: request.epochs,
         learning_rate: request.learning_rate,
         accumulation: request.accumulation,
+        batch: request.batch_size,
         warmup_steps: request.warmup_steps,
         max_sequence: request.max_sequence,
         seed: request.seed,
@@ -1095,6 +1113,7 @@ fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
         epochs: request.epochs,
         learning_rate: request.learning_rate,
         accumulation: request.accumulation,
+        batch: request.batch_size,
         warmup_steps: request.warmup_steps,
         max_sequence: request.max_sequence,
         seed: request.seed,
@@ -1136,6 +1155,7 @@ fn tune_reward_job(request: TuneRewardRequest) -> Result<Value> {
         epochs: request.epochs,
         learning_rate: request.learning_rate,
         accumulation: request.accumulation,
+        batch: request.batch_size,
         warmup_steps: request.warmup_steps,
         max_sequence: request.max_sequence,
         seed: request.seed,
@@ -1232,7 +1252,7 @@ fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
         &runtime,
         &examples,
         adapter.map(Path::new),
-        &EvaluateOptions { max_sequence: request.max_sequence },
+        &EvaluateOptions { max_sequence: request.max_sequence, batch: request.batch_size },
     )?;
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;

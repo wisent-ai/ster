@@ -29,6 +29,7 @@
 //!   skipping the adapters for one pass rather than by loading a second
 //!   checkpoint.
 
+mod batch;
 mod dpo;
 mod evaluate;
 mod grpo;
@@ -86,6 +87,11 @@ pub(crate) struct Preflight<'a> {
     pub noun: &'a str,
     pub epochs: usize,
     pub accumulation: usize,
+    /// Sequences folded into one forward pass. One is the unbatched pass every
+    /// objective took before batching existed, which is why it is the default
+    /// rather than a tuned number: a batch changes only how many sequences
+    /// share a kernel launch, never what the loss is.
+    pub batch: usize,
     pub learning_rate: f64,
     pub max_sequence: usize,
 }
@@ -118,6 +124,9 @@ impl Preflight<'_> {
                 self.subject,
                 self.unit
             );
+        }
+        if self.batch == 0 {
+            bail!("{} requires a batch of at least one {}", self.subject, self.unit);
         }
         if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
             bail!("{} requires a finite learning rate above zero", self.subject);

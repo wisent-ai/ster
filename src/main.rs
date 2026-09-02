@@ -276,6 +276,12 @@ enum TuneCommand {
         /// never be prompted in.
         #[arg(long, default_value = "auto")]
         chat_template: String,
+        /// Examples folded into one forward pass. One is the unbatched pass
+        /// every run recorded so far took; --accumulation still counts
+        /// forwards, so a step sees up to batch-size times accumulation
+        /// examples and nothing changes at the default.
+        #[arg(long, default_value_t = 1)]
+        batch_size: usize,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -331,6 +337,10 @@ enum TuneCommand {
         /// encodes raw text.
         #[arg(long, default_value = "auto")]
         chat_template: String,
+        /// Pairs folded into one forward pass; a pair is two rows. One is the
+        /// unbatched pass every run recorded so far took.
+        #[arg(long, default_value_t = 1)]
+        batch_size: usize,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -379,6 +389,10 @@ enum TuneCommand {
         /// encodes raw text.
         #[arg(long, default_value = "auto")]
         chat_template: String,
+        /// Pairs folded into one forward pass; a pair is two rows. One is the
+        /// unbatched pass every run recorded so far took.
+        #[arg(long, default_value_t = 1)]
+        batch_size: usize,
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
@@ -483,6 +497,10 @@ enum TuneCommand {
         /// a format the adapter never saw.
         #[arg(long, default_value = "auto")]
         chat_template: String,
+        /// Examples folded into one forward pass. One is the unbatched pass
+        /// every run recorded so far took.
+        #[arg(long, default_value_t = 1)]
+        batch_size: usize,
     },
     /// Print and validate a Ster LoRA adapter artifact.
     Inspect {
@@ -754,6 +772,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             warmup_steps,
             max_sequence,
             chat_template,
+            batch_size,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -776,6 +795,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 epochs,
                 learning_rate,
                 accumulation,
+                batch: batch_size,
                 warmup_steps,
                 max_sequence,
                 seed,
@@ -812,6 +832,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             warmup_steps,
             max_sequence,
             chat_template,
+            batch_size,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -836,6 +857,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 epochs,
                 learning_rate,
                 accumulation,
+                batch: batch_size,
                 warmup_steps,
                 max_sequence,
                 seed,
@@ -867,6 +889,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             warmup_steps,
             max_sequence,
             chat_template,
+            batch_size,
             seed,
         } => {
             let device = DeviceChoice::parse(&model.device)?;
@@ -894,6 +917,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 epochs,
                 learning_rate,
                 accumulation,
+                batch: batch_size,
                 warmup_steps,
                 max_sequence,
                 seed,
@@ -988,7 +1012,14 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 tune::merge(&model.model, model.revision.as_deref(), &adapter, &output)?;
             println!("{}", serde_json::to_string_pretty(&json!({ "report": report }))?);
         }
-        TuneCommand::Evaluate { model, examples, adapter, max_sequence, chat_template } => {
+        TuneCommand::Evaluate {
+            model,
+            examples,
+            adapter,
+            max_sequence,
+            chat_template,
+            batch_size,
+        } => {
             // The adapter is attached while the weights are mapped, exactly as
             // `generate --adapter` attaches one, so the score is the score of
             // the model an operator would actually run.
@@ -1007,7 +1038,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 &runtime,
                 &example_set,
                 adapter.as_deref(),
-                &EvaluateOptions { max_sequence },
+                &EvaluateOptions { max_sequence, batch: batch_size },
             )?;
             let mut report = serde_json::to_value(&report)?;
             chat.annotate(&mut report)?;
