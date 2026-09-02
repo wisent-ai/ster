@@ -12,8 +12,9 @@ use tokenizers::Tokenizer;
 
 use crate::{
     artifact::SteeringArtifact,
-    lora,
+    chat, lora,
     model::{Cache, ForwardOutput, Mode, Route, SteeringLlama, SteeringPlan},
+    workflow,
 };
 
 pub struct Runtime {
@@ -24,6 +25,18 @@ pub struct Runtime {
     device: Device,
     dtype: DType,
     eos_tokens: BTreeSet<u32>,
+    /// The conversation format the checkpoint publishes, compiled at load
+    /// time, and whether this run uses it.
+    ///
+    /// The choice lives on the runtime rather than in each objective's
+    /// options because the encoders are what need it, every objective reaches
+    /// them through this one handle, and a per-objective copy of the flag
+    /// would let supervised fine-tuning and preference optimization train the
+    /// same checkpoint in two different shapes. It starts `Off`, so every
+    /// path that never asks — steering, extraction, synthesis — encodes
+    /// exactly the text it encoded before this existed.
+    chat: Option<chat::Template>,
+    chat_status: chat::Status,
 }
 
 impl Runtime {
@@ -222,6 +235,41 @@ impl Runtime {
         Ok(artifact)
     }
 
+    /// Chooses whether this run encodes text through the model's own chat
+    /// template, and reports what that resolved to.
+    ///
+    /// A separate step rather than a loader argument, because the answer
+    /// depends on a file only the loader has read by then, and because every
+    /// caller that never asks — steering, extraction, pair synthesis, the
+    /// frozen judge inside policy optimization — must keep encoding exactly
+    /// the bytes it encoded before. The progress line is written here so that
+    /// one sentence reaches the operator whichever surface asked, and exactly
+    /// once per run.
+    pub fn set_chat_template(&mut self, choice: chat::Choice) -> chat::Status {
+        self.chat_status = match choice {
+            chat::Choice::Off => chat::Status::Off,
+            chat::Choice::Auto if self.chat.is_some() => chat::Status::Applied,
+            chat::Choice::Auto => chat::Status::Absent,
+        };
+        workflow::progress(self.chat_status.sentence().to_owned());
+        self.chat_status
+    }
+
+    /// What this run decided about the chat template.
+    pub fn chat_status(&self) -> chat::Status {
+        self.chat_status
+    }
+
+    /// The template, but only while this run is actually applying it. Every
+    /// encoder asks through here, so `off` is one check in one place rather
+    /// than a condition each of them could forget.
+    fn applied_template(&self) -> Option<&chat::Template> {
+        match self.chat_status {
+            chat::Status::Applied => self.chat.as_ref(),
+            chat::Status::Absent | chat::Status::Off => None,
+        }
+    }
+
     /// Tokenizes `prompt` and `completion` separately and returns the joined
     /// ids plus the index where the completion begins.
     ///
@@ -231,24 +279,56 @@ impl Runtime {
     /// completion — a second begin-of-sequence marker in the middle of the
     /// sequence would be a token the model is asked to predict and never sees
     /// at inference.
+    ///
+    /// Under a chat template both halves come from the template instead, and
+    /// neither is tokenized with the tokenizer's special tokens: the rendered
+    /// string already spells every marker the model expects, so asking the
+    /// tokenizer to add its own would prepend a second begin-of-sequence. The
+    /// boundary still lands exactly where the assistant's own tokens start,
+    /// because the completion half is what the template added *after* the
+    /// generation prompt — markers included, which is right, since the turn's
+    /// end marker is a token the model must learn to emit.
     pub fn encode_example(&self, prompt: &str, completion: &str) -> Result<(Vec<u32>, usize)> {
         if completion.trim().is_empty() {
             bail!("training example has an empty completion");
         }
-        let mut ids = self.encode(prompt)?;
-        let boundary = ids.len();
-        let encoded = self
-            .tokenizer
-            .encode(completion, false)
-            .map_err(|error| anyhow::anyhow!("failed to tokenize completion: {error}"))?;
-        if encoded.get_ids().is_empty() {
+        let (mut ids, tail) = match self.applied_template() {
+            Some(template) => {
+                let (head, tail) = template.example(prompt, completion)?;
+                (self.tokenize(&head, false, "prompt")?, self.tokenize(&tail, false, "completion")?)
+            }
+            None => (self.encode(prompt)?, self.tokenize(completion, false, "completion")?),
+        };
+        if tail.is_empty() {
             bail!("training example completion produced no tokens");
         }
-        ids.extend_from_slice(encoded.get_ids());
+        let boundary = ids.len();
+        ids.extend_from_slice(&tail);
         if ids.len() < 2 {
             bail!("training example encodes to fewer than two tokens, so there is nothing to predict");
         }
         Ok((ids, boundary))
+    }
+
+    /// One whole utterance, tokenized as the model would have produced it.
+    ///
+    /// This is what a preference pair's two sides are: complete responses with
+    /// no prompt in front of them, which is why they cannot go through
+    /// `encode_example`. Under a chat template each side is rendered as an
+    /// assistant turn, so the preference is measured over the same markers
+    /// inference will put around it; with no template it is `encode`,
+    /// unchanged.
+    pub fn encode_response(&self, text: &str) -> Result<Vec<u32>> {
+        match self.applied_template() {
+            Some(template) => {
+                let ids = self.tokenize(&template.response(text)?, false, "prompt")?;
+                if ids.is_empty() {
+                    bail!("tokenizer produced no tokens");
+                }
+                Ok(ids)
+            }
+            None => self.encode(text),
+        }
     }
 
     /// One differentiable forward over `ids`, returning logits `[1, n, vocab]`.
@@ -431,7 +511,15 @@ impl Runtime {
         if options.max_new_tokens == 0 {
             bail!("max_new_tokens must be greater than zero");
         }
-        let mut tokens = self.encode(prompt)?;
+        // The same mismatch that ruins training ruins decoding: an instruct
+        // checkpoint handed a bare prompt continues the text instead of
+        // answering it. Under a template the prompt becomes a user turn
+        // followed by the marker that opens the assistant's, which is the
+        // context the model was post-trained to answer from.
+        let mut tokens = match self.applied_template() {
+            Some(template) => self.tokenize(&template.prompt(prompt)?, false, "prompt")?,
+            None => self.encode(prompt)?,
+        };
         if tokens.len() >= self.model.config().max_position_embeddings {
             bail!(
                 "prompt contains {} tokens, model context allows fewer than {}",
@@ -519,14 +607,24 @@ impl Runtime {
         if prompt.trim().is_empty() {
             bail!("prompt must not be empty");
         }
-        let encoded = self.tokenizer
-            .encode(prompt, true)
-            .map_err(|error| anyhow::anyhow!("failed to tokenize prompt: {error}"))?;
-        let ids = encoded.get_ids().to_vec();
+        let ids = self.tokenize(prompt, true, "prompt")?;
         if ids.is_empty() {
             bail!("tokenizer produced no tokens");
         }
         Ok(ids)
+    }
+
+    /// The one call into the tokenizer, so `special` is a decision made at
+    /// each site rather than a default. `what` is the noun the refusal names,
+    /// which is why it is passed rather than derived: the same call tokenizes
+    /// a prompt and a completion and the operator needs to know which failed.
+    fn tokenize(&self, text: &str, special: bool, what: &str) -> Result<Vec<u32>> {
+        Ok(self
+            .tokenizer
+            .encode(text, special)
+            .map_err(|error| anyhow::anyhow!("failed to tokenize {what}: {error}"))?
+            .get_ids()
+            .to_vec())
     }
 }
 
@@ -601,6 +699,7 @@ struct BaseLoad {
     weights: Vec<PathBuf>,
     revision: Option<String>,
     eos_tokens: BTreeSet<u32>,
+    chat: Option<chat::Template>,
     device: Device,
     dtype: DType,
 }
@@ -611,6 +710,7 @@ impl BaseLoad {
         let dtype = DType::F32;
         let source = Checkpoint::resolve(model, revision)?;
         let (config, eos_tokens) = source.llama_config()?;
+        let chat = source.chat()?;
         let tokenizer = Tokenizer::from_file(&source.tokenizer)
             .map_err(|error| anyhow::anyhow!("failed to load tokenizer {}: {error}", source.tokenizer.display()))?;
         Ok(Self {
@@ -619,6 +719,7 @@ impl BaseLoad {
             weights: source.weights,
             revision: source.revision,
             eos_tokens,
+            chat,
             device,
             dtype,
         })
@@ -640,6 +741,8 @@ impl BaseLoad {
             device: self.device,
             dtype: self.dtype,
             eos_tokens: self.eos_tokens,
+            chat: self.chat,
+            chat_status: chat::Status::Off,
         }
     }
 }
@@ -672,6 +775,13 @@ pub struct Checkpoint {
     pub tokenizer: PathBuf,
     pub weights: Vec<PathBuf>,
     pub revision: Option<String>,
+    /// The tokenizer's own configuration, which is where a checkpoint records
+    /// its chat template and the text of its special tokens, and the
+    /// standalone template file newer repositories use instead. Both are
+    /// optional: a base model publishes neither, and that is a fact to report
+    /// rather than a checkpoint to refuse.
+    pub tokenizer_config: Option<PathBuf>,
+    pub chat_template: Option<PathBuf>,
 }
 
 impl Checkpoint {
@@ -683,7 +793,15 @@ impl Checkpoint {
             let tokenizer = local.join("tokenizer.json");
             let weights = local_safetensors(local)?;
             require_files(&config, &tokenizer, &weights)?;
-            return Ok(Self { config, tokenizer, weights, revision: revision.map(str::to_owned) });
+            let (tokenizer_config, chat_template) = chat::local_files(local);
+            return Ok(Self {
+                config,
+                tokenizer,
+                weights,
+                revision: revision.map(str::to_owned),
+                tokenizer_config,
+                chat_template,
+            });
         }
         let api = Api::new().context("failed to initialize Hugging Face Hub client")?;
         let repo = Repo::with_revision(
@@ -695,6 +813,20 @@ impl Checkpoint {
         let info = remote.info().with_context(|| format!("failed to read model repository {model}"))?;
         let config = remote.get("config.json")?;
         let tokenizer = remote.get("tokenizer.json")?;
+        // The two template files are fetched exactly like the three required
+        // ones, but only when the repository lists them: `get` on a file a
+        // repository does not publish is an error, and a base model not
+        // publishing a chat template is not an error.
+        let has_tokenizer_config = published(&info, "tokenizer_config.json");
+        let has_chat_template = published(&info, "chat_template.jinja");
+        let tokenizer_config = has_tokenizer_config
+            .then(|| remote.get("tokenizer_config.json"))
+            .transpose()
+            .context("failed to download tokenizer_config.json")?;
+        let chat_template = has_chat_template
+            .then(|| remote.get("chat_template.jinja"))
+            .transpose()
+            .context("failed to download chat_template.jinja")?;
         let weight_names: Vec<String> = info.siblings
             .into_iter()
             .map(|file| file.rfilename)
@@ -712,7 +844,14 @@ impl Checkpoint {
             weights.push(remote.get(&name).with_context(|| format!("failed to download {name}"))?);
         }
         require_files(&config, &tokenizer, &weights)?;
-        Ok(Self { config, tokenizer, weights, revision: Some(info.sha) })
+        Ok(Self {
+            config,
+            tokenizer,
+            weights,
+            revision: Some(info.sha),
+            tokenizer_config,
+            chat_template,
+        })
     }
 
     /// The parsed Llama config and its end-of-sequence tokens.
@@ -737,6 +876,21 @@ impl Checkpoint {
         let tokens = eos_tokens(&llama);
         Ok((llama.into_config(false), tokens))
     }
+
+    /// The conversation format this checkpoint publishes, if it publishes one.
+    ///
+    /// Compiled here rather than at first use so a template that does not
+    /// parse is refused while the operator is still waiting on the load,
+    /// instead of halfway through an epoch.
+    pub fn chat(&self) -> Result<Option<chat::Template>> {
+        chat::Template::load(self.tokenizer_config.as_deref(), self.chat_template.as_deref())
+    }
+}
+
+/// Whether the repository lists a file, so an optional one is only fetched
+/// when asking for it can succeed.
+fn published(info: &hf_hub::api::RepoInfo, name: &str) -> bool {
+    info.siblings.iter().any(|file| file.rfilename == name)
 }
 
 fn local_safetensors(root: &Path) -> Result<Vec<PathBuf>> {

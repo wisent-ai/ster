@@ -229,6 +229,11 @@ pub(crate) struct EncodedPair {
 /// of the rejected side is not the preference the operator stated. Both sides
 /// go or neither does — half a pair states no preference at all.
 ///
+/// Each side goes through `Runtime::encode_response` rather than the raw
+/// encoder, so a run that asked for the model's chat template compares two
+/// assistant turns wearing the markers inference will put around them, and a
+/// run that did not gets byte-identical ids to every release before this one.
+///
 /// Tokenizing up front rather than per epoch is what makes the skip report
 /// complete before the first gradient is taken.
 pub(crate) fn encode_pairs(
@@ -239,10 +244,10 @@ pub(crate) fn encode_pairs(
     let mut encoded = Vec::with_capacity(pairs.pairs.len());
     for (index, pair) in pairs.pairs.iter().enumerate() {
         let chosen = runtime
-            .encode(&pair.positive)
+            .encode_response(&pair.positive)
             .with_context(|| format!("pair {index} chosen side could not be encoded"))?;
         let rejected = runtime
-            .encode(&pair.negative)
+            .encode_response(&pair.negative)
             .with_context(|| format!("pair {index} rejected side could not be encoded"))?;
         for (side, ids) in [("chosen", &chosen), ("rejected", &rejected)] {
             if ids.len() < 2 {
