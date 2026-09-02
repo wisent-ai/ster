@@ -29,7 +29,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use super::{ExampleSet, sequence_logprob};
+use super::{ExampleSet, batch, sequence_logprob};
 use crate::{model::Route, runtime::Runtime, workflow};
 
 #[derive(Debug, Clone)]
@@ -39,6 +39,9 @@ pub struct EvaluateOptions {
     /// completion, and scoring one would report a loss for text the operator
     /// never wrote.
     pub max_sequence: usize,
+    /// Examples folded into one forward pass. One is the unbatched pass every
+    /// score recorded before batching existed.
+    pub batch: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,6 +103,9 @@ pub fn evaluate(
     let mut total_tokens = 0usize;
     let mut total_negative_log_likelihood = 0f64;
 
+    // Encoded up front, so every skip is reported before the first score and
+    // so the batch planner can see how long each example is.
+    let mut encoded: Vec<(usize, Vec<u32>, usize)> = Vec::with_capacity(examples.examples.len());
     for (index, example) in examples.examples.iter().enumerate() {
         let (ids, boundary) = runtime
             .encode_example(&example.prompt, &example.completion)
@@ -112,32 +118,63 @@ pub fn evaluate(
             ));
             continue;
         }
-        // Adapted, because the adapters this runtime carries — if it carries
-        // any — are the thing being evaluated. A bare checkpoint has none and
-        // this is the base model's own score.
-        let logits = runtime.forward_scored(&ids, Route::Adapted)?;
-        let log_likelihood = sequence_logprob(&logits, &ids, boundary, device)
-            .with_context(|| format!("example {index} produced no usable score"))?
-            .to_scalar::<f32>()? as f64;
-        let tokens = ids.len() - boundary;
-        let loss = -log_likelihood / tokens as f64;
+        encoded.push((index, ids, boundary));
+    }
 
-        total_tokens += tokens;
-        total_negative_log_likelihood += -log_likelihood;
-        workflow::progress(format!(
-            "example {}/{} loss {loss:.4} perplexity {:.3}",
-            index + 1,
-            examples.examples.len(),
-            loss.exp()
-        ));
-        entries.push(EvaluatedExample {
-            index,
-            prompt: example.prompt.clone(),
-            completion: example.completion.clone(),
-            completion_tokens: tokens,
-            loss,
-            perplexity: loss.exp(),
-        });
+    let lengths: Vec<usize> = encoded.iter().map(|(_, ids, _)| ids.len()).collect();
+    let order: Vec<usize> = (0..encoded.len()).collect();
+    // Each example's negative log-likelihood, kept beside its entry so the
+    // corpus total can be summed in the operator's order rather than in
+    // whatever order the batches were scored in.
+    let mut likelihoods: Vec<(usize, f64)> = Vec::with_capacity(encoded.len());
+    // One step per forward here: there is no optimizer, so accumulation is one
+    // and a step is a batch. Scoring is order-free — every entry carries its
+    // own index and the report is sorted back into it below — so length
+    // grouping costs nothing an operator can see.
+    for plan in batch::plan(&order, &lengths, options.batch, 1) {
+        for forward in &plan.forwards {
+            let rows: Vec<&[u32]> =
+                forward.iter().map(|&slot| encoded[slot].1.as_slice()).collect();
+            // Adapted, because the adapters this runtime carries — if it
+            // carries any — are the thing being evaluated. A bare checkpoint
+            // has none and this is the base model's own score.
+            let scored = runtime.forward_scored_rows(&rows, Route::Adapted)?;
+            for (position, &slot) in forward.iter().enumerate() {
+                let (index, ids, boundary) = &encoded[slot];
+                let logits = batch::row(&scored, position, ids.len())?;
+                let log_likelihood = sequence_logprob(&logits, ids, *boundary, device)
+                    .with_context(|| format!("example {index} produced no usable score"))?
+                    .to_scalar::<f32>()? as f64;
+                let tokens = ids.len() - boundary;
+                let loss = -log_likelihood / tokens as f64;
+                workflow::progress(format!(
+                    "example {}/{} loss {loss:.4} perplexity {:.3}",
+                    index + 1,
+                    examples.examples.len(),
+                    loss.exp()
+                ));
+                likelihoods.push((*index, -log_likelihood));
+                entries.push(EvaluatedExample {
+                    index: *index,
+                    prompt: examples.examples[*index].prompt.clone(),
+                    completion: examples.examples[*index].completion.clone(),
+                    completion_tokens: tokens,
+                    loss,
+                    perplexity: loss.exp(),
+                });
+            }
+        }
+    }
+
+    // Back into the operator's order, and the totals summed in that order, so
+    // the corpus numbers depend on the example set and not on the grouping.
+    entries.sort_by_key(|entry| entry.index);
+    likelihoods.sort_by_key(|&(index, _)| index);
+    for entry in &entries {
+        total_tokens += entry.completion_tokens;
+    }
+    for (_, negative_log_likelihood) in &likelihoods {
+        total_negative_log_likelihood += negative_log_likelihood;
     }
 
     if entries.is_empty() {
