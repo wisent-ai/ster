@@ -24,10 +24,17 @@ use serde_json::{Value, json};
 /// the reader looking for the one that is missing.
 ///
 /// The credential to export is Ster's own, not another product's. Ster is a
-/// declared consumer of `brama` in Stado's service directory, and Skarbiec
-/// holds a client identity minted for the consumer `ster` whose capability is
+/// declared consumer of `brama` in Stado's service directory, and the bearer
+/// is a Skarbiec grant for the consumer `ster` whose capability is
 /// `call:brama#<route>` — the grant Brama resolves by introspection when it
-/// meets a bearer its own start did not preload.
+/// meets a bearer its own start did not preload. It is minted with
+/// `stado host vault-token-mint <gateway-host> ster --capabilities
+/// 'call:brama#<route>' --audience ster --raw-token`.
+///
+/// The host argument is load-bearing. Brama introspects the vault on its own
+/// host, so a grant minted in a workstation's vault authenticates against that
+/// workstation and is still answered `401 unauthenticated` by the gateway,
+/// which never asks it. Mint it where the gateway looks.
 pub const URL_VAR: &str = "BRAMA_URL";
 pub const BEARER_VAR: &str = "BRAMA_BEARER";
 pub const DEFAULT_URL: &str = "https://brama.wisent.com";

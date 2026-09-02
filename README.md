@@ -382,13 +382,28 @@ and a base that is neither https nor explicit loopback with
 The bearer to export is Ster's own client identity, never another product's.
 Ster is a declared consumer of `brama` in Stado's service directory —
 `stado resolver resolve brama --consumer ster` answers
-`stado://service/brama capabilities=model-routing` — and Skarbiec holds a
-client identity minted for the consumer `ster` whose capability is
-`call:brama#<route>`. Brama resolves a bearer its own start did not preload by
-introspecting Skarbiec for exactly that grant, so the route the grant names is
-the route `--generator-model` may use. Reading the value at the moment of the
-call and keeping it in a process-only variable is the pattern the fleet already
-uses; a bearer belongs in neither a file nor a command line.
+`stado://service/brama capabilities=model-routing` — and the bearer itself is a
+Skarbiec grant for the consumer `ster` whose capability is `call:brama#<route>`.
+Brama resolves a bearer its own start did not preload by introspecting Skarbiec
+for exactly that grant, so the route the grant names is the only route
+`--generator-model` may then use.
+
+Which Skarbiec matters, and this is the part that is easy to get wrong: the
+gateway introspects the vault on its **own** host, not yours. A grant minted in
+a workstation's vault authenticates against that workstation and is answered
+`401 unauthenticated` by the gateway, which never consults it. Mint it where the
+gateway will look, through Stado's managed channel rather than over ssh:
+
+```bash
+export BRAMA_BEARER="$(stado host vault-token-mint <gateway-host> ster \
+  --capabilities 'call:brama#openai/gpt-5-mini' --audience ster --raw-token)"
+```
+
+`--raw-token` prints the bearer and nothing else, for a direct pipe into a
+variable or a secret store; Stado never writes it to disk or to a command line,
+and neither should you. Drop `--raw-token` for non-secret metadata only. Read
+the value at the moment of the call, keep it in a process-only variable, and let
+it die with the process: a bearer belongs in neither a file nor an argv.
 
 `--generator-model` may name exactly four things: a declared alias, such as
 Wisent's own chat alias `wisent-backend/chat/primary` or its sibling
