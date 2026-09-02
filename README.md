@@ -583,6 +583,22 @@ ster tune evaluate --model <MODEL> --examples <EXAMPLES>
 ster tune inspect <ARTIFACT>
 ```
 
+### A run that is interrupted is lost
+
+There is one adapter writer in the product, `lora::Artifact::save`, and every
+objective reaches it exactly once — after `tune::sft`, `tune::dpo`,
+`tune::reward` or `tune::grpo` has returned its finished report. Nothing is
+written before that: no periodic checkpoint, no snapshot per epoch, no partial
+adapter. Ster installs no signal handler either, so `Ctrl-C`, a closed terminal,
+an OOM kill or a lost machine ends the process with nothing on disk. A run
+killed in its sixth hour leaves the sixth hour and the five before it
+unrecoverable, and there is no `--resume`: the only way to continue is to start
+again from the base checkpoint.
+
+Size a run to what you are willing to lose. Fewer `--epochs` over a smaller
+`--examples` file, written to separate outputs, is recoverable work; one long
+run is not.
+
 ### Chat templates
 
 `--chat-template` decides what shape the text is encoded in, and it defaults to
