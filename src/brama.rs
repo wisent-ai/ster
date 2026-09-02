@@ -14,8 +14,20 @@ use serde_json::{Value, json};
 
 /// The gateway's own documented client variables.
 ///
-/// Ster is a distributed product: it reads the base URL and the bearer from
-/// the environment its launcher prepared and never talks to Skarbiec itself.
+/// Ster reads the base URL and the bearer from its own environment and never
+/// talks to Skarbiec itself. Nothing in this repository, and nothing on the
+/// fleet, puts the bearer there: no launcher script, no wrapper, no service
+/// unit, and not Ster Desktop, which spawns `ster serve` with the environment
+/// it inherited and sets no variable of its own. Whoever runs Ster exports
+/// `BRAMA_BEARER` themselves. Say so plainly here rather than naming a
+/// launcher, because a comment that points at a mechanism nobody wrote stops
+/// the reader looking for the one that is missing.
+///
+/// The credential to export is Ster's own, not another product's. Ster is a
+/// declared consumer of `brama` in Stado's service directory, and Skarbiec
+/// holds a client identity minted for the consumer `ster` whose capability is
+/// `call:brama#<route>` — the grant Brama resolves by introspection when it
+/// meets a bearer its own start did not preload.
 pub const URL_VAR: &str = "BRAMA_URL";
 pub const BEARER_VAR: &str = "BRAMA_BEARER";
 pub const DEFAULT_URL: &str = "https://brama.wisent.com";
@@ -191,11 +203,16 @@ fn is_loopback(base: &str) -> bool {
 /// Every failure collapses to one sentence that names the variable and nothing
 /// else. `env::VarError` is swallowed rather than propagated on purpose: its
 /// `NotUnicode` variant formats the offending value, which here is the bearer.
+///
+/// The sentence tells the operator to export it, because that is the only way
+/// it ever arrives: no launcher in this repository or on the fleet sets it.
 fn bearer() -> Result<String> {
     let bearer = env::var(BEARER_VAR).unwrap_or_default();
     let bearer = bearer.trim();
     if bearer.is_empty() {
-        bail!("{BEARER_VAR} is unset or empty; the launcher supplies the Brama bearer");
+        bail!(
+            "{BEARER_VAR} is unset or empty; export Ster's own Brama bearer before running this command"
+        );
     }
     Ok(bearer.to_owned())
 }
