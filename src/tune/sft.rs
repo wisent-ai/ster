@@ -154,11 +154,12 @@ pub fn sft(
             for forward in &plan.forwards {
                 let rows: Vec<&[u32]> =
                     forward.iter().map(|&slot| encoded[slot].1.as_slice()).collect();
-                let logits = runtime.forward_train_rows(&rows)?;
+                let read = batch::read_rows(&rows, options.batch, 1, |pass| {
+                    runtime.forward_train_rows(pass)
+                })?;
                 for (position, &slot) in forward.iter().enumerate() {
                     let (index, ids, boundary) = &encoded[slot];
-                    let logits = batch::row(&logits, position, ids.len())?;
-                    let value = completion_loss(&logits, ids, *boundary, runtime)
+                    let value = completion_loss(&read[position], ids, *boundary, runtime)
                         .with_context(|| format!("example {index} produced no usable loss"))?;
                     group_loss += value.to_scalar::<f32>()? as f64;
                     let scaled = (value / scale)?;

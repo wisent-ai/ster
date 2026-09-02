@@ -271,12 +271,12 @@ pub fn reward(
                     rows.push(&encoded[slot].chosen);
                     rows.push(&encoded[slot].rejected);
                 }
-                let hidden = runtime.forward_hidden_rows(&rows)?;
+                let read = batch::read_rows(&rows, options.batch, 2, |pass| {
+                    runtime.forward_hidden_rows(pass)
+                })?;
                 for (position, &slot) in forward.iter().enumerate() {
                     let pair = &encoded[slot];
-                    let chosen = batch::row(&hidden, position * 2, pair.chosen.len())?;
-                    let rejected = batch::row(&hidden, position * 2 + 1, pair.rejected.len())?;
-                    let value = step_loss(head, &chosen, &rejected)
+                    let value = step_loss(head, &read[position * 2], &read[position * 2 + 1])
                         .with_context(|| format!("pair {} produced no usable loss", pair.index))?;
                     group_loss += value.loss;
                     summary.record(&value);

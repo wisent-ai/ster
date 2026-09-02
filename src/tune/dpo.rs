@@ -223,13 +223,14 @@ pub fn dpo(
                     rows.push(&encoded[slot].pair.chosen);
                     rows.push(&encoded[slot].pair.rejected);
                 }
-                let logits = runtime.forward_train_rows(&rows)?;
+                let read = batch::read_rows(&rows, options.batch, 2, |pass| {
+                    runtime.forward_train_rows(pass)
+                })?;
                 for (position, &slot) in forward.iter().enumerate() {
                     let scored = &encoded[slot];
-                    let chosen = batch::row(&logits, position * 2, scored.pair.chosen.len())?;
-                    let rejected =
-                        batch::row(&logits, position * 2 + 1, scored.pair.rejected.len())?;
-                    let value = step_loss(runtime, scored, &chosen, &rejected, options)
+                    let chosen = &read[position * 2];
+                    let rejected = &read[position * 2 + 1];
+                    let value = step_loss(runtime, scored, chosen, rejected, options)
                         .with_context(|| {
                             format!("pair {} produced no usable loss", scored.pair.index)
                         })?;
@@ -343,15 +344,16 @@ fn reference_scores(runtime: &Runtime, encoded: &mut [Scored], pairs: usize) -> 
             rows.push(&pair.pair.chosen);
             rows.push(&pair.pair.rejected);
         }
-        let logits = runtime.forward_scored_rows(&rows, Route::Base)?;
+        let read = batch::read_rows(&rows, pairs, 2, |pass| {
+            runtime.forward_scored_rows(pass, Route::Base)
+        })?;
         for (position, pair) in group.iter_mut().enumerate() {
-            let row = batch::row(&logits, position * 2, pair.pair.chosen.len())?;
             pair.chosen_reference =
-                sequence_logprob(&row, &pair.pair.chosen, 1, device)?.to_scalar::<f32>()? as f64;
-            let row = batch::row(&logits, position * 2 + 1, pair.pair.rejected.len())?;
+                sequence_logprob(&read[position * 2], &pair.pair.chosen, 1, device)?
+                    .to_scalar::<f32>()? as f64;
             pair.rejected_reference =
-                sequence_logprob(&row, &pair.pair.rejected, 1, device)?.to_scalar::<f32>()?
-                    as f64;
+                sequence_logprob(&read[position * 2 + 1], &pair.pair.rejected, 1, device)?
+                    .to_scalar::<f32>()? as f64;
             scored += 1;
             workflow::progress(format!("reference pair {scored}/{total}"));
         }

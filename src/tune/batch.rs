@@ -110,3 +110,30 @@ pub(crate) fn divisor(batch: usize, accumulation: usize) -> f64 {
 pub(crate) fn row(output: &Tensor, index: usize, length: usize) -> Result<Tensor> {
     Ok(output.narrow(0, index, 1)?.narrow(1, 0, length)?)
 }
+
+/// Puts every row of one planned forward through `run`, and hands each row's
+/// own output back sliced to its own length.
+///
+/// `rows_per_unit` is how many sequences one unit of the objective is: one for
+/// an example, two for a preference pair. At `batch == 1` the stride is one
+/// row whatever that is, so a pair's two sides go through the model in two
+/// separate passes — which is the unbatched shape, and the reason a run at the
+/// default reproduces every number recorded before batching existed, down to
+/// the bytes of the adapter it writes. Above one, the whole planned forward is
+/// one pass.
+pub(crate) fn read_rows(
+    rows: &[&[u32]],
+    batch: usize,
+    rows_per_unit: usize,
+    run: impl Fn(&[&[u32]]) -> Result<Tensor>,
+) -> Result<Vec<Tensor>> {
+    let stride = if batch <= 1 { 1 } else { batch * rows_per_unit.max(1) };
+    let mut read = Vec::with_capacity(rows.len());
+    for pass in rows.chunks(stride) {
+        let output = run(pass)?;
+        for (index, ids) in pass.iter().enumerate() {
+            read.push(row(&output, index, ids.len())?);
+        }
+    }
+    Ok(read)
+}

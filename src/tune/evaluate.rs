@@ -138,11 +138,12 @@ pub fn evaluate(
             // Adapted, because the adapters this runtime carries — if it
             // carries any — are the thing being evaluated. A bare checkpoint
             // has none and this is the base model's own score.
-            let scored = runtime.forward_scored_rows(&rows, Route::Adapted)?;
+            let read = batch::read_rows(&rows, options.batch, 1, |pass| {
+                runtime.forward_scored_rows(pass, Route::Adapted)
+            })?;
             for (position, &slot) in forward.iter().enumerate() {
                 let (index, ids, boundary) = &encoded[slot];
-                let logits = batch::row(&scored, position, ids.len())?;
-                let log_likelihood = sequence_logprob(&logits, ids, *boundary, device)
+                let log_likelihood = sequence_logprob(&read[position], ids, *boundary, device)
                     .with_context(|| format!("example {index} produced no usable score"))?
                     .to_scalar::<f32>()? as f64;
                 let tokens = ids.len() - boundary;
