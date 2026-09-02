@@ -553,8 +553,11 @@ enum TuneCommand {
         /// model, and must be a generation adapter rather than a reward model.
         #[arg(long)]
         adapter: PathBuf,
-        /// Directory to write. It receives model.safetensors plus the source's
-        /// own config.json and tokenizer.json, which is what --model accepts.
+        /// Directory to write. It receives model.safetensors plus the
+        /// source's own config.json, tokenizer.json and tokenizer_config.json,
+        /// which is what --model accepts. The last of those is what carries
+        /// the chat template forward, so the merged checkpoint still reports
+        /// applied rather than absent.
         #[arg(long)]
         output: PathBuf,
     },
@@ -672,6 +675,14 @@ fn main() -> Result<()> {
             seed,
         } => {
             let precision = Precision::parse(&precision)?;
+            // Both documents are read before a single weight is mapped, so
+            // the two halves of the wrong-document refusal cost the same. An
+            // adapter was already refused this early because it is attached
+            // during the load; a steering vector was not, and handing one the
+            // wrong file paid for a full checkpoint load before being told.
+            // `Reward::parse` resolves its source ahead of the policy load for
+            // this reason and says so.
+            let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
             // An adapter rewrites the projections themselves, so it is
             // attached while the weights are mapped rather than applied per
             // token the way a steering vector is.
@@ -686,7 +697,6 @@ fn main() -> Result<()> {
                 None => model.load_at(precision)?,
             };
             runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
-            let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
             if let Some(vector) = vector.as_deref() {
                 tune::warn_on_provenance(vector, "direction", &runtime);
             }

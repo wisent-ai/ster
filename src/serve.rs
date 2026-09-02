@@ -731,7 +731,9 @@ struct TuneMergeRequest {
     #[serde(default)]
     adapter: String,
     /// Directory to write: model.safetensors plus the source's own
-    /// config.json and tokenizer.json, which is what `model` accepts.
+    /// config.json, tokenizer.json and tokenizer_config.json, which is what
+    /// `model` accepts. The last of those carries the chat template forward,
+    /// so the merged checkpoint still reports `applied` rather than `absent`.
     #[serde(default)]
     output: String,
 }
@@ -1007,10 +1009,17 @@ fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
 }
 
 fn generate_job(request: GenerateRequest) -> Result<Value> {
+    let precision = Precision::parse(&request.precision)?;
+    // Both documents are read before a single weight is mapped, so the two
+    // halves of the wrong-document refusal cost the same. An adapter was
+    // already refused this early because it is attached during the load; a
+    // steering vector was not, and the wrong file there paid for a full
+    // checkpoint load before being told.
+    let vector = request.vector.as_deref().filter(|value| !value.trim().is_empty());
+    let artifact = vector.map(|value| SteeringArtifact::load(Path::new(value))).transpose()?;
     // An adapter rewrites the projections themselves, so it is attached while
     // the weights are mapped rather than applied per token the way a steering
     // vector is.
-    let precision = Precision::parse(&request.precision)?;
     let mut runtime = match request.adapter.as_deref().filter(|value| !value.trim().is_empty()) {
         Some(adapter) => Runtime::load_with_adapter_at(
             &request.model.model,
@@ -1022,8 +1031,6 @@ fn generate_job(request: GenerateRequest) -> Result<Value> {
         None => request.model.load_runtime_at(&request.precision)?,
     };
     runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
-    let vector = request.vector.as_deref().filter(|value| !value.trim().is_empty());
-    let artifact = vector.map(|value| SteeringArtifact::load(Path::new(value))).transpose()?;
     if let Some(vector) = vector {
         tune::warn_on_provenance(Path::new(vector), "direction", &runtime);
     }
