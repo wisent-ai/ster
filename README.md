@@ -458,9 +458,11 @@ covers and previously could not.
 
 `--precision` names the dtype the frozen base weights are mapped at — `f32`,
 `f16` or `bf16` — and defaults to `f32`, so every run recorded before this flag
-existed is unchanged. It is on the five `ster tune` subcommands that load a
-model to train or score one, and mirrored as `precision` on the matching `/v1`
-endpoints.
+existed is unchanged. It is on every command that maps a checkpoint — `train`,
+`optimize`, `evaluate`, `generate`, `extract`, `pairs synthesize`, and the five
+`ster tune` subcommands that load a model — and mirrored as `precision` on each
+matching `/v1` endpoint. `tune merge` and `tune inspect` take none: neither
+builds a decoder.
 
 It names the base weights and nothing else. Adapters, a reward run's scalar
 head, and every `AdamW` moment stay in F32 whatever it says, and that split is
@@ -484,6 +486,27 @@ loss is summed in F32, because a log-softmax adds tens of thousands of terms
 into one accumulator and in half the smallest of them stop changing it. The
 key-value cache and the residual stream still store half-width values, so the
 memory saving survives all three.
+
+The rotary one has a number behind it. Scoring two held-out examples of about
+1860 tokens on TinyLlama-1.1B-Chat, against the same model's own `f32` loss of
+1.795495907465617: rotating in F32 costs 0.07% and rotating in half costs 1.1%,
+so the promotion removes roughly fifteen sixteenths of what half precision
+would otherwise take. At 128 tokens the two are indistinguishable — no position
+is far enough out for a half mantissa to collide two angles — which is the
+honest limit of the short fixtures and the reason the long run was worth doing.
+
+A steering vector is cast to the model's dtype on the way in, and it survives
+the cast as the same direction. Each vector in an artifact is unit-normalized
+F32; at `f16` the mean relative error per component is 1.8e-4, the largest
+absolute error 2.9e-5, and the cosine similarity with the original is 1.0 to
+within F32's own rounding. Two to four components in 2048 fall below half
+precision's smallest normal and become subnormal; none flush to zero, and they
+are the near-zero components that carry none of the direction. Generating from
+TinyLlama-1.1B-Chat with the same artifact, strength, seed and greedy sampling,
+`f32` and `f16` produce character-identical text at strengths 1 and 2 over 32
+and 96 tokens on two prompts, steered and unsteered. At strength 4 both collapse
+to an immediate end-of-sequence, which is over-steering rather than a precision
+effect.
 
 `bf16` on the `cpu` device is refused, at load, before a weight is mapped:
 
@@ -518,14 +541,24 @@ reproduces itself exactly.
 Training is where it decides whether a run happens at all. The same command as
 an SFT run over all 22 layers —
 `ster tune sft --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --examples docs/examples/examples.json --epochs 1 --max-sequence 128 --seed 42`
-— trains 88 adapter tensors and 1126400 parameters. At `--precision f16` it
-completes, at a peak resident 25.5 GiB and a final loss of 4.200512409210205. At
-`--precision f32` it is killed by the operating system partway through the first
-epoch, at a peak resident 31.9 GiB and a peak memory footprint of 52.6 GiB:
-not a Ster refusal and not a Candle allocation failure, just a signal. Most of
-that is the autograd tape over 22 differentiable layers rather than the weights,
-and the tape is not what `--precision` controls — but halving the resident base
-weights is the difference between that run finishing and being killed.
+— trains 88 adapter tensors and 1126400 parameters, and asks for a peak memory
+footprint of 102.8 GB at `f32` against 55.6 GB at `f16`, a factor of 1.85. On a
+quiet machine both finish; on a loaded one the `f32` run was killed by the
+operating system partway through the first epoch — not a Ster refusal and not a
+Candle allocation failure, just a signal — while `f16` completed at a final loss
+of 4.200512409210205. The same `f32` command completed on a second, quieter
+machine, at 76.9 s of user time against 105.6 s of system time and 2.4 million
+involuntary context switches, which is the shape of a box compressing memory to
+stay alive.
+
+Footprint is quoted rather than peak resident for the training runs, because
+resident moved between 23.9 and 34.6 GiB across machines while the footprint
+held: resident reflects what the operating system let the process keep, and the
+footprint reflects what it asked for. And most of that footprint is the
+autograd tape over 22 differentiable layers rather than the weights. The tape is
+not what `--precision` controls; the way to shrink it is fewer differentiable
+layers, not a narrower dtype. What halving the base weights buys is the margin
+that decides whether a loaded machine finishes the run.
 
 ### Reproducibility
 
