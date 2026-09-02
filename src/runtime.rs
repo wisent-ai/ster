@@ -563,13 +563,37 @@ impl Runtime {
         self.model.config().max_position_embeddings
     }
 
+    /// The hidden states one prompt produces at the requested layers.
+    ///
+    /// This is the read behind `train`, `optimize`, `evaluate` and `extract`,
+    /// and it encodes through [`Runtime::encode_prompt`] for a reason that is
+    /// not symmetry. A direction is a displacement between two points in the
+    /// residual stream, and where those points sit depends on the markers
+    /// around the text that produced them: under a template the model is
+    /// answering a user turn, without one it is continuing a document. Fitting
+    /// a direction from raw pair text and then adding it during a templated
+    /// decode measures one space and steers another.
     pub fn activations(&self, prompt: &str, layers: &[usize]) -> Result<Vec<(usize, Vec<f32>)>> {
         validate_layers(layers, self.layer_count())?;
-        let ids = self.encode(prompt)?;
+        let ids = self.encode_prompt(prompt)?;
         let input = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?;
         let mut cache = Cache::new(false, self.dtype, self.model.config(), &self.device)?;
         let output = self.model.forward(&input, 0, &mut cache, None, layers)?;
         Ok(output.activations.into_iter().collect())
+    }
+
+    /// One prompt, tokenized the way this run has decided prompts are
+    /// tokenized: as a user turn the assistant is about to answer, or as raw
+    /// text when there is no template or the operator turned it off.
+    ///
+    /// The rendered string already spells every marker the model expects, so
+    /// the tokenizer is asked not to add its own — a second begin-of-sequence
+    /// would be a token no inference path ever produces.
+    fn encode_prompt(&self, prompt: &str) -> Result<Vec<u32>> {
+        match self.applied_template() {
+            Some(template) => self.tokenize(&template.prompt(prompt)?, false, "prompt"),
+            None => self.encode(prompt),
+        }
     }
 
     /// One sampled continuation, decoded.
@@ -607,10 +631,7 @@ impl Runtime {
         // answering it. Under a template the prompt becomes a user turn
         // followed by the marker that opens the assistant's, which is the
         // context the model was post-trained to answer from.
-        let mut tokens = match self.applied_template() {
-            Some(template) => self.tokenize(&template.prompt(prompt)?, false, "prompt")?,
-            None => self.encode(prompt)?,
-        };
+        let mut tokens = self.encode_prompt(prompt)?;
         if tokens.len() >= self.model.config().max_position_embeddings {
             bail!(
                 "prompt contains {} tokens, model context allows fewer than {}",

@@ -28,7 +28,14 @@ pub fn progress(message: String) {
     }
 }
 
-/// The summary document the train/optimize commands print on stdout.
+/// The document `train`, `optimize` and `inspect` print.
+///
+/// It describes every vector rather than printing one: `ster inspect` used to
+/// serialize the artifact itself, which on a twenty-two-layer checkpoint is
+/// forty-five thousand floats down a terminal, while `ster tune inspect`
+/// printed shapes. A steering vector's content is not readable and its shape
+/// and length are, so this reports what a reader can actually use — and the
+/// artifact is still on disk for anything that wants the numbers.
 pub fn artifact_summary(artifact: &SteeringArtifact) -> serde_json::Value {
     serde_json::json!({
         "artifact": {
@@ -42,11 +49,20 @@ pub fn artifact_summary(artifact: &SteeringArtifact) -> serde_json::Value {
             "precision": artifact.precision,
             "layers": artifact.vectors.iter().map(|vector| serde_json::json!({
                 "layer": vector.layer,
+                "width": vector.values.len(),
+                "norm": norm(&vector.values),
                 "train_accuracy": vector.train_accuracy,
                 "train_margin": vector.train_margin,
-            })).collect::<Vec<_>>()
+            })).collect::<Vec<_>>(),
+            "metadata": artifact.metadata,
         }
     })
+}
+
+/// The Euclidean length of one direction, accumulated in `f64` so a
+/// two-thousand-term sum does not lose its low bits.
+fn norm(values: &[f32]) -> f64 {
+    values.iter().map(|value| f64::from(*value) * f64::from(*value)).sum::<f64>().sqrt()
 }
 
 pub fn train(
@@ -89,14 +105,78 @@ pub fn evaluate(
     })
 }
 
-pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<SteeringArtifact> {
+/// What `optimize` chose, and the evidence it chose on.
+///
+/// A chooser that publishes only its choice is asking to be trusted. The
+/// scores every candidate earned on the holdout are the whole content of the
+/// decision, and they cost nothing to carry: they were computed to make it.
+pub struct Selection {
+    pub artifact: SteeringArtifact,
+    pub holdout: Holdout,
+    pub candidates: Vec<Candidate>,
+}
+
+impl Selection {
+    /// The artifact summary every steering command prints, plus the table.
+    pub fn summary(&self) -> serde_json::Value {
+        let mut summary = artifact_summary(&self.artifact);
+        summary
+            .as_object_mut()
+            .expect("artifact_summary builds an object")
+            .insert(
+                "selection".to_owned(),
+                serde_json::json!({
+                    "holdout": self.holdout,
+                    "candidates": self.candidates,
+                }),
+            );
+        summary
+    }
+}
+
+/// One layer-and-method candidate, scored on pairs it was not fitted on.
+#[derive(Debug, Clone, Serialize)]
+pub struct Candidate {
+    pub layer: usize,
+    pub method: String,
+    pub holdout_accuracy: f32,
+    pub holdout_margin: f32,
+    /// True for exactly one row: the candidate this run picked.
+    pub selected: bool,
+}
+
+/// How the pair set was cut.
+///
+/// Reported rather than assumed, because "80/20" is a ratio and what an
+/// operator needs is the two counts it produced. A four-pair set yields a
+/// one-pair holdout, and a holdout of one pair is a coin flip dressed as a
+/// measurement — which is a fact about the input, not a defect, so it is
+/// stated rather than refused.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Holdout {
+    pub fit_pairs: usize,
+    pub holdout_pairs: usize,
+}
+
+pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<Selection> {
     if pairs.pairs.len() < 4 {
         bail!("optimization requires at least four contrastive pairs");
     }
     let captured = capture_pairs(runtime, pairs, layers)?;
     let split = (pairs.pairs.len() * 4 / 5).clamp(1, pairs.pairs.len() - 1);
+    let holdout = Holdout { fit_pairs: split, holdout_pairs: pairs.pairs.len() - split };
+    progress(format!(
+        "fitting each candidate on {} pairs and ranking on a {}-pair holdout",
+        holdout.fit_pairs, holdout.holdout_pairs
+    ));
+    if holdout.holdout_pairs == 1 {
+        progress(
+            "a one-pair holdout scores every candidate 0 or 1, so this ranking separates almost nothing; add pairs to make the choice mean something".to_owned(),
+        );
+    }
     let methods = [TrainingMethod::Caa, TrainingMethod::Pca, TrainingMethod::Logistic];
-    let mut best: Option<(f32, f32, usize, TrainingMethod, Vec<f32>)> = None;
+    let mut candidates = Vec::with_capacity(layers.len() * methods.len());
+    let mut best: Option<(f32, f32, usize, TrainingMethod)> = None;
     for &layer_index in layers {
         let layer = captured.get(&layer_index).expect("requested layer is captured");
         for method in methods {
@@ -106,15 +186,30 @@ pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<
                 &layer.negative[split..],
                 &direction,
             )?;
-            let candidate = (accuracy, margin, layer_index, method, direction);
+            candidates.push(Candidate {
+                layer: layer_index,
+                method: method.name().to_owned(),
+                holdout_accuracy: accuracy,
+                holdout_margin: margin,
+                selected: false,
+            });
             if best.as_ref().is_none_or(|current| {
-                candidate.0 > current.0 || (candidate.0 == current.0 && candidate.1 > current.1)
+                accuracy > current.0 || (accuracy == current.0 && margin > current.1)
             }) {
-                best = Some(candidate);
+                best = Some((accuracy, margin, layer_index, method));
             }
         }
     }
-    let (_, _, layer_index, method, _) = best.expect("methods and layers are non-empty");
+    let (_, _, layer_index, method) = best.expect("methods and layers are non-empty");
+    // The winner is marked in place rather than moved to the front: the table
+    // stays in the order the search walked it, so two runs over the same
+    // layers are diffable line for line.
+    for candidate in &mut candidates {
+        candidate.selected = candidate.layer == layer_index && candidate.method == method.name();
+    }
+    // The published direction is refitted on every pair, holdout included: the
+    // split existed to rank candidates, and once the ranking is done, throwing
+    // away a fifth of the evidence would be paying for the measurement twice.
     let selected = captured.get(&layer_index).expect("selected layer is captured");
     let direction = train_direction(&selected.positive, &selected.negative, method)?;
     let (accuracy, margin) = evaluate_direction(&selected.positive, &selected.negative, &direction)?;
@@ -132,8 +227,16 @@ pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<
         }],
         runtime.precision(),
     );
-    artifact.metadata.insert("selection".to_owned(), "80/20 holdout over method and layer".to_owned());
-    Ok(artifact)
+    artifact.metadata.insert(
+        "selection".to_owned(),
+        format!(
+            "chosen over {} candidates on a {}-pair holdout, then refitted on all {} pairs",
+            candidates.len(),
+            holdout.holdout_pairs,
+            pairs.pairs.len()
+        ),
+    );
+    Ok(Selection { artifact, holdout, candidates })
 }
 
 pub fn extract(runtime: &Runtime, input: &Path, output: &Path, layers: &[usize]) -> Result<()> {

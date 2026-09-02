@@ -238,6 +238,12 @@ struct TrainRequest {
     layers: String,
     #[serde(default = "default_method")]
     method: String,
+    /// `auto` reads every pair through the model's own chat template when it
+    /// publishes one, `off` reads it as raw text. A direction is fitted in
+    /// whatever space the pairs were read in and added in whatever space
+    /// generation runs in.
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
     /// The dtype the base weights are mapped at: `f32`, `f16`, or `bf16`. A
     /// direction is fitted in whatever space the prompts were read in, so two
     /// artifacts trained at different precisions are not interchangeable.
@@ -262,6 +268,8 @@ struct OptimizeRequest {
     pairs: String,
     #[serde(default)]
     output: String,
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
     #[serde(default = "default_precision")]
     precision: String,
     #[serde(default = "default_layers")]
@@ -285,6 +293,10 @@ struct EvaluateRequest {
     pairs: String,
     #[serde(default)]
     vector: String,
+    /// It should match the run that trained the artifact for the same reason
+    /// `precision` should.
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
     #[serde(default = "default_precision")]
     precision: String,
 }
@@ -347,6 +359,8 @@ struct ExtractRequest {
     output: String,
     #[serde(default = "default_layers")]
     layers: String,
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
     #[serde(default = "default_precision")]
     precision: String,
 }
@@ -442,6 +456,11 @@ struct PairsSynthesizeRequest {
     /// the `brama` route, which loads no weights.
     #[serde(default = "default_precision")]
     precision: String,
+    /// `auto` asks the local generator through the model's own chat template
+    /// when it publishes one. Ignored by the `brama` route, which is already
+    /// a chat API.
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
     #[serde(default)]
     count: usize,
     #[serde(default)]
@@ -951,30 +970,39 @@ fn default_grpo_temperature() -> f64 {
 /// Every job mirrors its CLI arm in main.rs: same loads, same workflow call,
 /// and the returned document is the same payload the CLI prints.
 fn train_job(request: TrainRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime_at(&request.precision)?;
+    let mut runtime = request.model.load_runtime_at(&request.precision)?;
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let method = TrainingMethod::parse(&request.method)?;
     let artifact = workflow::train(&runtime, &pair_set, &layers, method)?;
     artifact.save(Path::new(&request.output))?;
-    Ok(workflow::artifact_summary(&artifact))
+    let mut summary = workflow::artifact_summary(&artifact);
+    chat.annotate(&mut summary)?;
+    Ok(summary)
 }
 
 fn optimize_job(request: OptimizeRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime_at(&request.precision)?;
+    let mut runtime = request.model.load_runtime_at(&request.precision)?;
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
-    let artifact = workflow::optimize(&runtime, &pair_set, &layers)?;
-    artifact.save(Path::new(&request.output))?;
-    Ok(workflow::artifact_summary(&artifact))
+    let selection = workflow::optimize(&runtime, &pair_set, &layers)?;
+    selection.artifact.save(Path::new(&request.output))?;
+    let mut summary = selection.summary();
+    chat.annotate(&mut summary)?;
+    Ok(summary)
 }
 
 fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime_at(&request.precision)?;
+    let mut runtime = request.model.load_runtime_at(&request.precision)?;
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
     let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
-    Ok(serde_json::to_value(&report)?)
+    let mut report = serde_json::to_value(&report)?;
+    chat.annotate(&mut report)?;
+    Ok(report)
 }
 
 fn generate_job(request: GenerateRequest) -> Result<Value> {
@@ -1014,7 +1042,8 @@ fn generate_job(request: GenerateRequest) -> Result<Value> {
 }
 
 fn extract_job(request: ExtractRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime_at(&request.precision)?;
+    let mut runtime = request.model.load_runtime_at(&request.precision)?;
+    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let input = Path::new(&request.input);
     let output = Path::new(&request.output);
@@ -1025,7 +1054,7 @@ fn extract_job(request: ExtractRequest) -> Result<Value> {
 fn inspect_job(request: InspectRequest) -> Result<Value> {
     let artifact = SteeringArtifact::load(Path::new(&request.artifact))
         .with_context(|| format!("failed to inspect {}", request.artifact))?;
-    Ok(serde_json::to_value(&artifact)?)
+    Ok(workflow::artifact_summary(&artifact))
 }
 
 fn pairs_inspect_job(request: PairsInspectRequest) -> Result<Value> {
@@ -1086,7 +1115,12 @@ fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
     // request loads no weights and never touches a device.
     let (pair_set, report) = match request.generator.as_str() {
         "local" => {
-            let runtime = request.model.load_runtime_at(&request.precision)?;
+            let mut runtime = request.model.load_runtime_at(&request.precision)?;
+            // Synthesis is the first step of the funnel and everything
+            // downstream inherits what it writes. Addressed without its
+            // markers, an instruct checkpoint answers a pair request with
+            // instructions about answering pair requests.
+            runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
             pairs::synthesize(pairs::Generator::Local(&runtime), &options)?
         }
         "brama" => {

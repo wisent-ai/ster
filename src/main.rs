@@ -47,6 +47,13 @@ enum Command {
         /// Direction training method: caa, pca, or logistic.
         #[arg(long, default_value = "caa")]
         method: String,
+        /// auto reads every pair through the model's own chat template when
+        /// it publishes one, off reads it as raw text. A direction is fitted
+        /// in whatever space the pairs were read in and added in whatever
+        /// space generation runs in, so a direction fitted off and applied
+        /// auto is measured in one space and steers another.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         /// Dtype the base weights are mapped at: f32, f16, or bf16. A
         /// direction is fitted in whatever space the prompts were read in, so
         /// two artifacts trained at different precisions are not
@@ -64,6 +71,10 @@ enum Command {
         output: PathBuf,
         #[arg(long, default_value = "all")]
         layers: String,
+        /// auto reads every pair through the model's own chat template when
+        /// it publishes one, off reads it as raw text.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         /// Dtype the base weights are mapped at: f32, f16, or bf16. bf16 needs
         /// --device metal.
         #[arg(long, default_value = "f32")]
@@ -77,6 +88,12 @@ enum Command {
         pairs: PathBuf,
         #[arg(long)]
         vector: PathBuf,
+        /// auto reads every pair through the model's own chat template when
+        /// it publishes one, off reads it as raw text. It should match the
+        /// run that trained the artifact for the same reason --precision
+        /// should.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         /// Dtype the base weights are mapped at: f32, f16, or bf16. It should
         /// match the run that trained the artifact, or the score measures the
         /// direction in a space it was not fitted in.
@@ -130,13 +147,19 @@ enum Command {
         output: PathBuf,
         #[arg(long, default_value = "all")]
         layers: String,
+        /// auto reads every prompt through the model's own chat template when
+        /// it publishes one, off reads it as raw text. The exported
+        /// activations are the states the model reached; this is what it was
+        /// reading when it reached them.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         /// Dtype the base weights are mapped at: f32, f16, or bf16. The
         /// exported activations are F32 either way; this is the width they
         /// were computed in. bf16 needs --device metal.
         #[arg(long, default_value = "f32")]
         precision: String,
     },
-    /// Print and validate a Ster steering artifact.
+    /// Summarize and validate a Ster steering artifact.
     Inspect {
         #[arg(value_name = "ARTIFACT")]
         artifact: PathBuf,
@@ -163,8 +186,8 @@ enum Command {
 enum PairsCommand {
     /// Report duplicates, refusals, length balance, and diversity for a set.
     Inspect {
-        #[arg(value_name = "FILE")]
-        file: PathBuf,
+        #[arg(long)]
+        pairs: PathBuf,
         /// SimHash Hamming distance below which two pairs count as near-duplicates.
         #[arg(long, default_value_t = 3)]
         dedupe_bits: u32,
@@ -220,6 +243,14 @@ enum PairsCommand {
         /// bf16 needs --device metal.
         #[arg(long, default_value = "f32")]
         precision: String,
+        /// auto asks the local generator through the model's own chat
+        /// template when it publishes one, off asks it as raw text. An
+        /// instruct checkpoint spoken to without its markers answers with
+        /// meta-instructional debris — "Step 3: Make sure your emojis are
+        /// visually appealing" — rather than the pair text that was asked
+        /// for. Ignored by --generator brama, which is already a chat API.
+        #[arg(long, default_value = "auto")]
+        chat_template: String,
         /// One-sentence description of the trait the positive side shows.
         #[arg(long = "trait")]
         trait_description: String,
@@ -590,28 +621,37 @@ impl ModelArgs {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Train { model, pairs, output, layers, method, precision } => {
-            let runtime = model.load_at(Precision::parse(&precision)?)?;
+        Command::Train { model, pairs, output, layers, method, chat_template, precision } => {
+            let mut runtime = model.load_at(Precision::parse(&precision)?)?;
+            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let pair_set = PairSet::load(&pairs)?;
             let layers = parse_layers(&layers, runtime.layer_count())?;
             let method = TrainingMethod::parse(&method)?;
             let artifact = workflow::train(&runtime, &pair_set, &layers, method)?;
             artifact.save(&output)?;
-            println!("{}", serde_json::to_string_pretty(&workflow::artifact_summary(&artifact))?);
+            let mut summary = workflow::artifact_summary(&artifact);
+            chat.annotate(&mut summary)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
-        Command::Optimize { model, pairs, output, layers, precision } => {
-            let runtime = model.load_at(Precision::parse(&precision)?)?;
+        Command::Optimize { model, pairs, output, layers, chat_template, precision } => {
+            let mut runtime = model.load_at(Precision::parse(&precision)?)?;
+            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let pair_set = PairSet::load(&pairs)?;
             let layers = parse_layers(&layers, runtime.layer_count())?;
-            let artifact = workflow::optimize(&runtime, &pair_set, &layers)?;
-            artifact.save(&output)?;
-            println!("{}", serde_json::to_string_pretty(&workflow::artifact_summary(&artifact))?);
+            let selection = workflow::optimize(&runtime, &pair_set, &layers)?;
+            selection.artifact.save(&output)?;
+            let mut summary = selection.summary();
+            chat.annotate(&mut summary)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
-        Command::Evaluate { model, pairs, vector, precision } => {
-            let runtime = model.load_at(Precision::parse(&precision)?)?;
+        Command::Evaluate { model, pairs, vector, chat_template, precision } => {
+            let mut runtime = model.load_at(Precision::parse(&precision)?)?;
+            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let pair_set = PairSet::load(&pairs)?;
             let artifact = SteeringArtifact::load(&vector)?;
             let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
+            let mut report = serde_json::to_value(report)?;
+            chat.annotate(&mut report)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Generate {
@@ -650,8 +690,9 @@ fn main() -> Result<()> {
             )?;
             println!("{generated}");
         }
-        Command::Extract { model, input, output, layers, precision } => {
-            let runtime = model.load_at(Precision::parse(&precision)?)?;
+        Command::Extract { model, input, output, layers, chat_template, precision } => {
+            let mut runtime = model.load_at(Precision::parse(&precision)?)?;
+            runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let layers = parse_layers(&layers, runtime.layer_count())?;
             workflow::extract(&runtime, &input, &output, &layers)?;
             println!("{}", output.display());
@@ -659,7 +700,7 @@ fn main() -> Result<()> {
         Command::Inspect { artifact } => {
             let artifact = SteeringArtifact::load(&artifact)
                 .with_context(|| format!("failed to inspect {}", artifact.display()))?;
-            println!("{}", serde_json::to_string_pretty(&artifact)?);
+            println!("{}", serde_json::to_string_pretty(&workflow::artifact_summary(&artifact))?);
         }
         Command::Pairs { command } => run_pairs(command)?,
         Command::Tune { command } => run_tune(command)?,
@@ -675,7 +716,7 @@ fn main() -> Result<()> {
 /// only to keep the top-level match readable.
 fn run_pairs(command: PairsCommand) -> Result<()> {
     match command {
-        PairsCommand::Inspect { file, dedupe_bits, dedupe_bands, refusal_threshold } => {
+        PairsCommand::Inspect { pairs: file, dedupe_bits, dedupe_bands, refusal_threshold } => {
             let pair_set = PairSet::load(&file)?;
             let options = InspectOptions {
                 dedupe: DedupeOptions {
@@ -746,6 +787,7 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
             revision,
             device,
             precision,
+            chat_template,
             trait_description,
             count,
             output,
@@ -790,12 +832,17 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
                     let Some(model) = model else {
                         bail!("pairs synthesize with --generator local requires --model");
                     };
-                    let runtime = Runtime::load_at(
+                    let mut runtime = Runtime::load_at(
                         &model,
                         revision.as_deref(),
                         DeviceChoice::parse(&device)?,
                         Precision::parse(&precision)?,
                     )?;
+                    // Synthesis is the first step of the funnel and everything
+                    // downstream inherits what it writes. Addressed without
+                    // its markers, an instruct checkpoint answers a pair
+                    // request with instructions about answering pair requests.
+                    runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
                     pairs::synthesize(pairs::Generator::Local(&runtime), &options)?
                 }
                 "brama" => {
