@@ -175,12 +175,28 @@ pub struct Cache {
     masks: HashMap<(usize, usize), Tensor>,
     use_kv_cache: bool,
     kvs: Vec<Option<(Tensor, Tensor)>>,
+    /// Rotary tables, held in F32 whatever the weights are. See [`Cache::new`].
     cos: Tensor,
     sin: Tensor,
+    /// The dtype the base weights were mapped at. [`apply_rotary`] casts each
+    /// rotated query and key back to it, so a half-precision checkpoint keeps
+    /// a half-precision key-value cache and residual stream.
+    weights: DType,
     device: Device,
 }
 
 impl Cache {
+    /// `dtype` is the dtype the base weights were mapped at, and it is
+    /// deliberately *not* the dtype of the rotary tables. Position angles are
+    /// held in F32 whatever the weights are: `cos` and `sin` are indexed by
+    /// absolute position, and in F16 the mantissa runs out long before
+    /// `max_position_embeddings` does — two neighbouring positions late in the
+    /// context round to the same angle, which rotates two different tokens
+    /// identically and is invisible in the loss. The tables are one
+    /// `[positions, head_dim / 2]` matrix, so holding them wide costs a few
+    /// megabytes once rather than per forward, and [`apply_rotary`] casts each
+    /// query and key back to the weights' dtype afterwards so the key-value
+    /// cache still stores half-precision keys.
     pub fn new(use_kv_cache: bool, dtype: DType, config: &Config, device: &Device) -> Result<Self> {
         let inv_freq = rotary_frequencies(config);
         let theta = Tensor::new(inv_freq, device)?;
@@ -192,8 +208,9 @@ impl Cache {
             masks: HashMap::new(),
             use_kv_cache,
             kvs: vec![None; config.num_hidden_layers],
-            cos: angles.cos()?.to_dtype(dtype)?,
-            sin: angles.sin()?.to_dtype(dtype)?,
+            cos: angles.cos()?,
+            sin: angles.sin()?,
+            weights: dtype,
             device: device.clone(),
         })
     }
@@ -316,8 +333,9 @@ impl Attention {
             .reshape((batch, sequence, self.key_value_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let query = apply_rotary(&query, index_pos, &cache.cos, &cache.sin, mode.pass)?;
-        key = apply_rotary(&key, index_pos, &cache.cos, &cache.sin, mode.pass)?;
+        let query =
+            apply_rotary(&query, index_pos, &cache.cos, &cache.sin, cache.weights, mode.pass)?;
+        key = apply_rotary(&key, index_pos, &cache.cos, &cache.sin, cache.weights, mode.pass)?;
         if cache.use_kv_cache {
             if let Some((cached_key, cached_value)) = &cache.kvs[layer] {
                 key = Tensor::cat(&[cached_key, &key], 2)?.contiguous()?;
@@ -384,20 +402,38 @@ fn project(
     }
 }
 
+/// Rotates `input` by the angles at `index_pos..index_pos + sequence`, in F32,
+/// and returns the result at `weights`.
+///
+/// The rotation is a multiply-add against a table indexed by absolute
+/// position, so it is the one place in the forward where a half-precision
+/// mantissa is spent on something other than a weight: at F16 the angles
+/// themselves collide late in the context, and the phase error it introduces
+/// looks like a slightly different sentence rather than like a numerical
+/// fault. F32 in, F32 through, `weights` out — the cast back is what keeps a
+/// half-precision key-value cache half-precision, since the key this returns
+/// is the key the cache stores.
+///
+/// At F32 every cast here short-circuits to a handle clone
+/// (candle-core-0.11.0/src/tensor.rs:2453), so the F32 path is unchanged down
+/// to the op it records.
 fn apply_rotary(
     input: &Tensor,
     index_pos: usize,
     cos: &Tensor,
     sin: &Tensor,
+    weights: DType,
     pass: Pass,
 ) -> candle_core::Result<Tensor> {
     let (_, _, sequence, _) = input.dims4()?;
     let cos = cos.narrow(0, index_pos, sequence)?;
     let sin = sin.narrow(0, index_pos, sequence)?;
-    match pass {
-        Pass::Inference => candle_nn::rotary_emb::rope(input, &cos, &sin),
-        Pass::Differentiable => rope_composed(input, &cos, &sin),
-    }
+    let input = input.to_dtype(DType::F32)?;
+    let rotated = match pass {
+        Pass::Inference => candle_nn::rotary_emb::rope(&input.contiguous()?, &cos, &sin)?,
+        Pass::Differentiable => rope_composed(&input, &cos, &sin)?,
+    };
+    rotated.to_dtype(weights)
 }
 
 /// The rotary embedding written out of ops that have a backward pass.
