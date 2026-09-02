@@ -30,7 +30,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::{ExampleSet, batch, sequence_logprob};
-use crate::{lora, model::Route, runtime::Runtime, workflow};
+use crate::{artifact::Document, lora, model::Route, runtime::Runtime, workflow};
 
 /// Warns when an artifact this run is consuming was produced in a different
 /// encoding, or at a different precision, than this run is using.
@@ -82,18 +82,27 @@ pub fn warn_on_provenance(artifact: &Path, subject: &str, runtime: &Runtime) {
 
 /// The object recording how `artifact` was produced, whichever kind it is.
 ///
-/// An adapter's is the `train` object of its sidecar; a steering artifact's is
-/// the document itself. The sidecar decides which: only an adapter has one, so
-/// its presence identifies the shape without guessing from the file name or
-/// parsing the artifact twice to find out what it is.
+/// An adapter's is the `train` object of the sidecar written beside its
+/// safetensors; a steering artifact is itself JSON and records at the top
+/// level. Which one this is cannot be decided by looking for a sidecar:
+/// `sidecar_path` swaps the extension for `json`, so for a steering artifact —
+/// which is already `.json` — it names the artifact itself, that read succeeds,
+/// and the adapter branch then looks for a `train` object that a direction
+/// never had. So the bytes are read once and `Document::recognise` says what
+/// they are, which is honest where both the file name and the mere existence
+/// of a neighbouring file are not.
+///
+/// `Unrecognised` takes the adapter reading. A document that is neither shape
+/// has no provenance to disagree with, and the field lookups above miss
+/// silently on the `null` that produces.
 fn provenance(artifact: &Path) -> Option<serde_json::Value> {
     let sidecar = lora::Artifact::sidecar_path(artifact);
-    if let Ok(bytes) = std::fs::read(&sidecar) {
-        let document = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
-        return Some(document["train"].clone());
+    let bytes = std::fs::read(&sidecar).or_else(|_| std::fs::read(artifact)).ok()?;
+    let document = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+    match Document::recognise(&bytes) {
+        Document::Steering => Some(document),
+        Document::AdapterSidecar | Document::Unrecognised => Some(document["train"].clone()),
     }
-    let bytes = std::fs::read(artifact).ok()?;
-    serde_json::from_slice(&bytes).ok()
 }
 
 #[derive(Debug, Clone)]
