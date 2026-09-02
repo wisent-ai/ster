@@ -38,7 +38,9 @@ mod reward;
 mod sft;
 
 pub use dpo::{DpoLoss, DpoOptions, DpoReport, dpo};
-pub use evaluate::{EvaluateOptions, EvaluateReport, EvaluatedExample, evaluate};
+pub use evaluate::{
+    EvaluateOptions, EvaluateReport, EvaluatedExample, evaluate, warn_on_provenance,
+};
 pub use grpo::{GrpoIteration, GrpoOptions, GrpoReport, Reward, grpo};
 pub use merge::{MergeReport, merge};
 pub use reward::{RewardHead, RewardModel, RewardOptions, RewardReport, reward};

@@ -38,26 +38,31 @@ use crate::{lora, model::Route, runtime::Runtime, workflow};
 /// Every command that consumes an artifact already documents that the two must
 /// agree — `tune evaluate --chat-template` says a mismatch "measures a format
 /// the adapter never saw", and `--precision` says the same about the space a
-/// direction was fitted in. The artifact records both in its sidecar, so the
-/// product can say it rather than leaving the operator to remember: an
-/// adapter trained on chat markers and scored on raw text produces a
-/// plausible number that answers a different question, and nothing about the
-/// output otherwise looks wrong.
+/// direction was fitted in. The artifact records both, so the product can say
+/// it rather than leaving the operator to remember: an adapter trained on chat
+/// markers and scored on raw text produces a plausible number that answers a
+/// different question, and nothing about the output otherwise looks wrong.
+///
+/// One function covers both kinds of artifact because the question is one
+/// question. Where the record lives differs — an adapter keeps it in the
+/// `train` object of the sidecar written beside its safetensors, a steering
+/// artifact is itself a JSON document and carries it at the top level — and
+/// `provenance` resolves that difference once, so a field added to either
+/// shape is warned on without a second copy of this logic growing beside it.
 ///
 /// A warning and not a refusal, deliberately. Both combinations are things an
 /// operator may want on purpose — measuring how far an adapter transfers out
-/// of its training format is a real question — and a refusal would make the
-/// experiment impossible rather than merely deliberate.
+/// of its training format is a real question, and so is reading a direction in
+/// a space it was not fitted in — and a refusal would make the experiment
+/// impossible rather than merely deliberate. Only an unnoticed mismatch is a
+/// defect.
 ///
-/// Silent when the sidecar cannot be read or does not carry the field: an
+/// Silent when nothing can be read or the record does not carry the field: an
 /// artifact written before a field existed is not a mismatch, and this is a
 /// courtesy on top of the run rather than a gate in front of it.
-pub(crate) fn warn_on_provenance(artifact: &Path, subject: &str, runtime: &Runtime) {
-    let sidecar = lora::Artifact::sidecar_path(artifact);
-    let Ok(bytes) = std::fs::read(&sidecar) else { return };
-    let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return };
-    let train = &document["train"];
-    if let Some(trained) = train["chat_template"].as_str() {
+pub fn warn_on_provenance(artifact: &Path, subject: &str, runtime: &Runtime) {
+    let Some(record) = provenance(artifact) else { return };
+    if let Some(trained) = record["chat_template"].as_str() {
         let now = runtime.chat_status().label();
         if trained != now {
             workflow::progress(format!(
@@ -65,22 +70,30 @@ pub(crate) fn warn_on_provenance(artifact: &Path, subject: &str, runtime: &Runti
             ));
         }
     }
-    if let Some(trained) = train["precision"].as_str() {
-        let now = match runtime.dtype() {
-            candle_core::DType::F32 => "f32",
-            candle_core::DType::F16 => "f16",
-            candle_core::DType::BF16 => "bf16",
-            other => {
-                let _ = other;
-                return;
-            }
-        };
+    if let Some(trained) = record["precision"].as_str() {
+        let now = runtime.precision().name();
         if trained != now {
             workflow::progress(format!(
                 "warning: this {subject} was trained at precision {trained} and this run maps the base weights at {now}, so it is being read in a different space than it was fitted in"
             ));
         }
     }
+}
+
+/// The object recording how `artifact` was produced, whichever kind it is.
+///
+/// An adapter's is the `train` object of its sidecar; a steering artifact's is
+/// the document itself. The sidecar decides which: only an adapter has one, so
+/// its presence identifies the shape without guessing from the file name or
+/// parsing the artifact twice to find out what it is.
+fn provenance(artifact: &Path) -> Option<serde_json::Value> {
+    let sidecar = lora::Artifact::sidecar_path(artifact);
+    if let Ok(bytes) = std::fs::read(&sidecar) {
+        let document = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+        return Some(document["train"].clone());
+    }
+    let bytes = std::fs::read(artifact).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 #[derive(Debug, Clone)]
