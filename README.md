@@ -352,32 +352,34 @@ ster tune sft --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
               [--targets query,value] [--layers all] [--epochs 1]
               [--learning-rate 0.0001] [--accumulation 8] [--warmup-steps 0]
               [--max-sequence 512] [--chat-template auto|off] [--batch-size 1]
-              [--seed 42]
+              [--precision f32|f16|bf16] [--seed 42]
 ster tune dpo --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
               [--revision <REVISION>] [--device cpu] [--rank 8] [--alpha 16]
               [--targets query,value] [--layers all] [--beta 0.1]
               [--loss dpo|ipo] [--epochs 1] [--learning-rate 0.0001]
               [--accumulation 8] [--warmup-steps 0] [--max-sequence 512]
-              [--chat-template auto|off] [--batch-size 1] [--seed 42]
+              [--chat-template auto|off] [--batch-size 1]
+              [--precision f32|f16|bf16] [--seed 42]
 ster tune reward --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
                  [--revision <REVISION>] [--device cpu] [--rank 8] [--alpha 16]
                  [--targets query,value] [--layers all] [--epochs 1]
                  [--learning-rate 0.0001] [--accumulation 8] [--warmup-steps 0]
                  [--max-sequence 512] [--chat-template auto|off]
-                 [--batch-size 1] [--seed 42]
+                 [--batch-size 1] [--precision f32|f16|bf16] [--seed 42]
 ster tune grpo --model <MODEL> --prompts <PROMPTS> --output <OUTPUT>
                [--revision <REVISION>] [--device cpu] [--reward length]
                [--group 4] [--iterations 1] [--beta 0.04] [--rank 8]
                [--alpha 16] [--targets query,value] [--layers all]
                [--learning-rate 0.0001] [--accumulation 1] [--warmup-steps 0]
                [--max-new-tokens 64] [--temperature 0.9] [--top-p 0.95]
-               [--max-sequence 512] [--chat-template auto|off] [--seed 42]
+               [--max-sequence 512] [--chat-template auto|off]
+               [--precision f32|f16|bf16] [--seed 42]
 ster tune merge --model <MODEL> --adapter <ADAPTER> --output <DIR>
                 [--revision <REVISION>] [--device cpu]
 ster tune evaluate --model <MODEL> --examples <EXAMPLES>
                    [--revision <REVISION>] [--device cpu] [--adapter <ADAPTER>]
                    [--max-sequence 512] [--chat-template auto|off]
-                   [--batch-size 1]
+                   [--batch-size 1] [--precision f32|f16|bf16]
 ster tune inspect <ARTIFACT>
 ```
 
@@ -452,6 +454,103 @@ The templated run reports one more completion token per example than the same
 run with `--chat-template off`: the assistant turn's `</s>`, which the loss now
 covers and previously could not.
 
+### Precision
+
+`--precision` names the dtype the frozen base weights are mapped at — `f32`,
+`f16` or `bf16` — and defaults to `f32`, so every run recorded before this flag
+existed is unchanged. It is on the five `ster tune` subcommands that load a
+model to train or score one, and mirrored as `precision` on the matching `/v1`
+endpoints.
+
+It names the base weights and nothing else. Adapters, a reward run's scalar
+head, and every `AdamW` moment stay in F32 whatever it says, and that split is
+the whole of mixed precision rather than a detail of it: a low-rank update is
+small relative to the weight it corrects, and an update below that weight's own
+ulp rounds to nothing in half precision, so the adapter would train while the
+model did not move. Candle makes the split nearly free — `AdamW` builds both
+moments at each variable's own dtype, `lora::Adapter::forward` already casts
+each factor to the activation's dtype, and `to_dtype` is differentiable with a
+backward that casts the gradient back — so an F32 adapter stays F32 through a
+half-precision forward without anything being arranged.
+
+Three things in the forward pass are held at F32 regardless, because they are
+the places where half precision is wrong rather than merely cheaper: attention
+promotes queries, keys and values before the score matmul and casts only the
+output back; the rotary tables and the rotation itself run in F32, because a
+position is an absolute index rather than a weight and a half mantissa there
+makes neighbouring late positions round to the same angle — a phase error that
+reads as a slightly different sentence and never as a numerical fault; and every
+loss is summed in F32, because a log-softmax adds tens of thousands of terms
+into one accumulator and in half the smallest of them stop changing it. The
+key-value cache and the residual stream still store half-width values, so the
+memory saving survives all three.
+
+`bf16` on the `cpu` device is refused, at load, before a weight is mapped:
+
+```text
+bf16 has no CPU matmul kernel in this Candle build; use --precision f16 for half precision on cpu, or --device metal for bf16
+```
+
+That is a fact about Candle rather than a policy. `cpu_backend`'s matmul accepts
+F16, F32 and F64 and returns `unsupported dtype BF16 for op matmul` for anything
+else, so a bf16 CPU run does not run slowly — it downloads and maps the whole
+checkpoint and then dies at the first projection. `f16` on the CPU is real half
+arithmetic on an Apple-silicon class machine: `gemm` selects a native
+`neonfp16` microkernel on aarch64 when the hardware reports the `fp16` feature.
+On `metal` all three work.
+
+Measured on `TinyLlama/TinyLlama-1.1B-Chat-v1.0`, CPU, revision
+`fe8a4ea1ffedaf415f4da2f062534de366a451e6`, scoring the eight checked-in
+examples with `ster tune evaluate --max-sequence 128`:
+
+| | peak resident | user CPU | loss | perplexity |
+| --- | --- | --- | --- | --- |
+| `--precision f32` | 6.46 GiB | 15.2 s | 4.18851804357814 | 65.92502052501293 |
+| `--precision f16` | 4.29 GiB | 10.2 s | 4.17449491605984 | 65.00699737728682 |
+
+Two runs of each, peak resident stable to 0.02% and user CPU to 4%; wall clock
+is not reported because the machine was shared and the same run varied between
+3.9 s and 10.8 s while its CPU time did not move. The 2.32 GiB saved is the
+checkpoint's own weight count at two bytes instead of four. The loss differs by
+0.33%, which is what half precision cost in accuracy here, and each precision
+reproduces itself exactly.
+
+Training is where it decides whether a run happens at all. The same command as
+an SFT run over all 22 layers —
+`ster tune sft --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --examples docs/examples/examples.json --epochs 1 --max-sequence 128 --seed 42`
+— trains 88 adapter tensors and 1126400 parameters. At `--precision f16` it
+completes, at a peak resident 25.5 GiB and a final loss of 4.200512409210205. At
+`--precision f32` it is killed by the operating system partway through the first
+epoch, at a peak resident 31.9 GiB and a peak memory footprint of 52.6 GiB:
+not a Ster refusal and not a Candle allocation failure, just a signal. Most of
+that is the autograd tape over 22 differentiable layers rather than the weights,
+and the tape is not what `--precision` controls — but halving the resident base
+weights is the difference between that run finishing and being killed.
+
+### Reproducibility
+
+A Ster run reproduces itself: the same command, at the same `--seed`, against
+the same checkpoint, writes the same numbers and the same adapter bytes, and
+`--batch-size 1` reproduces every run recorded before batching existed byte for
+byte. Changing `--batch-size` changes the run, for two independent reasons: a
+larger batch puts different examples in the same optimizer step, and the
+floating-point sums inside a batched forward associate in a different order.
+Neither is a defect and neither is a loss of reproducibility — every batch size
+reproduces itself.
+
+`--batch-size` counts rows per forward: examples for `sft` and `evaluate`, pairs
+for `dpo` and `reward`, where a pair is two rows. A batch of one is one row per
+forward whatever the unit, so a preference pair's two sides go through the model
+as two separate one-row passes at the default — which is what makes the byte
+identity above hold. `--accumulation` keeps counting forwards, so a step sees up
+to `batch-size * accumulation` rows.
+
+`--precision f32` is byte-identical too, across both the batching and the
+precision work: `sft`, `dpo` and `reward` on the toy checkpoint at
+`--seed 7 --epochs 2 --layers all`, run through the pre-precision binary and
+through the current one at `--precision f32 --batch-size 1`, produce adapters
+with identical SHA-256 digests.
+
 ### What trains, and what does not
 
 Only the adapters train, in every objective below. Base weights arrive through
@@ -476,16 +575,20 @@ correctness check: with an identity adapter the reference and the policy agree
 exactly, so the first step's loss is a known constant, and each section below
 says which one.
 
-Three mechanics are shared and each is deliberate rather than unfinished. One
-sequence goes through each forward pass and `--accumulation` of them are folded
-into one `AdamW` step from their scaled losses, because Ster's decoder has no
-padding token and no attention mask for a batched sequence — stacking sequences
-of different lengths would train the adapter on whatever filler the shorter rows
-carried, silently, under a loss that still looks reasonable. The KV cache is off
-while training, because the whole sequence goes through in one pass and a cache
-would keep the previous sequence's keys and values inside this one's autograd
-graph. The learning rate ramps linearly over `--warmup-steps` steps and then
-decays on a cosine to a tenth of the base rate.
+Three mechanics are shared and each is deliberate rather than unfinished.
+`--batch-size` sequences go through each forward pass and `--accumulation` of
+those forwards are folded into one `AdamW` step from their scaled losses, so a
+step sees up to `batch-size * accumulation` rows; the default of one row per
+forward is what reproduces every run recorded before batching existed. A
+batched forward right-pads its rows and masks every padded key out of every
+real query, which is what makes stacking sequences of different lengths safe —
+before that mask existed it would have trained the adapter on whatever filler
+the shorter rows carried, silently, under a loss that still looked reasonable.
+The KV cache is off while training, because the whole sequence goes through in
+one pass, because a cache would keep the previous sequence's keys and values
+inside this one's autograd graph, and because one cache cannot hold rows that
+end in different places. The learning rate ramps linearly over
+`--warmup-steps` steps and then decays on a cosine to a tenth of the base rate.
 
 `--targets` names the projections that carry an adapter — `query`, `key`,
 `value`, `output`, `gate`, `up`, and `down` — and accepts either the short name
@@ -777,9 +880,9 @@ called from a gradient. There is no judge model and no LLM-as-critic
 anywhere in the loop: `tune grpo` takes its reward from a reward model you
 trained or from a deterministic function, and if you want a hosted model's
 opinion, that is `pairs synthesize --generator brama` producing training data,
-not a grader wired into a gradient. The one-sequence-per-forward batching is a
-property of the decoder, for the padding reason stated above, rather than a
-milestone on the way to something wider.
+not a grader wired into a gradient. Batching is bounded in the same spirit:
+`--batch-size` folds rows into one padded forward, and the padding mask is what
+keeps that honest, but nothing here grows into a distributed trainer.
 
 All seven operations are jobs on the `ster serve` backend —
 `POST /v1/tune/sft`, `POST /v1/tune/dpo`, `POST /v1/tune/reward`,
