@@ -37,7 +37,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{
-    ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions,
+    ChatChoice, ContrastivePair, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions,
     PairSet, PromptSet, Reward, RewardHead, RewardOptions, Runtime, SftOptions, SteeringArtifact,
     SynthesisOptions, TrainingMethod,
     brama,
@@ -304,6 +304,11 @@ struct GenerateRequest {
     top_p: Option<f64>,
     #[serde(default = "default_seed")]
     seed: u64,
+    /// `auto` renders the prompt through the model's own chat template when
+    /// it publishes one, `off` sends raw text. An instruct checkpoint handed
+    /// a bare prompt continues it instead of answering it.
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
 }
 
 impl Validate for GenerateRequest {
@@ -489,6 +494,8 @@ struct TuneSftRequest {
     max_sequence: usize,
     #[serde(default = "default_seed")]
     seed: u64,
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
 }
 
 impl Validate for TuneSftRequest {
@@ -536,6 +543,8 @@ struct TuneDpoRequest {
     max_sequence: usize,
     #[serde(default = "default_seed")]
     seed: u64,
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
 }
 
 impl Validate for TuneDpoRequest {
@@ -578,6 +587,8 @@ struct TuneRewardRequest {
     max_sequence: usize,
     #[serde(default = "default_seed")]
     seed: u64,
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
 }
 
 impl Validate for TuneRewardRequest {
@@ -634,6 +645,8 @@ struct TuneGrpoRequest {
     max_sequence: usize,
     #[serde(default = "default_seed")]
     seed: u64,
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
 }
 
 impl Validate for TuneGrpoRequest {
@@ -681,6 +694,8 @@ struct TuneEvaluateRequest {
     adapter: Option<String>,
     #[serde(default = "default_max_sequence")]
     max_sequence: usize,
+    #[serde(default = "default_chat_template")]
+    chat_template: String,
 }
 
 impl Validate for TuneEvaluateRequest {
@@ -799,6 +814,14 @@ fn default_max_sequence() -> usize {
     512
 }
 
+/// Apply the model's own conversation format when it publishes one. An
+/// instruct checkpoint is the common case and raw text is wrong for it, so
+/// the default is the setting that is right more often; `off` restores the
+/// raw-text encoding a base model wants.
+fn default_chat_template() -> String {
+    "auto".to_owned()
+}
+
 /// The strength of the pull back toward the frozen reference, at the value the
 /// DPO paper reports across its settings.
 fn default_beta() -> f64 {
@@ -886,7 +909,7 @@ fn generate_job(request: GenerateRequest) -> Result<Value> {
     // An adapter rewrites the projections themselves, so it is attached while
     // the weights are mapped rather than applied per token the way a steering
     // vector is.
-    let runtime = match request.adapter.as_deref().filter(|value| !value.trim().is_empty()) {
+    let mut runtime = match request.adapter.as_deref().filter(|value| !value.trim().is_empty()) {
         Some(adapter) => Runtime::load_with_adapter(
             &request.model.model,
             request.model.revision.as_deref(),
@@ -895,6 +918,7 @@ fn generate_job(request: GenerateRequest) -> Result<Value> {
         )?,
         None => request.model.load_runtime()?,
     };
+    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let artifact = request
         .vector
         .as_deref()
@@ -1017,12 +1041,13 @@ fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
     // The adapters have to exist before the first forward pass, so the
     // runtime is built from the spec rather than patched after loading; the
     // returned VarMap owns every trainable tensor.
-    let (runtime, varmap) = Runtime::load_trainable(
+    let (mut runtime, varmap) = Runtime::load_trainable(
         &request.model.model,
         request.model.revision.as_deref(),
         device,
         &spec,
     )?;
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let examples = ExampleSet::load(Path::new(&request.examples))?;
     let options = SftOptions {
         spec: spec.clone(),
@@ -1035,8 +1060,11 @@ fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
     };
     let report = tune::sft(&runtime, &varmap, &examples, &options)?;
     // The report is folded into the artifact so a trained adapter always
-    // carries the run that produced it.
-    let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+    // carries the run that produced it, and the encoding it was produced in
+    // travels with it.
+    let mut report = serde_json::to_value(&report)?;
+    chat.annotate(&mut report)?;
+    let artifact = runtime.adapter_artifact(&spec, report.clone())?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
 }
@@ -1052,12 +1080,13 @@ fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
         layers: parse_adapter_layers(&request.layers)?,
         seed: request.seed,
     };
-    let (runtime, varmap) = Runtime::load_trainable(
+    let (mut runtime, varmap) = Runtime::load_trainable(
         &request.model.model,
         request.model.revision.as_deref(),
         device,
         &spec,
     )?;
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pairs = PairSet::load(Path::new(&request.pairs))?;
     let options = DpoOptions {
         spec: spec.clone(),
@@ -1073,7 +1102,9 @@ fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
     let report = tune::dpo(&runtime, &varmap, &pairs, &options)?;
     // The report is folded into the artifact so a trained adapter always
     // carries the run that produced it.
-    let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+    let mut report = serde_json::to_value(&report)?;
+    chat.annotate(&mut report)?;
+    let artifact = runtime.adapter_artifact(&spec, report.clone())?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
 }
@@ -1090,12 +1121,13 @@ fn tune_reward_job(request: TuneRewardRequest) -> Result<Value> {
         layers: parse_adapter_layers(&request.layers)?,
         seed: request.seed,
     };
-    let (runtime, varmap) = Runtime::load_trainable(
+    let (mut runtime, varmap) = Runtime::load_trainable(
         &request.model.model,
         request.model.revision.as_deref(),
         device,
         &spec,
     )?;
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let head =
         RewardHead::fresh(&varmap, runtime.hidden_size(), runtime.device(), runtime.dtype())?;
     let pairs = PairSet::load(Path::new(&request.pairs))?;
@@ -1109,8 +1141,9 @@ fn tune_reward_job(request: TuneRewardRequest) -> Result<Value> {
         seed: request.seed,
     };
     let report = tune::reward(&runtime, &varmap, &head, &pairs, &options)?;
-    let artifact =
-        runtime.reward_artifact(&spec, head.weight(), serde_json::to_value(&report)?)?;
+    let mut report = serde_json::to_value(&report)?;
+    chat.annotate(&mut report)?;
+    let artifact = runtime.reward_artifact(&spec, head.weight(), report.clone())?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
 }
@@ -1133,12 +1166,13 @@ fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value> {
         request.model.revision.as_deref(),
         device,
     )?;
-    let (runtime, varmap) = Runtime::load_trainable(
+    let (mut runtime, varmap) = Runtime::load_trainable(
         &request.model.model,
         request.model.revision.as_deref(),
         device,
         &spec,
     )?;
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let prompts = PromptSet::load(Path::new(&request.prompts))?;
     let options = GrpoOptions {
         spec: spec.clone(),
@@ -1160,7 +1194,9 @@ fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value> {
     let report = tune::grpo(&runtime, &varmap, &prompts, &source, &request.reward, &options)?;
     // The report is folded into the artifact so a trained adapter always
     // carries the run that produced it.
-    let artifact = runtime.adapter_artifact(&spec, serde_json::to_value(&report)?)?;
+    let mut report = serde_json::to_value(&report)?;
+    chat.annotate(&mut report)?;
+    let artifact = runtime.adapter_artifact(&spec, report.clone())?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
 }
@@ -1181,7 +1217,7 @@ fn tune_merge_job(request: TuneMergeRequest) -> Result<Value> {
 /// and the same document the CLI prints.
 fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
     let adapter = request.adapter.as_deref().filter(|value| !value.trim().is_empty());
-    let runtime = match adapter {
+    let mut runtime = match adapter {
         Some(adapter) => Runtime::load_with_adapter(
             &request.model.model,
             request.model.revision.as_deref(),
@@ -1190,6 +1226,7 @@ fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
         )?,
         None => request.model.load_runtime()?,
     };
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let examples = ExampleSet::load(Path::new(&request.examples))?;
     let report = tune::evaluate(
         &runtime,
@@ -1197,7 +1234,9 @@ fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
         adapter.map(Path::new),
         &EvaluateOptions { max_sequence: request.max_sequence },
     )?;
-    Ok(serde_json::to_value(&report)?)
+    let mut report = serde_json::to_value(&report)?;
+    chat.annotate(&mut report)?;
+    Ok(report)
 }
 
 fn tune_inspect_job(request: TuneInspectRequest) -> Result<Value> {
