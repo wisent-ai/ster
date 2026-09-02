@@ -12,7 +12,7 @@
 //!   stop early.
 
 use anyhow::{Context, Result, bail};
-use candle_core::Tensor;
+use candle_core::{DType, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap, loss};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::Serialize;
@@ -258,9 +258,16 @@ fn completion_loss(
             ids.len()
         );
     }
+    // Scored in F32 whatever the base weights are. `cross_entropy` takes the
+    // log-softmax of this window, and a half-precision log-softmax over a
+    // vocabulary is the one place in this loss where the summation range
+    // genuinely does not fit. `to_dtype` is differentiable and returns the
+    // gradient in the argument's dtype, so this costs a clone at F32 and
+    // nothing else.
     let window = logits
         .narrow(1, boundary - 1, predicted)?
-        .reshape((predicted, vocab))?;
+        .reshape((predicted, vocab))?
+        .to_dtype(DType::F32)?;
     let targets = Tensor::new(&ids[boundary..], runtime.device())?;
     Ok(loss::cross_entropy(&window, &targets)?)
 }

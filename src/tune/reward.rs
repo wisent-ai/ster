@@ -93,7 +93,11 @@ impl RewardHead {
         if width != expected {
             bail!("reward head is {expected} wide, the model's residual stream is {width}");
         }
-        let last = hidden.i((0, sequence - 1, ..))?;
+        // Read at the head's own dtype rather than the residual stream's. The
+        // head is the smallest parameter in the run — one row — and it is the
+        // one that rounds away first, so it is trained in F32 even when the
+        // base weights are half. At F32 this is a clone.
+        let last = hidden.i((0, sequence - 1, ..))?.to_dtype(self.weight.dtype())?;
         // An elementwise product folded to a scalar rather than a matmul: the
         // result is one number, and a `[1, hidden] x [hidden, 1]` matmul would
         // reshape twice to say the same thing.
