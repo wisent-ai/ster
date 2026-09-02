@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::Precision;
+use crate::{chat, runtime::Precision};
 
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 
@@ -144,6 +144,21 @@ pub struct SteeringArtifact {
     /// notes the operator wrote.
     #[serde(default)]
     pub precision: Option<String>,
+    /// Whether the pairs this direction was fitted from were read through the
+    /// model's own chat template: `"applied"`, `"absent"`, or `"off"`, the
+    /// same three words an adapter sidecar records at `train.chat_template`.
+    ///
+    /// The same provenance argument as `precision`, and the sharper half of
+    /// it. Precision changes where a direction points by a few ulps; format
+    /// changes what the residual stream contains, because a templated prompt
+    /// is a user turn the assistant is about to answer and a raw one is a
+    /// document being continued. A direction fitted `off` and added during an
+    /// `applied` decode is measured in one space and steers another, and
+    /// nothing about the artifact used to say so.
+    ///
+    /// `None` means an artifact written before this field existed.
+    #[serde(default)]
+    pub chat_template: Option<String>,
     pub trait_name: String,
     pub method: String,
     pub hidden_size: usize,
@@ -161,6 +176,7 @@ impl SteeringArtifact {
         hidden_size: usize,
         vectors: Vec<LayerVector>,
         precision: Precision,
+        chat_template: chat::Status,
     ) -> Self {
         Self {
             schema_version: ARTIFACT_SCHEMA_VERSION,
@@ -168,6 +184,7 @@ impl SteeringArtifact {
             model,
             model_revision,
             precision: Some(precision.name().to_owned()),
+            chat_template: Some(chat_template.label().to_owned()),
             trait_name,
             method,
             hidden_size,

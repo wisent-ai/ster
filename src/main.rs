@@ -649,6 +649,10 @@ fn main() -> Result<()> {
             let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let pair_set = PairSet::load(&pairs)?;
             let artifact = SteeringArtifact::load(&vector)?;
+            // The artifact now records the precision and the format it was
+            // fitted in, so the advice `--precision` has always given can
+            // finally be checked. Same helper the tune half uses.
+            tune::warn_on_provenance(&vector, "direction", &runtime);
             let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
             let mut report = serde_json::to_value(report)?;
             chat.annotate(&mut report)?;
@@ -683,6 +687,9 @@ fn main() -> Result<()> {
             };
             runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
+            if let Some(vector) = vector.as_deref() {
+                tune::warn_on_provenance(vector, "direction", &runtime);
+            }
             let generated = runtime.generate(
                 &prompt,
                 artifact.as_ref(),

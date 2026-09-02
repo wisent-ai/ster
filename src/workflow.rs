@@ -47,6 +47,7 @@ pub fn artifact_summary(artifact: &SteeringArtifact) -> serde_json::Value {
             "method": artifact.method,
             "hidden_size": artifact.hidden_size,
             "precision": artifact.precision,
+            "chat_template": artifact.chat_template,
             "layers": artifact.vectors.iter().map(|vector| serde_json::json!({
                 "layer": vector.layer,
                 "width": vector.values.len(),
@@ -226,6 +227,7 @@ pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<
             train_accuracy: accuracy,
         }],
         runtime.precision(),
+        runtime.chat_status(),
     );
     artifact.metadata.insert(
         "selection".to_owned(),
@@ -349,6 +351,7 @@ fn artifact_from_captured(
         runtime.hidden_size(),
         vectors,
         runtime.precision(),
+        runtime.chat_status(),
     ))
 }
 

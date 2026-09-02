@@ -999,6 +999,7 @@ fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
+    tune::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
     let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
@@ -1021,12 +1022,11 @@ fn generate_job(request: GenerateRequest) -> Result<Value> {
         None => request.model.load_runtime_at(&request.precision)?,
     };
     runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
-    let artifact = request
-        .vector
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| SteeringArtifact::load(Path::new(value)))
-        .transpose()?;
+    let vector = request.vector.as_deref().filter(|value| !value.trim().is_empty());
+    let artifact = vector.map(|value| SteeringArtifact::load(Path::new(value))).transpose()?;
+    if let Some(vector) = vector {
+        tune::warn_on_provenance(Path::new(vector), "direction", &runtime);
+    }
     let generated = runtime.generate(
         &request.prompt,
         artifact.as_ref(),
