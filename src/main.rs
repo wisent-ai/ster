@@ -1161,6 +1161,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
                 tune::grpo(&runtime, &varmap, &prompt_set, &source, &reward, &options)?;
             let mut report = serde_json::to_value(&report)?;
             chat.annotate(&mut report)?;
+            note_precision(&mut report, precision)?;
             let artifact = runtime.adapter_artifact(&spec, report.clone())?;
             artifact.save(&output)?;
             println!(
