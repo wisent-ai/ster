@@ -1,3 +1,66 @@
+//! model.rs — the decoder Ster reads, steers and trains through.
+//!
+//! # Where the casts are, and the one rule that puts them there
+//!
+//! The base weights are mapped at whatever dtype the loader chose — F32, F16
+//! or BF16 — and the adapters, any head, and every optimizer moment are F32
+//! regardless, because a low-rank correction smaller than the weight's own ulp
+//! rounds to nothing in half. Inside the forward the rule is narrower than
+//! "half everywhere" and can be stated in one line:
+//!
+//! **A tensor may be held at the weights' dtype. A sum over many terms is
+//! taken in F32.**
+//!
+//! Half precision costs a mantissa, and a mantissa only matters where error
+//! accumulates. A projection is one dot product against a weight that is
+//! itself half — nothing is gained by widening it. A softmax, a norm, a rotary
+//! angle and a log-probability all accumulate across a sequence, and each of
+//! them is where a half mantissa turns into a wrong answer rather than a
+//! slightly rounded one. So, site by site, with the reason each one is where
+//! it is:
+//!
+//! * **Both masks are `u8` and therefore dtype-free.** [`Cache::mask`] and
+//!   [`padded_causal_mask`] mark a key as hidden with a one, and
+//!   [`masked_fill`] turns that into a negative infinity in the dtype the
+//!   scores are already in. A mask has no precision to lose, and building one
+//!   per dtype would be a way to get it wrong.
+//! * **Attention scores and the softmax are F32, always.** Query, key and
+//!   value are promoted before the score matmul and the result is cast back
+//!   after the value matmul. The softmax sums an exponential over the whole
+//!   key axis, which is the longest reduction in the pass and the one that
+//!   grows with context; in F16 its accumulator saturates while the true value
+//!   is still finite.
+//! * **Rotary is F32 in and F32 through, and casts back.** The tables are held
+//!   F32 whatever the weights are, because they are indexed by absolute
+//!   position rather than derived from a weight: in F16 two neighbouring late
+//!   positions round to the same angle, which rotates two different tokens
+//!   identically. [`apply_rotary`] returns the rotated query and key at the
+//!   weights' dtype, so the key-value cache still stores half-precision keys
+//!   and half precision is still a memory saving.
+//! * **Norms promote themselves.** Both spellings — the fused
+//!   `ops::rms_norm` and the composed `LayerNorm::forward` that training takes
+//!   — cast F16 and BF16 up to F32 for the sum of squares and back afterwards
+//!   (candle-nn-0.11.0/src/layer_norm.rs:123-138). This file adds nothing, and
+//!   should not: a second promotion around a function that already promotes is
+//!   a cast that reads as a safeguard and is really just a copy.
+//! * **The readout leaves in F32.** Both the vocabulary projection and the
+//!   residual stream are cast to F32 before they are returned, so every loss
+//!   in `tune` is F32 arithmetic over an F32 input whatever the checkpoint was
+//!   mapped at, and no objective has to know which precision it is training
+//!   against.
+//!
+//! What stays at the weights' dtype is everything whose error does not
+//! compound: the embedding lookup, the four attention projections, the three
+//! feed-forward projections, the residual stream between layers, and the
+//! key-value cache. That is where the bytes are, which is why mapping them
+//! half is worth doing at all.
+//!
+//! Every cast above short-circuits to a handle clone when the dtypes already
+//! agree (candle-core-0.11.0/src/tensor.rs:2453), so an F32 run records the
+//! same ops it recorded before any of this existed — which is a claim the
+//! product is expected to demonstrate by writing a byte-identical adapter, not
+//! merely to assert here.
+
 use std::{collections::{BTreeMap, HashMap}, f32::consts::PI};
 
 use anyhow::{Result, bail};
