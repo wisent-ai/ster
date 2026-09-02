@@ -298,9 +298,41 @@ impl Runtime {
             .hidden)
     }
 
+    /// One differentiable forward over several sequences at once, returning
+    /// logits `[batch, width, vocab]` where `width` is the longest row.
+    ///
+    /// Row `r`'s real logits are its first `rows[r].len()` positions: the
+    /// padding is on the right, so every row is sliced from the front to its
+    /// own length, which is the same offset convention a single-sequence
+    /// forward already hands back.
+    pub fn forward_train_rows(&self, rows: &[&[u32]]) -> Result<Tensor> {
+        self.row_logits(rows, Mode::TRAIN, "a training forward pass needs at least one token")
+    }
+
+    /// The same batched pass with no autograd tape, routed through the policy
+    /// or the frozen reference exactly as `forward_scored` routes one.
+    pub fn forward_scored_rows(&self, rows: &[&[u32]], route: Route) -> Result<Tensor> {
+        self.row_logits(rows, Mode::score(route), "a scoring forward pass needs at least one token")
+    }
+
+    /// The batched residual stream a reward head reads, `[batch, width,
+    /// hidden]`, with no vocabulary projection.
+    pub fn forward_hidden_rows(&self, rows: &[&[u32]]) -> Result<Tensor> {
+        Ok(self
+            .forward_rows(rows, Mode::REWARD, "a reward forward pass needs at least one token")?
+            .hidden)
+    }
+
     /// A forward that must produce logits, unwrapped.
     fn logits(&self, ids: &[u32], mode: Mode, empty: &str) -> Result<Tensor> {
         self.forward_once(ids, mode, empty)?
+            .logits
+            .context("this forward pass was asked for no vocabulary projection")
+    }
+
+    /// The batched equivalent, which must produce logits too.
+    fn row_logits(&self, rows: &[&[u32]], mode: Mode, empty: &str) -> Result<Tensor> {
+        self.forward_rows(rows, mode, empty)?
             .logits
             .context("this forward pass was asked for no vocabulary projection")
     }
@@ -319,6 +351,30 @@ impl Runtime {
         let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
         let mut cache = Cache::new(false, self.dtype, self.model.config(), &self.device)?;
         Ok(self.model.forward_pass(&input, 0, &mut cache, None, &[], mode)?)
+    }
+
+    /// The body every batched forward shares: many right-padded sequences, no
+    /// KV cache.
+    ///
+    /// The cache is off for the reason it is off in `forward_once`, and here
+    /// it is also structural: one cache cannot hold rows that end in different
+    /// places. Filler is token zero, which is never read — `forward_batch`
+    /// masks every padded key out of every real query — and is chosen only
+    /// because it is the one id every vocabulary has.
+    fn forward_rows(&self, rows: &[&[u32]], mode: Mode, empty: &str) -> Result<ForwardOutput> {
+        if rows.is_empty() || rows.iter().any(|row| row.is_empty()) {
+            bail!("{empty}");
+        }
+        let lengths: Vec<usize> = rows.iter().map(|row| row.len()).collect();
+        let width = lengths.iter().copied().max().unwrap_or_default();
+        let mut flat = Vec::with_capacity(rows.len() * width);
+        for row in rows {
+            flat.extend_from_slice(row);
+            flat.resize(flat.len() + width - row.len(), 0);
+        }
+        let input = Tensor::from_vec(flat, (rows.len(), width), &self.device)?;
+        let mut cache = Cache::new(false, self.dtype, self.model.config(), &self.device)?;
+        Ok(self.model.forward_batch(&input, &lengths, &mut cache, None, mode)?)
     }
 
     pub fn hidden_size(&self) -> usize {
