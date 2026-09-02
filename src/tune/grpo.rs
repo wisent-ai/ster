@@ -206,6 +206,14 @@ pub fn grpo(
             "group-relative policy optimization requires a group of at least two completions, because the group is the baseline"
         );
     }
+    // The judge is a different model from the policy, but it reads the same
+    // kind of residual stream, and it was fitted in whatever encoding and
+    // precision trained it. A reward artifact from an f16 run scoring an f32
+    // policy is reading a space it was not fitted in, and the reward it
+    // returns looks perfectly ordinary, so the run says so.
+    if let Some(path) = matches!(reward, Reward::Model(_)).then_some(requested_reward) {
+        super::evaluate::warn_on_provenance(Path::new(path), "reward model", runtime);
+    }
     if !options.beta.is_finite() || options.beta < 0.0 {
         bail!("group-relative policy optimization requires a finite beta of zero or more");
     }

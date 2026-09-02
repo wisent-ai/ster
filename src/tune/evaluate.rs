@@ -30,7 +30,58 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::{ExampleSet, batch, sequence_logprob};
-use crate::{model::Route, runtime::Runtime, workflow};
+use crate::{lora, model::Route, runtime::Runtime, workflow};
+
+/// Warns when an artifact this run is consuming was produced in a different
+/// encoding, or at a different precision, than this run is using.
+///
+/// Every command that consumes an artifact already documents that the two must
+/// agree — `tune evaluate --chat-template` says a mismatch "measures a format
+/// the adapter never saw", and `--precision` says the same about the space a
+/// direction was fitted in. The artifact records both in its sidecar, so the
+/// product can say it rather than leaving the operator to remember: an
+/// adapter trained on chat markers and scored on raw text produces a
+/// plausible number that answers a different question, and nothing about the
+/// output otherwise looks wrong.
+///
+/// A warning and not a refusal, deliberately. Both combinations are things an
+/// operator may want on purpose — measuring how far an adapter transfers out
+/// of its training format is a real question — and a refusal would make the
+/// experiment impossible rather than merely deliberate.
+///
+/// Silent when the sidecar cannot be read or does not carry the field: an
+/// artifact written before a field existed is not a mismatch, and this is a
+/// courtesy on top of the run rather than a gate in front of it.
+pub(crate) fn warn_on_provenance(artifact: &Path, subject: &str, runtime: &Runtime) {
+    let sidecar = lora::Artifact::sidecar_path(artifact);
+    let Ok(bytes) = std::fs::read(&sidecar) else { return };
+    let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return };
+    let train = &document["train"];
+    if let Some(trained) = train["chat_template"].as_str() {
+        let now = runtime.chat_status().label();
+        if trained != now {
+            workflow::progress(format!(
+                "warning: this {subject} was trained with chat template {trained} and this run encodes {now}, so the number below describes a format it was not trained in"
+            ));
+        }
+    }
+    if let Some(trained) = train["precision"].as_str() {
+        let now = match runtime.dtype() {
+            candle_core::DType::F32 => "f32",
+            candle_core::DType::F16 => "f16",
+            candle_core::DType::BF16 => "bf16",
+            other => {
+                let _ = other;
+                return;
+            }
+        };
+        if trained != now {
+            workflow::progress(format!(
+                "warning: this {subject} was trained at precision {trained} and this run maps the base weights at {now}, so it is being read in a different space than it was fitted in"
+            ));
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct EvaluateOptions {
@@ -95,6 +146,9 @@ pub fn evaluate(
         bail!("max_sequence must be at least two tokens, so that one token can predict another");
     }
     examples.validate(&examples.label())?;
+    if let Some(adapter) = adapter {
+        warn_on_provenance(adapter, "adapter", runtime);
+    }
 
     let limit = options.max_sequence.min(runtime.context_length());
     let device = runtime.device();
