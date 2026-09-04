@@ -1,3 +1,5 @@
+mod onboarding;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -163,6 +165,12 @@ enum Command {
     Inspect {
         #[arg(value_name = "ARTIFACT")]
         artifact: PathBuf,
+    },
+    /// Learn Ster's first local workflow and record a real pair-set result.
+    Onboarding {
+        /// Discard recorded progress and evidence, then show the walkthrough again.
+        #[arg(long)]
+        reset: bool,
     },
     /// Author, inspect, and synthesize contrastive pair sets.
     Pairs {
@@ -721,6 +729,7 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to inspect {}", artifact.display()))?;
             println!("{}", serde_json::to_string_pretty(&workflow::artifact_summary(&artifact))?);
         }
+        Command::Onboarding { reset } => onboarding::run(reset)?,
         Command::Pairs { command } => run_pairs(command)?,
         Command::Tune { command } => run_tune(command)?,
         Command::Serve { port } => {
@@ -764,6 +773,7 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
             pair_set.pairs.push(ContrastivePair { positive, negative });
             let index = pair_set.pairs.len() - 1;
             pair_set.save(&file)?;
+            onboarding::record_pair_set_written(&file)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
