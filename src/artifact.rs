@@ -8,12 +8,14 @@ use crate::{chat, runtime::Precision};
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContrastivePair {
     pub positive: String,
     pub negative: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PairSet {
     #[serde(default)]
     pub trait_name: String,

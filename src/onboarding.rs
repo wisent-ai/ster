@@ -6,12 +6,12 @@ use serde_json::{Map, Value, json};
 
 const PRODUCT_ID: &str = "ster";
 const JOURNEY_ID: &str = "first-use";
-const JOURNEY_VERSION: &str = "2026-09-03.1";
-const FIRST_SUCCESS_FACT: &str = "contrastive_pair_set_written";
+const JOURNEY_VERSION: &str = "2026-09-05.1";
+const FIRST_SUCCESS_FACT: &str = "contrastive_pair_set_imported";
 const STATE_SCHEMA: &str = "ster.onboarding-state.v1";
 const DEFINITION: &str = include_str!("onboarding_first_use.json");
 
-pub fn run(reset: bool) -> Result<()> {
+pub fn run(reset: bool, import_pairs: Option<&Path>, name: Option<&str>) -> Result<()> {
     let definition = canonical_definition()?;
     let mut state = if reset {
         let state = fresh_state(&definition)?;
@@ -24,9 +24,33 @@ pub fn run(reset: bool) -> Result<()> {
         load_or_start_state(&definition)?
     };
 
+    if let Some(source) = import_pairs {
+        let report = ster::workspace::import_pair_set(source, name)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if report.accepted() {
+            let destination = report
+                .path
+                .as_deref()
+                .context("accepted pair-set import did not return a destination")?;
+            record_pair_set_imported(Path::new(destination))?;
+            println!(
+                "Ster first-use journey complete: the imported pair set is active for training and evaluation."
+            );
+        } else {
+            bail!(
+                "{}",
+                report
+                    .reason
+                    .as_deref()
+                    .unwrap_or("Ster did not accept the pair set")
+            );
+        }
+        return Ok(());
+    }
+
     if state.get("status").and_then(Value::as_str) == Some("completed") {
         println!(
-            "Ster first-use journey is already complete: a contrastive pair set was written."
+            "Ster first-use journey is already complete: a contrastive pair set was imported."
         );
         return Ok(());
     }
@@ -42,7 +66,7 @@ pub fn run(reset: bool) -> Result<()> {
 
         let Some(next_screen_id) = next_screen_id(screen)? else {
             save_state(&state)?;
-            println!("\nFirst-use progress saved; complete the command shown above.");
+            println!("\nFirst-use progress saved; import an existing pair set with the command shown above.");
             return Ok(());
         };
 
@@ -57,10 +81,9 @@ pub fn run(reset: bool) -> Result<()> {
     }
 }
 
-/// Record onboarding evidence only after `pairs add` has durably written the
-/// pair set. This is the product effect the first-use journey promises, so the
-/// command that performed the write owns the fact rather than the presenter.
-pub fn record_pair_set_written(path: &Path) -> Result<()> {
+/// Record onboarding evidence only after the workspace accepted and persisted
+/// an imported pair set. Merely choosing a file never completes first use.
+pub fn record_pair_set_imported(path: &Path) -> Result<()> {
     let definition = canonical_definition()?;
     let mut state = load_or_start_state(&definition)?;
     let terminal_screen_id = definition

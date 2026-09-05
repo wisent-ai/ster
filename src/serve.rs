@@ -117,6 +117,13 @@ fn handle_connection(stream: TcpStream, job_lock: &Mutex<()>) -> Result<()> {
 
     match (method, path) {
         ("GET", "/v1/health") => send_json(&writer, 200, json!({"status": "ok"})),
+        ("GET", "/v1/workspace") => match crate::workspace::summary() {
+            Ok(summary) => send_json(&writer, 200, serde_json::to_value(summary)?),
+            Err(error) => send_error(&writer, 500, &format!("{error:#}")),
+        },
+        ("POST", "/v1/workspace/import-pairs") => {
+            stream_job(&writer, &body, job_lock, workspace_import_pairs_job)
+        }
         ("POST", "/v1/train") => stream_job(&writer, &body, job_lock, train_job),
         ("POST", "/v1/optimize") => stream_job(&writer, &body, job_lock, optimize_job),
         ("POST", "/v1/evaluate") => stream_job(&writer, &body, job_lock, evaluate_job),
@@ -221,6 +228,24 @@ impl ModelRequest {
             self.revision.as_deref(),
             device,
             Precision::parse(precision)?,
+        )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceImportPairsRequest {
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl Validate for WorkspaceImportPairsRequest {
+    fn validate(&self) -> Result<(), String> {
+        require(
+            &self.source,
+            "workspace import-pairs requires a source path".to_owned(),
         )
     }
 }
@@ -1064,6 +1089,14 @@ fn inspect_job(request: InspectRequest) -> Result<Value> {
     let artifact = SteeringArtifact::load(Path::new(&request.artifact))
         .with_context(|| format!("failed to inspect {}", request.artifact))?;
     Ok(workflow::artifact_summary(&artifact))
+}
+
+fn workspace_import_pairs_job(request: WorkspaceImportPairsRequest) -> Result<Value> {
+    let report = crate::workspace::import_pair_set(
+        Path::new(&request.source),
+        request.name.as_deref(),
+    )?;
+    Ok(serde_json::to_value(report)?)
 }
 
 fn pairs_inspect_job(request: PairsInspectRequest) -> Result<Value> {

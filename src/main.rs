@@ -37,9 +37,9 @@ enum Command {
     Train {
         #[command(flatten)]
         model: ModelArgs,
-        /// JSON file with trait_name and contrastive pairs.
+        /// Pair-set JSON. Omit it to use the active imported set.
         #[arg(long)]
-        pairs: PathBuf,
+        pairs: Option<PathBuf>,
         /// Output Ster steering artifact.
         #[arg(long)]
         output: PathBuf,
@@ -67,8 +67,9 @@ enum Command {
     Optimize {
         #[command(flatten)]
         model: ModelArgs,
+        /// Pair-set JSON. Omit it to use the active imported set.
         #[arg(long)]
-        pairs: PathBuf,
+        pairs: Option<PathBuf>,
         #[arg(long)]
         output: PathBuf,
         #[arg(long, default_value = "all")]
@@ -86,8 +87,9 @@ enum Command {
     Evaluate {
         #[command(flatten)]
         model: ModelArgs,
+        /// Pair-set JSON. Omit it to use the active imported set.
         #[arg(long)]
-        pairs: PathBuf,
+        pairs: Option<PathBuf>,
         #[arg(long)]
         vector: PathBuf,
         /// auto reads every pair through the model's own chat template when
@@ -166,11 +168,22 @@ enum Command {
         #[arg(value_name = "ARTIFACT")]
         artifact: PathBuf,
     },
-    /// Learn Ster's first local workflow and record a real pair-set result.
+    /// Import existing contrastive data during first use, or replay the walkthrough.
     Onboarding {
         /// Discard recorded progress and evidence, then show the walkthrough again.
         #[arg(long)]
         reset: bool,
+        /// Existing canonical pair-set JSON to validate, persist, and make active.
+        #[arg(long)]
+        import_pairs: Option<PathBuf>,
+        /// Stable workspace name; defaults to the source file name.
+        #[arg(long, requires = "import_pairs")]
+        name: Option<String>,
+    },
+    /// Import and inspect Ster's persistent local workspace.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
     },
     /// Author, inspect, and synthesize contrastive pair sets.
     Pairs {
@@ -191,11 +204,26 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum WorkspaceCommand {
+    /// Validate, persist, and activate an existing contrastive pair set.
+    ImportPairs {
+        #[arg(value_name = "SOURCE")]
+        source: PathBuf,
+        /// Stable workspace name; defaults to the source file name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Print imported pair sets and the active input.
+    Show,
+}
+
+#[derive(Debug, Subcommand)]
 enum PairsCommand {
     /// Report duplicates, refusals, length balance, and diversity for a set.
     Inspect {
+        /// Pair-set JSON. Omit it to inspect the active imported set.
         #[arg(long)]
-        pairs: PathBuf,
+        pairs: Option<PathBuf>,
         /// SimHash Hamming distance below which two pairs count as near-duplicates.
         #[arg(long, default_value_t = 3)]
         dedupe_bits: u32,
@@ -367,8 +395,9 @@ enum TuneCommand {
         /// JSON file with trait_name and contrastive pairs. The positive side
         /// is the chosen response and the negative side the rejected one, so a
         /// steering pair set trains a preference without being rewritten.
+        /// Pair-set JSON. Omit it to use the active imported set.
         #[arg(long)]
-        pairs: PathBuf,
+        pairs: Option<PathBuf>,
         /// Output LoRA adapter safetensors; the identity sidecar is written beside it.
         #[arg(long)]
         output: PathBuf,
@@ -430,8 +459,9 @@ enum TuneCommand {
         model: ModelArgs,
         /// JSON file with trait_name and contrastive pairs. The positive side
         /// is the response the head learns to score higher.
+        /// Pair-set JSON. Omit it to use the active imported set.
         #[arg(long)]
-        pairs: PathBuf,
+        pairs: Option<PathBuf>,
         /// Output reward artifact safetensors, carrying the adapters and the
         /// head together; the identity sidecar is written beside it.
         #[arg(long)]
@@ -635,6 +665,7 @@ impl ModelArgs {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Train { model, pairs, output, layers, method, chat_template, precision } => {
+            let pairs = resolve_pairs(pairs)?;
             let mut runtime = model.load_at(Precision::parse(&precision)?)?;
             let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let pair_set = PairSet::load(&pairs)?;
@@ -647,6 +678,7 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Command::Optimize { model, pairs, output, layers, chat_template, precision } => {
+            let pairs = resolve_pairs(pairs)?;
             let mut runtime = model.load_at(Precision::parse(&precision)?)?;
             let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let pair_set = PairSet::load(&pairs)?;
@@ -658,6 +690,7 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Command::Evaluate { model, pairs, vector, chat_template, precision } => {
+            let pairs = resolve_pairs(pairs)?;
             let mut runtime = model.load_at(Precision::parse(&precision)?)?;
             let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
             let pair_set = PairSet::load(&pairs)?;
@@ -729,7 +762,10 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to inspect {}", artifact.display()))?;
             println!("{}", serde_json::to_string_pretty(&workflow::artifact_summary(&artifact))?);
         }
-        Command::Onboarding { reset } => onboarding::run(reset)?,
+        Command::Onboarding { reset, import_pairs, name } => {
+            onboarding::run(reset, import_pairs.as_deref(), name.as_deref())?
+        }
+        Command::Workspace { command } => run_workspace(command)?,
         Command::Pairs { command } => run_pairs(command)?,
         Command::Tune { command } => run_tune(command)?,
         Command::Serve { port } => {
@@ -739,12 +775,47 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn run_workspace(command: WorkspaceCommand) -> Result<()> {
+    match command {
+        WorkspaceCommand::ImportPairs { source, name } => {
+            let report = ster::workspace::import_pair_set(&source, name.as_deref())?;
+            if report.accepted() {
+                let path = report
+                    .path
+                    .as_deref()
+                    .context("accepted pair-set import did not return a destination")?;
+                onboarding::record_pair_set_imported(std::path::Path::new(path))?;
+            }
+            let accepted = report.accepted();
+            let refusal = report.reason.clone();
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !accepted {
+                bail!("{}", refusal.as_deref().unwrap_or("Ster did not accept the pair set"));
+            }
+        }
+        WorkspaceCommand::Show => {
+            println!("{}", serde_json::to_string_pretty(&ster::workspace::summary()?)?);
+        }
+    }
+    Ok(())
+}
+
+fn resolve_pairs(selected: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = selected {
+        return Ok(path);
+    }
+    ster::workspace::active_pair_set()?.context(
+        "no active Ster pair set; pass --pairs or import one with `ster workspace import-pairs`",
+    )
+}
+
 /// The `ster pairs` arms. Each one does the work and prints one pretty JSON
 /// document, exactly like the arms above; they live here rather than inline
 /// only to keep the top-level match readable.
 fn run_pairs(command: PairsCommand) -> Result<()> {
     match command {
-        PairsCommand::Inspect { pairs: file, dedupe_bits, dedupe_bands, refusal_threshold } => {
+        PairsCommand::Inspect { pairs, dedupe_bits, dedupe_bands, refusal_threshold } => {
+            let file = resolve_pairs(pairs)?;
             let pair_set = PairSet::load(&file)?;
             let options = InspectOptions {
                 dedupe: DedupeOptions {
@@ -773,7 +844,6 @@ fn run_pairs(command: PairsCommand) -> Result<()> {
             pair_set.pairs.push(ContrastivePair { positive, negative });
             let index = pair_set.pairs.len() - 1;
             pair_set.save(&file)?;
-            onboarding::record_pair_set_written(&file)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
@@ -987,6 +1057,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             precision,
             seed,
         } => {
+            let pairs = resolve_pairs(pairs)?;
             let device = DeviceChoice::parse(&model.device)?;
             let spec = lora::Spec {
                 rank,
@@ -1052,6 +1123,7 @@ fn run_tune(command: TuneCommand) -> Result<()> {
             precision,
             seed,
         } => {
+            let pairs = resolve_pairs(pairs)?;
             let device = DeviceChoice::parse(&model.device)?;
             let spec = lora::Spec {
                 rank,

@@ -12,6 +12,7 @@ pub mod runtime;
 pub mod serve;
 pub mod tune;
 pub mod workflow;
+pub mod workspace;
 
 pub use artifact::{ContrastivePair, PairSet, SteeringArtifact};
 pub use chat::{Choice as ChatChoice, Status as ChatStatus};

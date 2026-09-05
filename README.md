@@ -157,7 +157,23 @@ runs no free-space preflight, so size the destination before a first fetch.
 
 ## First steering workflow
 
-Create `pairs.json`:
+If you already have a canonical Ster pair set, import it instead of creating
+starter rows:
+
+```bash
+ster workspace import-pairs ./my-pairs.json
+ster workspace show
+```
+
+Ster validates the whole document before writing anything, keeps a canonical
+copy under `$XDG_DATA_HOME/ster` (or `~/.local/share/ster`), and makes it the
+active set. Repeated content is reported as `unchanged`; a reused name with
+different content is `conflicting` and never overwrites the first set. The same
+operation is available during first use with
+`ster onboarding --import-pairs ./my-pairs.json`.
+
+If you do not have an existing set, create `pairs.json`:
+
 
 ```json
 {
@@ -203,7 +219,8 @@ Run `ster pairs inspect --pairs pairs.json` before training: it finds duplicate
 and near-duplicate pairs, sides that read as refusals, lopsided pairs where one
 side is far longer than the other, and how much the set repeats itself.
 
-Train a direction for layers 12 through 19:
+Train a direction for layers 12 through 19. The explicit `--pairs` below works
+for the manually created file; omit it to use the active imported set:
 
 ```bash
 ster train \
@@ -240,6 +257,8 @@ ster extract    export hidden states for an arbitrary prompt set
 ster inspect    summarize and validate a steering artifact
 ster pairs      author, inspect, and synthesize contrastive pair sets
 ster tune       train, merge, score, and inspect LoRA adapters
+ster onboarding import or replay first use
+ster workspace  import, activate, and inspect persistent pair sets
 ```
 
 Run `ster <command> --help` for exact arguments. Commands return non-zero on
