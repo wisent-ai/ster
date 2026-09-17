@@ -12,7 +12,7 @@
       "runner_platform": "darwin-arm64",
       "quality": [],
       "build": {
-        "argv": ["sh", "scripts/build-release.sh"]
+        "argv": ["bash", "release/build.sh"]
       },
       "stage": {
         "release/ster": "bin/ster",
@@ -24,7 +24,7 @@
       "runner_platform": "linux-amd64",
       "quality": [],
       "build": {
-        "argv": ["sh", "scripts/build-release.sh"]
+        "argv": ["bash", "release/build.sh"]
       },
       "stage": {
         "release/ster": "bin/ster",

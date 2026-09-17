@@ -8,7 +8,7 @@ argument that is not a local directory puts its weights. The
 
 Inside Wisent, the built binary is delivered by Stado rather than by `cargo`.
 Ster ships the two files that make this work — `.wisent-release.json` and
-`scripts/build-release.sh` — and Stado reads them:
+`release/build.sh` — and Stado reads them:
 
 ```bash
 stado product install ster --surface cli
