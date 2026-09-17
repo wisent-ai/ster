@@ -9,6 +9,7 @@ use clap::{Args, Parser};
 use ster::{DeviceChoice, Precision, Runtime};
 
 mod command;
+mod decide;
 mod onboarding;
 mod pairs;
 mod tune;
@@ -61,6 +62,8 @@ pub(crate) fn run() -> Result<()> {
         Command::Extract(args) => vectors::extract(args),
         Command::Inspect(args) => vectors::inspect(args),
         Command::Onboarding(args) => vectors::onboarding(args),
+        Command::Decide(args) => decide::decide(args),
+        Command::Calibrate(args) => decide::calibrate(args),
         Command::Workspace { command } => workspace::run(command),
         Command::Pairs { command } => pairs::run(command),
         Command::Tune { command } => tune::run(command),

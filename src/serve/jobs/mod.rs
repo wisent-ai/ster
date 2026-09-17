@@ -19,8 +19,11 @@ use super::requests::{
     TrainRequest,
 };
 
+mod decide;
 mod pairs;
 mod tune;
+
+pub(super) use decide::{calibrate_job, decide_job};
 
 pub(super) use pairs::{
     pairs_inspect_job, pairs_save_job, pairs_synthesize_job, workspace_import_pairs_job,

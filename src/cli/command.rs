@@ -3,6 +3,7 @@
 
 use clap::Subcommand;
 
+use super::decide::{CalibrateArgs, DecideArgs};
 use super::pairs::PairsCommand;
 use super::tune::TuneCommand;
 use super::vectors::{
@@ -26,6 +27,12 @@ pub(super) enum Command {
     Inspect(InspectArgs),
     /// Import existing contrastive data during first use, or replay the walkthrough.
     Onboarding(OnboardingArgs),
+    /// Answer typed questions about a state from one forward pass, with a
+    /// probability for every option.
+    Decide(DecideArgs),
+    /// Fit the temperature that makes decision probabilities honest, from
+    /// labelled examples.
+    Calibrate(CalibrateArgs),
     /// Import and inspect Ster's persistent local workspace.
     Workspace {
         #[command(subcommand)]

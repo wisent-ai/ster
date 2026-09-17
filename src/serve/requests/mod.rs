@@ -16,10 +16,12 @@ use defaults::default_device;
 mod defaults;
 
 pub(super) use defaults::note_precision;
+mod decide;
 mod pairs;
 mod tune;
 mod vectors;
 
+pub(super) use decide::{CalibrateRequest, DecideRequest};
 pub(super) use pairs::{
     PairsInspectRequest, PairsSaveRequest, PairsSynthesizeRequest, WorkspaceImportPairsRequest,
 };

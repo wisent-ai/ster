@@ -122,6 +122,34 @@ impl Runtime {
         Ok(ids)
     }
 
+    /// Every id this tokenizer spells `label` with as exactly one token.
+    ///
+    /// A decision reads the model's next-token distribution at the position
+    /// where an answer letter begins, and a vocabulary carries that letter
+    /// more than once: bare `A`, SentencePiece's word-initial `▁A`, and
+    /// byte-level BPE's `ĠA`. Which one the model puts its mass on depends on
+    /// whether the prompt ended in whitespace or a chat marker, so every
+    /// spelling the vocabulary holds is scored and the reader sums them. The
+    /// vocabulary is consulted directly rather than through `encode`, because
+    /// a Llama tokenizer prepends a space to whatever it encodes and would
+    /// never hand back the bare form. A label the vocabulary spells with no
+    /// single token cannot be read from one position, which is a refusal
+    /// rather than a guess.
+    pub fn label_tokens(&self, label: &str) -> Result<Vec<u32>> {
+        let mut ids = Vec::with_capacity(3);
+        for spelling in [label.to_owned(), format!("\u{2581}{label}"), format!("\u{0120}{label}")] {
+            if let Some(id) = self.tokenizer.token_to_id(&spelling)
+                && !ids.contains(&id)
+            {
+                ids.push(id);
+            }
+        }
+        if ids.is_empty() {
+            bail!("this tokenizer has no single token for the answer label {label:?}, so it cannot be read from one position");
+        }
+        Ok(ids)
+    }
+
     /// The one call into the tokenizer, so `special` is a decision made at
     /// each site rather than a default. `what` is the noun the refusal names,
     /// which is why it is passed rather than derived: the same call tokenizes

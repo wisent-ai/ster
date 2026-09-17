@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod brama;
 pub mod chat;
+pub mod decide;
 pub mod lora;
 pub mod model;
 pub mod pairs;
@@ -13,6 +14,7 @@ pub mod workspace;
 
 pub use artifact::{ContrastivePair, PairSet, SteeringArtifact};
 pub use chat::{Choice as ChatChoice, Status as ChatStatus};
+pub use decide::{Calibration, Options as DecideOptions, Request as DecideRequest, Response as DecideResponse};
 pub use lora::{Spec as LoraSpec, Target as LoraTarget};
 pub use pairs::{SetReport, SynthesisOptions, SynthesisReport};
 pub use representation::TrainingMethod;

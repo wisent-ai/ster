@@ -118,6 +118,8 @@ fn handle_connection(stream: TcpStream, job_lock: &Mutex<()>) -> Result<()> {
         ("POST", "/v1/generate") => stream_job(&writer, &body, job_lock, generate_job),
         ("POST", "/v1/extract") => stream_job(&writer, &body, job_lock, extract_job),
         ("POST", "/v1/inspect") => stream_job(&writer, &body, job_lock, inspect_job),
+        ("POST", "/v1/decide") => stream_job(&writer, &body, job_lock, decide_job),
+        ("POST", "/v1/calibrate") => stream_job(&writer, &body, job_lock, calibrate_job),
         ("POST", "/v1/pairs/inspect") => stream_job(&writer, &body, job_lock, pairs_inspect_job),
         ("POST", "/v1/pairs/save") => stream_job(&writer, &body, job_lock, pairs_save_job),
         ("POST", "/v1/pairs/synthesize") => {

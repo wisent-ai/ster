@@ -85,6 +85,46 @@ impl Runtime {
             .hidden)
     }
 
+    /// The next-token distribution after each of several continuations of
+    /// one shared prefix: `suffixes.len()` vectors of `vocab` F32 logits.
+    ///
+    /// This is what a decision reads — not a sampled continuation but the
+    /// distribution the model holds at the end of a prompt, before any token
+    /// is drawn — and it is read this way because every question about one
+    /// state shares that state. The prefix goes through the model once with
+    /// the key-value cache on; each suffix then runs on its own copy of that
+    /// cache from position `prefix.len()`, so a question costs its own tokens
+    /// and never the state's again. The copy is a refcount, not a memcpy:
+    /// appending to the cache builds new tensors and leaves the prefix's
+    /// untouched, which is what lets one prefix serve every suffix.
+    ///
+    /// An empty prefix is allowed and means every suffix is a whole prompt;
+    /// an empty suffix is not, since there would be no position of its own
+    /// to read.
+    pub fn next_token_logits_after(&self, prefix: &[u32], suffixes: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
+        if suffixes.is_empty() || suffixes.iter().any(|suffix| suffix.is_empty()) {
+            bail!("a decision forward pass needs at least one token");
+        }
+        let mut shared = Cache::new(true, self.dtype, self.model.config(), &self.device)?;
+        if !prefix.is_empty() {
+            let input = Tensor::new(prefix, &self.device)?.unsqueeze(0)?;
+            self.model.forward(&input, 0, &mut shared, None, &[])?;
+        }
+        suffixes
+            .iter()
+            .map(|suffix| {
+                let mut cache = shared.clone();
+                let input = Tensor::new(*suffix, &self.device)?.unsqueeze(0)?;
+                let logits = self
+                    .model
+                    .forward(&input, prefix.len(), &mut cache, None, &[])?
+                    .logits
+                    .context("this forward pass was asked for no vocabulary projection")?;
+                Ok(logits.squeeze(0)?.to_vec1::<f32>()?)
+            })
+            .collect()
+    }
+
     /// A forward that must produce logits, unwrapped.
     fn logits(&self, ids: &[u32], mode: Mode, empty: &str) -> Result<Tensor> {
         self.forward_once(ids, mode, empty)?
@@ -165,7 +205,7 @@ impl Runtime {
     /// The rendered string already spells every marker the model expects, so
     /// the tokenizer is asked not to add its own — a second begin-of-sequence
     /// would be a token no inference path ever produces.
-    fn encode_prompt(&self, prompt: &str) -> Result<Vec<u32>> {
+    pub fn encode_prompt(&self, prompt: &str) -> Result<Vec<u32>> {
         match self.applied_template() {
             Some(template) => self.tokenize(&template.prompt(prompt)?, false, "prompt"),
             None => self.encode(prompt),
