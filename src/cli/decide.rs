@@ -35,6 +35,11 @@ pub(super) struct ReadArgs {
     /// single pass with no correction.
     #[arg(long, default_value_t = 0)]
     permutations: usize,
+    /// A LoRA adapter trained for this exact model, such as one written by
+    /// `ster tune decide`. Ster refuses a mismatch rather than reading the
+    /// wrong model.
+    #[arg(long)]
+    adapter: Option<PathBuf>,
 }
 
 /// `ster decide`
@@ -117,7 +122,20 @@ pub(super) fn calibrate(args: CalibrateArgs) -> Result<()> {
 
 impl ReadArgs {
     fn load(&self) -> Result<(ster::Runtime, DecideOptions)> {
-        let runtime = self.model.load_at(Precision::parse(&self.precision)?)?;
+        let precision = Precision::parse(&self.precision)?;
+        // An adapter rewrites the projections themselves, so it is attached
+        // while the weights are mapped; one trained for another model is
+        // refused there rather than read through.
+        let runtime = match self.adapter.as_deref() {
+            Some(adapter) => ster::Runtime::load_with_adapter_at(
+                &self.model.model,
+                self.model.revision.as_deref(),
+                ster::DeviceChoice::parse(&self.model.device)?,
+                adapter,
+                precision,
+            )?,
+            None => self.model.load_at(precision)?,
+        };
         let options = DecideOptions {
             permutations: self.permutations,
             temperature: RAW_TEMPERATURE,

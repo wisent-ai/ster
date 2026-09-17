@@ -45,9 +45,9 @@ pub use artifact::{
 };
 pub use examples::{Example, ExampleSet};
 pub use objective::{
-    dpo, grpo, reward, sft, DpoLoss, DpoOptions, DpoReport, GrpoIteration, GrpoOptions,
-    GrpoReport, Reward, RewardHead, RewardModel, RewardOptions, RewardReport, SftOptions,
-    SftReport,
+    decide, dpo, grpo, reward, sft, DecideOptions as DecideTuneOptions, DecideReport, DpoLoss,
+    DpoOptions, DpoReport, GrpoIteration, GrpoOptions, GrpoReport, Reward, RewardHead, RewardModel,
+    RewardOptions, RewardReport, SftOptions, SftReport,
 };
 
 use crate::lora;

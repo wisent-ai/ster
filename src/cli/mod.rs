@@ -10,6 +10,7 @@ use ster::{DeviceChoice, Precision, Runtime};
 
 mod command;
 mod decide;
+mod decisions;
 mod onboarding;
 mod pairs;
 mod tune;
@@ -64,6 +65,7 @@ pub(crate) fn run() -> Result<()> {
         Command::Onboarding(args) => vectors::onboarding(args),
         Command::Decide(args) => decide::decide(args),
         Command::Calibrate(args) => decide::calibrate(args),
+        Command::Decisions { command } => decisions::run(command),
         Command::Workspace { command } => workspace::run(command),
         Command::Pairs { command } => pairs::run(command),
         Command::Tune { command } => tune::run(command),

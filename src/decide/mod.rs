@@ -27,11 +27,16 @@ use crate::{workflow, Runtime};
 
 mod answer;
 mod calibration;
+mod pipeline;
 mod prompt;
 mod request;
 
 pub use answer::{Answer, Explanation, Order, QuestionLogits, Response, Usage};
 pub use calibration::{Calibration, Labelled, Metrics, RAW_TEMPERATURE};
+pub use pipeline::{
+    benchmark, fetch, import_jsonl, split, synthesize, Benchmark, BenchmarkOptions, FetchOptions, FetchReport,
+    ImportReport, Latency, Schema, SynthesizeOptions, SynthesizeReport, TypeMetrics,
+};
 pub use request::{Example, ExampleSet, NoulCriteria, Question, Request, MAX_OPTIONS};
 
 /// How a decision run reads the model.
@@ -88,13 +93,14 @@ pub fn decide(
 /// Fit a temperature on `examples` and report how the probabilities matched
 /// the labels before and after.
 ///
-/// The report also carries a control: the same questions judged against the
-/// wrong state, each example's questions paired with the next example's
-/// state. A model that reads the state scores its labels better on the real
-/// pairing than on the shuffled one; a model that answers from the options
-/// and the letters alone scores the same on both, and no temperature can
-/// make that honest. One example gives nothing to shuffle against, so the
-/// control is absent below two.
+/// The report also carries a control: the same questions judged against a
+/// wrong state — for each example, the nearest later example whose answer to
+/// the same question differs, so the control state contradicts the label
+/// wherever the set allows it. A model that reads the state scores its labels
+/// far better on the real pairing than on that one; a model that answers
+/// from the options and the letters alone scores the same on both, and no
+/// temperature can make that honest. One example gives nothing to pair
+/// against, so the control is absent below two.
 pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options) -> Result<Calibration> {
     examples.validate()?;
     let count = examples.examples.len();
@@ -104,8 +110,19 @@ pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options) -> 
         workflow::progress(format!("reading example {} of {count}", index + 1));
         labelled.extend(labelled_logits(runtime, example, &example.request.state, options)?);
         if count > 1 {
-            let other = &examples.examples[(index + 1) % count].request.state;
-            shuffled.extend(labelled_logits(runtime, example, other, options)?);
+            for (id, question) in &example.request.questions {
+                let Some(answer) = example.answers.get(id) else { continue };
+                let other = control_state(examples, index, id);
+                let one = Example {
+                    request: Request {
+                        state: other.clone(),
+                        model: None,
+                        questions: BTreeMap::from([(id.clone(), question.clone())]),
+                    },
+                    answers: BTreeMap::from([(id.clone(), answer.clone())]),
+                };
+                shuffled.extend(labelled_logits(runtime, &one, other, options)?);
+            }
         }
     }
     let temperature = calibration::fit_temperature(&labelled);
@@ -163,43 +180,50 @@ fn labelled_logits(
         .collect())
 }
 
-/// One sequence the model reads: which question, which option order, and the
-/// tokens.
-struct Row {
-    question: usize,
-    order: Vec<usize>,
-    ids: Vec<u32>,
+/// The state the control judges example `index`'s question `id` against:
+/// the nearest later example, cyclically, whose answer to `id` differs from
+/// this one's, or the next example when none differs.
+///
+/// Chosen this way rather than "the next example" because sets arrive in
+/// label runs — a classification dataset's first hundred rows may all share
+/// one class — and a control paired with a same-label state measures nothing.
+pub fn control_state<'a>(set: &'a ExampleSet, index: usize, id: &str) -> &'a serde_json::Value {
+    let count = set.examples.len();
+    let own = set.examples[index].answers.get(id);
+    let other = (1..count)
+        .map(|step| &set.examples[(index + step) % count])
+        .find(|other| other.answers.get(id).is_some_and(|answer| Some(answer) != own))
+        .unwrap_or(&set.examples[(index + 1) % count]);
+    &other.request.state
 }
 
-/// The answer-letter logits of every question in `request`, in canonical
-/// option order, plus what it cost.
-///
-/// Every question in every order is rendered and tokenized first. The rows
-/// all begin with the same text — the header and the state — so the longest
-/// run of tokens they share goes through the model once, and each row then
-/// costs only what comes after it: its question, its options, and the answer
-/// prompt. The shared run is found on the tokens rather than the text,
-/// because a tokenizer may merge across the point where the texts diverge
-/// and a prefix cut by characters could then end mid-token.
-fn question_logits(
+/// One sequence the model reads: which question, which option order, and the
+/// tokens.
+pub struct Row {
+    pub question: usize,
+    pub order: Vec<usize>,
+    pub ids: Vec<u32>,
+}
+
+/// Every rendering of every question in `request`, tokenized, plus the token
+/// ids each answer letter position may be spelled with. This is the one
+/// place a decision prompt is turned into tokens, for reading and for
+/// training alike, so the two cannot drift apart.
+pub fn render_rows(
     runtime: &Runtime,
     request: &Request,
-    options: Options,
-) -> Result<(Vec<QuestionLogits>, Usage)> {
-    if !(options.temperature.is_finite() && options.temperature > 0.0) {
-        bail!("temperature must be a positive number");
-    }
-    let questions: Vec<(&String, &Question)> = request.questions.iter().collect();
+    permutations: usize,
+) -> Result<(Vec<Row>, BTreeMap<usize, Vec<u32>>)> {
     let mut rows = Vec::new();
     let mut labels: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
-    for (index, (id, question)) in questions.iter().enumerate() {
+    for (index, (id, question)) in request.questions.iter().enumerate() {
         let texts = question.options();
         for position in 0..texts.len() {
             if let std::collections::btree_map::Entry::Vacant(slot) = labels.entry(position) {
                 slot.insert(runtime.label_tokens(prompt::LABELS[position])?);
             }
         }
-        for order in prompt::orders(texts.len(), options.permutations) {
+        for order in prompt::orders(texts.len(), permutations) {
             let text = prompt::render(request, question, &texts, &order);
             let ids = runtime.encode_prompt(&text)?;
             if ids.len() > runtime.context_length() {
@@ -212,6 +236,27 @@ fn question_logits(
             rows.push(Row { question: index, order, ids });
         }
     }
+    Ok((rows, labels))
+}
+
+/// The answer-letter logits of every question in `request`, in canonical
+/// option order, plus what it cost.
+///
+/// The rows all begin with the same text — the header and the state — so the
+/// longest run of tokens they share goes through the model once, and each row
+/// then costs only what comes after it: its question, its options, and the
+/// answer prompt. The shared run is found on the tokens rather than the text,
+/// because a tokenizer may merge across the point where the texts diverge
+/// and a prefix cut by characters could then end mid-token.
+fn question_logits(
+    runtime: &Runtime,
+    request: &Request,
+    options: Options,
+) -> Result<(Vec<QuestionLogits>, Usage)> {
+    if !(options.temperature.is_finite() && options.temperature > 0.0) {
+        bail!("temperature must be a positive number");
+    }
+    let (rows, labels) = render_rows(runtime, request, options.permutations)?;
     let shared = shared_prefix(&rows);
     let suffixes: Vec<&[u32]> = rows.iter().map(|row| &row.ids[shared..]).collect();
     let mut usage = Usage::for_passes(usize::from(shared > 0) + rows.len());
@@ -222,7 +267,8 @@ fn question_logits(
         usage.input_tokens - shared
     ));
     let distributions = runtime.next_token_logits_after(&rows[0].ids[..shared], &suffixes)?;
-    let mut logits: Vec<QuestionLogits> = questions.iter().map(|_| QuestionLogits::default()).collect();
+    let mut logits: Vec<QuestionLogits> =
+        request.questions.iter().map(|_| QuestionLogits::default()).collect();
     for (row, vocabulary) in rows.iter().zip(distributions) {
         let mut canonical = vec![0f32; row.order.len()];
         for (position, &option) in row.order.iter().enumerate() {

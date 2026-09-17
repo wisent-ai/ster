@@ -2,11 +2,13 @@
 //! and its own arm; all of them go through the same `tune` and `lora`
 //! functions the serve endpoints call and print one pretty JSON document.
 
+mod decide;
 mod dpo;
 mod grpo;
 mod reward;
 mod sft;
 
+pub(super) use decide::{decide, DecideArgs};
 pub(super) use dpo::{dpo, DpoArgs};
 pub(super) use grpo::{grpo, GrpoArgs};
 pub(super) use reward::{reward, RewardArgs};

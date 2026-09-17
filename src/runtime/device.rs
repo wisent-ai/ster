@@ -26,13 +26,13 @@ impl DeviceChoice {
             Self::Cpu => Ok(Device::Cpu),
             Self::Metal => {
                 #[cfg(feature = "metal")]
-                { Device::new_metal(0).context("failed to initialize Metal device") }
+                { anyhow::Context::context(Device::new_metal(0), "failed to initialize Metal device") }
                 #[cfg(not(feature = "metal"))]
                 { bail!("this Ster binary was built without the metal feature") }
             }
             Self::Cuda => {
                 #[cfg(feature = "cuda")]
-                { Device::new_cuda(0).context("failed to initialize CUDA device") }
+                { anyhow::Context::context(Device::new_cuda(0), "failed to initialize CUDA device") }
                 #[cfg(not(feature = "cuda"))]
                 { bail!("this Ster binary was built without the cuda feature") }
             }

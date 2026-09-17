@@ -3,7 +3,7 @@
 use clap::Subcommand;
 
 use super::artifact::{EvaluateArgs, InspectArgs, MergeArgs};
-use super::train::{DpoArgs, GrpoArgs, RewardArgs, SftArgs};
+use super::train::{DecideArgs, DpoArgs, GrpoArgs, RewardArgs, SftArgs};
 
 #[derive(Debug, Subcommand)]
 pub(in crate::cli) enum TuneCommand {
@@ -15,6 +15,9 @@ pub(in crate::cli) enum TuneCommand {
     Reward(RewardArgs),
     /// Optimize the policy against a reward, using a sampled group as baseline.
     Grpo(GrpoArgs),
+    /// Train LoRA adapters to answer typed decisions with calibrated
+    /// probabilities, from labelled decisions — Ster's RLCD.
+    Decide(DecideArgs),
     /// Fold a LoRA adapter into the base weights as a standalone checkpoint.
     Merge(MergeArgs),
     /// Score a checkpoint on held-out examples: loss and perplexity, no training.

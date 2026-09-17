@@ -4,6 +4,7 @@
 use clap::Subcommand;
 
 use super::decide::{CalibrateArgs, DecideArgs};
+use super::decisions::DecisionsCommand;
 use super::pairs::PairsCommand;
 use super::tune::TuneCommand;
 use super::vectors::{
@@ -33,6 +34,12 @@ pub(super) enum Command {
     /// Fit the temperature that makes decision probabilities honest, from
     /// labelled examples.
     Calibrate(CalibrateArgs),
+    /// Get, split, and benchmark labelled decisions: the pipeline around a
+    /// decision model.
+    Decisions {
+        #[command(subcommand)]
+        command: DecisionsCommand,
+    },
     /// Import and inspect Ster's persistent local workspace.
     Workspace {
         #[command(subcommand)]

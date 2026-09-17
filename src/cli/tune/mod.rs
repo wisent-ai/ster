@@ -18,6 +18,7 @@ pub(super) fn run(command: TuneCommand) -> Result<()> {
         TuneCommand::Dpo(args) => train::dpo(args),
         TuneCommand::Reward(args) => train::reward(args),
         TuneCommand::Grpo(args) => train::grpo(args),
+        TuneCommand::Decide(args) => train::decide(args),
         TuneCommand::Merge(args) => artifact::merge(args),
         TuneCommand::Evaluate(args) => artifact::evaluate(args),
         TuneCommand::Inspect(args) => artifact::inspect(args),
