@@ -52,6 +52,12 @@ pub struct Calibration {
     pub questions: usize,
     pub before: Metrics,
     pub after: Metrics,
+    /// The same labels scored at the fitted temperature with every question
+    /// judged against another example's state. Present from two examples up.
+    /// Reading the state means `after.accuracy` beats `control.accuracy`;
+    /// equal means the answers came from the options and letters alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<Metrics>,
 }
 
 /// How well the probabilities matched the labels, at one temperature.

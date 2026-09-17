@@ -1,0 +1,39 @@
+{
+  "examples": [
+    {
+      "state": "My running shoes arrived in the wrong size. Can I swap them for a size 10?",
+      "questions": {
+        "department": {"type": "choice", "instructions": "Which team should handle this?", "criteria": {"returns": "Exchanges, refunds, wrong or damaged items", "shipping": "Delivery status, delays, lost packages", "billing": "Charges, invoices, payment problems"}},
+        "frustration": {"type": "score", "instructions": "How frustrated is the customer?", "criteria": ["Calm, just stating facts", "Frustrated but civil", "Very angry, strong language or threatening to leave"]},
+        "is_urgent": {"type": "noul", "instructions": "Does this message convey urgency?"}
+      },
+      "answers": {"department": "returns", "frustration": 0, "is_urgent": false}
+    },
+    {
+      "state": "I was charged twice for order 4471 and the second invoice is wrong. Fix this today or I am disputing it with my bank.",
+      "questions": {
+        "department": {"type": "choice", "instructions": "Which team should handle this?", "criteria": {"returns": "Exchanges, refunds, wrong or damaged items", "shipping": "Delivery status, delays, lost packages", "billing": "Charges, invoices, payment problems"}},
+        "frustration": {"type": "score", "instructions": "How frustrated is the customer?", "criteria": ["Calm, just stating facts", "Frustrated but civil", "Very angry, strong language or threatening to leave"]},
+        "is_urgent": {"type": "noul", "instructions": "Does this message convey urgency?"}
+      },
+      "answers": {"department": "billing", "frustration": 2, "is_urgent": true}
+    },
+    {
+      "state": "Tracking says my package has been sitting in a depot for six days. Any idea when it will move?",
+      "questions": {
+        "department": {"type": "choice", "instructions": "Which team should handle this?", "criteria": {"returns": "Exchanges, refunds, wrong or damaged items", "shipping": "Delivery status, delays, lost packages", "billing": "Charges, invoices, payment problems"}},
+        "frustration": {"type": "score", "instructions": "How frustrated is the customer?", "criteria": ["Calm, just stating facts", "Frustrated but civil", "Very angry, strong language or threatening to leave"]},
+        "is_urgent": {"type": "noul", "instructions": "Does this message convey urgency?"}
+      },
+      "answers": {"department": "shipping", "frustration": 1, "is_urgent": false}
+    },
+    {
+      "state": "The jacket I received has a torn sleeve. I want a replacement, no rush.",
+      "questions": {
+        "department": {"type": "choice", "instructions": "Which team should handle this?", "criteria": {"returns": "Exchanges, refunds, wrong or damaged items", "shipping": "Delivery status, delays, lost packages", "billing": "Charges, invoices, payment problems"}},
+        "is_urgent": {"type": "noul", "instructions": "Does this message convey urgency?"}
+      },
+      "answers": {"department": "returns", "is_urgent": false}
+    }
+  ]
+}

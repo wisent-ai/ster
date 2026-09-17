@@ -87,29 +87,40 @@ pub fn decide(
 
 /// Fit a temperature on `examples` and report how the probabilities matched
 /// the labels before and after.
+///
+/// The report also carries a control: the same questions judged against the
+/// wrong state, each example's questions paired with the next example's
+/// state. A model that reads the state scores its labels better on the real
+/// pairing than on the shuffled one; a model that answers from the options
+/// and the letters alone scores the same on both, and no temperature can
+/// make that honest. One example gives nothing to shuffle against, so the
+/// control is absent below two.
 pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options) -> Result<Calibration> {
     examples.validate()?;
+    let count = examples.examples.len();
     let mut labelled = Vec::new();
+    let mut shuffled = Vec::new();
     for (index, example) in examples.examples.iter().enumerate() {
-        workflow::progress(format!("reading example {} of {}", index + 1, examples.examples.len()));
-        let (logits, _) = question_logits(runtime, &example.request, options)?;
-        for ((id, question), logits) in example.request.questions.iter().zip(logits) {
-            if let Some(answer) = example.answers.get(id) {
-                let truth = question.truth_index(answer).expect("validated label");
-                labelled.push(Labelled { logits, truth });
-            }
+        workflow::progress(format!("reading example {} of {count}", index + 1));
+        labelled.extend(labelled_logits(runtime, example, &example.request.state, options)?);
+        if count > 1 {
+            let other = &examples.examples[(index + 1) % count].request.state;
+            shuffled.extend(labelled_logits(runtime, example, other, options)?);
         }
     }
     let temperature = calibration::fit_temperature(&labelled);
     let before = calibration::metrics(&labelled, RAW_TEMPERATURE);
     let after = calibration::metrics(&labelled, temperature);
+    let control = (count > 1).then(|| calibration::metrics(&shuffled, temperature));
     workflow::progress(format!(
-        "fitted temperature {temperature:.4} over {} labelled questions: nll {:.4} -> {:.4}, ece {:.4} -> {:.4}",
+        "fitted temperature {temperature:.4} over {} labelled questions: nll {:.4} -> {:.4}, ece {:.4} -> {:.4}, accuracy {:.4}{}",
         labelled.len(),
         before.nll,
         after.nll,
         before.ece,
-        after.ece
+        after.ece,
+        after.accuracy,
+        control.map_or(String::new(), |control| format!(" against {:.4} on shuffled states", control.accuracy))
     ));
     Ok(Calibration {
         schema: calibration::SCHEMA.to_owned(),
@@ -118,11 +129,38 @@ pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options) -> 
         chat_template: runtime.chat_status().label().to_owned(),
         precision: runtime.precision().name().to_owned(),
         temperature,
-        examples: examples.examples.len(),
+        examples: count,
         questions: labelled.len(),
         before,
         after,
+        control,
     })
+}
+
+/// The logits of every labelled question in `example`, judged against
+/// `state` — its own, or another example's for the control.
+fn labelled_logits(
+    runtime: &Runtime,
+    example: &Example,
+    state: &serde_json::Value,
+    options: Options,
+) -> Result<Vec<Labelled>> {
+    let request = Request {
+        state: state.clone(),
+        model: None,
+        questions: example.request.questions.clone(),
+    };
+    let (logits, _) = question_logits(runtime, &request, options)?;
+    Ok(request
+        .questions
+        .iter()
+        .zip(logits)
+        .filter_map(|((id, question), logits)| {
+            let answer = example.answers.get(id)?;
+            let truth = question.truth_index(answer).expect("validated label");
+            Some(Labelled { logits, truth })
+        })
+        .collect())
 }
 
 /// One sequence the model reads: which question, which option order, and the
