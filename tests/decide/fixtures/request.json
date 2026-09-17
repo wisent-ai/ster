@@ -1,0 +1,23 @@
+{
+  "state": "My running shoes arrived in the wrong size. Can I swap them for a size 10? I paid already and the invoice was fine.",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which team should handle this?",
+      "criteria": {
+        "returns": "Exchanges, refunds, wrong or damaged items",
+        "shipping": "Delivery status, delays, lost packages",
+        "billing": "Charges, invoices, payment problems"
+      }
+    },
+    "frustration": {
+      "type": "score",
+      "instructions": "How frustrated is the customer?",
+      "criteria": ["Calm, just stating facts", "Frustrated but civil", "Very angry, strong language or threatening to leave"]
+    },
+    "is_urgent": {
+      "type": "noul",
+      "instructions": "Does this message convey urgency?"
+    }
+  }
+}

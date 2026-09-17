@@ -17,6 +17,10 @@ exclude = ["assets/*", ".github/*", "release/*"]
 name = "ster"
 path = "src/main.rs"
 
+[[test]]
+name = "decide"
+path = "tests/decide/main.rs"
+
 [features]
 default = []
 metal = ["candle-core/metal", "candle-nn/metal"]

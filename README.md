@@ -20,7 +20,9 @@ layers, learns directions from contrastive examples, evaluates whether those
 directions separate the requested trait, and applies them during generation. It
 also trains the weights themselves: LoRA adapters under a supervised, a
 preference, a reward-modelling or a policy-gradient objective, and the tools to
-merge, score and inspect what comes out.
+merge, score and inspect what comes out. And it reads decisions: typed
+questions about a state answered from one forward pass, with a probability for
+every option and no text generated.
 
 The product is **Ster**. Wisent is the company that builds it.
 
@@ -55,6 +57,14 @@ Included now:
 - merging an adapter into the base weights as a standalone checkpoint;
 - frozen adapter artifacts applied at generation time;
 - deterministic JSON pair, activation, steering, and evaluation formats.
+- typed decisions — a choice from named options, a score on ordered levels,
+  or a yes/no — read from the next-token distribution over answer letters
+  after one cached pass over the state, every option shown under every
+  letter so the model's letter preference cancels, in TypeSafe's System One
+  request and answer shapes;
+- temperature calibration of those decisions on labelled examples, reported
+  with negative log-likelihood, expected calibration error, accuracy, and a
+  shuffled-state control;
 
 Explicit boundaries:
 
@@ -217,10 +227,11 @@ ster evaluate   measure a vector on a contrastive pair set
 ster generate   run normal or steered autoregressive generation
 ster extract    export hidden states for an arbitrary prompt set
 ster inspect    summarize and validate a steering artifact
-ster pairs      author, inspect, and synthesize contrastive pair sets
-ster tune       train, merge, score, and inspect LoRA adapters
 ster onboarding import or replay first use
+ster decide     answer typed questions about a state from one forward pass
+ster calibrate  fit the temperature that makes decision probabilities honest
 ster workspace  import, activate, and inspect persistent pair sets
+ster serve      loopback HTTP/JSON backend for desktop apps
 ```
 
 Run `ster <command> --help` for exact arguments. Commands return non-zero on
@@ -239,6 +250,9 @@ Each command family has its own page in this repository:
   [adapters](docs/guide/tuning/adapters.md),
   [chat templates](docs/guide/tuning/chat-templates.md) and
   [precision](docs/guide/tuning/precision.md) beside it.
+- [Decisions](docs/guide/decisions.md) — `ster decide`: what a decision
+  is, the request and response documents, and reading one with `--explain`;
+  with [calibration](docs/guide/decisions/calibration.md) beside it.
 
 ## Architecture
 

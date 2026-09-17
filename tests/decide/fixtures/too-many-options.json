@@ -1,0 +1,15 @@
+{
+  "state": "Pick a letter.",
+  "questions": {
+    "letter": {
+      "type": "choice",
+      "instructions": "Which entry?",
+      "criteria": {
+        "o01": null, "o02": null, "o03": null, "o04": null, "o05": null, "o06": null, "o07": null,
+        "o08": null, "o09": null, "o10": null, "o11": null, "o12": null, "o13": null, "o14": null,
+        "o15": null, "o16": null, "o17": null, "o18": null, "o19": null, "o20": null, "o21": null,
+        "o22": null, "o23": null, "o24": null, "o25": null, "o26": null, "o27": null
+      }
+    }
+  }
+}
