@@ -49,6 +49,7 @@ fn serve_answers_the_desktops_decide_request_and_refuses_a_bad_one() {
         }
     }));
     server.kill().expect("serve stops");
+    server.wait().expect("serve reaped");
     assert!(answered.0.starts_with("HTTP/1.1 200"), "{}", answered.0);
     let events: Vec<Value> = answered
         .1

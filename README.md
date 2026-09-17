@@ -28,7 +28,7 @@ The product is **Ster**. Wisent is the company that builds it.
 
 ## Current product contract
 
-Ster 0.13 provides one binary and one library crate. Both use the same versioned
+Ster 0.14 provides one binary and one library crate. Both use the same versioned
 JSON artifacts and native Candle runtime.
 
 Included now:
