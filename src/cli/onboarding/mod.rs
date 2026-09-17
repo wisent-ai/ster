@@ -14,6 +14,10 @@ mod state;
 
 use state::{fresh_state, load_or_start_state, save_state};
 
+/// A first-use journey is three to five screens: enough to show the promise, few enough to finish.
+const MIN_JOURNEY_SCREENS: usize = 3;
+const MAX_JOURNEY_SCREENS: usize = 5;
+
 pub fn run(reset: bool, import_pairs: Option<&Path>, name: Option<&str>) -> Result<()> {
     let definition = canonical_definition()?;
     let mut state = if reset {
@@ -144,7 +148,7 @@ fn canonical_definition() -> Result<Value> {
         .get("screens")
         .and_then(Value::as_array)
         .context("canonical onboarding journey has no screens")?;
-    if !(3..=5).contains(&screens.len()) {
+    if !(MIN_JOURNEY_SCREENS..=MAX_JOURNEY_SCREENS).contains(&screens.len()) {
         bail!("canonical onboarding journey must have three to five screens");
     }
 

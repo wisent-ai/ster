@@ -65,9 +65,12 @@ pub struct Holdout {
     pub holdout_pairs: usize,
 }
 
+/// Fewer contrastive pairs than this leave nothing to hold out for scoring.
+const MIN_OPTIMIZATION_PAIRS: usize = 4;
+
 pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<Selection> {
-    if pairs.pairs.len() < 4 {
-        bail!("optimization requires at least four contrastive pairs");
+    if pairs.pairs.len() < MIN_OPTIMIZATION_PAIRS {
+        bail!("optimization requires at least {MIN_OPTIMIZATION_PAIRS} contrastive pairs");
     }
     let captured = capture_pairs(runtime, pairs, layers)?;
     let split = (pairs.pairs.len() * 4 / 5).clamp(1, pairs.pairs.len() - 1);

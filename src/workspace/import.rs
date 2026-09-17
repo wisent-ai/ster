@@ -178,9 +178,12 @@ fn pair_set_digest(pair_set: &PairSet) -> Result<String> {
     Ok(digest[..16].iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// A workspace name is at most this many bytes, so it fits a file name on every filesystem.
+const MAX_NAME_LENGTH: usize = 64;
+
 fn validate_name(name: &str) -> std::result::Result<(), String> {
     let valid = !name.is_empty()
-        && name.len() <= 64
+        && name.len() <= MAX_NAME_LENGTH
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -209,7 +212,7 @@ fn derived_name(source: &Path) -> String {
         } else {
             separator = true;
         }
-        if name.len() == 64 {
+        if name.len() == MAX_NAME_LENGTH {
             break;
         }
     }
