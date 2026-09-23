@@ -244,7 +244,7 @@ Each command family has its own page in this repository:
   `ster pairs`, which authors it.
 - [Steering](docs/guide/steering.md) — choosing a direction, reading one, and
   what fitting one out of format costs.
-- [Fine-tuning](docs/guide/fine-tuning.md) — what `ster tune` trains, what a
+- [Fine-tuning](docs/guide/tuning/fine-tuning.md) — what `ster tune` trains, what a
   run needs before it starts, and what it records, with
   [objectives](docs/guide/tuning/objectives.md),
   [adapters](docs/guide/tuning/adapters.md),

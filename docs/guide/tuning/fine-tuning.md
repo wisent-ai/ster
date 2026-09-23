@@ -3,7 +3,7 @@
 What `ster tune` trains, what a run needs before it starts, and what it
 records about itself. The four objectives are in
 [objectives](objectives.md); reading and folding a trained adapter is in
-[adapters](adapters.md). The [README](../../README.md) links here from its
+[adapters](adapters.md). The [README](../../../README.md) links here from its
 command list.
 
 
