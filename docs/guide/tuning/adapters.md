@@ -73,8 +73,8 @@ sit in `evaluate` itself:
 `max_sequence must be at least two tokens, so that one token can predict another`,
 and a batch of zero with
 `evaluation requires a batch of at least one example`. Both refuse on
-`POST /v1/tune/evaluate` as well, because the check is in the function rather
-than in the flag.
+`ster request tune/evaluate` as well, because the check is in the function
+rather than in the flag.
 
 ## What fine-tuning does not do
 
@@ -97,13 +97,13 @@ not a grader wired into a gradient. Batching is bounded in the same spirit:
 `--batch-size` folds rows into one padded forward, and the padding mask is what
 keeps that honest, but nothing here grows into a distributed trainer.
 
-All seven operations are jobs on the `ster serve` backend —
-`POST /v1/tune/sft`, `POST /v1/tune/dpo`, `POST /v1/tune/reward`,
-`POST /v1/tune/grpo`, `POST /v1/tune/merge`, `POST /v1/tune/evaluate` and
-`POST /v1/tune/inspect` — streamed as NDJSON like every other job, and
-`POST /v1/generate` takes the same `adapter` field. That is how Ster Desktop
-offers the whole stack on its own screen, and how a finished run leaves the
-adapter it wrote in the field Generate reads.
+All seven operations are operations of `ster request`: `tune/sft`, `tune/dpo`,
+`tune/reward`, `tune/grpo`, `tune/merge`, `tune/evaluate` and `tune/inspect`,
+each reading its JSON body on stdin and printing NDJSON events like every
+other operation ([desktop requests](../desktop-requests.md)), and
+`ster request generate` takes the same `adapter` field. That is how Ster
+Desktop offers the whole stack on its own screen, and how a finished run
+leaves the adapter it wrote in the field Generate reads.
 
 ## Artifact contract
 

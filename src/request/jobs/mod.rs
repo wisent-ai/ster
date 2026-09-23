@@ -1,4 +1,4 @@
-//! What each endpoint actually runs. Every job mirrors its CLI arm in the
+//! What each operation actually runs. Every job mirrors its CLI arm in the
 //! `cli` module: same loads, same workflow call, and the returned document is
 //! the same payload the CLI prints.
 
@@ -35,7 +35,7 @@ pub(super) use tune::{
 
 /// Every job mirrors its CLI arm in main.rs: same loads, same workflow call,
 /// and the returned document is the same payload the CLI prints.
-pub(in crate::serve) fn train_job(request: TrainRequest) -> Result<Value> {
+pub(in crate::request) fn train_job(request: TrainRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
@@ -48,7 +48,7 @@ pub(in crate::serve) fn train_job(request: TrainRequest) -> Result<Value> {
     Ok(summary)
 }
 
-pub(in crate::serve) fn optimize_job(request: OptimizeRequest) -> Result<Value> {
+pub(in crate::request) fn optimize_job(request: OptimizeRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
@@ -60,7 +60,7 @@ pub(in crate::serve) fn optimize_job(request: OptimizeRequest) -> Result<Value> 
     Ok(summary)
 }
 
-pub(in crate::serve) fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
+pub(in crate::request) fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
@@ -72,7 +72,7 @@ pub(in crate::serve) fn evaluate_job(request: EvaluateRequest) -> Result<Value> 
     Ok(report)
 }
 
-pub(in crate::serve) fn generate_job(request: GenerateRequest) -> Result<Value> {
+pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value> {
     let precision = Precision::parse(&request.precision)?;
     // Both documents are read before a single weight is mapped, so the two
     // halves of the wrong-document refusal cost the same. An adapter was
@@ -112,7 +112,7 @@ pub(in crate::serve) fn generate_job(request: GenerateRequest) -> Result<Value> 
     Ok(json!({"text": generated}))
 }
 
-pub(in crate::serve) fn extract_job(request: ExtractRequest) -> Result<Value> {
+pub(in crate::request) fn extract_job(request: ExtractRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
     runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
@@ -122,7 +122,7 @@ pub(in crate::serve) fn extract_job(request: ExtractRequest) -> Result<Value> {
     Ok(json!({"path": request.output}))
 }
 
-pub(in crate::serve) fn inspect_job(request: InspectRequest) -> Result<Value> {
+pub(in crate::request) fn inspect_job(request: InspectRequest) -> Result<Value> {
     let artifact = SteeringArtifact::load(Path::new(&request.artifact))
         .with_context(|| format!("failed to inspect {}", request.artifact))?;
     Ok(workflow::artifact_summary(&artifact))

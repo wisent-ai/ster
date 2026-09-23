@@ -129,7 +129,7 @@ the gateway base, defaulting to `https://brama.wisent.com`, and
 `BRAMA_BEARER`, the caller's bearer. Ster reads both from its own environment
 and never reads a vault itself. Nothing puts them there for you: there is no
 launcher script in this repository, no wrapper on the fleet, and no service
-unit that exports them, and Ster Desktop spawns `ster serve` with the
+unit that exports them, and Ster Desktop runs `ster request` with the
 environment it inherited without setting a variable of its own. You export
 `BRAMA_BEARER` before the run. An empty bearer is refused with
 `BRAMA_BEARER is unset or empty; export Ster's own Brama bearer before running this command`,
@@ -192,12 +192,13 @@ The run reports `generator`, which records which of the two wrote the set as
 `refusal_retries`, and `diversity`, so a short set is
 explained by the counts rather than guessed at.
 
-The same three operations are jobs on the loopback HTTP/JSON backend that
-`ster serve` exposes, streamed as NDJSON like its six existing ones.
-`POST /v1/pairs/inspect` returns the inspection document for a path,
-`POST /v1/pairs/save` writes a set from `traitName` and `entries` and returns
-the path and pair count, and `POST /v1/pairs/synthesize` runs the loop and
-returns the written path and the report. The synthesize job takes `generator`,
+The same three operations are operations of `ster request`, which reads the
+request body as JSON on stdin and prints NDJSON events like every other
+operation ([desktop requests](desktop-requests.md)).
+`ster request pairs/inspect` returns the inspection document for a path,
+`ster request pairs/save` writes a set from `traitName` and `entries` and
+returns the path and pair count, and `ster request pairs/synthesize` runs the
+loop and returns the written path and the report. The synthesize operation takes `generator`,
 defaulting to `"local"`, and `generatorModel`, takes `chatTemplate` and
 `precision` on the local route, and requires `model` only on that route; it
 refuses a hosted run without a route with

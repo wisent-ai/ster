@@ -22,10 +22,9 @@ pub use optimize::{optimize, Candidate, Holdout, Selection};
 pub use train::train;
 
 /// Progress lines the workflows print while running. The CLI leaves the sink
-/// unset and every line goes to stderr; the serve backend installs a sink for
-/// the duration of a streamed job so the same lines reach the desktop app as
-/// NDJSON log events. Serve runs jobs one at a time, so one global sink is
-/// enough.
+/// unset and every line goes to stderr; `ster request` installs a sink so the
+/// same lines reach the desktop app as NDJSON log events. One process runs
+/// one request, so one global sink is enough.
 static PROGRESS_SINK: Mutex<Option<Box<dyn Fn(&str) + Send>>> = Mutex::new(None);
 
 pub fn set_progress_sink(sink: Option<Box<dyn Fn(&str) + Send>>) {

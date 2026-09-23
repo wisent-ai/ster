@@ -1,8 +1,8 @@
-//! What the desktop app may ask for, one struct per endpoint, checked before
+//! What the desktop app may ask for, one struct per operation, checked before
 //! any model is loaded.
 //!
 //! The checkpoint half every request carries is here; the rest is grouped the
-//! way the endpoints are: steering runs in `vectors`, pair authoring in
+//! way the operations are: steering runs in `vectors`, pair authoring in
 //! `pairs`, adapter training in `tune`, and every serde default in
 //! `defaults`.
 
@@ -50,13 +50,13 @@ pub(super) fn require(value: &str, sentence: String) -> Result<(), String> {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct ModelRequest {
+pub(in crate::request) struct ModelRequest {
     #[serde(default)]
-    pub(in crate::serve) model: String,
+    pub(in crate::request) model: String,
     #[serde(default)]
-    pub(in crate::serve) revision: Option<String>,
+    pub(in crate::request) revision: Option<String>,
     #[serde(default = "default_device")]
-    pub(in crate::serve) device: String,
+    pub(in crate::request) device: String,
 }
 
 impl ModelRequest {
@@ -66,7 +66,7 @@ impl ModelRequest {
 
     /// The shared load. Every handler that maps a checkpoint goes through
     /// here, so `precision` means the same thing on all of them.
-    pub(in crate::serve) fn load_runtime_at(&self, precision: &str) -> Result<Runtime> {
+    pub(in crate::request) fn load_runtime_at(&self, precision: &str) -> Result<Runtime> {
         let device = DeviceChoice::parse(&self.device)?;
         Runtime::load_at(
             &self.model,

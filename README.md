@@ -231,7 +231,7 @@ ster onboarding import or replay first use
 ster decide     answer typed questions about a state from one forward pass
 ster calibrate  fit the temperature that makes decision probabilities honest
 ster workspace  import, activate, and inspect persistent pair sets
-ster serve      loopback HTTP/JSON backend for desktop apps
+ster request    run one desktop request to completion: JSON body on stdin, NDJSON events on stdout
 ```
 
 Run `ster <command> --help` for exact arguments. Commands return non-zero on
@@ -253,6 +253,9 @@ Each command family has its own page in this repository:
 - [Decisions](docs/guide/decisions.md) — `ster decide`: what a decision
   is, the request and response documents, and reading one with `--explain`;
   with [calibration](docs/guide/decisions/calibration.md) beside it.
+- [Desktop requests](docs/guide/desktop-requests.md) — `ster request`: how
+  Ster Desktop runs each workflow as one process per operation, the JSON body,
+  the NDJSON events, and what each exit status means.
 
 ## Architecture
 

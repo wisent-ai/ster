@@ -1,4 +1,4 @@
-//! Running the pair-authoring endpoints: workspace import, audit, save, and
+//! Running the pair-authoring operations: workspace import, audit, save, and
 //! synthesis with either a local runtime or a hosted writer.
 
 use anyhow::{bail, Result};
@@ -18,7 +18,7 @@ use super::super::requests::{
     PairsInspectRequest, PairsSaveRequest, PairsSynthesizeRequest, WorkspaceImportPairsRequest,
 };
 
-pub(in crate::serve) fn workspace_import_pairs_job(request: WorkspaceImportPairsRequest) -> Result<Value> {
+pub(in crate::request) fn workspace_import_pairs_job(request: WorkspaceImportPairsRequest) -> Result<Value> {
     let report = crate::workspace::import_pair_set(
         Path::new(&request.source),
         request.name.as_deref(),
@@ -26,7 +26,7 @@ pub(in crate::serve) fn workspace_import_pairs_job(request: WorkspaceImportPairs
     Ok(serde_json::to_value(report)?)
 }
 
-pub(in crate::serve) fn pairs_inspect_job(request: PairsInspectRequest) -> Result<Value> {
+pub(in crate::request) fn pairs_inspect_job(request: PairsInspectRequest) -> Result<Value> {
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let options = InspectOptions {
         dedupe: DedupeOptions {
@@ -44,7 +44,7 @@ pub(in crate::serve) fn pairs_inspect_job(request: PairsInspectRequest) -> Resul
 /// The editor's write path. `PairSet::save` validates before it writes, so a
 /// set the loader would reject never reaches disk and the desktop sees the
 /// same refusal sentence the CLI prints.
-pub(in crate::serve) fn pairs_save_job(request: PairsSaveRequest) -> Result<Value> {
+pub(in crate::request) fn pairs_save_job(request: PairsSaveRequest) -> Result<Value> {
     let pair_set = PairSet {
         trait_name: request.trait_name,
         pairs: request
@@ -57,7 +57,7 @@ pub(in crate::serve) fn pairs_save_job(request: PairsSaveRequest) -> Result<Valu
     Ok(json!({"path": request.path, "pairCount": pair_set.pairs.len()}))
 }
 
-pub(in crate::serve) fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
+pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
     let options = SynthesisOptions {
         trait_description: request.trait_description,
         trait_name: request.trait_name,

@@ -53,7 +53,7 @@ pub(super) fn default_retry_multiplier() -> usize {
 }
 
 /// Synthesis answers are one or two sentences, so it keeps a tighter token
-/// budget than the general generate endpoint.
+/// budget than the general generate operation.
 pub(super) fn default_synthesis_max_new_tokens() -> usize {
     96
 }
@@ -126,7 +126,7 @@ pub(super) fn default_precision() -> String {
 /// beside the chat-template decision and for the same reason: two runs of the
 /// same request at different precisions produce different losses, and a report
 /// that does not say which one made it is not comparable with the other.
-pub(in crate::serve) fn note_precision(report: &mut Value, precision: Precision) -> Result<()> {
+pub(in crate::request) fn note_precision(report: &mut Value, precision: Precision) -> Result<()> {
     report
         .as_object_mut()
         .context("a run report must be a JSON object to record its precision")?

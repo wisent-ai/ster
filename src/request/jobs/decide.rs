@@ -13,7 +13,7 @@ use crate::{
 
 use super::super::requests::{CalibrateRequest, DecideRequest};
 
-pub(in crate::serve) fn decide_job(request: DecideRequest) -> Result<Value> {
+pub(in crate::request) fn decide_job(request: DecideRequest) -> Result<Value> {
     let document = request.request.expect("validated request");
     // The calibration is read before a single weight is mapped, so one
     // fitted for another model is refused in milliseconds rather than after
@@ -40,7 +40,7 @@ pub(in crate::serve) fn decide_job(request: DecideRequest) -> Result<Value> {
     Ok(serde_json::to_value(response)?)
 }
 
-pub(in crate::serve) fn calibrate_job(request: CalibrateRequest) -> Result<Value> {
+pub(in crate::request) fn calibrate_job(request: CalibrateRequest) -> Result<Value> {
     let examples = ExampleSet::load(Path::new(&request.examples))?;
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
     runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);

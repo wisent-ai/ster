@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 /// Ster reads the base URL and the bearer from its own environment and never
 /// talks to Skarbiec itself. Nothing in this repository, and nothing on the
 /// fleet, puts the bearer there: no launcher script, no wrapper, no service
-/// unit, and not Ster Desktop, which spawns `ster serve` with the environment
+/// unit, and not Ster Desktop, which runs `ster request` with the environment
 /// it inherited and sets no variable of its own. Whoever runs Ster exports
 /// `BRAMA_BEARER` themselves. Say so plainly here rather than naming a
 /// launcher, because a comment that points at a mechanism nobody wrote stops

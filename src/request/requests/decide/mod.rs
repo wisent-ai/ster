@@ -1,4 +1,4 @@
-//! The decision endpoints' requests: answering typed questions about a
+//! The decision operations' requests: answering typed questions about a
 //! state, and fitting the temperature that makes those answers honest.
 
 use serde::Deserialize;
@@ -12,25 +12,25 @@ use super::{
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct DecideRequest {
+pub(in crate::request) struct DecideRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     /// The decision document itself — a state and its typed questions — as
     /// the desktop composed it, rather than a path to one on disk.
-    pub(in crate::serve) request: Option<Request>,
+    pub(in crate::request) request: Option<Request>,
     /// A calibration artifact written by `ster calibrate` for this model.
     #[serde(default)]
-    pub(in crate::serve) calibration: Option<String>,
+    pub(in crate::request) calibration: Option<String>,
     /// Option orders per question; `0` shows every option under every letter.
     #[serde(default)]
-    pub(in crate::serve) permutations: usize,
+    pub(in crate::request) permutations: usize,
     /// Whether the response carries per-order detail for every question.
     #[serde(default)]
-    pub(in crate::serve) explain: bool,
+    pub(in crate::request) explain: bool,
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for DecideRequest {
@@ -45,21 +45,21 @@ impl Validate for DecideRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct CalibrateRequest {
+pub(in crate::request) struct CalibrateRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     /// Path to the labelled example set.
     #[serde(default)]
-    pub(in crate::serve) examples: String,
+    pub(in crate::request) examples: String,
     /// Where the calibration artifact is written.
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
     #[serde(default)]
-    pub(in crate::serve) permutations: usize,
+    pub(in crate::request) permutations: usize,
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for CalibrateRequest {

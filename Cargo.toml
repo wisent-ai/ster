@@ -1,6 +1,6 @@
 [package]
 name = "ster"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Representation reading and steering for open-weight language models"

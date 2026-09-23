@@ -1,4 +1,4 @@
-//! Running the adapter-training endpoints, and the two flag parsers their
+//! Running the adapter-training operations, and the two flag parsers their
 //! requests share.
 
 use anyhow::{bail, Context, Result};
@@ -23,7 +23,7 @@ use super::super::requests::{
 
 /// Mirrors the `ster tune sft` arm: same spec, same `tune::sft`, and the
 /// progress lines the trainer writes reach the desktop over the job stream.
-pub(in crate::serve) fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
+pub(in crate::request) fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
     let device = DeviceChoice::parse(&request.model.device)?;
     let spec = lora::Spec {
         rank: request.rank,
@@ -69,7 +69,7 @@ pub(in crate::serve) fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
 
 /// Mirrors the `ster tune dpo` arm. One runtime is loaded: the reference the
 /// objective measures against is the same weights with the adapters skipped.
-pub(in crate::serve) fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
+pub(in crate::request) fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
     let device = DeviceChoice::parse(&request.model.device)?;
     let spec = lora::Spec {
         rank: request.rank,
@@ -114,7 +114,7 @@ pub(in crate::serve) fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value> {
 /// Mirrors the `ster tune reward` arm. The head is registered in the same
 /// VarMap the adapters live in, so one optimizer steps the pair and the
 /// artifact carries both.
-pub(in crate::serve) fn tune_reward_job(request: TuneRewardRequest) -> Result<Value> {
+pub(in crate::request) fn tune_reward_job(request: TuneRewardRequest) -> Result<Value> {
     let device = DeviceChoice::parse(&request.model.device)?;
     let spec = lora::Spec {
         rank: request.rank,
@@ -160,7 +160,7 @@ pub(in crate::serve) fn tune_reward_job(request: TuneRewardRequest) -> Result<Va
 /// Mirrors the `ster tune grpo` arm. The reward source is resolved before the
 /// policy is loaded, so a reward artifact for the wrong checkpoint is refused
 /// before the desktop waits out a policy load to hear it.
-pub(in crate::serve) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value> {
+pub(in crate::request) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value> {
     let device = DeviceChoice::parse(&request.model.device)?;
     let spec = lora::Spec {
         rank: request.rank,
@@ -215,7 +215,7 @@ pub(in crate::serve) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value>
 
 /// Mirrors the `ster tune merge` arm. No device and no runtime: merging
 /// rewrites tensors and never runs the model.
-pub(in crate::serve) fn tune_merge_job(request: TuneMergeRequest) -> Result<Value> {
+pub(in crate::request) fn tune_merge_job(request: TuneMergeRequest) -> Result<Value> {
     let report = tune::merge(
         &request.model.model,
         request.model.revision.as_deref(),
@@ -227,7 +227,7 @@ pub(in crate::serve) fn tune_merge_job(request: TuneMergeRequest) -> Result<Valu
 
 /// Mirrors the `ster tune evaluate` arm: no optimizer, no artifact written,
 /// and the same document the CLI prints.
-pub(in crate::serve) fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
+pub(in crate::request) fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
     let adapter = request.adapter.as_deref().filter(|value| !value.trim().is_empty());
     let precision = Precision::parse(&request.precision)?;
     let mut runtime = match adapter {
@@ -259,7 +259,7 @@ pub(in crate::serve) fn tune_evaluate_job(request: TuneEvaluateRequest) -> Resul
     Ok(report)
 }
 
-pub(in crate::serve) fn tune_inspect_job(request: TuneInspectRequest) -> Result<Value> {
+pub(in crate::request) fn tune_inspect_job(request: TuneInspectRequest) -> Result<Value> {
     // Inspection reads the adapter document alone: no model is loaded, so the
     // tensors land on the CPU whatever trained them.
     let artifact = lora::Artifact::load(Path::new(&request.artifact), &Device::Cpu)

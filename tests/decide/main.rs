@@ -11,7 +11,7 @@ use std::{
 use serde_json::Value;
 
 mod refusals;
-mod serve;
+mod request;
 
 const MODEL: &str = "HuggingFaceTB/SmolLM2-1.7B-Instruct";
 const OTHER_MODEL: &str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0";

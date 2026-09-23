@@ -12,10 +12,11 @@ ster decide --model <MODEL> --request <REQUEST>
             [--calibration <CALIBRATION>] [--output <OUTPUT>] [--explain]
 ```
 
-It prints a pretty JSON document on stdout and is also a streamed NDJSON job
-on the `ster serve` backend, `POST /v1/decide`, where every flag above is a
-camelCase field of the request body and the request document itself travels
-inline under `request` rather than as a path, because the desktop composes it.
+It prints a pretty JSON document on stdout and is also the operation
+`ster request decide`, whose JSON body on stdin carries every flag above as a
+camelCase field, with the request document itself inline under `request`
+rather than as a path, because the desktop composes it
+([desktop requests](desktop-requests.md)).
 
 ## What a decision is
 
@@ -187,8 +188,10 @@ which is the honest result for a model that has not read the message.
 ## Refusals
 
 All of these are decided before the checkpoint loads and exit `1` with
-`Error:` and the sentence. The serve backend returns the same sentence as a
-`400` body before streaming.
+`Error:` and the sentence. `ster request decide` refuses the request-document
+sentences with a single result event of status `2`, before anything loads;
+a path or calibration refusal ends it with the sentence as its last log event
+and a status-`1` result.
 
 - `a decide request has an empty state`
 - `a decide request needs at least one question`

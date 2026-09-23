@@ -1,4 +1,4 @@
-//! The adapter-training endpoints' requests: supervised fine-tuning,
+//! The adapter-training operations' requests: supervised fine-tuning,
 //! preference optimization, reward modelling, policy optimization, and the
 //! merge, evaluate and inspect surfaces beside them.
 
@@ -9,46 +9,46 @@ use super::{require, ModelRequest, Validate};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct TuneSftRequest {
+pub(in crate::request) struct TuneSftRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     #[serde(default)]
-    pub(in crate::serve) examples: String,
+    pub(in crate::request) examples: String,
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
     #[serde(default = "default_rank")]
-    pub(in crate::serve) rank: usize,
+    pub(in crate::request) rank: usize,
     #[serde(default = "default_alpha")]
-    pub(in crate::serve) alpha: f64,
+    pub(in crate::request) alpha: f64,
     #[serde(default = "default_targets")]
-    pub(in crate::serve) targets: String,
+    pub(in crate::request) targets: String,
     #[serde(default = "default_layers")]
-    pub(in crate::serve) layers: String,
+    pub(in crate::request) layers: String,
     #[serde(default = "default_epochs")]
-    pub(in crate::serve) epochs: usize,
+    pub(in crate::request) epochs: usize,
     #[serde(default = "default_learning_rate")]
-    pub(in crate::serve) learning_rate: f64,
+    pub(in crate::request) learning_rate: f64,
     #[serde(default = "default_accumulation")]
-    pub(in crate::serve) accumulation: usize,
+    pub(in crate::request) accumulation: usize,
     /// Zero starts at the full learning rate, which is what a short run wants.
     #[serde(default)]
-    pub(in crate::serve) warmup_steps: usize,
+    pub(in crate::request) warmup_steps: usize,
     #[serde(default = "default_max_sequence")]
-    pub(in crate::serve) max_sequence: usize,
+    pub(in crate::request) max_sequence: usize,
     #[serde(default = "default_seed")]
-    pub(in crate::serve) seed: u64,
+    pub(in crate::request) seed: u64,
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     /// Rows folded into one forward pass — examples here, pairs on the
-    /// preference endpoints, where a pair is two rows. One is the unbatched
+    /// preference operations, where a pair is two rows. One is the unbatched
     /// pass every run recorded so far took.
     #[serde(default = "default_batch_size")]
-    pub(in crate::serve) batch_size: usize,
+    pub(in crate::request) batch_size: usize,
     /// The dtype the frozen base weights are mapped at: `f32`, `f16`, or
     /// `bf16`. Adapters, any head, and every optimizer moment stay in f32
     /// whatever this says. `bf16` needs the `metal` device.
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for TuneSftRequest {
@@ -61,47 +61,47 @@ impl Validate for TuneSftRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct TuneDpoRequest {
+pub(in crate::request) struct TuneDpoRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     /// A contrastive pair set. The positive side is the chosen response and
     /// the negative side the rejected one, so the file Train already reads is
     /// the file this reads.
     #[serde(default)]
-    pub(in crate::serve) pairs: String,
+    pub(in crate::request) pairs: String,
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
     #[serde(default = "default_rank")]
-    pub(in crate::serve) rank: usize,
+    pub(in crate::request) rank: usize,
     #[serde(default = "default_alpha")]
-    pub(in crate::serve) alpha: f64,
+    pub(in crate::request) alpha: f64,
     #[serde(default = "default_targets")]
-    pub(in crate::serve) targets: String,
+    pub(in crate::request) targets: String,
     #[serde(default = "default_layers")]
-    pub(in crate::serve) layers: String,
+    pub(in crate::request) layers: String,
     #[serde(default = "default_beta")]
-    pub(in crate::serve) beta: f64,
+    pub(in crate::request) beta: f64,
     #[serde(default = "default_preference_loss")]
-    pub(in crate::serve) loss: String,
+    pub(in crate::request) loss: String,
     #[serde(default = "default_epochs")]
-    pub(in crate::serve) epochs: usize,
+    pub(in crate::request) epochs: usize,
     #[serde(default = "default_learning_rate")]
-    pub(in crate::serve) learning_rate: f64,
+    pub(in crate::request) learning_rate: f64,
     #[serde(default = "default_accumulation")]
-    pub(in crate::serve) accumulation: usize,
+    pub(in crate::request) accumulation: usize,
     /// Zero starts at the full learning rate, which is what a short run wants.
     #[serde(default)]
-    pub(in crate::serve) warmup_steps: usize,
+    pub(in crate::request) warmup_steps: usize,
     #[serde(default = "default_max_sequence")]
-    pub(in crate::serve) max_sequence: usize,
+    pub(in crate::request) max_sequence: usize,
     #[serde(default = "default_seed")]
-    pub(in crate::serve) seed: u64,
+    pub(in crate::request) seed: u64,
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_batch_size")]
-    pub(in crate::serve) batch_size: usize,
+    pub(in crate::request) batch_size: usize,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for TuneDpoRequest {
@@ -114,42 +114,42 @@ impl Validate for TuneDpoRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct TuneRewardRequest {
+pub(in crate::request) struct TuneRewardRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     /// A contrastive pair set. The positive side is the response the head
     /// learns to score higher.
     #[serde(default)]
-    pub(in crate::serve) pairs: String,
+    pub(in crate::request) pairs: String,
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
     #[serde(default = "default_rank")]
-    pub(in crate::serve) rank: usize,
+    pub(in crate::request) rank: usize,
     #[serde(default = "default_alpha")]
-    pub(in crate::serve) alpha: f64,
+    pub(in crate::request) alpha: f64,
     #[serde(default = "default_targets")]
-    pub(in crate::serve) targets: String,
+    pub(in crate::request) targets: String,
     #[serde(default = "default_layers")]
-    pub(in crate::serve) layers: String,
+    pub(in crate::request) layers: String,
     #[serde(default = "default_epochs")]
-    pub(in crate::serve) epochs: usize,
+    pub(in crate::request) epochs: usize,
     #[serde(default = "default_learning_rate")]
-    pub(in crate::serve) learning_rate: f64,
+    pub(in crate::request) learning_rate: f64,
     #[serde(default = "default_accumulation")]
-    pub(in crate::serve) accumulation: usize,
+    pub(in crate::request) accumulation: usize,
     /// Zero starts at the full learning rate, which is what a short run wants.
     #[serde(default)]
-    pub(in crate::serve) warmup_steps: usize,
+    pub(in crate::request) warmup_steps: usize,
     #[serde(default = "default_max_sequence")]
-    pub(in crate::serve) max_sequence: usize,
+    pub(in crate::request) max_sequence: usize,
     #[serde(default = "default_seed")]
-    pub(in crate::serve) seed: u64,
+    pub(in crate::request) seed: u64,
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_batch_size")]
-    pub(in crate::serve) batch_size: usize,
+    pub(in crate::request) batch_size: usize,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for TuneRewardRequest {
@@ -162,54 +162,54 @@ impl Validate for TuneRewardRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct TuneGrpoRequest {
+pub(in crate::request) struct TuneGrpoRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     /// A prompt set, `{"prompts": ["…"]}` — the shape extract already takes.
     #[serde(default)]
-    pub(in crate::serve) prompts: String,
+    pub(in crate::request) prompts: String,
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
     /// The keyword `length`, or the path to a reward artifact.
     #[serde(default = "default_reward")]
-    pub(in crate::serve) reward: String,
+    pub(in crate::request) reward: String,
     #[serde(default = "default_group")]
-    pub(in crate::serve) group: usize,
+    pub(in crate::request) group: usize,
     #[serde(default = "default_iterations")]
-    pub(in crate::serve) iterations: usize,
+    pub(in crate::request) iterations: usize,
     #[serde(default = "default_kl_beta")]
-    pub(in crate::serve) beta: f64,
+    pub(in crate::request) beta: f64,
     #[serde(default = "default_rank")]
-    pub(in crate::serve) rank: usize,
+    pub(in crate::request) rank: usize,
     #[serde(default = "default_alpha")]
-    pub(in crate::serve) alpha: f64,
+    pub(in crate::request) alpha: f64,
     #[serde(default = "default_targets")]
-    pub(in crate::serve) targets: String,
+    pub(in crate::request) targets: String,
     #[serde(default = "default_layers")]
-    pub(in crate::serve) layers: String,
+    pub(in crate::request) layers: String,
     #[serde(default = "default_learning_rate")]
-    pub(in crate::serve) learning_rate: f64,
+    pub(in crate::request) learning_rate: f64,
     /// One group is already `group` sequences, so a step per group is the
     /// natural unit and the default is one rather than eight.
     #[serde(default = "default_group_accumulation")]
-    pub(in crate::serve) accumulation: usize,
+    pub(in crate::request) accumulation: usize,
     /// Zero starts at the full learning rate, which is what a short run wants.
     #[serde(default)]
-    pub(in crate::serve) warmup_steps: usize,
+    pub(in crate::request) warmup_steps: usize,
     #[serde(default = "default_grpo_max_new_tokens")]
-    pub(in crate::serve) max_new_tokens: usize,
+    pub(in crate::request) max_new_tokens: usize,
     #[serde(default = "default_grpo_temperature")]
-    pub(in crate::serve) temperature: f64,
+    pub(in crate::request) temperature: f64,
     #[serde(default = "default_top_p")]
-    pub(in crate::serve) top_p: f64,
+    pub(in crate::request) top_p: f64,
     #[serde(default = "default_max_sequence")]
-    pub(in crate::serve) max_sequence: usize,
+    pub(in crate::request) max_sequence: usize,
     #[serde(default = "default_seed")]
-    pub(in crate::serve) seed: u64,
+    pub(in crate::request) seed: u64,
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for TuneGrpoRequest {
@@ -223,13 +223,13 @@ impl Validate for TuneGrpoRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct TuneMergeRequest {
+pub(in crate::request) struct TuneMergeRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     /// The adapter to fold in; it must be a generation adapter trained for
     /// this exact model.
     #[serde(default)]
-    pub(in crate::serve) adapter: String,
+    pub(in crate::request) adapter: String,
     /// Directory to write: model.safetensors beside the source's own
     /// config.json and tokenizer.json, plus whichever of
     /// tokenizer_config.json and chat_template.jinja the source published,
@@ -237,7 +237,7 @@ pub(in crate::serve) struct TuneMergeRequest {
     /// chat template lives, so a source that published one merges to a
     /// checkpoint that still reports `applied` rather than `absent`.
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
 }
 
 impl Validate for TuneMergeRequest {
@@ -250,23 +250,23 @@ impl Validate for TuneMergeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct TuneEvaluateRequest {
+pub(in crate::request) struct TuneEvaluateRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     #[serde(default)]
-    pub(in crate::serve) examples: String,
+    pub(in crate::request) examples: String,
     /// A frozen adapter to attach before scoring; omit or leave empty to score
     /// the bare checkpoint, which is the run an adapter is compared against.
     #[serde(default)]
-    pub(in crate::serve) adapter: Option<String>,
+    pub(in crate::request) adapter: Option<String>,
     #[serde(default = "default_max_sequence")]
-    pub(in crate::serve) max_sequence: usize,
+    pub(in crate::request) max_sequence: usize,
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_batch_size")]
-    pub(in crate::serve) batch_size: usize,
+    pub(in crate::request) batch_size: usize,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for TuneEvaluateRequest {
@@ -278,9 +278,9 @@ impl Validate for TuneEvaluateRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct TuneInspectRequest {
+pub(in crate::request) struct TuneInspectRequest {
     #[serde(default)]
-    pub(in crate::serve) artifact: String,
+    pub(in crate::request) artifact: String,
 }
 
 impl Validate for TuneInspectRequest {

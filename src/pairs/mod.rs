@@ -17,7 +17,7 @@
 //!   roles and only the writer may be hosted.
 //!
 //! Both are the single implementation behind the CLI arms and the
-//! `/v1/pairs/*` serve endpoints.
+//! `pairs/*` operations of `ster request`.
 
 pub mod quality;
 

@@ -1,6 +1,6 @@
 //! The four training arms of `ster tune`. Each objective owns its own flags
 //! and its own arm; all of them go through the same `tune` and `lora`
-//! functions the serve endpoints call and print one pretty JSON document.
+//! functions `ster request` calls and print one pretty JSON document.
 
 mod decide;
 mod dpo;

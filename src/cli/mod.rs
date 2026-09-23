@@ -69,7 +69,13 @@ pub(crate) fn run() -> Result<()> {
         Command::Workspace { command } => workspace::run(command),
         Command::Pairs { command } => pairs::run(command),
         Command::Tune { command } => tune::run(command),
-        Command::Serve { port } => ster::serve::run(port),
+        Command::Request { operation } => {
+            let status = ster::request::run(&operation)?;
+            if status != 0 {
+                std::process::exit(status);
+            }
+            Ok(())
+        }
     }
 }
 

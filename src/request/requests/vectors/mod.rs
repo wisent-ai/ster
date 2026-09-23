@@ -1,4 +1,4 @@
-//! The steering endpoints' requests: training a direction, choosing one,
+//! The steering operations' requests: training a direction, choosing one,
 //! scoring one, generating with one, and reading raw representations.
 
 use serde::Deserialize;
@@ -8,28 +8,28 @@ use super::{require, ModelRequest, Validate};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct TrainRequest {
+pub(in crate::request) struct TrainRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     #[serde(default)]
-    pub(in crate::serve) pairs: String,
+    pub(in crate::request) pairs: String,
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
     #[serde(default = "default_layers")]
-    pub(in crate::serve) layers: String,
+    pub(in crate::request) layers: String,
     #[serde(default = "default_method")]
-    pub(in crate::serve) method: String,
+    pub(in crate::request) method: String,
     /// `auto` reads every pair through the model's own chat template when it
     /// publishes one, `off` reads it as raw text. A direction is fitted in
     /// whatever space the pairs were read in and added in whatever space
     /// generation runs in.
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     /// The dtype the base weights are mapped at: `f32`, `f16`, or `bf16`. A
     /// direction is fitted in whatever space the prompts were read in, so two
     /// artifacts trained at different precisions are not interchangeable.
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for TrainRequest {
@@ -42,19 +42,19 @@ impl Validate for TrainRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct OptimizeRequest {
+pub(in crate::request) struct OptimizeRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     #[serde(default)]
-    pub(in crate::serve) pairs: String,
+    pub(in crate::request) pairs: String,
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
     #[serde(default = "default_layers")]
-    pub(in crate::serve) layers: String,
+    pub(in crate::request) layers: String,
 }
 
 impl Validate for OptimizeRequest {
@@ -67,19 +67,19 @@ impl Validate for OptimizeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct EvaluateRequest {
+pub(in crate::request) struct EvaluateRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     #[serde(default)]
-    pub(in crate::serve) pairs: String,
+    pub(in crate::request) pairs: String,
     #[serde(default)]
-    pub(in crate::serve) vector: String,
+    pub(in crate::request) vector: String,
     /// It should match the run that trained the artifact for the same reason
     /// `precision` should.
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for EvaluateRequest {
@@ -92,34 +92,34 @@ impl Validate for EvaluateRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct GenerateRequest {
+pub(in crate::request) struct GenerateRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     #[serde(default)]
-    pub(in crate::serve) prompt: String,
+    pub(in crate::request) prompt: String,
     #[serde(default)]
-    pub(in crate::serve) vector: Option<String>,
+    pub(in crate::request) vector: Option<String>,
     /// A frozen LoRA adapter artifact trained for this exact model. Ster
     /// refuses a mismatch rather than steering the wrong residual stream.
     #[serde(default)]
-    pub(in crate::serve) adapter: Option<String>,
+    pub(in crate::request) adapter: Option<String>,
     #[serde(default = "default_strength")]
-    pub(in crate::serve) strength: f64,
+    pub(in crate::request) strength: f64,
     #[serde(default = "default_max_new_tokens")]
-    pub(in crate::serve) max_new_tokens: usize,
+    pub(in crate::request) max_new_tokens: usize,
     #[serde(default)]
-    pub(in crate::serve) temperature: f64,
+    pub(in crate::request) temperature: f64,
     #[serde(default)]
-    pub(in crate::serve) top_p: Option<f64>,
+    pub(in crate::request) top_p: Option<f64>,
     #[serde(default = "default_seed")]
-    pub(in crate::serve) seed: u64,
+    pub(in crate::request) seed: u64,
     /// `auto` renders the prompt through the model's own chat template when
     /// it publishes one, `off` sends raw text. An instruct checkpoint handed
     /// a bare prompt continues it instead of answering it.
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for GenerateRequest {
@@ -131,19 +131,19 @@ impl Validate for GenerateRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct ExtractRequest {
+pub(in crate::request) struct ExtractRequest {
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     #[serde(default)]
-    pub(in crate::serve) input: String,
+    pub(in crate::request) input: String,
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
     #[serde(default = "default_layers")]
-    pub(in crate::serve) layers: String,
+    pub(in crate::request) layers: String,
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
 }
 
 impl Validate for ExtractRequest {
@@ -156,9 +156,9 @@ impl Validate for ExtractRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct InspectRequest {
+pub(in crate::request) struct InspectRequest {
     #[serde(default)]
-    pub(in crate::serve) artifact: String,
+    pub(in crate::request) artifact: String,
 }
 
 impl Validate for InspectRequest {

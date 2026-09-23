@@ -1,4 +1,4 @@
-//! The pair-authoring endpoints' requests: importing a set into the
+//! The pair-authoring operations' requests: importing a set into the
 //! workspace, auditing one, saving one, and writing one with a model.
 
 use serde::Deserialize;
@@ -9,11 +9,11 @@ use super::{require, ModelRequest, Validate};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(in crate::serve) struct WorkspaceImportPairsRequest {
+pub(in crate::request) struct WorkspaceImportPairsRequest {
     #[serde(default)]
-    pub(in crate::serve) source: String,
+    pub(in crate::request) source: String,
     #[serde(default)]
-    pub(in crate::serve) name: Option<String>,
+    pub(in crate::request) name: Option<String>,
 }
 
 impl Validate for WorkspaceImportPairsRequest {
@@ -27,15 +27,15 @@ impl Validate for WorkspaceImportPairsRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct PairsInspectRequest {
+pub(in crate::request) struct PairsInspectRequest {
     #[serde(default)]
-    pub(in crate::serve) pairs: String,
+    pub(in crate::request) pairs: String,
     #[serde(default = "default_dedupe_bits")]
-    pub(in crate::serve) dedupe_bits: u32,
+    pub(in crate::request) dedupe_bits: u32,
     #[serde(default = "default_dedupe_bands")]
-    pub(in crate::serve) dedupe_bands: u32,
+    pub(in crate::request) dedupe_bands: u32,
     #[serde(default = "default_refusal_threshold")]
-    pub(in crate::serve) refusal_threshold: f32,
+    pub(in crate::request) refusal_threshold: f32,
 }
 
 impl Validate for PairsInspectRequest {
@@ -46,22 +46,22 @@ impl Validate for PairsInspectRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct PairsSaveEntry {
+pub(in crate::request) struct PairsSaveEntry {
     #[serde(default)]
-    pub(in crate::serve) positive: String,
+    pub(in crate::request) positive: String,
     #[serde(default)]
-    pub(in crate::serve) negative: String,
+    pub(in crate::request) negative: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct PairsSaveRequest {
+pub(in crate::request) struct PairsSaveRequest {
     #[serde(default)]
-    pub(in crate::serve) path: String,
+    pub(in crate::request) path: String,
     #[serde(default)]
-    pub(in crate::serve) trait_name: String,
+    pub(in crate::request) trait_name: String,
     #[serde(default)]
-    pub(in crate::serve) entries: Vec<PairsSaveEntry>,
+    pub(in crate::request) entries: Vec<PairsSaveEntry>,
 }
 
 impl Validate for PairsSaveRequest {
@@ -76,50 +76,50 @@ impl Validate for PairsSaveRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(in crate::serve) struct PairsSynthesizeRequest {
+pub(in crate::request) struct PairsSynthesizeRequest {
     /// Which model writes the pairs: local or brama. The model, revision and
     /// device below belong to the local route only; a brama body omits them.
     #[serde(default = "default_generator")]
-    pub(in crate::serve) generator: String,
+    pub(in crate::request) generator: String,
     #[serde(default)]
-    pub(in crate::serve) generator_model: Option<String>,
+    pub(in crate::request) generator_model: Option<String>,
     #[serde(flatten)]
-    pub(in crate::serve) model: ModelRequest,
+    pub(in crate::request) model: ModelRequest,
     #[serde(default, rename = "trait")]
-    pub(in crate::serve) trait_description: String,
+    pub(in crate::request) trait_description: String,
     #[serde(default)]
-    pub(in crate::serve) trait_name: String,
+    pub(in crate::request) trait_name: String,
     #[serde(default)]
-    pub(in crate::serve) opposite: Option<String>,
+    pub(in crate::request) opposite: Option<String>,
     /// The dtype the local generator's base weights are mapped at. Ignored by
     /// the `brama` route, which loads no weights.
     #[serde(default = "default_precision")]
-    pub(in crate::serve) precision: String,
+    pub(in crate::request) precision: String,
     /// `auto` asks the local generator through the model's own chat template
     /// when it publishes one. Ignored by the `brama` route, which is already
     /// a chat API.
     #[serde(default = "default_chat_template")]
-    pub(in crate::serve) chat_template: String,
+    pub(in crate::request) chat_template: String,
     #[serde(default)]
-    pub(in crate::serve) count: usize,
+    pub(in crate::request) count: usize,
     #[serde(default)]
-    pub(in crate::serve) output: String,
+    pub(in crate::request) output: String,
     #[serde(default = "default_retry_multiplier")]
-    pub(in crate::serve) retry_multiplier: usize,
+    pub(in crate::request) retry_multiplier: usize,
     #[serde(default = "default_dedupe_bits")]
-    pub(in crate::serve) dedupe_bits: u32,
+    pub(in crate::request) dedupe_bits: u32,
     #[serde(default = "default_dedupe_bands")]
-    pub(in crate::serve) dedupe_bands: u32,
+    pub(in crate::request) dedupe_bands: u32,
     #[serde(default = "default_refusal_threshold")]
-    pub(in crate::serve) refusal_threshold: f32,
+    pub(in crate::request) refusal_threshold: f32,
     #[serde(default = "default_synthesis_max_new_tokens")]
-    pub(in crate::serve) max_new_tokens: usize,
+    pub(in crate::request) max_new_tokens: usize,
     #[serde(default = "default_synthesis_temperature")]
-    pub(in crate::serve) temperature: f64,
+    pub(in crate::request) temperature: f64,
     #[serde(default = "default_top_p")]
-    pub(in crate::serve) top_p: f64,
+    pub(in crate::request) top_p: f64,
     #[serde(default = "default_seed")]
-    pub(in crate::serve) seed: u64,
+    pub(in crate::request) seed: u64,
 }
 
 impl Validate for PairsSynthesizeRequest {

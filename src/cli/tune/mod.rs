@@ -1,6 +1,6 @@
 //! `ster tune`: training adapters and working with the ones already trained.
-//! The arms go through the same `tune` and `lora` functions the serve
-//! endpoints call and print one pretty JSON document each.
+//! The arms go through the same `tune` and `lora` functions `ster request`
+//! calls and print one pretty JSON document each.
 
 use anyhow::{bail, Context, Result};
 use serde_json::json;

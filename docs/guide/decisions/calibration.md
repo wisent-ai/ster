@@ -11,9 +11,9 @@ ster calibrate --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
                [--precision f32|f16|bf16] [--permutations 0]
 ```
 
-It writes the artifact to `--output`, prints it, and is also the streamed
-NDJSON job `POST /v1/calibrate` on the `ster serve` backend, with `examples`
-and `output` as paths in the request body.
+It writes the artifact to `--output`, prints it, and is also the operation
+`ster request calibrate`, with `examples` and `output` as paths in the request
+body ([desktop requests](../desktop-requests.md)).
 
 ## What is fitted
 
@@ -102,8 +102,9 @@ Error: calibration calibration.json was fitted for model 'HuggingFaceTB/SmolLM2-
 
 ## Refusals
 
-All exit `1` with `Error:` and the sentence, before the checkpoint loads; the
-serve backend returns the same sentence as a `400` body.
+All exit `1` with `Error:` and the sentence, before the checkpoint loads;
+`ster request calibrate` ends with the same sentence as its last log event and
+a status-`1` result.
 
 A labelled set:
 

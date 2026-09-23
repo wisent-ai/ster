@@ -36,12 +36,14 @@ exactly as it does under `ster tune`, and `--method` names the estimator
 `train` fits: contrastive activation addition, the leading principal
 direction, or a logistic probe. `--chat-template` and `--precision` are on
 every one of these commands except `inspect`, which loads no model. Each
-command prints a pretty JSON document on stdout, and each is also a streamed
-NDJSON job on the `ster serve` backend — `POST /v1/train`, `POST /v1/optimize`,
-`POST /v1/evaluate`, `POST /v1/generate`, `POST /v1/extract` and
-`POST /v1/inspect` — where every flag above is a camelCase field of the request
-body, `chatTemplate` and `precision` included, each defaulting to what the CLI
-defaults to.
+command prints a pretty JSON document on stdout, and each is also an operation
+of `ster request`: `ster request train`, `ster request optimize`,
+`ster request evaluate`, `ster request generate`, `ster request extract` and
+`ster request inspect` read the request body as one JSON document on stdin,
+where every flag above is a camelCase field, `chatTemplate` and `precision`
+included, each defaulting to what the CLI defaults to, and print NDJSON log
+events and one result event carrying the same document. The process ends with
+the operation; see [desktop requests](desktop-requests.md).
 
 ## Selection
 

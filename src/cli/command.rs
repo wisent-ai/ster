@@ -55,10 +55,14 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: TuneCommand,
     },
-    /// Loopback HTTP/JSON backend for desktop apps.
-    Serve {
-        /// Port to bind; 0 selects an ephemeral port.
-        #[arg(long, default_value_t = 0)]
-        port: u16,
+    /// Run one JSON request from a desktop app to completion: the body on
+    /// stdin, NDJSON log events and one result event on stdout, and the
+    /// result's status as the exit status.
+    Request {
+        /// The operation: train, optimize, evaluate, generate, extract,
+        /// inspect, decide, calibrate, workspace/import-pairs, pairs/inspect,
+        /// pairs/save, pairs/synthesize, or tune/sft, tune/dpo, tune/reward,
+        /// tune/grpo, tune/merge, tune/evaluate, tune/inspect.
+        operation: String,
     },
 }
