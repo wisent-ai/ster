@@ -8,15 +8,14 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 use crate::{
+    tune as tune_lib,
     workflow::{self, parse_layers},
-    tune as tune_lib, ChatChoice, DeviceChoice, GenerationOptions, PairSet, Precision,
-    Runtime,
-    SteeringArtifact, TrainingMethod,
+    ChatChoice, DeviceChoice, GenerationOptions, PairSet, Precision, Runtime, SteeringArtifact,
+    TrainingMethod,
 };
 
 use super::requests::{
-    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest,
-    TrainRequest,
+    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest, TrainRequest,
 };
 
 mod decide;
@@ -26,7 +25,8 @@ mod tune;
 pub(super) use decide::{calibrate_job, decide_job};
 
 pub(super) use pairs::{
-    pairs_inspect_job, pairs_save_job, pairs_synthesize_job, workspace_import_pairs_job,
+    pairs_import_job, pairs_inspect_job, pairs_save_job, pairs_synthesize_job,
+    workspace_import_pairs_job,
 };
 pub(super) use tune::{
     tune_dpo_job, tune_evaluate_job, tune_grpo_job, tune_inspect_job, tune_merge_job,
@@ -79,12 +79,21 @@ pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value
     // already refused this early because it is attached during the load; a
     // steering vector was not, and the wrong file there paid for a full
     // checkpoint load before being told.
-    let vector = request.vector.as_deref().filter(|value| !value.trim().is_empty());
-    let artifact = vector.map(|value| SteeringArtifact::load(Path::new(value))).transpose()?;
+    let vector = request
+        .vector
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let artifact = vector
+        .map(|value| SteeringArtifact::load(Path::new(value)))
+        .transpose()?;
     // An adapter rewrites the projections themselves, so it is attached while
     // the weights are mapped rather than applied per token the way a steering
     // vector is.
-    let mut runtime = match request.adapter.as_deref().filter(|value| !value.trim().is_empty()) {
+    let mut runtime = match request
+        .adapter
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         Some(adapter) => Runtime::load_with_adapter_at(
             &request.model.model,
             request.model.revision.as_deref(),
@@ -127,4 +136,3 @@ pub(in crate::request) fn inspect_job(request: InspectRequest) -> Result<Value> 
         .with_context(|| format!("failed to inspect {}", request.artifact))?;
     Ok(workflow::artifact_summary(&artifact))
 }
-

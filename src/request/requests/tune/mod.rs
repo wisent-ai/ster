@@ -54,7 +54,10 @@ pub(in crate::request) struct TuneSftRequest {
 impl Validate for TuneSftRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("tune sft")?;
-        require(&self.examples, "tune sft requires an example set".to_owned())?;
+        require(
+            &self.examples,
+            "tune sft requires an example set".to_owned(),
+        )?;
         require(&self.output, "tune sft requires an output path".to_owned())
     }
 }
@@ -156,7 +159,10 @@ impl Validate for TuneRewardRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("tune reward")?;
         require(&self.pairs, "tune reward requires a pairs file".to_owned())?;
-        require(&self.output, "tune reward requires an output path".to_owned())
+        require(
+            &self.output,
+            "tune reward requires an output path".to_owned(),
+        )
     }
 }
 
@@ -217,7 +223,10 @@ impl Validate for TuneGrpoRequest {
         self.model.check("tune grpo")?;
         require(&self.prompts, "tune grpo requires a prompt set".to_owned())?;
         require(&self.output, "tune grpo requires an output path".to_owned())?;
-        require(&self.reward, "tune grpo requires a reward source".to_owned())
+        require(
+            &self.reward,
+            "tune grpo requires a reward source".to_owned(),
+        )
     }
 }
 
@@ -244,7 +253,10 @@ impl Validate for TuneMergeRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("tune merge")?;
         require(&self.adapter, "tune merge requires an adapter".to_owned())?;
-        require(&self.output, "tune merge requires an output directory".to_owned())
+        require(
+            &self.output,
+            "tune merge requires an output directory".to_owned(),
+        )
     }
 }
 
@@ -272,7 +284,10 @@ pub(in crate::request) struct TuneEvaluateRequest {
 impl Validate for TuneEvaluateRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("tune evaluate")?;
-        require(&self.examples, "tune evaluate requires an example set".to_owned())
+        require(
+            &self.examples,
+            "tune evaluate requires an example set".to_owned(),
+        )
     }
 }
 
@@ -285,6 +300,9 @@ pub(in crate::request) struct TuneInspectRequest {
 
 impl Validate for TuneInspectRequest {
     fn validate(&self) -> Result<(), String> {
-        require(&self.artifact, "tune inspect requires an adapter artifact".to_owned())
+        require(
+            &self.artifact,
+            "tune inspect requires an adapter artifact".to_owned(),
+        )
     }
 }

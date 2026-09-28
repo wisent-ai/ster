@@ -72,6 +72,7 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
         "inspect" => run_job(body, inspect_job),
         "decide" => run_job(body, decide_job),
         "calibrate" => run_job(body, calibrate_job),
+        "pairs/import" => run_job(body, pairs_import_job),
         "pairs/inspect" => run_job(body, pairs_inspect_job),
         "pairs/save" => run_job(body, pairs_save_job),
         "pairs/synthesize" => run_job(body, pairs_synthesize_job),

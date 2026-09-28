@@ -185,4 +185,3 @@ pub(super) fn default_grpo_max_new_tokens() -> usize {
 pub(super) fn default_grpo_temperature() -> f64 {
     0.9
 }
-

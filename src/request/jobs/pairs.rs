@@ -8,22 +8,41 @@ use std::path::Path;
 
 use crate::{
     brama,
-    pairs::{self, quality::dedupe::DedupeOptions, InspectOptions, SynthesisOptions},
     pairs::quality::diversity::DEFAULT_MAX_SAMPLE,
+    pairs::{self, quality::dedupe::DedupeOptions, InspectOptions, SynthesisOptions},
     ChatChoice, ContrastivePair, GenerationOptions, PairSet,
-
 };
 
 use super::super::requests::{
-    PairsInspectRequest, PairsSaveRequest, PairsSynthesizeRequest, WorkspaceImportPairsRequest,
+    PairsImportRequest, PairsInspectRequest, PairsSaveRequest, PairsSynthesizeRequest,
+    WorkspaceImportPairsRequest,
 };
 
-pub(in crate::request) fn workspace_import_pairs_job(request: WorkspaceImportPairsRequest) -> Result<Value> {
-    let report = crate::workspace::import_pair_set(
-        Path::new(&request.source),
-        request.name.as_deref(),
-    )?;
+pub(in crate::request) fn workspace_import_pairs_job(
+    request: WorkspaceImportPairsRequest,
+) -> Result<Value> {
+    let report =
+        crate::workspace::import_pair_set(Path::new(&request.source), request.name.as_deref())?;
     Ok(serde_json::to_value(report)?)
+}
+
+/// A benchmark export read into a pair set by the same `pairs::benchmark`
+/// the `ster pairs import` command runs; `report.skipped` names every row
+/// that could not become a pair.
+pub(in crate::request) fn pairs_import_job(request: PairsImportRequest) -> Result<Value> {
+    let options = pairs::benchmark::ImportOptions {
+        benchmark: pairs::benchmark::Benchmark::parse(&request.benchmark)?,
+        trait_name: request
+            .trait_name
+            .unwrap_or_else(|| request.benchmark.clone()),
+        source: request.source.into(),
+        examples: request.examples.map(Into::into),
+        count: request.count,
+        seed: request.seed,
+    };
+    let (set, report) = pairs::benchmark::import(&options)?;
+    set.save(Path::new(&request.output))?;
+    Ok(json!({"output": request.output, "trait_name": set.trait_name, "report": report}))
 }
 
 pub(in crate::request) fn pairs_inspect_job(request: PairsInspectRequest) -> Result<Value> {
@@ -50,7 +69,10 @@ pub(in crate::request) fn pairs_save_job(request: PairsSaveRequest) -> Result<Va
         pairs: request
             .entries
             .into_iter()
-            .map(|entry| ContrastivePair { positive: entry.positive, negative: entry.negative })
+            .map(|entry| ContrastivePair {
+                positive: entry.positive,
+                negative: entry.negative,
+            })
             .collect(),
     };
     pair_set.save(Path::new(&request.path))?;

@@ -65,7 +65,10 @@ pub(in crate::request) struct CalibrateRequest {
 impl Validate for CalibrateRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("calibrate")?;
-        require(&self.examples, "calibrate requires an examples path".to_owned())?;
+        require(
+            &self.examples,
+            "calibrate requires an examples path".to_owned(),
+        )?;
         require(&self.output, "calibrate requires an output path".to_owned())
     }
 }

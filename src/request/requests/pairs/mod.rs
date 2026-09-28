@@ -6,7 +6,6 @@ use serde::Deserialize;
 use super::defaults::*;
 use super::{require, ModelRequest, Validate};
 
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(in crate::request) struct WorkspaceImportPairsRequest {
@@ -40,7 +39,10 @@ pub(in crate::request) struct PairsInspectRequest {
 
 impl Validate for PairsInspectRequest {
     fn validate(&self) -> Result<(), String> {
-        require(&self.pairs, "pairs inspect requires a pairs file".to_owned())
+        require(
+            &self.pairs,
+            "pairs inspect requires a pairs file".to_owned(),
+        )
     }
 }
 
@@ -138,10 +140,49 @@ impl Validate for PairsSynthesizeRequest {
             &self.trait_description,
             "pairs synthesize requires a trait description".to_owned(),
         )?;
-        require(&self.output, "pairs synthesize requires an output path".to_owned())?;
+        require(
+            &self.output,
+            "pairs synthesize requires an output path".to_owned(),
+        )?;
         if self.count == 0 {
             return Err("pairs synthesize requires a pair count above zero".to_owned());
         }
         Ok(())
+    }
+}
+
+/// A pair set read from a benchmark export: the same fields as
+/// `ster pairs import`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(in crate::request) struct PairsImportRequest {
+    #[serde(default)]
+    pub(in crate::request) benchmark: String,
+    #[serde(default)]
+    pub(in crate::request) source: String,
+    #[serde(default)]
+    pub(in crate::request) examples: Option<String>,
+    #[serde(default)]
+    pub(in crate::request) count: Option<usize>,
+    #[serde(default = "default_seed")]
+    pub(in crate::request) seed: u64,
+    #[serde(default)]
+    pub(in crate::request) trait_name: Option<String>,
+    #[serde(default)]
+    pub(in crate::request) output: String,
+}
+
+impl Validate for PairsImportRequest {
+    fn validate(&self) -> Result<(), String> {
+        crate::pairs::benchmark::Benchmark::parse(&self.benchmark)
+            .map_err(|error| error.to_string())?;
+        require(
+            &self.source,
+            "pairs import requires a source export".to_owned(),
+        )?;
+        require(
+            &self.output,
+            "pairs import requires an output path".to_owned(),
+        )
     }
 }

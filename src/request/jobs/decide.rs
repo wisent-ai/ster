@@ -35,8 +35,12 @@ pub(in crate::request) fn decide_job(request: DecideRequest) -> Result<Value> {
         options.temperature = loaded.temperature;
     }
     runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
-    let response =
-        decide::decide(&runtime, &document, options, calibration.as_ref().map(|(path, _)| *path))?;
+    let response = decide::decide(
+        &runtime,
+        &document,
+        options,
+        calibration.as_ref().map(|(path, _)| *path),
+    )?;
     Ok(serde_json::to_value(response)?)
 }
 

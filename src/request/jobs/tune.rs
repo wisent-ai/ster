@@ -8,11 +8,9 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 use crate::{
-    lora, tune, ChatChoice, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet,
-    GrpoOptions, Precision, Reward, Runtime,
-    workflow::parse_layers, GenerationOptions, PairSet, PromptSet, RewardHead, RewardOptions,
-    SftOptions,
-
+    lora, tune, workflow::parse_layers, ChatChoice, DeviceChoice, DpoLoss, DpoOptions,
+    EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions, PairSet, Precision, PromptSet,
+    Reward, RewardHead, RewardOptions, Runtime, SftOptions,
 };
 
 use super::super::requests::note_precision;
@@ -135,8 +133,12 @@ pub(in crate::request) fn tune_reward_job(request: TuneRewardRequest) -> Result<
     // The head is registered at the parameter dtype, never the base dtype: a
     // scalar head is exactly the small trained weight that rounds away in
     // half precision.
-    let head =
-        RewardHead::fresh(&varmap, runtime.hidden_size(), runtime.device(), runtime.param_dtype())?;
+    let head = RewardHead::fresh(
+        &varmap,
+        runtime.hidden_size(),
+        runtime.device(),
+        runtime.param_dtype(),
+    )?;
     let pairs = PairSet::load(Path::new(&request.pairs))?;
     let options = RewardOptions {
         spec: spec.clone(),
@@ -202,7 +204,14 @@ pub(in crate::request) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Valu
             seed: request.seed,
         },
     };
-    let report = tune::grpo(&runtime, &varmap, &prompts, &source, &request.reward, &options)?;
+    let report = tune::grpo(
+        &runtime,
+        &varmap,
+        &prompts,
+        &source,
+        &request.reward,
+        &options,
+    )?;
     // The report is folded into the artifact so a trained adapter always
     // carries the run that produced it.
     let mut report = serde_json::to_value(&report)?;
@@ -228,7 +237,10 @@ pub(in crate::request) fn tune_merge_job(request: TuneMergeRequest) -> Result<Va
 /// Mirrors the `ster tune evaluate` arm: no optimizer, no artifact written,
 /// and the same document the CLI prints.
 pub(in crate::request) fn tune_evaluate_job(request: TuneEvaluateRequest) -> Result<Value> {
-    let adapter = request.adapter.as_deref().filter(|value| !value.trim().is_empty());
+    let adapter = request
+        .adapter
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
     let precision = Precision::parse(&request.precision)?;
     let mut runtime = match adapter {
         Some(adapter) => Runtime::load_with_adapter_at(
@@ -251,7 +263,10 @@ pub(in crate::request) fn tune_evaluate_job(request: TuneEvaluateRequest) -> Res
         &runtime,
         &examples,
         adapter.map(Path::new),
-        &EvaluateOptions { max_sequence: request.max_sequence, batch: request.batch_size },
+        &EvaluateOptions {
+            max_sequence: request.max_sequence,
+            batch: request.batch_size,
+        },
     )?;
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
@@ -271,7 +286,11 @@ pub(in crate::request) fn tune_inspect_job(request: TuneInspectRequest) -> Resul
 /// on the CLI. Repeats collapse and the order follows the request.
 fn parse_targets(value: &str) -> Result<Vec<lora::Target>> {
     let mut targets = Vec::new();
-    for segment in value.split(',').map(str::trim).filter(|segment| !segment.is_empty()) {
+    for segment in value
+        .split(',')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+    {
         let target = lora::Target::parse(segment)?;
         if !targets.contains(&target) {
             targets.push(target);

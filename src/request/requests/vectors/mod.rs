@@ -86,7 +86,10 @@ impl Validate for EvaluateRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("evaluate")?;
         require(&self.pairs, "evaluate requires a pairs file".to_owned())?;
-        require(&self.vector, "evaluate requires a steering artifact".to_owned())
+        require(
+            &self.vector,
+            "evaluate requires a steering artifact".to_owned(),
+        )
     }
 }
 
@@ -149,7 +152,10 @@ pub(in crate::request) struct ExtractRequest {
 impl Validate for ExtractRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("extract")?;
-        require(&self.input, "extract requires a prompt input file".to_owned())?;
+        require(
+            &self.input,
+            "extract requires a prompt input file".to_owned(),
+        )?;
         require(&self.output, "extract requires an output path".to_owned())
     }
 }
@@ -163,6 +169,9 @@ pub(in crate::request) struct InspectRequest {
 
 impl Validate for InspectRequest {
     fn validate(&self) -> Result<(), String> {
-        require(&self.artifact, "inspect requires a steering artifact".to_owned())
+        require(
+            &self.artifact,
+            "inspect requires a steering artifact".to_owned(),
+        )
     }
 }

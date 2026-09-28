@@ -23,15 +23,15 @@ mod vectors;
 
 pub(super) use decide::{CalibrateRequest, DecideRequest};
 pub(super) use pairs::{
-    PairsInspectRequest, PairsSaveRequest, PairsSynthesizeRequest, WorkspaceImportPairsRequest,
+    PairsImportRequest, PairsInspectRequest, PairsSaveRequest, PairsSynthesizeRequest,
+    WorkspaceImportPairsRequest,
 };
 pub(super) use tune::{
     TuneDpoRequest, TuneEvaluateRequest, TuneGrpoRequest, TuneInspectRequest, TuneMergeRequest,
     TuneRewardRequest, TuneSftRequest,
 };
 pub(super) use vectors::{
-    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest,
-    TrainRequest,
+    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest, TrainRequest,
 };
 
 /// Field-level validation before a job starts streaming. The message is the
