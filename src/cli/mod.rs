@@ -14,6 +14,7 @@ mod decisions;
 mod onboarding;
 mod pairs;
 mod tune;
+mod toy;
 mod vectors;
 mod workspace;
 
@@ -69,6 +70,7 @@ pub(crate) fn run() -> Result<()> {
         Command::Workspace { command } => workspace::run(command),
         Command::Pairs { command } => pairs::run(command),
         Command::Tune { command } => tune::run(command),
+        Command::ToyModel { out } => toy::run(&out),
         Command::Request { operation } => {
             let status = ster::request::run(&operation)?;
             if status != 0 {

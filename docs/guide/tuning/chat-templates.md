@@ -69,7 +69,7 @@ prompts and completions are bare, so the markers come from the template rather
 than from the data:
 
 ```bash
-cp -R path/to/toy-model toy-chat-model
+ster toy-model toy-chat-model
 cp docs/examples/chat-template/tokenizer_config.json toy-chat-model/
 ster tune evaluate --model toy-chat-model --examples docs/examples/tuning/chat-examples.json
 ```

@@ -55,6 +55,13 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: TuneCommand,
     },
+    /// Write a tiny offline Llama-family checkpoint (seeded random weights,
+    /// a ~60-word WordLevel tokenizer) that every command can load with no
+    /// download, GPU or account.
+    ToyModel {
+        #[arg(value_name = "DIR")]
+        out: std::path::PathBuf,
+    },
     /// Run one JSON request from a desktop app to completion: the body on
     /// stdin, NDJSON log events and one result event on stdout, and the
     /// result's status as the exit status.

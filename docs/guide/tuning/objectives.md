@@ -9,7 +9,9 @@ optimization: what each one reads, what it writes, and how a run is read back.
 `--examples` reads `{"examples": [{"prompt": "…", "completion": "…"}]}`, with an
 optional `name`. Eight examples written in the toy checkpoint's own vocabulary
 are checked in as [`docs/examples/tuning/examples.json`](../../examples/tuning/examples.json),
-so a first run needs no download. An example longer than `--max-sequence`
+so a first run needs no download: `ster toy-model <DIR>` writes that checkpoint
+(a four-layer grouped-query Llama shape with seeded random weights and a
+WordLevel tokenizer over the same vocabulary). An example longer than `--max-sequence`
 tokens is skipped because a cut completion would teach the model to stop early.
 
 The objective is next-token cross-entropy over the completion tokens only. For a
