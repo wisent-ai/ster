@@ -1,16 +1,15 @@
-//! Running the adapter-training operations, and the two flag parsers their
-//! requests share.
+//! Running the adapter-training operations.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use candle_core::Device;
 use serde_json::{json, Value};
 
 use std::path::Path;
 
 use crate::{
-    lora, tune, workflow::parse_layers, ChatChoice, DeviceChoice, DpoLoss, DpoOptions,
-    EvaluateOptions, ExampleSet, GenerationOptions, GrpoOptions, PairSet, Precision, PromptSet,
-    Reward, RewardHead, RewardOptions, Runtime, SftOptions,
+    lora, tune, ChatChoice, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet,
+    GenerationOptions, GrpoOptions, PairSet, Precision, PromptSet, Reward, RewardHead,
+    RewardOptions, Runtime, SftOptions,
 };
 
 use super::super::requests::note_precision;
@@ -18,6 +17,7 @@ use super::super::requests::{
     TuneDpoRequest, TuneEvaluateRequest, TuneGrpoRequest, TuneInspectRequest, TuneMergeRequest,
     TuneRewardRequest, TuneSftRequest,
 };
+use super::tune_flags::{parse_adapter_layers, parse_targets};
 
 /// Mirrors the `ster tune sft` arm: same spec, same `tune::sft`, and the
 /// progress lines the trainer writes reach the desktop over the job stream.
@@ -280,37 +280,4 @@ pub(in crate::request) fn tune_inspect_job(request: TuneInspectRequest) -> Resul
     let artifact = lora::Artifact::load(Path::new(&request.artifact), &Device::Cpu)
         .with_context(|| format!("failed to inspect {}", request.artifact))?;
     Ok(tune::inspect(&artifact))
-}
-
-/// `targets` is a comma-separated projection list, exactly as `--targets` is
-/// on the CLI. Repeats collapse and the order follows the request.
-fn parse_targets(value: &str) -> Result<Vec<lora::Target>> {
-    let mut targets = Vec::new();
-    for segment in value
-        .split(',')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-    {
-        let target = lora::Target::parse(segment)?;
-        if !targets.contains(&target) {
-            targets.push(target);
-        }
-    }
-    if targets.is_empty() {
-        bail!("no targets selected");
-    }
-    Ok(targets)
-}
-
-/// `layers` means what it means everywhere else in Ster, with one difference:
-/// `all` cannot be expanded yet. `parse_layers` needs the model's layer count,
-/// and the count is only known once the weights are mapped — which happens
-/// inside `Runtime::load_trainable`, after the spec exists. An empty layer
-/// list is the spec's way of saying every layer, and the loader resolves it
-/// against the real count before it builds any adapter.
-fn parse_adapter_layers(value: &str) -> Result<Vec<usize>> {
-    if value.trim() == "all" {
-        return Ok(Vec::new());
-    }
-    parse_layers(value, usize::MAX)
 }

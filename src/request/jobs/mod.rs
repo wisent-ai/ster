@@ -21,6 +21,7 @@ use super::requests::{
 mod decide;
 mod pairs;
 mod tune;
+mod tune_flags;
 
 pub(super) use decide::{calibrate_job, decide_job};
 
