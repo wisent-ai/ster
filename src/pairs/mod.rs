@@ -19,6 +19,7 @@
 //! Both are the single implementation behind the CLI arms and the
 //! `pairs/*` operations of `ster request`.
 
+pub mod benchmark;
 pub mod quality;
 
 mod generator;

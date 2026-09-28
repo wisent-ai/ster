@@ -15,6 +15,8 @@ use ster::{
 
 use super::resolve_pairs;
 
+mod import;
+
 #[derive(Debug, Subcommand)]
 pub(super) enum PairsCommand {
     /// Report duplicates, refusals, length balance, and diversity for a set.
@@ -122,6 +124,8 @@ pub(super) enum PairsCommand {
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
+    /// Write a pair set from a TruthfulQA, Do-Not-Answer or LiveCodeBench export.
+    Import(import::ImportArgs),
 }
 
 
@@ -145,6 +149,7 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
             let report = pairs::inspect(&pair_set, &options)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        PairsCommand::Import(args) => import::run(args)?,
         PairsCommand::Add { pairs: file, positive, negative, trait_name } => {
             // `PairSet::load` refuses a set with no pairs, so the first `add`
             // to a path that does not exist yet builds the set in memory

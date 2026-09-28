@@ -187,6 +187,13 @@ ster pairs synthesize \
   --output pairs.json
 ```
 
+`ster pairs import` reads a published benchmark export (TruthfulQA,
+Do-Not-Answer, LiveCodeBench) into a set:
+
+```bash
+ster pairs import --benchmark truthfulqa --source TruthfulQA_en.csv --count 200 --output pairs.json
+```
+
 Run `ster pairs inspect --pairs pairs.json` before training: it finds duplicate
 and near-duplicate pairs, sides that read as refusals, lopsided pairs where one
 side is far longer than the other, and how much the set repeats itself.

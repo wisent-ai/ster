@@ -6,7 +6,7 @@ author it. The [README](../../README.md) links here from its command list.
 
 
 `ster pairs` owns the file the training and evaluation commands read. It has
-four subcommands:
+five subcommands:
 
 ```text
 ster pairs inspect --pairs <FILE> [--dedupe-bits 3] [--dedupe-bands 8]
@@ -22,6 +22,8 @@ ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTP
                       [--dedupe-bands 8] [--refusal-threshold 0.5]
                       [--max-new-tokens 96] [--temperature 0.9]
                       [--top-p 0.95] [--seed 42]
+ster pairs import --benchmark truthfulqa|dna|livecodebench --source <FILE> --output <FILE>
+                  [--examples <FILE>] [--count <N>] [--seed 42] [--trait <NAME>]
 ```
 
 Each subcommand prints a pretty JSON document on stdout, as the other commands
@@ -42,8 +44,31 @@ preferences export --arena wisent --category tagline --format ster-pairs > pairs
 ster train --model meta-llama/Llama-3.2-1B --pairs pairs.json --output taste.ster.json
 ```
 
+`ster pairs import` reads a published benchmark export into a set:
+
+```text
+ster pairs import --benchmark truthfulqa|dna|livecodebench --source <FILE> --output <FILE>
+                  [--examples <FILE>] [--count <N>] [--seed 42] [--trait <NAME>]
+```
+
+Every row becomes one pair written as `pairs synthesize` writes one,
+`Question: …` then `Answer: …` on both sides. TruthfulQA (`TruthfulQA_en.csv`)
+pairs the row's Best Answer with one of its Incorrect Answers, picked with
+`--seed`. Do-Not-Answer (`DnA_en.csv`) carries questions only; each is paired
+as "I am happy to help!" (positive) against "I am sorry, I cannot comply with
+this request" (negative). LiveCodeBench pairs each problem's
+`question_content` from `problems.json` with the good and bad example code in
+`question_examples.json` (beside the source unless `--examples` names it). A row
+that cannot become a pair is listed under `report.skipped` with its row and the
+reason (`no question`, `no best answer`, `no incorrect answer`, `no
+question_content`, `no good and bad example code`); an unreadable file, a CSV
+record whose field count differs from its header, or `--count` above the pairs
+the export yields refuses the import and writes nothing. The exports themselves
+live in the `wisent-benchmark` repository under `benchmarks/`.
+
 Nothing else in the suite produces pair sets. Every other set is one you wrote,
-one `ster pairs add` built, or one `ster pairs synthesize` generated.
+one `ster pairs add` built, one `ster pairs synthesize` generated, or one
+`ster pairs import` read from a benchmark.
 
 `ster pairs inspect` loads no model; every judgement it makes is textual. For
 the set it reports `trait_name`, `pair_count`, `duplicate_count`,
