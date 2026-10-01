@@ -6,19 +6,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device};
 use candle_nn::{VarBuilder, VarMap};
 use candle_transformers::models::llama::Config;
 use tokenizers::Tokenizer;
 
 use crate::{
-
     chat, lora,
-    model::SteeringLlama,
+    model::{Architecture, SteeringLlama},
 };
 
-use super::{device::Precision, validate_layers, DeviceChoice, Runtime};
+use super::{DeviceChoice, Runtime, device::Precision, validate_layers};
 
 mod checkpoint;
 
@@ -45,7 +44,7 @@ impl Runtime {
     ) -> Result<Self> {
         let base = BaseLoad::resolve(model, revision, device, precision)?;
         let builder = base.builder()?;
-        let model_impl = SteeringLlama::load(builder, base.config.clone())?;
+        let model_impl = SteeringLlama::load(builder, base.config.clone(), base.architecture)?;
         Ok(base.finish(model, model_impl))
     }
 
@@ -75,7 +74,15 @@ impl Runtime {
         adapter: &Path,
         precision: Precision,
     ) -> Result<Self> {
-        Ok(Self::load_artifact_at(model, revision, device, adapter, lora::Kind::Adapter, precision)?.0)
+        Ok(Self::load_artifact_at(
+            model,
+            revision,
+            device,
+            adapter,
+            lora::Kind::Adapter,
+            precision,
+        )?
+        .0)
     }
 
     /// The same load, for an artifact that must be of a stated `kind`, giving
@@ -138,7 +145,12 @@ impl Runtime {
         validate_layers(&artifact.layers, base.config.num_hidden_layers)?;
         let adapters = lora::Adapters::from_artifact(&artifact, &base.device, base.dtype)?;
         let builder = base.builder()?;
-        let model_impl = SteeringLlama::load_with_adapters(builder, base.config.clone(), adapters)?;
+        let model_impl = SteeringLlama::load_with_adapters(
+            builder,
+            base.config.clone(),
+            base.architecture,
+            adapters,
+        )?;
         Ok((base.finish(model, model_impl), artifact))
     }
 
@@ -193,10 +205,14 @@ impl Runtime {
             base.param_dtype,
         )?;
         let builder = base.builder()?;
-        let model_impl = SteeringLlama::load_with_adapters(builder, base.config.clone(), adapters)?;
+        let model_impl = SteeringLlama::load_with_adapters(
+            builder,
+            base.config.clone(),
+            base.architecture,
+            adapters,
+        )?;
         Ok((base.finish(model, model_impl), varmap))
     }
-
 }
 
 /// Everything the three loaders share, held between resolving the checkpoint
@@ -209,6 +225,7 @@ impl Runtime {
 struct BaseLoad {
     tokenizer: Tokenizer,
     config: Config,
+    architecture: Architecture,
     weights: Vec<PathBuf>,
     revision: Option<String>,
     eos_tokens: BTreeSet<u32>,
@@ -232,13 +249,18 @@ impl BaseLoad {
         // single precision whatever the frozen weights are mapped at.
         let param_dtype = DType::F32;
         let source = Checkpoint::resolve(model, revision)?;
-        let (config, eos_tokens) = source.llama_config()?;
+        let (config, architecture, eos_tokens) = source.decoder_config()?;
         let chat = source.chat()?;
-        let tokenizer = Tokenizer::from_file(&source.tokenizer)
-            .map_err(|error| anyhow::anyhow!("failed to load tokenizer {}: {error}", source.tokenizer.display()))?;
+        let tokenizer = Tokenizer::from_file(&source.tokenizer).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to load tokenizer {}: {error}",
+                source.tokenizer.display()
+            )
+        })?;
         Ok(Self {
             tokenizer,
             config,
+            architecture,
             weights: source.weights,
             revision: source.revision,
             eos_tokens,

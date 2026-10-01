@@ -33,7 +33,12 @@ JSON artifacts and native Candle runtime.
 
 Included now:
 
-- local and Hugging Face Llama-family checkpoints published as Safetensors;
+- local and Hugging Face Llama (`model_type` llama) and Qwen3 (`model_type`
+  qwen3, with its per-head query and key norms) checkpoints published as
+  unquantized Safetensors. A quantized checkpoint (one that declares
+  `quantization_config`, such as GPTQ) is refused with the sentence that names
+  it, as is a checkpoint whose attention is not as wide as its residual
+  stream, or whose attention projections carry a bias;
 - CPU execution, with compile-time Metal and CUDA backends;
 - pair-set authoring and inspection for duplicates, refusals, length balance,
   and diversity, with no model loaded;

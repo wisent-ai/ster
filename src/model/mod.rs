@@ -73,7 +73,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use candle_core::{DType, Device, Tensor};
 
 mod attention;
@@ -84,6 +84,19 @@ mod layer;
 pub use cache::Cache;
 pub use decoder::SteeringLlama;
 
+/// What a checkpoint's decoder adds to the Llama shape every Ster model has.
+///
+/// Qwen3 is a Llama decoder with one more normalisation: an RMS norm over
+/// each head's query and key, applied after the projection and before the
+/// rotary embedding, with a learned weight per head dimension
+/// (`self_attn.q_norm`, `self_attn.k_norm`). Everything else — the norms
+/// around each block, the gated feed-forward, grouped-query attention, the
+/// rotary convention — is the same, so it is a flag on one decoder rather
+/// than a second one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Architecture {
+    pub query_key_norm: bool,
+}
 
 /// Whether the forward pass must be differentiable.
 ///
@@ -171,7 +184,11 @@ impl Mode {
     /// point: nothing here is backpropagated, so paying for the composed forms
     /// would buy an autograd tape that is thrown away.
     pub const fn score(route: Route) -> Self {
-        Self { pass: Pass::Inference, route, readout: Readout::EveryPosition }
+        Self {
+            pass: Pass::Inference,
+            route,
+            readout: Readout::EveryPosition,
+        }
     }
 
     /// A reward model's forward: composed kernels, adapters on, and the
@@ -222,7 +239,11 @@ impl SteeringPlan {
         if tensors.is_empty() {
             bail!("steering plan contains no vectors");
         }
-        Ok(Self { vectors: tensors, strength, hidden_size })
+        Ok(Self {
+            vectors: tensors,
+            strength,
+            hidden_size,
+        })
     }
 
     fn vector(&self, layer: usize) -> Option<&Tensor> {
@@ -247,5 +268,3 @@ pub struct ForwardOutput {
     pub hidden: Tensor,
     pub activations: BTreeMap<usize, Vec<f32>>,
 }
-
-

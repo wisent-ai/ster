@@ -3,17 +3,19 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use candle_core::{DType, IndexOp, Tensor};
-use candle_nn::{embedding, linear_no_bias, rms_norm, Embedding, Linear, Module, RmsNorm, VarBuilder};
+use candle_nn::{
+    Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
+};
 use candle_transformers::models::llama::Config;
 
 use crate::lora::Adapters;
 
 use super::{
+    Architecture, Cache, ForwardOutput, Mode, Readout, SteeringPlan,
     attention::padded_causal_mask,
-    layer::{normalize, DecoderLayer},
-    Cache, ForwardOutput, Mode, Readout, SteeringPlan,
+    layer::{DecoderLayer, normalize},
 };
 
 #[derive(Debug, Clone)]
@@ -27,8 +29,17 @@ pub struct SteeringLlama {
 }
 
 impl SteeringLlama {
-    pub fn load(builder: VarBuilder<'_>, config: Config) -> Result<Self> {
-        Ok(Self::load_with_adapters(builder, config, Adapters::default())?)
+    pub fn load(
+        builder: VarBuilder<'_>,
+        config: Config,
+        architecture: Architecture,
+    ) -> Result<Self> {
+        Ok(Self::load_with_adapters(
+            builder,
+            config,
+            architecture,
+            Adapters::default(),
+        )?)
     }
 
     /// Loads the frozen base and attaches `adapters`.
@@ -40,26 +51,43 @@ impl SteeringLlama {
     pub fn load_with_adapters(
         builder: VarBuilder<'_>,
         config: Config,
+        architecture: Architecture,
         adapters: crate::lora::Adapters,
     ) -> candle_core::Result<Self> {
-        let embeddings = embedding(config.vocab_size, config.hidden_size, builder.pp("model.embed_tokens"))?;
+        let embeddings = embedding(
+            config.vocab_size,
+            config.hidden_size,
+            builder.pp("model.embed_tokens"),
+        )?;
         let lm_head = if config.tie_word_embeddings {
             Linear::new(embeddings.embeddings().clone(), None)
         } else {
             linear_no_bias(config.hidden_size, config.vocab_size, builder.pp("lm_head"))?
         };
-        let final_norm = rms_norm(config.hidden_size, config.rms_norm_eps, builder.pp("model.norm"))?;
+        let final_norm = rms_norm(
+            config.hidden_size,
+            config.rms_norm_eps,
+            builder.pp("model.norm"),
+        )?;
         let layers = (0..config.num_hidden_layers)
             .map(|index| {
                 DecoderLayer::load(
                     builder.pp(format!("model.layers.{index}")),
                     &config,
+                    architecture,
                     index,
                     &adapters,
                 )
             })
             .collect::<candle_core::Result<Vec<_>>>()?;
-        Ok(Self { embeddings, layers, final_norm, lm_head, config, adapters })
+        Ok(Self {
+            embeddings,
+            layers,
+            final_norm,
+            lm_head,
+            config,
+            adapters,
+        })
     }
 
     pub fn adapters(&self) -> &crate::lora::Adapters {
@@ -78,7 +106,14 @@ impl SteeringLlama {
         steering: Option<&SteeringPlan>,
         capture_layers: &[usize],
     ) -> Result<ForwardOutput> {
-        Ok(self.forward_pass(tokens, index_pos, cache, steering, capture_layers, Mode::DECODE)?)
+        Ok(self.forward_pass(
+            tokens,
+            index_pos,
+            cache,
+            steering,
+            capture_layers,
+            Mode::DECODE,
+        )?)
     }
 
     /// `mode` picks the kernels, the adapter route and the readout; every
@@ -92,7 +127,15 @@ impl SteeringLlama {
         capture_layers: &[usize],
         mode: Mode,
     ) -> candle_core::Result<ForwardOutput> {
-        self.decode(tokens, index_pos, cache, steering, capture_layers, None, mode)
+        self.decode(
+            tokens,
+            index_pos,
+            cache,
+            steering,
+            capture_layers,
+            None,
+            mode,
+        )
     }
 
     /// A batch of unequal-length sequences in a single pass.
@@ -140,7 +183,10 @@ impl SteeringLlama {
             bail!("a batched forward needs at least one row of at least one token");
         }
         if lengths.len() != batch {
-            bail!("a batched forward got {} lengths for {batch} rows", lengths.len());
+            bail!(
+                "a batched forward got {} lengths for {batch} rows",
+                lengths.len()
+            );
         }
         if cache.use_kv_cache {
             bail!("a batched forward cannot share one key-value cache across rows");
@@ -152,7 +198,9 @@ impl SteeringLlama {
             );
         }
         if matches!(mode.readout, Readout::LastPosition) {
-            bail!("a batched forward cannot read one last position, because every row ends somewhere else");
+            bail!(
+                "a batched forward cannot read one last position, because every row ends somewhere else"
+            );
         }
         for (row, &length) in lengths.iter().enumerate() {
             if length == 0 {
@@ -200,8 +248,7 @@ impl SteeringLlama {
             }
             if let Some(plan) = steering {
                 if let Some(vector) = plan.vector(index) {
-                    let scaled = (vector * plan.strength)?
-                        .reshape((1, 1, plan.hidden_size))?;
+                    let scaled = (vector * plan.strength)?.reshape((1, 1, plan.hidden_size))?;
                     hidden = hidden.broadcast_add(&scaled).map_err(|error| {
                         error.context(format!("failed to apply steering at layer {index}"))
                     })?;
@@ -218,11 +265,17 @@ impl SteeringLlama {
                 let last = hidden.i((.., sequence - 1, ..))?.contiguous()?;
                 Some(self.lm_head.forward(&last)?.to_dtype(DType::F32)?)
             }
-            Readout::EveryPosition => {
-                Some(self.lm_head.forward(&hidden.contiguous()?)?.to_dtype(DType::F32)?)
-            }
+            Readout::EveryPosition => Some(
+                self.lm_head
+                    .forward(&hidden.contiguous()?)?
+                    .to_dtype(DType::F32)?,
+            ),
             Readout::Hidden => None,
         };
-        Ok(ForwardOutput { logits, hidden: hidden.to_dtype(DType::F32)?, activations })
+        Ok(ForwardOutput {
+            logits,
+            hidden: hidden.to_dtype(DType::F32)?,
+            activations,
+        })
     }
 }

@@ -3,12 +3,12 @@
 //! may not see.
 
 use candle_core::{DType, Device, Tensor};
+use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
 use candle_transformers::models::llama::Config;
-use candle_nn::{linear_no_bias, Linear, Module, VarBuilder};
 
 use crate::lora::{Adapter, Adapters, Target};
 
-use super::{Cache, Mode, Pass, Route};
+use super::{Architecture, Cache, Mode, Pass, Route, layer::normalize};
 
 #[derive(Debug, Clone)]
 pub(super) struct Attention {
@@ -20,6 +20,10 @@ pub(super) struct Attention {
     key_adapter: Option<Adapter>,
     value_adapter: Option<Adapter>,
     output_adapter: Option<Adapter>,
+    /// Qwen3's per-head RMS norms on query and key, applied before the
+    /// rotary embedding. `None` on a Llama checkpoint, which has neither.
+    query_norm: Option<RmsNorm>,
+    key_norm: Option<RmsNorm>,
     heads: usize,
     key_value_heads: usize,
     head_dim: usize,
@@ -29,12 +33,30 @@ impl Attention {
     pub(super) fn load(
         builder: VarBuilder<'_>,
         config: &Config,
+        architecture: Architecture,
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
         let input = config.hidden_size;
         let query_width = config.hidden_size;
-        let key_value_width = config.hidden_size / config.num_attention_heads * config.num_key_value_heads;
+        let head_dim = config.hidden_size / config.num_attention_heads;
+        let key_value_width = head_dim * config.num_key_value_heads;
+        let (query_norm, key_norm) = if architecture.query_key_norm {
+            (
+                Some(rms_norm(
+                    head_dim,
+                    config.rms_norm_eps,
+                    builder.pp("q_norm"),
+                )?),
+                Some(rms_norm(
+                    head_dim,
+                    config.rms_norm_eps,
+                    builder.pp("k_norm"),
+                )?),
+            )
+        } else {
+            (None, None)
+        };
         Ok(Self {
             query: linear_no_bias(input, query_width, builder.pp("q_proj"))?,
             key: linear_no_bias(input, key_value_width, builder.pp("k_proj"))?,
@@ -44,9 +66,11 @@ impl Attention {
             key_adapter: adapters.get(layer, Target::Key).cloned(),
             value_adapter: adapters.get(layer, Target::Value).cloned(),
             output_adapter: adapters.get(layer, Target::Output).cloned(),
+            query_norm,
+            key_norm,
             heads: config.num_attention_heads,
             key_value_heads: config.num_key_value_heads,
-            head_dim: config.hidden_size / config.num_attention_heads,
+            head_dim,
         })
     }
 
@@ -68,20 +92,39 @@ impl Attention {
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, hidden_size) = hidden.dims3()?;
         let query = project(&self.query, self.query_adapter.as_ref(), hidden, mode.route)?
-            .reshape((batch, sequence, self.heads, self.head_dim))?
+            .reshape((batch, sequence, self.heads, self.head_dim))?;
+        let query = per_head_norm(self.query_norm.as_ref(), query, mode.pass)?
             .transpose(1, 2)?
             .contiguous()?;
-        let mut key = project(&self.key, self.key_adapter.as_ref(), hidden, mode.route)?
-            .reshape((batch, sequence, self.key_value_heads, self.head_dim))?
+        let key = project(&self.key, self.key_adapter.as_ref(), hidden, mode.route)?.reshape((
+            batch,
+            sequence,
+            self.key_value_heads,
+            self.head_dim,
+        ))?;
+        let mut key = per_head_norm(self.key_norm.as_ref(), key, mode.pass)?
             .transpose(1, 2)?
             .contiguous()?;
         let mut value = project(&self.value, self.value_adapter.as_ref(), hidden, mode.route)?
             .reshape((batch, sequence, self.key_value_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let query =
-            apply_rotary(&query, index_pos, &cache.cos, &cache.sin, cache.weights, mode.pass)?;
-        key = apply_rotary(&key, index_pos, &cache.cos, &cache.sin, cache.weights, mode.pass)?;
+        let query = apply_rotary(
+            &query,
+            index_pos,
+            &cache.cos,
+            &cache.sin,
+            cache.weights,
+            mode.pass,
+        )?;
+        key = apply_rotary(
+            &key,
+            index_pos,
+            &cache.cos,
+            &cache.sin,
+            cache.weights,
+            mode.pass,
+        )?;
         if cache.use_kv_cache {
             if let Some((cached_key, cached_value)) = &cache.kvs[layer] {
                 key = Tensor::cat(&[cached_key, &key], 2)?.contiguous()?;
@@ -110,7 +153,9 @@ impl Attention {
             // already exist, so there is nothing causality would remove.
             None if sequence == 1 => attention,
             None => {
-                let mask = cache.mask(sequence, index_pos)?.broadcast_as(attention.shape())?;
+                let mask = cache
+                    .mask(sequence, index_pos)?
+                    .broadcast_as(attention.shape())?;
                 masked_fill(&attention, &mask, f32::NEG_INFINITY)?
             }
         };
@@ -122,9 +167,29 @@ impl Attention {
             Pass::Inference => candle_nn::ops::softmax_last_dim(&attention)?,
             Pass::Differentiable => candle_nn::ops::softmax(&attention, candle_core::D::Minus1)?,
         };
-        let output = attention.matmul(&value.contiguous()?)?.to_dtype(input_dtype)?;
-        let output = output.transpose(1, 2)?.reshape((batch, sequence, hidden_size))?;
-        project(&self.output, self.output_adapter.as_ref(), &output, mode.route)
+        let output = attention
+            .matmul(&value.contiguous()?)?
+            .to_dtype(input_dtype)?;
+        let output = output
+            .transpose(1, 2)?
+            .reshape((batch, sequence, hidden_size))?;
+        project(
+            &self.output,
+            self.output_adapter.as_ref(),
+            &output,
+            mode.route,
+        )
+    }
+}
+
+/// Normalizes each head over its own `head_dim` when the architecture has the
+/// norm, before the heads move to the second axis and before the rotary
+/// embedding, which is where Qwen3 applies it. A Llama checkpoint passes the
+/// projection through untouched.
+fn per_head_norm(norm: Option<&RmsNorm>, heads: Tensor, pass: Pass) -> candle_core::Result<Tensor> {
+    match norm {
+        Some(norm) => normalize(norm, &heads, pass),
+        None => Ok(heads),
     }
 }
 

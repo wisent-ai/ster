@@ -7,11 +7,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_transformers::models::llama::{Config, LlamaConfig, LlamaEosToks};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType, api::sync::Api};
 
-use crate::chat;
+use crate::{chat, model::Architecture};
 
 /// A checkpoint's three files, resolved but not mapped.
 ///
@@ -61,7 +61,9 @@ impl Checkpoint {
             revision.unwrap_or("main").to_owned(),
         );
         let remote = api.repo(repo);
-        let info = remote.info().with_context(|| format!("failed to read model repository {model}"))?;
+        let info = remote
+            .info()
+            .with_context(|| format!("failed to read model repository {model}"))?;
         let config = remote.get("config.json")?;
         let tokenizer = remote.get("tokenizer.json")?;
         // The two template files are fetched exactly like the three required
@@ -78,7 +80,8 @@ impl Checkpoint {
             .then(|| remote.get("chat_template.jinja"))
             .transpose()
             .context("failed to download chat_template.jinja")?;
-        let weight_names: Vec<String> = info.siblings
+        let weight_names: Vec<String> = info
+            .siblings
             .into_iter()
             .map(|file| file.rfilename)
             .filter(|name| {
@@ -92,7 +95,11 @@ impl Checkpoint {
         }
         let mut weights = Vec::with_capacity(weight_names.len());
         for name in weight_names {
-            weights.push(remote.get(&name).with_context(|| format!("failed to download {name}"))?);
+            weights.push(
+                remote
+                    .get(&name)
+                    .with_context(|| format!("failed to download {name}"))?,
+            );
         }
         require_files(&config, &tokenizer, &weights)?;
         Ok(Self {
@@ -105,27 +112,64 @@ impl Checkpoint {
         })
     }
 
-    /// The parsed Llama config and its end-of-sequence tokens.
+    /// The parsed decoder config, what the architecture adds to it, and its
+    /// end-of-sequence tokens.
     ///
     /// The architecture refusal lives here rather than in each caller, so a
     /// command that never builds a decoder still refuses a checkpoint the
     /// decoder could not have loaded — a merge that silently produced a
     /// directory `Runtime::load` then rejects would be worse than no merge.
-    pub fn llama_config(&self) -> Result<(Config, BTreeSet<u32>)> {
+    pub fn decoder_config(&self) -> Result<(Config, Architecture, BTreeSet<u32>)> {
         let bytes = fs::read(&self.config)
             .with_context(|| format!("failed to read {}", self.config.display()))?;
         let raw: serde_json::Value = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid model config {}", self.config.display()))?;
-        let model_type = raw.get("model_type").and_then(|value| value.as_str()).unwrap_or("");
-        if model_type != "llama" {
+        let model_type = raw
+            .get("model_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let architecture = match model_type {
+            "llama" => Architecture {
+                query_key_norm: false,
+            },
+            "qwen3" => Architecture {
+                query_key_norm: true,
+            },
+            _ => bail!(
+                "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face checkpoint with model_type llama or qwen3"
+            ),
+        };
+        if raw.get("quantization_config").is_some() {
             bail!(
-                "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face Llama-family checkpoint with model_type=llama"
+                "{} is a quantized checkpoint (it declares quantization_config); Ster maps unquantized safetensors only, so use the checkpoint it was quantized from",
+                self.config.display()
+            );
+        }
+        if raw.get("attention_bias").and_then(|value| value.as_bool()) == Some(true) {
+            bail!(
+                "{} declares attention_bias true; Ster's attention projections carry no bias",
+                self.config.display()
             );
         }
         let llama: LlamaConfig = serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid Llama config {}", self.config.display()))?;
+            .with_context(|| format!("invalid {model_type} config {}", self.config.display()))?;
+        // Ster derives a head's width from the residual width, so a checkpoint
+        // whose attention is wider or narrower than its residual stream would
+        // be split into heads of the wrong size. It is refused with both
+        // numbers rather than loaded wrong.
+        if let Some(head_dim) = raw.get("head_dim").and_then(|value| value.as_u64()) {
+            let attention_width = head_dim as usize * llama.num_attention_heads;
+            if attention_width != llama.hidden_size {
+                bail!(
+                    "{} has {} heads of {head_dim} ({attention_width} wide) over a {}-wide residual stream; Ster supports only attention as wide as the residual stream",
+                    self.config.display(),
+                    llama.num_attention_heads,
+                    llama.hidden_size
+                );
+            }
+        }
         let tokens = eos_tokens(&llama);
-        Ok((llama.into_config(false), tokens))
+        Ok((llama.into_config(false), architecture, tokens))
     }
 
     /// The conversation format this checkpoint publishes, if it publishes one.
@@ -134,7 +178,10 @@ impl Checkpoint {
     /// parse is refused while the operator is still waiting on the load,
     /// instead of halfway through an epoch.
     pub fn chat(&self) -> Result<Option<chat::Template>> {
-        chat::Template::load(self.tokenizer_config.as_deref(), self.chat_template.as_deref())
+        chat::Template::load(
+            self.tokenizer_config.as_deref(),
+            self.chat_template.as_deref(),
+        )
     }
 }
 
@@ -149,7 +196,10 @@ fn local_safetensors(root: &Path) -> Result<Vec<PathBuf>> {
     for entry in fs::read_dir(root).with_context(|| format!("failed to list {}", root.display()))? {
         let path = entry?.path();
         if path.extension().and_then(|extension| extension.to_str()) == Some("safetensors")
-            && !path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.contains("optimizer"))
+            && !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("optimizer"))
         {
             weights.push(path);
         }

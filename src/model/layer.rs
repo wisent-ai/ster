@@ -2,14 +2,14 @@
 //! where a steering vector is added to the residual stream.
 
 use candle_core::Tensor;
-use candle_nn::{linear_no_bias, rms_norm, Linear, Module, RmsNorm, VarBuilder};
+use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
 use candle_transformers::models::llama::Config;
 
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    attention::{project, Attention},
-    Cache, Mode, Pass, Route,
+    Architecture, Cache, Mode, Pass, Route,
+    attention::{Attention, project},
 };
 
 #[derive(Debug, Clone)]
@@ -30,9 +30,21 @@ impl FeedForward {
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
         Ok(Self {
-            gate: linear_no_bias(config.hidden_size, config.intermediate_size, builder.pp("gate_proj"))?,
-            up: linear_no_bias(config.hidden_size, config.intermediate_size, builder.pp("up_proj"))?,
-            down: linear_no_bias(config.intermediate_size, config.hidden_size, builder.pp("down_proj"))?,
+            gate: linear_no_bias(
+                config.hidden_size,
+                config.intermediate_size,
+                builder.pp("gate_proj"),
+            )?,
+            up: linear_no_bias(
+                config.hidden_size,
+                config.intermediate_size,
+                builder.pp("up_proj"),
+            )?,
+            down: linear_no_bias(
+                config.intermediate_size,
+                config.hidden_size,
+                builder.pp("down_proj"),
+            )?,
             gate_adapter: adapters.get(layer, Target::Gate).cloned(),
             up_adapter: adapters.get(layer, Target::Up).cloned(),
             down_adapter: adapters.get(layer, Target::Down).cloned(),
@@ -43,9 +55,12 @@ impl FeedForward {
     /// so the feed-forward block is already differentiable as written — but a
     /// `Route`, because its three projections are adapter sites like any other.
     pub(super) fn forward(&self, hidden: &Tensor, route: Route) -> candle_core::Result<Tensor> {
-        let gated =
-            (candle_nn::ops::silu(&project(&self.gate, self.gate_adapter.as_ref(), hidden, route)?)?
-                * project(&self.up, self.up_adapter.as_ref(), hidden, route)?)?;
+        let gated = (candle_nn::ops::silu(&project(
+            &self.gate,
+            self.gate_adapter.as_ref(),
+            hidden,
+            route,
+        )?)? * project(&self.up, self.up_adapter.as_ref(), hidden, route)?)?;
         project(&self.down, self.down_adapter.as_ref(), &gated, route)
     }
 }
@@ -62,12 +77,23 @@ impl DecoderLayer {
     pub(super) fn load(
         builder: VarBuilder<'_>,
         config: &Config,
+        architecture: Architecture,
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
         Ok(Self {
-            attention_norm: rms_norm(config.hidden_size, config.rms_norm_eps, builder.pp("input_layernorm"))?,
-            attention: Attention::load(builder.pp("self_attn"), config, layer, adapters)?,
+            attention_norm: rms_norm(
+                config.hidden_size,
+                config.rms_norm_eps,
+                builder.pp("input_layernorm"),
+            )?,
+            attention: Attention::load(
+                builder.pp("self_attn"),
+                config,
+                architecture,
+                layer,
+                adapters,
+            )?,
             feed_forward_norm: rms_norm(
                 config.hidden_size,
                 config.rms_norm_eps,
@@ -110,7 +136,11 @@ impl DecoderLayer {
 /// (candle-nn-0.11.0/src/layer_norm.rs:197) is the same normalisation built
 /// from `sqr`, `sum_keepdim`, `broadcast_div` and `broadcast_mul`, which do
 /// record backward nodes.
-pub(super) fn normalize(norm: &RmsNorm, hidden: &Tensor, pass: Pass) -> candle_core::Result<Tensor> {
+pub(super) fn normalize(
+    norm: &RmsNorm,
+    hidden: &Tensor,
+    pass: Pass,
+) -> candle_core::Result<Tensor> {
     match pass {
         Pass::Inference => norm.forward(hidden),
         Pass::Differentiable => norm.forward_diff(hidden),

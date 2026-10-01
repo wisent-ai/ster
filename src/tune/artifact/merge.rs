@@ -98,7 +98,7 @@ pub fn merge(
     }
 
     let source = Checkpoint::resolve(model, revision)?;
-    let (config, _) = source.llama_config()?;
+    let (config, _, _) = source.decoder_config()?;
     if artifact.hidden_size != config.hidden_size {
         bail!(
             "adapter width {} does not match model width {}",
@@ -106,7 +106,11 @@ pub fn merge(
             config.hidden_size
         );
     }
-    if let Some(layer) = artifact.layers.iter().copied().find(|layer| *layer >= config.num_hidden_layers)
+    if let Some(layer) = artifact
+        .layers
+        .iter()
+        .copied()
+        .find(|layer| *layer >= config.num_hidden_layers)
     {
         bail!(
             "layer {layer} is outside the model's 0..{} range",
@@ -158,7 +162,10 @@ pub fn merge(
             dtype.get_or_insert(original);
             let delta = (b.to_dtype(DType::F32)?.matmul(&a.to_dtype(DType::F32)?)? * scale)?;
             let updated = (base.to_dtype(DType::F32)? + &delta).with_context(|| {
-                format!("adapter for layer {layer} {} does not fit {name}", target.name())
+                format!(
+                    "adapter for layer {layer} {} does not fit {name}",
+                    target.name()
+                )
             })?;
             tensors.insert(name, updated.to_dtype(original)?);
             merged += 1;
@@ -166,11 +173,12 @@ pub fn merge(
     }
     workflow::progress(format!("merged {merged} projections at scale {scale}"));
 
-    fs::create_dir_all(output)
-        .with_context(|| format!("failed to create {}", output.display()))?;
+    fs::create_dir_all(output).with_context(|| format!("failed to create {}", output.display()))?;
     let weights_path = output.join("model.safetensors");
-    let flat: HashMap<String, Tensor> =
-        tensors.iter().map(|(name, tensor)| (name.clone(), tensor.clone())).collect();
+    let flat: HashMap<String, Tensor> = tensors
+        .iter()
+        .map(|(name, tensor)| (name.clone(), tensor.clone()))
+        .collect();
     let parameters: usize = tensors.values().map(|tensor| tensor.elem_count()).sum();
     let total = tensors.len();
     candle_core::safetensors::save(&flat, &weights_path)
@@ -194,28 +202,46 @@ pub fn merge(
         (source.tokenizer_config.as_deref(), "tokenizer_config.json"),
         (source.chat_template.as_deref(), "chat_template.jinja"),
     ];
-    let required = [(&source.config, "config.json"), (&source.tokenizer, "tokenizer.json")];
+    let required = [
+        (&source.config, "config.json"),
+        (&source.tokenizer, "tokenizer.json"),
+    ];
     for (from, leaf) in required
         .into_iter()
         .map(|(from, leaf)| (from.as_path(), leaf))
-        .chain(optional.into_iter().filter_map(|(from, leaf)| from.map(|from| (from, leaf))))
+        .chain(
+            optional
+                .into_iter()
+                .filter_map(|(from, leaf)| from.map(|from| (from, leaf))),
+        )
     {
         let to = output.join(leaf);
         fs::copy(from, &to)
             .with_context(|| format!("failed to copy {} to {}", from.display(), to.display()))?;
         files.push(leaf.to_owned());
     }
-    workflow::progress(format!("wrote {} to {}", files.join(", "), output.display()));
+    workflow::progress(format!(
+        "wrote {} to {}",
+        files.join(", "),
+        output.display()
+    ));
 
     Ok(MergeReport {
         model: model.to_owned(),
-        model_revision: source.revision.clone().or_else(|| artifact.model_revision.clone()),
+        model_revision: source
+            .revision
+            .clone()
+            .or_else(|| artifact.model_revision.clone()),
         adapter: adapter.display().to_string(),
         output: output.display().to_string(),
         rank: artifact.rank,
         alpha: artifact.alpha,
         scale,
-        targets: artifact.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: artifact
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: artifact.layers.clone(),
         hidden_size: artifact.hidden_size,
         merged_tensors: merged,
@@ -225,7 +251,9 @@ pub fn merge(
         // An artifact naming no targets never validates, so `dtype` is set by
         // the time it is read; the fallback keeps the field a string rather
         // than making the report fallible for a case that cannot happen.
-        dtype: dtype.map(|value| format!("{value:?}")).unwrap_or_else(|| "unknown".to_owned()),
+        dtype: dtype
+            .map(|value| format!("{value:?}"))
+            .unwrap_or_else(|| "unknown".to_owned()),
         files,
     })
 }
