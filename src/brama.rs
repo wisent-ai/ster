@@ -7,7 +7,7 @@
 //! SDK. This module is the whole of that reach — one synchronous POST, no
 //! async runtime, no provider credentials of its own.
 
-use std::{env, time::Duration};
+use std::env;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -37,12 +37,6 @@ use serde_json::{Value, json};
 /// which never asks it. Mint it where the gateway looks.
 pub const URL_VAR: &str = "BRAMA_URL";
 pub const BEARER_VAR: &str = "BRAMA_BEARER";
-pub const DEFAULT_URL: &str = "https://brama.wisent.com";
-
-/// Matches Brama's documented `requestDeadlineSeconds`, so Ster gives up at the
-/// same moment the gateway does instead of holding a socket the other side has
-/// already abandoned.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Brama refuses `max_tokens` outside `1..=32768`; see [`Gateway::complete`].
 const MAX_TOKENS_LIMIT: usize = 32_768;
@@ -62,7 +56,7 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    /// Reads `BRAMA_URL` (defaulted) and `BRAMA_BEARER` (required).
+    /// Reads `BRAMA_URL` and `BRAMA_BEARER`, both required.
     pub fn from_env(model: &str) -> Result<Self> {
         let model = model.trim();
         if model.is_empty() {
@@ -76,7 +70,7 @@ impl Gateway {
             base,
             bearer: bearer()?,
             model: model.to_owned(),
-            agent: ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build(),
+            agent: ureq::AgentBuilder::new().build(),
         })
     }
 
@@ -157,7 +151,8 @@ impl Gateway {
     }
 }
 
-/// `BRAMA_URL` with trailing slashes trimmed, or the documented default.
+/// `BRAMA_URL` with trailing slashes trimmed. There is no built-in gateway:
+/// an unset or empty value is refused by name (cli.md rule 14).
 ///
 /// A non-unicode value is refused by name and never echoed: the same launcher
 /// exports the bearer, and a message that quotes environment values is one
@@ -165,12 +160,12 @@ impl Gateway {
 fn base_url() -> Result<String> {
     let raw = match env::var(URL_VAR) {
         Ok(raw) => raw,
-        Err(env::VarError::NotPresent) => return Ok(DEFAULT_URL.to_owned()),
+        Err(env::VarError::NotPresent) => String::new(),
         Err(env::VarError::NotUnicode(_)) => bail!("{URL_VAR} is not valid unicode"),
     };
     let base = raw.trim().trim_end_matches('/');
     if base.is_empty() {
-        return Ok(DEFAULT_URL.to_owned());
+        bail!("{URL_VAR} is unset or empty; export the Brama gateway base Ster should call");
     }
     Ok(base.to_owned())
 }

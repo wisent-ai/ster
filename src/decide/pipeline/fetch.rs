@@ -3,7 +3,7 @@
 //! label column becomes one choice question per row, with the label names
 //! the dataset publishes as the options.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -18,9 +18,6 @@ const ROWS_URL: &str = "https://datasets-server.huggingface.co/rows";
 
 /// The most rows the route returns per page.
 const PAGE: usize = 100;
-
-/// Matches the request deadline Ster's Brama client gives a hosted call.
-const DEADLINE: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
 pub struct FetchOptions {
@@ -65,7 +62,7 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
     if options.question_id.trim().is_empty() || options.instructions.trim().is_empty() {
         bail!("a fetched question needs an id and instructions");
     }
-    let agent = ureq::AgentBuilder::new().timeout(DEADLINE).build();
+    let agent = ureq::AgentBuilder::new().build();
     let mut names: Option<Vec<String>> = None;
     let mut examples = Vec::new();
     let mut rows = 0usize;

@@ -150,13 +150,15 @@ carries messages with roles rather than a rendered string: a chat API is
 already a chat API.
 
 The hosted route reads Brama's own documented client variables: `BRAMA_URL`,
-the gateway base, defaulting to `https://brama.wisent.com`, and
-`BRAMA_BEARER`, the caller's bearer. Ster reads both from its own environment
+the gateway base, and `BRAMA_BEARER`, the caller's bearer. Both are required;
+there is no built-in gateway. Ster reads both from its own environment
 and never reads a vault itself. Nothing puts them there for you: there is no
 launcher script in this repository, no wrapper on the fleet, and no service
 unit that exports them, and Ster Desktop runs `ster request` with the
 environment it inherited without setting a variable of its own. You export
-`BRAMA_BEARER` before the run. An empty bearer is refused with
+both before the run. An unset base is refused with
+`BRAMA_URL is unset or empty; export the Brama gateway base Ster should call`,
+an empty bearer with
 `BRAMA_BEARER is unset or empty; export Ster's own Brama bearer before running this command`,
 and a base that is neither https nor explicit loopback with
 `BRAMA_URL must be an https:// base or an explicit http:// loopback address, because Brama answers plain http elsewhere with 426 secure_transport_required`.
