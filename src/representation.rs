@@ -10,9 +10,9 @@ pub enum TrainingMethod {
 impl TrainingMethod {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
-            "caa" | "mean-difference" => Ok(Self::Caa),
+            "caa" => Ok(Self::Caa),
             "pca" => Ok(Self::Pca),
-            "logistic" | "probe" => Ok(Self::Logistic),
+            "logistic" => Ok(Self::Logistic),
             _ => bail!("unknown training method {value:?}; expected caa, pca, or logistic"),
         }
     }
