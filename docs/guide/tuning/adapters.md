@@ -81,7 +81,11 @@ rather than in the flag.
 Ster never trains a full weight. The only tensors any objective creates are the
 low-rank adapter factors and, on a reward run, the scalar head that reads them.
 `ster tune merge` does write full weights, but it folds a finished adapter into
-them rather than training them.
+them rather than training them. A full-parameter fine-tune is therefore done
+as `ster tune sft` followed by `ster tune merge`: the merged checkpoint is an
+ordinary full checkpoint, and no `--full` mode that trains every base weight is
+planned. An adapter whose `--targets` and `--adapter-layers` cover every linear
+layer is the closest Ster comes to that.
 
 Training runs where the rest of Ster runs: it loads no gateway, spends no quota,
 touches no credential, and writes nothing but the artifact it was asked for. The
