@@ -2,7 +2,7 @@
 //! is. A default that is not written down here is a number nobody chose.
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::Precision;
 
@@ -157,6 +157,12 @@ pub(super) fn default_reward() -> String {
 /// itself, cheap enough that a first run finishes.
 pub(super) fn default_group() -> usize {
     4
+}
+
+/// One assistant turn: a single completion per prompt, which is what a body
+/// without the field has always asked for.
+pub(super) fn default_turns() -> usize {
+    1
 }
 
 pub(super) fn default_iterations() -> usize {

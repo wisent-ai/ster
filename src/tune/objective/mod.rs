@@ -10,6 +10,6 @@ mod sft;
 
 pub use decide::{decide, DecideOptions, DecideReport};
 pub use dpo::{dpo, DpoLoss, DpoOptions, DpoReport};
-pub use grpo::{grpo, GrpoIteration, GrpoOptions, GrpoReport, Reward};
+pub use grpo::{grpo, GrpoIteration, GrpoOptions, GrpoReport, Reward, UserSimulator};
 pub use reward::{reward, RewardHead, RewardModel, RewardOptions, RewardReport};
 pub use sft::{sft, SftOptions, SftReport};

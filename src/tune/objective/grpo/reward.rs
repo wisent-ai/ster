@@ -2,9 +2,8 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
-
 
 use crate::{
     runtime::{Completion, DeviceChoice, GenerationOptions},
@@ -48,12 +47,12 @@ impl Reward {
         }
         let path = Path::new(trimmed);
         if !path.exists() {
-            bail!(
-                "reward source {trimmed:?} is neither the keyword length nor a file that exists"
-            );
+            bail!("reward source {trimmed:?} is neither the keyword length nor a file that exists");
         }
         workflow::progress(format!("loading the reward model at {trimmed}"));
-        Ok(Self::Model(Box::new(RewardModel::load(model, revision, device, path)?)))
+        Ok(Self::Model(Box::new(RewardModel::load(
+            model, revision, device, path,
+        )?)))
     }
 
     /// Names the source in the report, so a reward number is attributable.
@@ -89,6 +88,9 @@ pub struct GrpoOptions {
     /// Completions drawn per prompt. Two is the smallest group with a baseline
     /// that is not the sample itself.
     pub group: usize,
+    /// Assistant turns per conversation. One is a single completion per
+    /// prompt; above one, a simulated user writes the turns in between.
+    pub turns: usize,
     /// Passes over the prompt set. Each one re-samples, because the point is to
     /// learn from what the *current* policy writes.
     pub iterations: usize,
@@ -112,6 +114,9 @@ pub struct GrpoIteration {
     pub reward_spread: f32,
     pub mean_kl: f32,
     pub policy_loss: f32,
+    /// Assistant turns per conversation, averaged: below `turns` when the
+    /// simulated user ended conversations early.
+    pub mean_turns: f32,
     pub mean_completion_tokens: f32,
 }
 
@@ -122,6 +127,9 @@ pub struct GrpoReport {
     pub trained_prompts: usize,
     pub skipped_long: usize,
     pub group: usize,
+    pub turns: usize,
+    /// The model that wrote the user's turns, when there were any.
+    pub user_model: Option<String>,
     pub iterations: usize,
     pub steps: usize,
     pub beta: f64,

@@ -1,7 +1,7 @@
 //! Sampling a continuation, with a steering artifact applied or not, and the
 //! exact token sequence the model saw while producing it.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::Tensor;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 
@@ -10,7 +10,7 @@ use crate::{
     model::{Cache, SteeringPlan},
 };
 
-use super::super::{validate_layers, Runtime};
+use super::super::{Runtime, validate_layers};
 
 #[derive(Debug, Clone, Copy)]
 pub struct GenerationOptions {
@@ -62,15 +62,29 @@ impl Runtime {
         artifact: Option<&SteeringArtifact>,
         options: GenerationOptions,
     ) -> Result<Completion> {
-        if options.max_new_tokens == 0 {
-            bail!("max_new_tokens must be greater than zero");
-        }
         // The same mismatch that ruins training ruins decoding: an instruct
         // checkpoint handed a bare prompt continues the text instead of
         // answering it. Under a template the prompt becomes a user turn
         // followed by the marker that opens the assistant's, which is the
         // context the model was post-trained to answer from.
-        let mut tokens = self.encode_prompt(prompt)?;
+        let tokens = self.encode_prompt(prompt)?;
+        self.sample_tokens(tokens, artifact, options)
+    }
+
+    /// One sampled continuation of a context that is already tokenized.
+    ///
+    /// A conversation of several turns is rendered and tokenized by the
+    /// caller, because only the caller knows which turns it holds; the
+    /// sampling and the returned split are exactly [`Runtime::sample`]'s.
+    pub fn sample_tokens(
+        &self,
+        mut tokens: Vec<u32>,
+        artifact: Option<&SteeringArtifact>,
+        options: GenerationOptions,
+    ) -> Result<Completion> {
+        if options.max_new_tokens == 0 {
+            bail!("max_new_tokens must be greater than zero");
+        }
         if tokens.len() >= self.model.config().max_position_embeddings {
             bail!(
                 "prompt contains {} tokens, model context allows fewer than {}",
@@ -97,11 +111,18 @@ impl Runtime {
                     );
                 }
                 validate_layers(
-                    &artifact.vectors.iter().map(|vector| vector.layer).collect::<Vec<_>>(),
+                    &artifact
+                        .vectors
+                        .iter()
+                        .map(|vector| vector.layer)
+                        .collect::<Vec<_>>(),
                     self.layer_count(),
                 )?;
                 Some(SteeringPlan::new(
-                    artifact.vectors.iter().map(|vector| (vector.layer, vector.values.clone())),
+                    artifact
+                        .vectors
+                        .iter()
+                        .map(|vector| (vector.layer, vector.values.clone())),
                     options.strength,
                     self.hidden_size(),
                     &self.device,
@@ -113,9 +134,14 @@ impl Runtime {
         let sampling = if options.temperature <= 0.0 {
             Sampling::ArgMax
         } else if let Some(top_p) = options.top_p {
-            Sampling::TopP { p: top_p, temperature: options.temperature }
+            Sampling::TopP {
+                p: top_p,
+                temperature: options.temperature,
+            }
         } else {
-            Sampling::All { temperature: options.temperature }
+            Sampling::All {
+                temperature: options.temperature,
+            }
         };
         let mut sampler = LogitsProcessor::from_sampling(options.seed, sampling);
         let mut cache = Cache::new(true, self.dtype, self.model.config(), &self.device)?;
@@ -123,13 +149,20 @@ impl Runtime {
             let (context, index_pos) = if step == 0 {
                 (tokens.clone(), 0)
             } else {
-                (vec![*tokens.last().expect("tokens are non-empty")], tokens.len() - 1)
+                (
+                    vec![*tokens.last().expect("tokens are non-empty")],
+                    tokens.len() - 1,
+                )
             };
             let input = Tensor::new(context.as_slice(), &self.device)?.unsqueeze(0)?;
-            let output = self.model.forward(&input, index_pos, &mut cache, plan.as_ref(), &[])?;
+            let output = self
+                .model
+                .forward(&input, index_pos, &mut cache, plan.as_ref(), &[])?;
             // `Mode::DECODE` always asks for the last position's logits, so
             // this is the one readout that cannot be absent.
-            let logits = output.logits.context("the decode pass produced no logits")?;
+            let logits = output
+                .logits
+                .context("the decode pass produced no logits")?;
             let next = sampler.sample(&logits.squeeze(0)?)?;
             tokens.push(next);
             if self.eos_tokens.contains(&next) {
@@ -144,6 +177,10 @@ impl Runtime {
             .decode(&tokens[prompt_len..], true)
             .map_err(|error| anyhow::anyhow!("failed to decode generated tokens: {error}"))?;
         let sampled = tokens.split_off(prompt_len);
-        Ok(Completion { prompt: tokens, tokens: sampled, text })
+        Ok(Completion {
+            prompt: tokens,
+            tokens: sampled,
+            text,
+        })
     }
 }

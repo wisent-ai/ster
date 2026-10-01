@@ -24,6 +24,6 @@ pub use runtime::{Checkpoint, Completion, DeviceChoice, GenerationOptions, Preci
 pub use tune::{
     DecideReport, DecideTuneOptions, DpoLoss, DpoOptions, DpoReport, EvaluateOptions, EvaluateReport,
     EvaluatedExample, ExampleSet, GrpoIteration, GrpoOptions, GrpoReport, MergeReport, Reward,
-    RewardHead, RewardModel, RewardOptions, RewardReport, SftOptions, SftReport,
+    RewardHead, RewardModel, RewardOptions, RewardReport, SftOptions, SftReport, UserSimulator,
 };
 pub use workflow::PromptSet;

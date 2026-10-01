@@ -189,14 +189,45 @@ Together those three make the first step's loss exactly zero, which is this
 objective's identity check: a fresh adapter is the reference, so every KL term
 is zero, and the advantages are mean-centred, so the policy term is zero too.
 
+### Conversations with a simulated user
+
+`--turns N` above one samples whole conversations instead of single
+completions. The prompt is the user's first turn; the policy answers it, and
+`--user-model` writes the user's next turn by answering the same conversation
+with every role swapped, at the run's own `--max-new-tokens`, `--temperature`
+and `--top-p`. That repeats until the policy has written `N` turns or the
+simulated user replies with nothing, which ends the conversation early. Both
+models must render conversations through a chat template; a policy whose
+template is absent or turned off is refused with `a conversation of several
+turns needs the model's chat template, and this run's chat template is absent`,
+and a user model without one with `the simulated user <MODEL> publishes no chat
+template, so it cannot write a user's turn in a conversation`.
+
+Each assistant turn is scored by `--reward` with the conversation before it in
+front, and a conversation's reward is the sum over its assistant turns. A
+conversation the simulated user ends early has fewer turns to earn from, so the
+conversation's length in turns is part of the reward without a separate weight.
+The advantage is the conversation's, centred on its group, and every assistant
+turn in it carries that advantage; the loss averages each turn over its own
+tokens and then over the conversation's turns. A refusal is whatever the reward
+model scores low, never a list of phrases.
+
+`--turns 1` (the default) with `--user-model` is refused with `a simulated user
+writes turns between assistant turns, so it needs turns above one; this run
+asked for one`, and `--turns` above one without it with `a conversation of <N>
+assistant turns needs a simulated user model to write the turns in between`. A
+turn whose conversation plus `--max-new-tokens` would pass `--max-sequence` is
+refused with the turn number and both token counts rather than cut.
+
 The report records `reward`, `prompts`, `trained_prompts`, `skipped_long`,
-`group`, `iterations`, `steps`, `beta`, `trainable_tensors`,
-`trainable_parameters`, `first_loss`, `final_loss`, `mean_reward`, `mean_kl`,
-`policy_loss`, `max_new_tokens`, `temperature`, `top_p`, `seed`, `rank`,
-`alpha`, `targets`, `layers`, `learning_rate`, `accumulation`,
-`chat_template`, `precision`, and `history` —
-one entry per iteration carrying `iteration`, `groups`, `completions`,
-`mean_reward`, `reward_spread`, `mean_kl`, `policy_loss` and
-`mean_completion_tokens`. The history is the point: a single mean over a policy
-that moved the whole time hides exactly the trend the run exists to show.
+`group`, `turns`, `user_model`, `iterations`, `steps`, `beta`,
+`trainable_tensors`, `trainable_parameters`, `first_loss`, `final_loss`,
+`mean_reward`, `mean_kl`, `policy_loss`, `max_new_tokens`, `temperature`,
+`top_p`, `seed`, `rank`, `alpha`, `targets`, `layers`, `learning_rate`,
+`accumulation`, `chat_template`, `precision`, and `history` — one entry per
+iteration carrying `iteration`, `groups`, `completions`, `mean_reward`,
+`reward_spread`, `mean_kl`, `policy_loss`, `mean_turns` and
+`mean_completion_tokens` (per assistant turn). The history is the point: a
+single mean over a policy that moved the whole time hides exactly the trend the
+run exists to show.
 

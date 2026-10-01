@@ -5,7 +5,7 @@
 use serde::Deserialize;
 
 use super::defaults::*;
-use super::{require, ModelRequest, Validate};
+use super::{ModelRequest, Validate, require};
 
 mod artifacts;
 
@@ -185,6 +185,15 @@ pub(in crate::request) struct TuneGrpoRequest {
     pub(in crate::request) reward: String,
     #[serde(default = "default_group")]
     pub(in crate::request) group: usize,
+    /// Assistant turns per sampled conversation; above one, `userModel`
+    /// writes the user's turns in between.
+    #[serde(default = "default_turns")]
+    pub(in crate::request) turns: usize,
+    /// The model that plays the user when `turns` is above one.
+    #[serde(default)]
+    pub(in crate::request) user_model: Option<String>,
+    #[serde(default)]
+    pub(in crate::request) user_revision: Option<String>,
     #[serde(default = "default_iterations")]
     pub(in crate::request) iterations: usize,
     #[serde(default = "default_kl_beta")]

@@ -2,14 +2,14 @@
 
 use anyhow::{Context, Result};
 use candle_core::Device;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use std::path::Path;
 
 use crate::{
-    lora, tune, ChatChoice, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet,
-    GenerationOptions, GrpoOptions, PairSet, Precision, PromptSet, Reward, RewardHead,
-    RewardOptions, Runtime, SftOptions,
+    ChatChoice, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions,
+    GrpoOptions, PairSet, Precision, PromptSet, Reward, RewardHead, RewardOptions, Runtime,
+    SftOptions, UserSimulator, lora, tune,
 };
 
 use super::super::requests::note_precision;
@@ -178,6 +178,11 @@ pub(in crate::request) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Valu
         device,
     )?;
     let precision = Precision::parse(&request.precision)?;
+    let user = request
+        .user_model
+        .as_deref()
+        .map(|name| UserSimulator::load(name, request.user_revision.as_deref(), device, precision))
+        .transpose()?;
     let (mut runtime, varmap) = Runtime::load_trainable_at(
         &request.model.model,
         request.model.revision.as_deref(),
@@ -190,6 +195,7 @@ pub(in crate::request) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Valu
     let options = GrpoOptions {
         spec: spec.clone(),
         group: request.group,
+        turns: request.turns,
         iterations: request.iterations,
         beta: request.beta,
         learning_rate: request.learning_rate,
@@ -210,6 +216,7 @@ pub(in crate::request) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Valu
         &prompts,
         &source,
         &request.reward,
+        user.as_ref().zip(request.user_model.as_deref()),
         &options,
     )?;
     // The report is folded into the artifact so a trained adapter always

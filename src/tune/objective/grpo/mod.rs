@@ -39,7 +39,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::Tensor;
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
 
@@ -54,10 +54,12 @@ use crate::{
 
 mod group;
 mod reward;
+mod rollout;
 
 pub use reward::{GrpoIteration, GrpoOptions, GrpoReport, Reward};
+pub use rollout::UserSimulator;
 
-use group::{group_loss, sample_group, Totals};
+use group::{Totals, group_loss, sample_group};
 
 /// Runs the loop against `prompts`, scoring with `reward`.
 ///
@@ -65,13 +67,15 @@ use group::{group_loss, sample_group, Totals};
 /// `varmap`. It plays three roles at once and can, because they differ only in
 /// which forward mode they ask for: it is the policy being sampled from, the
 /// policy being scored with a gradient, and — with the adapters skipped — the
-/// frozen reference the KL is measured against.
+/// frozen reference the KL is measured against. `user` writes the user's
+/// turns when `options.turns` is above one, and must be absent otherwise.
 pub fn grpo(
     runtime: &Runtime,
     varmap: &VarMap,
     prompts: &PromptSet,
     reward: &Reward,
     requested_reward: &str,
+    user: Option<(&UserSimulator, &str)>,
     options: &GrpoOptions,
 ) -> Result<GrpoReport> {
     if options.group < 2 {
@@ -79,6 +83,17 @@ pub fn grpo(
             "group-relative policy optimization requires a group of at least two completions, because the group is the baseline"
         );
     }
+    match (options.turns, user) {
+        (0, _) => bail!("group-relative policy optimization requires at least one assistant turn"),
+        (1, Some(_)) => bail!(
+            "a simulated user writes turns between assistant turns, so it needs turns above one; this run asked for one"
+        ),
+        (turns, None) if turns > 1 => bail!(
+            "a conversation of {turns} assistant turns needs a simulated user model to write the turns in between"
+        ),
+        _ => {}
+    }
+    let simulator = user.map(|(simulator, _)| simulator);
     // The judge is a different model from the policy, but it reads the same
     // kind of residual stream, and it was fitted in whatever encoding and
     // precision trained it. A reward artifact from an f16 run scoring an f32
@@ -98,7 +113,13 @@ pub fn grpo(
     if options.generation.max_new_tokens == 0 {
         bail!("max_new_tokens must be greater than zero");
     }
-    let Trainable { spec, vars, tensors, parameters, limit } = Preflight {
+    let Trainable {
+        spec,
+        vars,
+        tensors,
+        parameters,
+        limit,
+    } = Preflight {
         subject: "group-relative policy optimization",
         unit: "prompt",
         pass: "iteration",
@@ -140,7 +161,10 @@ pub fn grpo(
 
     let mut optimizer = AdamW::new(
         vars,
-        ParamsAdamW { lr: options.learning_rate, ..Default::default() },
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
     )
     .context("failed to initialize the AdamW optimizer")?;
 
@@ -177,8 +201,10 @@ pub fn grpo(
                     options.iterations,
                     options.group
                 ));
-                let group = sample_group(runtime, prompt, reward, options, &mut draw)
-                    .with_context(|| format!("prompt {index} produced no usable group"))?;
+                let group = sample_group(
+                    runtime, simulator, prompt, reward, options, limit, &mut draw,
+                )
+                .with_context(|| format!("prompt {index} produced no usable group"))?;
                 let loss = group_loss(runtime, &group, options)
                     .with_context(|| format!("prompt {index} produced no usable loss"))?;
                 totals.record(&group, &loss);
@@ -236,6 +262,7 @@ pub fn grpo(
         reward_spread: 0.0,
         mean_kl: 0.0,
         policy_loss: 0.0,
+        mean_turns: 0.0,
         mean_completion_tokens: 0.0,
     });
 
@@ -245,6 +272,8 @@ pub fn grpo(
         trained_prompts: usable.len(),
         skipped_long: prompts.prompts.len() - usable.len(),
         group: options.group,
+        turns: options.turns,
+        user_model: user.map(|(_, model)| model.to_owned()),
         iterations: options.iterations,
         steps: step,
         beta: options.beta,
@@ -262,7 +291,11 @@ pub fn grpo(
         seed: options.generation.seed,
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: spec
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,

@@ -33,7 +33,8 @@ ster tune reward --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
                  [--batch-size 1] [--precision f32|f16|bf16] [--seed 42]
 ster tune grpo --model <MODEL> --prompts <PROMPTS> --output <OUTPUT>
                [--revision <REVISION>] [--device cpu] [--reward length]
-               [--group 4] [--iterations 1] [--beta 0.04] [--rank 8]
+               [--group 4] [--turns 1] [--user-model <MODEL>]
+               [--user-revision <REVISION>] [--iterations 1] [--beta 0.04] [--rank 8]
                [--alpha 16] [--targets query,value] [--layers all]
                [--learning-rate 0.0001] [--accumulation 1] [--warmup-steps 0]
                [--max-new-tokens 64] [--temperature 0.9] [--top-p 0.95]

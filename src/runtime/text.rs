@@ -1,7 +1,7 @@
 //! Turning text into the exact token sequence this checkpoint expects,
 //! including the conversation format it was post-trained in.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::{chat, workflow};
 
@@ -68,9 +68,15 @@ impl Runtime {
         let (mut ids, tail) = match self.applied_template() {
             Some(template) => {
                 let (head, tail) = template.example(prompt, completion)?;
-                (self.tokenize(&head, false, "prompt")?, self.tokenize(&tail, false, "completion")?)
+                (
+                    self.tokenize(&head, false, "prompt")?,
+                    self.tokenize(&tail, false, "completion")?,
+                )
             }
-            None => (self.encode(prompt)?, self.tokenize(completion, false, "completion")?),
+            None => (
+                self.encode(prompt)?,
+                self.tokenize(completion, false, "completion")?,
+            ),
         };
         if tail.is_empty() {
             bail!("training example completion produced no tokens");
@@ -78,7 +84,9 @@ impl Runtime {
         let boundary = ids.len();
         ids.extend_from_slice(&tail);
         if ids.len() < 2 {
-            bail!("training example encodes to fewer than two tokens, so there is nothing to predict");
+            bail!(
+                "training example encodes to fewer than two tokens, so there is nothing to predict"
+            );
         }
         Ok((ids, boundary))
     }
@@ -122,6 +130,22 @@ impl Runtime {
         Ok(ids)
     }
 
+    /// A whole conversation, rendered by the model's chat template and ending
+    /// where the assistant's next turn begins.
+    ///
+    /// Only a template knows how turns are delimited, so a conversation has
+    /// no raw-text form: with the template absent or turned off this is a
+    /// refusal naming what the run decided, not a guess at the markers.
+    pub fn encode_conversation(&self, messages: &[chat::Message<'_>]) -> Result<Vec<u32>> {
+        let Some(template) = self.applied_template() else {
+            bail!(
+                "a conversation of several turns needs the model's chat template, and this run's chat template is {}",
+                self.chat_status.label()
+            );
+        };
+        self.tokenize(&template.render(messages, true)?, false, "conversation")
+    }
+
     /// Every id this tokenizer spells `label` with as exactly one token.
     ///
     /// A decision reads the model's next-token distribution at the position
@@ -137,7 +161,11 @@ impl Runtime {
     /// rather than a guess.
     pub fn label_tokens(&self, label: &str) -> Result<Vec<u32>> {
         let mut ids = Vec::with_capacity(3);
-        for spelling in [label.to_owned(), format!("\u{2581}{label}"), format!("\u{0120}{label}")] {
+        for spelling in [
+            label.to_owned(),
+            format!("\u{2581}{label}"),
+            format!("\u{0120}{label}"),
+        ] {
             if let Some(id) = self.tokenizer.token_to_id(&spelling)
                 && !ids.contains(&id)
             {
@@ -145,7 +173,9 @@ impl Runtime {
             }
         }
         if ids.is_empty() {
-            bail!("this tokenizer has no single token for the answer label {label:?}, so it cannot be read from one position");
+            bail!(
+                "this tokenizer has no single token for the answer label {label:?}, so it cannot be read from one position"
+            );
         }
         Ok(ids)
     }
