@@ -24,12 +24,12 @@ pub(super) struct ReadArgs {
     /// it publishes one, off sends raw text. A decision is read at the
     /// position where the assistant's answer begins, so an instruct
     /// checkpoint wants auto.
-    #[arg(long, default_value = "auto")]
-    chat_template: String,
+    #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+    chat_template: ChatChoice,
     /// Dtype the base weights are mapped at: f32, f16, or bf16. bf16 needs
     /// --device metal.
-    #[arg(long, default_value = "f32")]
-    precision: String,
+    #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    precision: Precision,
     /// Option orders each question is shown in. 0 shows every option under
     /// every letter once, which cancels the model's letter preference; 1 is a
     /// single pass with no correction.
@@ -94,7 +94,7 @@ pub(super) fn decide(args: DecideArgs) -> Result<()> {
         options.temperature = document.temperature;
     }
     options.explain = explain;
-    runtime.set_chat_template(ChatChoice::parse(&read.chat_template)?);
+    runtime.set_chat_template(read.chat_template);
     let response = decide::decide(
         &runtime,
         &request,
@@ -113,7 +113,7 @@ pub(super) fn calibrate(args: CalibrateArgs) -> Result<()> {
     let CalibrateArgs { read, examples, output } = args;
     let examples = ExampleSet::load(&examples)?;
     let (mut runtime, options) = read.load()?;
-    runtime.set_chat_template(ChatChoice::parse(&read.chat_template)?);
+    runtime.set_chat_template(read.chat_template);
     let calibration = decide::calibrate(&runtime, &examples, options)?;
     calibration.save(&output)?;
     println!("{}", serde_json::to_string_pretty(&calibration)?);
@@ -122,7 +122,7 @@ pub(super) fn calibrate(args: CalibrateArgs) -> Result<()> {
 
 impl ReadArgs {
     fn load(&self) -> Result<(ster::Runtime, DecideOptions)> {
-        let precision = Precision::parse(&self.precision)?;
+        let precision = self.precision;
         // An adapter rewrites the projections themselves, so it is attached
         // while the weights are mapped; one trained for another model is
         // refused there rather than read through.

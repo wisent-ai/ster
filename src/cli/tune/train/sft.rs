@@ -53,8 +53,8 @@ pub(in crate::cli) struct SftArgs {
         /// chat template when it publishes one, off encodes raw text. An
         /// instruct checkpoint trained on raw text learns a format it will
         /// never be prompted in.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Examples folded into one forward pass. One is the unbatched pass
         /// every run recorded so far took; --accumulation still counts
         /// forwards, so a step sees up to batch-size times accumulation
@@ -65,8 +65,8 @@ pub(in crate::cli) struct SftArgs {
         /// Adapters, any head, and every optimizer moment stay in f32
         /// whatever this says, because a low-rank update below the weight's
         /// own ulp rounds to nothing in half. bf16 needs --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
         #[arg(long, default_value_t = 42)]
         seed: u64,
 }
@@ -101,7 +101,6 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
             // The adapters have to exist before the first forward pass, so
             // the runtime is built from the spec rather than patched after
             // loading; the returned VarMap owns every trainable tensor.
-            let precision = Precision::parse(&precision)?;
             let (mut runtime, varmap) = Runtime::load_trainable_at(
                 &model.model,
                 model.revision.as_deref(),
@@ -109,7 +108,7 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
                 &spec,
                 precision,
             )?;
-            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            let chat = runtime.set_chat_template(chat_template);
             let example_set = ExampleSet::load(&examples)?;
             let options = SftOptions {
                 spec: spec.clone(),

@@ -76,13 +76,13 @@ pub(in crate::cli) struct GrpoArgs {
         /// auto samples every completion from the prompt as the model's own
         /// chat template renders it, when it publishes one; off samples from
         /// raw text.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
         /// Adapters and every optimizer moment stay in f32. bf16 needs
         /// --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
         #[arg(long, default_value_t = 42)]
         seed: u64,
 }
@@ -123,7 +123,6 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
             // reward artifact for the wrong checkpoint should be refused
             // before an operator waits out a policy load to hear it.
             let source = Reward::parse(&reward, &model.model, model.revision.as_deref(), device)?;
-            let precision = Precision::parse(&precision)?;
             let (mut runtime, varmap) = Runtime::load_trainable_at(
                 &model.model,
                 model.revision.as_deref(),
@@ -131,7 +130,7 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
                 &spec,
                 precision,
             )?;
-            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            let chat = runtime.set_chat_template(chat_template);
             let prompt_set = PromptSet::load(&prompts)?;
             let options = GrpoOptions {
                 spec: spec.clone(),

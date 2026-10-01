@@ -63,8 +63,8 @@ pub(in crate::cli) struct DpoArgs {
         /// auto encodes both sides of every pair as the assistant turn the
         /// model's own chat template renders, when it publishes one; off
         /// encodes raw text.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Pairs folded into one forward pass; a pair is two rows. One is the
         /// unbatched pass every run recorded so far took.
         #[arg(long, default_value_t = 1)]
@@ -72,8 +72,8 @@ pub(in crate::cli) struct DpoArgs {
         /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
         /// Adapters and every optimizer moment stay in f32. bf16 needs
         /// --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
         #[arg(long, default_value_t = 42)]
         seed: u64,
 }
@@ -111,7 +111,6 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<()> {
             // The reference the objective measures against is this same
             // runtime with the adapters skipped, so exactly one model is
             // loaded however many times each sequence is scored.
-            let precision = Precision::parse(&precision)?;
             let (mut runtime, varmap) = Runtime::load_trainable_at(
                 &model.model,
                 model.revision.as_deref(),
@@ -119,7 +118,7 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<()> {
                 &spec,
                 precision,
             )?;
-            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            let chat = runtime.set_chat_template(chat_template);
             let pair_set = PairSet::load(&pairs)?;
             let options = DpoOptions {
                 spec: spec.clone(),

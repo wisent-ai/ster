@@ -51,8 +51,8 @@ pub(in crate::cli) struct EvaluateArgs {
         /// template renders, when it publishes one; off scores raw text. It
         /// must match the run that trained the adapter, or the score measures
         /// a format the adapter never saw.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Examples folded into one forward pass. One is the unbatched pass
         /// every run recorded so far took.
         #[arg(long, default_value_t = 1)]
@@ -60,8 +60,8 @@ pub(in crate::cli) struct EvaluateArgs {
         /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
         /// A score is only comparable with another score taken at the same
         /// precision. bf16 needs --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
 }
 
 /// `ster tune inspect`
@@ -94,7 +94,6 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
             // The adapter is attached while the weights are mapped, exactly as
             // `generate --adapter` attaches one, so the score is the score of
             // the model an operator would actually run.
-            let precision = Precision::parse(&precision)?;
             let mut runtime = match adapter.as_deref() {
                 Some(adapter) => Runtime::load_with_adapter_at(
                     &model.model,
@@ -110,7 +109,7 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
                     precision,
                 )?,
             };
-            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            let chat = runtime.set_chat_template(chat_template);
             let example_set = ExampleSet::load(&examples)?;
             let report = tune::evaluate(
                 &runtime,

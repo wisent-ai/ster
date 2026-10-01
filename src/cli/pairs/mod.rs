@@ -77,16 +77,16 @@ pub(super) enum PairsCommand {
         /// Dtype the local generator's base weights are mapped at: f32, f16,
         /// or bf16. Ignored by --generator brama, which loads no weights.
         /// bf16 needs --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
         /// auto asks the local generator through the model's own chat
         /// template when it publishes one, off asks it as raw text. An
         /// instruct checkpoint spoken to without its markers answers with
         /// meta-instructional debris — "Step 3: Make sure your emojis are
         /// visually appealing" — rather than the pair text that was asked
         /// for. Ignored by --generator brama, which is already a chat API.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// One-sentence description of the trait the positive side shows.
         #[arg(long = "trait")]
         trait_description: String,
@@ -256,13 +256,13 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                         &model,
                         revision.as_deref(),
                         device,
-                        Precision::parse(&precision)?,
+                        precision,
                     )?;
                     // Synthesis is the first step of the funnel and everything
                     // downstream inherits what it writes. Addressed without
                     // its markers, an instruct checkpoint answers a pair
                     // request with instructions about answering pair requests.
-                    runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+                    runtime.set_chat_template(chat_template);
                     pairs::synthesize(pairs::Generator::Local(&runtime), &options)?
                 }
                 "brama" => {

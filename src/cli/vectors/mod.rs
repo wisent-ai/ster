@@ -30,22 +30,23 @@ pub(super) struct TrainArgs {
         /// Comma-separated layers, half-open ranges such as 8..16, or all.
         #[arg(long, default_value = "all")]
         layers: String,
-        /// Direction training method: caa, pca, or logistic.
-        #[arg(long, default_value = "caa")]
-        method: String,
+        /// Direction training method: caa, pca, or logistic. Parsed by clap,
+        /// so a typo is a usage error before a checkpoint is loaded.
+        #[arg(long, default_value = "caa", value_parser = TrainingMethod::parse)]
+        method: TrainingMethod,
         /// auto reads every pair through the model's own chat template when
         /// it publishes one, off reads it as raw text. A direction is fitted
         /// in whatever space the pairs were read in and added in whatever
         /// space generation runs in, so a direction fitted off and applied
         /// auto is measured in one space and steers another.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Dtype the base weights are mapped at: f32, f16, or bf16. A
         /// direction is fitted in whatever space the prompts were read in, so
         /// two artifacts trained at different precisions are not
         /// interchangeable. bf16 needs --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
 }
 
 /// `ster optimize`
@@ -62,12 +63,12 @@ pub(super) struct OptimizeArgs {
         layers: String,
         /// auto reads every pair through the model's own chat template when
         /// it publishes one, off reads it as raw text.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Dtype the base weights are mapped at: f32, f16, or bf16. bf16 needs
         /// --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
 }
 
 /// `ster evaluate`
@@ -84,13 +85,13 @@ pub(super) struct EvaluateArgs {
         /// it publishes one, off reads it as raw text. It should match the
         /// run that trained the artifact for the same reason --precision
         /// should.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Dtype the base weights are mapped at: f32, f16, or bf16. It should
         /// match the run that trained the artifact, or the score measures the
         /// direction in a space it was not fitted in.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
 }
 
 /// `ster generate`
@@ -111,13 +112,13 @@ pub(super) struct GenerateArgs {
         /// it publishes one, off sends the prompt as raw text. An instruct
         /// checkpoint asked a bare question continues the text instead of
         /// answering it, which is what auto exists to prevent.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Dtype the base weights are mapped at: f32, f16, or bf16. Half
         /// precision holds a checkpoint in half the memory; a steering vector
         /// is cast to it on the way in. bf16 needs --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
         #[arg(long, default_value_t = 1.0)]
         strength: f64,
         #[arg(long, default_value_t = 128)]
@@ -147,13 +148,13 @@ pub(super) struct ExtractArgs {
         /// it publishes one, off reads it as raw text. The exported
         /// activations are the states the model reached; this is what it was
         /// reading when it reached them.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Dtype the base weights are mapped at: f32, f16, or bf16. The
         /// exported activations are F32 either way; this is the width they
         /// were computed in. bf16 needs --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
 }
 
 /// `ster inspect`
@@ -180,11 +181,10 @@ pub(super) struct OnboardingArgs {
 pub(super) fn train(args: TrainArgs) -> Result<()> {
     let TrainArgs { model, pairs, output, layers, method, chat_template, precision } = args;
             let pairs = resolve_pairs(pairs)?;
-            let mut runtime = model.load_at(Precision::parse(&precision)?)?;
-            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            let mut runtime = model.load_at(precision)?;
+            let chat = runtime.set_chat_template(chat_template);
             let pair_set = PairSet::load(&pairs)?;
             let layers = parse_layers(&layers, runtime.layer_count())?;
-            let method = TrainingMethod::parse(&method)?;
             let artifact = workflow::train(&runtime, &pair_set, &layers, method)?;
             artifact.save(&output)?;
             let mut summary = workflow::artifact_summary(&artifact);
@@ -195,8 +195,8 @@ pub(super) fn train(args: TrainArgs) -> Result<()> {
 pub(super) fn optimize(args: OptimizeArgs) -> Result<()> {
     let OptimizeArgs { model, pairs, output, layers, chat_template, precision } = args;
             let pairs = resolve_pairs(pairs)?;
-            let mut runtime = model.load_at(Precision::parse(&precision)?)?;
-            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            let mut runtime = model.load_at(precision)?;
+            let chat = runtime.set_chat_template(chat_template);
             let pair_set = PairSet::load(&pairs)?;
             let layers = parse_layers(&layers, runtime.layer_count())?;
             let selection = workflow::optimize(&runtime, &pair_set, &layers)?;
@@ -209,8 +209,8 @@ pub(super) fn optimize(args: OptimizeArgs) -> Result<()> {
 pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
     let EvaluateArgs { model, pairs, vector, chat_template, precision } = args;
             let pairs = resolve_pairs(pairs)?;
-            let mut runtime = model.load_at(Precision::parse(&precision)?)?;
-            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            let mut runtime = model.load_at(precision)?;
+            let chat = runtime.set_chat_template(chat_template);
             let pair_set = PairSet::load(&pairs)?;
             let artifact = SteeringArtifact::load(&vector)?;
             // The artifact now records the precision and the format it was
@@ -237,7 +237,6 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
             top_p,
             seed,
     } = args;
-            let precision = Precision::parse(&precision)?;
             // Both documents are read before a single weight is mapped, so
             // the two halves of the wrong-document refusal cost the same. An
             // adapter was already refused this early because it is attached
@@ -259,7 +258,7 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
                 )?,
                 None => model.load_at(precision)?,
             };
-            runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            runtime.set_chat_template(chat_template);
             if let Some(vector) = vector.as_deref() {
                 tune::warn_on_provenance(vector, "direction", &runtime);
             }
@@ -273,8 +272,8 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
 }
 pub(super) fn extract(args: ExtractArgs) -> Result<()> {
     let ExtractArgs { model, input, output, layers, chat_template, precision } = args;
-            let mut runtime = model.load_at(Precision::parse(&precision)?)?;
-            runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            let mut runtime = model.load_at(precision)?;
+            runtime.set_chat_template(chat_template);
             let layers = parse_layers(&layers, runtime.layer_count())?;
             workflow::extract(&runtime, &input, &output, &layers)?;
             println!("{}", output.display());

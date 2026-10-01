@@ -123,10 +123,10 @@ pub(super) struct BenchmarkArgs {
     /// A calibration written by `ster calibrate` for this exact model.
     #[arg(long)]
     calibration: Option<PathBuf>,
-    #[arg(long, default_value = "auto")]
-    chat_template: String,
-    #[arg(long, default_value = "f32")]
-    precision: String,
+    #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+    chat_template: ChatChoice,
+    #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    precision: Precision,
     /// Option orders each question is shown in; 0 is every cyclic shift.
     #[arg(long, default_value_t = 0)]
     permutations: usize,
@@ -214,7 +214,7 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
         .as_deref()
         .map(|path| Calibration::load(path).map(|document| (path, document)))
         .transpose()?;
-    let precision = Precision::parse(&args.precision)?;
+    let precision = args.precision;
     let device = args.model.device;
     let mut runtime = match args.adapter.as_deref() {
         Some(adapter) => {
@@ -227,7 +227,7 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
         document.check_model(path, &runtime.model_id)?;
         read.temperature = document.temperature;
     }
-    runtime.set_chat_template(ChatChoice::parse(&args.chat_template)?);
+    runtime.set_chat_template(args.chat_template);
     let options = decide::BenchmarkOptions {
         read,
         calibration: calibration.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),

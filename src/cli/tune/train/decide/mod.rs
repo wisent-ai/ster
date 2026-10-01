@@ -57,16 +57,16 @@ pub(in crate::cli) struct DecideArgs {
     /// auto renders every prompt through the model's own chat template
     /// when it publishes one, off sends raw text. Train in the format the
     /// decisions will be read in.
-    #[arg(long, default_value = "auto")]
-    chat_template: String,
+    #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+    chat_template: ChatChoice,
     /// Rows folded into one forward pass.
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
     /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
     /// Adapters and every optimizer moment stay in f32. bf16 needs
     /// --device metal.
-    #[arg(long, default_value = "f32")]
-    precision: String,
+    #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    precision: Precision,
     #[arg(long, default_value_t = 42)]
     seed: u64,
 }
@@ -102,10 +102,9 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
         layers: parse_adapter_layers(&layers)?,
         seed,
     };
-    let precision = Precision::parse(&precision)?;
     let (mut runtime, varmap) =
         Runtime::load_trainable_at(&model.model, model.revision.as_deref(), device, &spec, precision)?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+    let chat = runtime.set_chat_template(chat_template);
     let options = DecideTuneOptions {
         spec: spec.clone(),
         epochs,

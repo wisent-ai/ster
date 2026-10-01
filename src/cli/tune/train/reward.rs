@@ -56,8 +56,8 @@ pub(in crate::cli) struct RewardArgs {
         /// auto encodes both sides of every pair as the assistant turn the
         /// model's own chat template renders, when it publishes one; off
         /// encodes raw text.
-        #[arg(long, default_value = "auto")]
-        chat_template: String,
+        #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+        chat_template: ChatChoice,
         /// Pairs folded into one forward pass; a pair is two rows. One is the
         /// unbatched pass every run recorded so far took.
         #[arg(long, default_value_t = 1)]
@@ -65,8 +65,8 @@ pub(in crate::cli) struct RewardArgs {
         /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
         /// The adapters and the scalar head stay in f32. bf16 needs
         /// --device metal.
-        #[arg(long, default_value = "f32")]
-        precision: String,
+        #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+        precision: Precision,
         #[arg(long, default_value_t = 42)]
         seed: u64,
 }
@@ -99,7 +99,6 @@ pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
                 layers: parse_adapter_layers(&layers)?,
                 seed,
             };
-            let precision = Precision::parse(&precision)?;
             let (mut runtime, varmap) = Runtime::load_trainable_at(
                 &model.model,
                 model.revision.as_deref(),
@@ -107,7 +106,7 @@ pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
                 &spec,
                 precision,
             )?;
-            let chat = runtime.set_chat_template(ChatChoice::parse(&chat_template)?);
+            let chat = runtime.set_chat_template(chat_template);
             // The head joins the same VarMap the adapters live in, so one
             // optimizer steps the pair and the artifact holds both. It is
             // registered at the parameter dtype, never the base dtype: a
