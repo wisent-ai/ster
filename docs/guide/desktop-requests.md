@@ -67,11 +67,3 @@ prints one `result` event whose `json` is the summary `ster inspect` prints,
 and exits `0`. The same body with the operation misspelled prints
 `{"type":"result","status":2,"json":{"error":"unknown operation: inspct"}}`
 and exits `2`.
-
-## Tests
-
-[`tests/decide/request.rs`](../../tests/decide/request.rs) runs
-`ster request decide` on the built binary with the body Ster Desktop's Decide
-screen composes, checks the answer, the progress log events and the exit
-status, and checks that a malformed question is refused with its exact sentence
-as a single status-`2` result before any model loads.

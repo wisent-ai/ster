@@ -11,15 +11,14 @@ homepage = "https://ster.wisent.com"
 readme = "README.md"
 keywords = ["llm", "representation-engineering", "activation-steering", "machine-learning"]
 categories = ["command-line-utilities", "science"]
+# No test target is built until the operator approves one with
+# `tama tests approve`.
+autotests = false
 exclude = ["assets/*", ".github/*", "release/*"]
 
 [[bin]]
 name = "ster"
 path = "src/main.rs"
-
-[[test]]
-name = "decide"
-path = "tests/decide/main.rs"
 
 [features]
 default = []

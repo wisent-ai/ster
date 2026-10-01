@@ -214,16 +214,3 @@ refused as `question '<id>' renders to <n> tokens, past the <max> this model
 was built for`, and a tokenizer that has no single token for an answer letter
 as `this tokenizer has no single token for the answer label "<label>", so it
 cannot be read from one position`.
-
-## Tests
-
-[`tests/decide/main.rs`](../../tests/decide/main.rs) drives the built binary
-against the real `HuggingFaceTB/SmolLM2-1.7B-Instruct` checkpoint in the
-Hugging Face cache: the request above is answered and its response read back
-from disk, every order is explained, a calibration is fitted and then read by
-a decision and refused by another model, and every refusal above that needs no
-model is checked for its exact sentence.
-
-```bash
-cargo test --release --test decide
-```

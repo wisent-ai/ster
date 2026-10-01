@@ -48,7 +48,7 @@ Requests with the correct answer to some of their questions:
 A choice is labelled with its option name, a score with its level index, a
 noul with `true` or `false`. Not every question needs a label. The full set
 the recorded run used is
-[`tests/decide/fixtures/examples.json`](../../../tests/decide/fixtures/examples.json):
+[`examples.json`](examples.json):
 four support messages, eleven labels.
 
 ## The artifact
