@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde_json::json;
 use candle_core::Device;
-use ster::{lora, tune, ChatChoice, DeviceChoice, EvaluateOptions, ExampleSet, Precision, Runtime};
+use ster::{lora, tune, ChatChoice, EvaluateOptions, ExampleSet, Precision, Runtime};
 
 use super::super::ModelArgs;
 use super::note_precision;
@@ -99,14 +99,14 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
                 Some(adapter) => Runtime::load_with_adapter_at(
                     &model.model,
                     model.revision.as_deref(),
-                    DeviceChoice::parse(&model.device)?,
+                    model.device,
                     adapter,
                     precision,
                 )?,
                 None => Runtime::load_at(
                     &model.model,
                     model.revision.as_deref(),
-                    DeviceChoice::parse(&model.device)?,
+                    model.device,
                     precision,
                 )?,
             };

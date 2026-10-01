@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use serde_json::json;
-use ster::{decide::ExampleSet, lora, tune, ChatChoice, DecideTuneOptions, DeviceChoice, Precision, Runtime};
+use ster::{decide::ExampleSet, lora, tune, ChatChoice, DecideTuneOptions, Precision, Runtime};
 
 use super::super::super::ModelArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
@@ -94,7 +94,7 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
     // The examples are read before a weight is mapped, so a bad label is
     // refused in milliseconds.
     let example_set = ExampleSet::load(&examples)?;
-    let device = DeviceChoice::parse(&model.device)?;
+    let device = model.device;
     let spec = lora::Spec {
         rank,
         alpha,

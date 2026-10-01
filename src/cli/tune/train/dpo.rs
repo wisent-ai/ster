@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde_json::json;
 use ster::{
-    lora, tune, ChatChoice, DeviceChoice, DpoLoss, DpoOptions, PairSet, Precision, Runtime,
+    lora, tune, ChatChoice, DpoLoss, DpoOptions, PairSet, Precision, Runtime,
 };
 
 use super::super::super::{resolve_pairs, ModelArgs};
@@ -100,7 +100,7 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<()> {
             seed,
     } = args;
             let pairs = resolve_pairs(pairs)?;
-            let device = DeviceChoice::parse(&model.device)?;
+            let device = model.device;
             let spec = lora::Spec {
                 rank,
                 alpha,

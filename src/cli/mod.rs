@@ -40,9 +40,10 @@ pub(crate) struct ModelArgs {
     /// Immutable Hugging Face revision; defaults to main.
     #[arg(long)]
     revision: Option<String>,
-    /// Runtime device: cpu, metal, or cuda.
-    #[arg(long, default_value = "cpu")]
-    device: String,
+    /// Runtime device: cpu, metal, or cuda. Parsed by clap, so an unknown
+    /// device is a usage error (exit 2) before anything loads.
+    #[arg(long, default_value = "cpu", value_parser = DeviceChoice::parse)]
+    device: DeviceChoice,
 }
 
 impl ModelArgs {
@@ -50,8 +51,7 @@ impl ModelArgs {
     /// here, so `--precision` means the same thing on all of them and a new
     /// command cannot quietly forget it.
     fn load_at(&self, precision: Precision) -> Result<Runtime> {
-        let device = DeviceChoice::parse(&self.device)?;
-        Runtime::load_at(&self.model, self.revision.as_deref(), device, precision)
+        Runtime::load_at(&self.model, self.revision.as_deref(), self.device, precision)
     }
 }
 

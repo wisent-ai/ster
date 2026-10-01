@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde_json::json;
 use ster::{
-    lora, tune, ChatChoice, DeviceChoice, PairSet, Precision, RewardHead, RewardOptions, Runtime,
+    lora, tune, ChatChoice, PairSet, Precision, RewardHead, RewardOptions, Runtime,
 };
 
 use super::super::super::{resolve_pairs, ModelArgs};
@@ -91,7 +91,7 @@ pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
             seed,
     } = args;
             let pairs = resolve_pairs(pairs)?;
-            let device = DeviceChoice::parse(&model.device)?;
+            let device = model.device;
             let spec = lora::Spec {
                 rank,
                 alpha,

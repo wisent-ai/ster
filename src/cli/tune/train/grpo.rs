@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde_json::json;
 use ster::{
-    lora, tune, ChatChoice, DeviceChoice, GenerationOptions, GrpoOptions, Precision, PromptSet,
+    lora, tune, ChatChoice, GenerationOptions, GrpoOptions, Precision, PromptSet,
     Reward, Runtime,
 };
 
@@ -111,7 +111,7 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
             precision,
             seed,
     } = args;
-            let device = DeviceChoice::parse(&model.device)?;
+            let device = model.device;
             let spec = lora::Spec {
                 rank,
                 alpha,

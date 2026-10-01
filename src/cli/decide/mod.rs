@@ -130,7 +130,7 @@ impl ReadArgs {
             Some(adapter) => ster::Runtime::load_with_adapter_at(
                 &self.model.model,
                 self.model.revision.as_deref(),
-                ster::DeviceChoice::parse(&self.model.device)?,
+                self.model.device,
                 adapter,
                 precision,
             )?,

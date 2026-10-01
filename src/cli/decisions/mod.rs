@@ -10,7 +10,7 @@ use serde_json::json;
 use ster::{
     brama::Gateway,
     decide::{self, Calibration, ExampleSet, FetchOptions, Schema, SynthesizeOptions},
-    ChatChoice, DecideOptions, DeviceChoice, Precision, Runtime, RAW_TEMPERATURE,
+    ChatChoice, DecideOptions, Precision, Runtime, RAW_TEMPERATURE,
 };
 
 use super::ModelArgs;
@@ -215,7 +215,7 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
         .map(|path| Calibration::load(path).map(|document| (path, document)))
         .transpose()?;
     let precision = Precision::parse(&args.precision)?;
-    let device = DeviceChoice::parse(&args.model.device)?;
+    let device = args.model.device;
     let mut runtime = match args.adapter.as_deref() {
         Some(adapter) => {
             Runtime::load_with_adapter_at(&args.model.model, args.model.revision.as_deref(), device, adapter, precision)?

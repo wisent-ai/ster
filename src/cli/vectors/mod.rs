@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use ster::{
     tune,
     workflow::{self, parse_layers},
-    ChatChoice, DeviceChoice, GenerationOptions, PairSet, Precision, Runtime, SteeringArtifact,
+    ChatChoice, GenerationOptions, PairSet, Precision, Runtime, SteeringArtifact,
     TrainingMethod,
 };
 
@@ -253,7 +253,7 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
                 Some(adapter) => Runtime::load_with_adapter_at(
                     &model.model,
                     model.revision.as_deref(),
-                    DeviceChoice::parse(&model.device)?,
+                    model.device,
                     adapter,
                     precision,
                 )?,

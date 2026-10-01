@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use serde_json::json;
-use ster::{lora, tune, ChatChoice, DeviceChoice, ExampleSet, Precision, Runtime, SftOptions};
+use ster::{lora, tune, ChatChoice, ExampleSet, Precision, Runtime, SftOptions};
 
 use super::super::super::ModelArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
@@ -90,7 +90,7 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
             precision,
             seed,
     } = args;
-            let device = DeviceChoice::parse(&model.device)?;
+            let device = model.device;
             let spec = lora::Spec {
                 rank,
                 alpha,

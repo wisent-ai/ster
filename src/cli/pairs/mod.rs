@@ -71,9 +71,9 @@ pub(super) enum PairsCommand {
         /// Immutable Hugging Face revision; defaults to main.
         #[arg(long)]
         revision: Option<String>,
-        /// Runtime device: cpu, metal, or cuda.
-        #[arg(long, default_value = "cpu")]
-        device: String,
+        /// Runtime device: cpu, metal, or cuda; an unknown one is a usage error.
+        #[arg(long, default_value = "cpu", value_parser = DeviceChoice::parse)]
+        device: DeviceChoice,
         /// Dtype the local generator's base weights are mapped at: f32, f16,
         /// or bf16. Ignored by --generator brama, which loads no weights.
         /// bf16 needs --device metal.
@@ -255,7 +255,7 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                     let mut runtime = Runtime::load_at(
                         &model,
                         revision.as_deref(),
-                        DeviceChoice::parse(&device)?,
+                        device,
                         Precision::parse(&precision)?,
                     )?;
                     // Synthesis is the first step of the funnel and everything
