@@ -9,12 +9,13 @@ use clap::{Args, Parser};
 use ster::{DeviceChoice, Precision, Runtime};
 
 mod command;
+mod converse;
 mod decide;
 mod decisions;
 mod onboarding;
 mod pairs;
-mod tune;
 mod toy;
+mod tune;
 mod vectors;
 mod workspace;
 
@@ -51,7 +52,12 @@ impl ModelArgs {
     /// here, so `--precision` means the same thing on all of them and a new
     /// command cannot quietly forget it.
     fn load_at(&self, precision: Precision) -> Result<Runtime> {
-        Runtime::load_at(&self.model, self.revision.as_deref(), self.device, precision)
+        Runtime::load_at(
+            &self.model,
+            self.revision.as_deref(),
+            self.device,
+            precision,
+        )
     }
 }
 
@@ -71,6 +77,7 @@ pub(crate) fn run() -> Result<()> {
         Command::Pairs { command } => pairs::run(command),
         Command::Tune { command } => tune::run(command),
         Command::ToyModel { out } => toy::run(&out),
+        Command::Converse(args) => converse::run(args),
         Command::Request { operation } => {
             let status = ster::request::run(&operation)?;
             if status != 0 {

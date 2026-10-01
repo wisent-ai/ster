@@ -57,7 +57,7 @@ mod reward;
 mod rollout;
 
 pub use reward::{GrpoIteration, GrpoOptions, GrpoReport, Reward};
-pub use rollout::UserSimulator;
+pub use rollout::{Rollout, UserSimulator, rollout};
 
 use group::{Totals, group_loss, sample_group};
 

@@ -55,7 +55,16 @@ pub(super) fn sample_group(
     let mut conversations = Vec::with_capacity(options.group);
     let mut rewards = Vec::with_capacity(options.group);
     for _ in 0..options.group {
-        let turns = rollout(runtime, user, prompt, options, limit, draw)?;
+        let turns = rollout(
+            runtime,
+            user,
+            prompt,
+            options.turns,
+            options.generation,
+            limit,
+            draw,
+        )?
+        .turns;
         let mut total = 0f64;
         for turn in &turns {
             total += reward.score(turn)?;

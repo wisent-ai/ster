@@ -3,6 +3,7 @@
 
 use clap::Subcommand;
 
+use super::converse::ConverseArgs;
 use super::decide::{CalibrateArgs, DecideArgs};
 use super::decisions::DecisionsCommand;
 use super::pairs::PairsCommand;
@@ -26,6 +27,10 @@ pub(super) enum Command {
     Extract(ExtractArgs),
     /// Summarize and validate a Ster steering artifact.
     Inspect(InspectArgs),
+    /// Play conversations between a model and a simulated user and write
+    /// each as {"messages": [...]}: the rollout tune grpo --turns trains on,
+    /// with no gradient.
+    Converse(ConverseArgs),
     /// Import existing contrastive data during first use, or replay the walkthrough.
     Onboarding(OnboardingArgs),
     /// Answer typed questions about a state from one forward pass, with a

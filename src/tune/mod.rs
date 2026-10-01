@@ -40,14 +40,15 @@ mod objective;
 mod preflight;
 
 pub use artifact::{
-    evaluate, merge, warn_on_provenance, EvaluateOptions, EvaluateReport, EvaluatedExample,
-    MergeReport,
+    EvaluateOptions, EvaluateReport, EvaluatedExample, MergeReport, evaluate, merge,
+    warn_on_provenance,
 };
 pub use examples::{Example, ExampleSet};
 pub use objective::{
-    decide, dpo, grpo, reward, sft, DecideOptions as DecideTuneOptions, DecideReport, DpoLoss,
-    DpoOptions, DpoReport, GrpoIteration, GrpoOptions, GrpoReport, Reward, RewardHead, RewardModel,
-    RewardOptions, RewardReport, SftOptions, SftReport, UserSimulator,
+    DecideOptions as DecideTuneOptions, DecideReport, DpoLoss, DpoOptions, DpoReport,
+    GrpoIteration, GrpoOptions, GrpoReport, Reward, RewardHead, RewardModel, RewardOptions,
+    RewardReport, Rollout, SftOptions, SftReport, UserSimulator, decide, dpo, grpo, reward,
+    rollout, sft,
 };
 
 use crate::lora;
@@ -56,7 +57,6 @@ use crate::lora;
 /// rather than to zero. LoRA runs are short; a schedule that reaches zero
 /// spends a meaningful share of its last steps not learning at all.
 const DECAY_FLOOR: f64 = 0.1;
-
 
 /// Linear warmup for `warmup` steps, then cosine decay from `base` down to
 /// `DECAY_FLOOR * base` over whatever steps remain.

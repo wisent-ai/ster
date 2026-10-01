@@ -219,6 +219,17 @@ assistant turns needs a simulated user model to write the turns in between`. A
 turn whose conversation plus `--max-new-tokens` would pass `--max-sequence` is
 refused with the turn number and both token counts rather than cut.
 
+`ster converse` plays the same conversations with no gradient, for
+evaluation: `--model` (with an optional `--adapter`) answers, `--user-model`
+plays the user, and each prompt in `--prompts` opens one conversation of at
+most `--turns` assistant turns. Every conversation is written to `--output` as
+one JSONL line, `{"prompt_index", "messages": [{role, content}, ...]}`, and the
+command prints the count of conversations and assistant turns.
+`--max-new-tokens`, `--max-sequence`, `--temperature` and `--seed` have no
+default: they decide what the evaluation measured, so the run names them.
+`--turns` below two is refused with `a conversation with a simulated user needs
+--turns of at least 2; one turn is ster generate`.
+
 The report records `reward`, `prompts`, `trained_prompts`, `skipped_long`,
 `group`, `turns`, `user_model`, `iterations`, `steps`, `beta`,
 `trainable_tensors`, `trainable_parameters`, `first_loss`, `final_loss`,

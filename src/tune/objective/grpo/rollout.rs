@@ -19,7 +19,12 @@ use crate::{
     workflow,
 };
 
-use super::GrpoOptions;
+/// One played conversation: the policy's turns with the context each was
+/// sampled from, and the whole transcript as `(role, text)` in order.
+pub struct Rollout {
+    pub turns: Vec<Completion>,
+    pub transcript: Vec<(&'static str, String)>,
+}
 
 /// The model that writes the user's turns. Frozen and generation-only: it is
 /// never scored with a gradient and carries no adapter.
@@ -71,50 +76,67 @@ impl Speaker {
 
 /// The policy's turns, in order. Each completion's `prompt` is the whole
 /// conversation before that turn, so scoring it scores the turn in context.
-pub(super) fn rollout(
+/// `ster converse` plays the same function with no gradient anywhere, so a
+/// conversation evaluated is a conversation trained on.
+pub fn rollout(
     runtime: &Runtime,
     user: Option<&UserSimulator>,
     prompt: &str,
-    options: &GrpoOptions,
+    turns: usize,
+    generation: GenerationOptions,
     limit: usize,
     draw: &mut u64,
-) -> Result<Vec<Completion>> {
+) -> Result<Rollout> {
     let Some(user) = user else {
-        let completion = runtime.sample(prompt, None, next(options, draw))?;
+        let completion = runtime.sample(prompt, None, next(generation, draw))?;
         refuse_empty(&completion, 1)?;
-        return Ok(vec![completion]);
+        let transcript = vec![
+            ("user", prompt.to_owned()),
+            ("assistant", completion.text.clone()),
+        ];
+        return Ok(Rollout {
+            turns: vec![completion],
+            transcript,
+        });
     };
 
     let mut said: Vec<(Speaker, String)> = vec![(Speaker::User, prompt.to_owned())];
-    let mut turns = Vec::with_capacity(options.turns);
-    for turn in 1..=options.turns {
+    let mut played = Vec::with_capacity(turns);
+    for turn in 1..=turns {
         let context = runtime.encode_conversation(&messages(&said, false))?;
-        let longest = context.len() + options.generation.max_new_tokens;
+        let longest = context.len() + generation.max_new_tokens;
         if longest > limit {
             bail!(
                 "turn {turn} needs {} conversation tokens plus {} sampled tokens, past the {limit} token limit; lower --turns or raise --max-sequence",
                 context.len(),
-                options.generation.max_new_tokens
+                generation.max_new_tokens
             );
         }
-        let completion = runtime.sample_tokens(context, None, next(options, draw))?;
+        let completion = runtime.sample_tokens(context, None, next(generation, draw))?;
         refuse_empty(&completion, turn)?;
         said.push((Speaker::Assistant, completion.text.clone()));
-        turns.push(completion);
-        if turn == options.turns {
+        played.push(completion);
+        if turn == turns {
             break;
         }
 
         let context = user.runtime.encode_conversation(&messages(&said, true))?;
         let reply = user
             .runtime
-            .sample_tokens(context, None, next(options, draw))?;
+            .sample_tokens(context, None, next(generation, draw))?;
         if reply.text.trim().is_empty() {
             break;
         }
         said.push((Speaker::User, reply.text));
     }
-    Ok(turns)
+    let transcript = said
+        .into_iter()
+        .map(|(speaker, text)| (speaker.role(), text))
+        .collect();
+    Ok(Rollout {
+        turns: played,
+        transcript,
+    })
 }
 
 /// The conversation as one side sees it: as written for the policy, or with
@@ -132,13 +154,13 @@ fn messages(said: &[(Speaker, String)], swap: bool) -> Vec<Message<'_>> {
 }
 
 /// Every draw in the run gets its own seed, advanced from the operator's.
-fn next(options: &GrpoOptions, draw: &mut u64) -> GenerationOptions {
-    let generation = GenerationOptions {
-        seed: options.generation.seed.wrapping_add(*draw),
-        ..options.generation
+fn next(generation: GenerationOptions, draw: &mut u64) -> GenerationOptions {
+    let advanced = GenerationOptions {
+        seed: generation.seed.wrapping_add(*draw),
+        ..generation
     };
     *draw = draw.wrapping_add(1);
-    generation
+    advanced
 }
 
 /// An assistant turn whose first token was the end of sequence has nothing to
@@ -146,9 +168,7 @@ fn next(options: &GrpoOptions, draw: &mut u64) -> GenerationOptions {
 /// upward by removing its worst member, so the whole group is refused.
 fn refuse_empty(completion: &Completion, turn: usize) -> Result<()> {
     if completion.tokens.is_empty() {
-        bail!(
-            "assistant turn {turn} of a sampled conversation was empty, so this group has nothing to score"
-        );
+        bail!("assistant turn {turn} of a sampled conversation was empty");
     }
     Ok(())
 }

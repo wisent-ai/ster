@@ -8,8 +8,10 @@ mod grpo;
 mod reward;
 mod sft;
 
-pub use decide::{decide, DecideOptions, DecideReport};
-pub use dpo::{dpo, DpoLoss, DpoOptions, DpoReport};
-pub use grpo::{grpo, GrpoIteration, GrpoOptions, GrpoReport, Reward, UserSimulator};
-pub use reward::{reward, RewardHead, RewardModel, RewardOptions, RewardReport};
-pub use sft::{sft, SftOptions, SftReport};
+pub use decide::{DecideOptions, DecideReport, decide};
+pub use dpo::{DpoLoss, DpoOptions, DpoReport, dpo};
+pub use grpo::{
+    GrpoIteration, GrpoOptions, GrpoReport, Reward, Rollout, UserSimulator, grpo, rollout,
+};
+pub use reward::{RewardHead, RewardModel, RewardOptions, RewardReport, reward};
+pub use sft::{SftOptions, SftReport, sft};
