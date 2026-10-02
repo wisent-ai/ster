@@ -8,9 +8,9 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde_json::json;
 use ster::{
+    ChatChoice, DecideOptions, Precision, RAW_TEMPERATURE, Runtime,
     brama::Gateway,
     decide::{self, Calibration, ExampleSet, FetchOptions, Schema, SynthesizeOptions},
-    ChatChoice, DecideOptions, Precision, Runtime, RAW_TEMPERATURE,
 };
 
 use super::ModelArgs;
@@ -34,18 +34,20 @@ pub(super) struct FetchArgs {
     /// Dataset id on the Hub, such as fancyzhx/ag_news.
     #[arg(long)]
     dataset: String,
-    #[arg(long, default_value = "default")]
+    /// The dataset configuration on the Hub; none is assumed.
+    #[arg(long)]
     config: String,
-    #[arg(long, default_value = "train")]
+    /// The split read, such as train or test; none is assumed.
+    #[arg(long)]
     split: String,
     /// The column holding the text each row is about.
-    #[arg(long, default_value = "text")]
+    #[arg(long)]
     text_field: String,
     /// The class-label column; its class names become the options.
-    #[arg(long, default_value = "label")]
+    #[arg(long)]
     label_field: String,
     /// The id the one question is asked under.
-    #[arg(long, default_value = "class")]
+    #[arg(long)]
     question_id: String,
     /// The question asked about every text.
     #[arg(long)]
@@ -66,10 +68,11 @@ pub(super) struct ImportArgs {
     /// The JSONL file, one {"context", "options", "label"} row per line.
     #[arg(long)]
     input: PathBuf,
-    #[arg(long, default_value = "choice")]
+    /// The id the one question is asked under.
+    #[arg(long)]
     question_id: String,
     /// The question asked about every context.
-    #[arg(long, default_value = "Which option fits the context?")]
+    #[arg(long)]
     instructions: String,
     #[arg(long)]
     output: PathBuf,
@@ -146,8 +149,12 @@ pub(super) fn run(command: DecisionsCommand) -> Result<()> {
 }
 
 fn write(path: &Path, set: &ExampleSet) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     std::fs::write(path, serde_json::to_string_pretty(set)?)
         .with_context(|| format!("failed to write {}", path.display()))
@@ -167,24 +174,42 @@ fn fetch(args: FetchArgs) -> Result<()> {
     };
     let (set, report) = decide::fetch(&options)?;
     write(&args.output, &set)?;
-    println!("{}", serde_json::to_string_pretty(&json!({"path": args.output.display().to_string(), "report": report}))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &json!({"path": args.output.display().to_string(), "report": report})
+        )?
+    );
     Ok(())
 }
 
 fn import(args: ImportArgs) -> Result<()> {
     let (set, report) = decide::import_jsonl(&args.input, &args.question_id, &args.instructions)?;
     write(&args.output, &set)?;
-    println!("{}", serde_json::to_string_pretty(&json!({"path": args.output.display().to_string(), "report": report}))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &json!({"path": args.output.display().to_string(), "report": report})
+        )?
+    );
     Ok(())
 }
 
 fn synthesize(args: SynthesizeArgs) -> Result<()> {
     let schema = Schema::load(&args.schema)?;
     let gateway = Gateway::from_env(&args.generator_model)?;
-    let options = SynthesizeOptions { per_option: args.per_option, retry_multiplier: args.retry_multiplier };
+    let options = SynthesizeOptions {
+        per_option: args.per_option,
+        retry_multiplier: args.retry_multiplier,
+    };
     let (set, report) = decide::synthesize(&gateway, &schema, &options)?;
     write(&args.output, &set)?;
-    println!("{}", serde_json::to_string_pretty(&json!({"path": args.output.display().to_string(), "report": report}))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &json!({"path": args.output.display().to_string(), "report": report})
+        )?
+    );
     Ok(())
 }
 
@@ -217,12 +242,25 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
     let precision = args.precision;
     let device = args.model.device;
     let mut runtime = match args.adapter.as_deref() {
-        Some(adapter) => {
-            Runtime::load_with_adapter_at(&args.model.model, args.model.revision.as_deref(), device, adapter, precision)?
-        }
-        None => Runtime::load_at(&args.model.model, args.model.revision.as_deref(), device, precision)?,
+        Some(adapter) => Runtime::load_with_adapter_at(
+            &args.model.model,
+            args.model.revision.as_deref(),
+            device,
+            adapter,
+            precision,
+        )?,
+        None => Runtime::load_at(
+            &args.model.model,
+            args.model.revision.as_deref(),
+            device,
+            precision,
+        )?,
     };
-    let mut read = DecideOptions { permutations: args.permutations, temperature: RAW_TEMPERATURE, explain: false };
+    let mut read = DecideOptions {
+        permutations: args.permutations,
+        temperature: RAW_TEMPERATURE,
+        explain: false,
+    };
     if let Some((path, document)) = &calibration {
         document.check_model(path, &runtime.model_id)?;
         read.temperature = document.temperature;
@@ -230,15 +268,26 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
     runtime.set_chat_template(args.chat_template);
     let options = decide::BenchmarkOptions {
         read,
-        calibration: calibration.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
-        adapter: args.adapter.as_deref().map(|path| path.to_string_lossy().into_owned()),
+        calibration: calibration
+            .as_ref()
+            .map(|(path, _)| path.to_string_lossy().into_owned()),
+        adapter: args
+            .adapter
+            .as_deref()
+            .map(|path| path.to_string_lossy().into_owned()),
     };
     let report = decide::benchmark(&runtime, &set, &options)?;
-    if let Some(parent) = args.output.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    if let Some(parent) = args
+        .output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let document = serde_json::to_string_pretty(&report)?;
-    std::fs::write(&args.output, &document).with_context(|| format!("failed to write {}", args.output.display()))?;
+    std::fs::write(&args.output, &document)
+        .with_context(|| format!("failed to write {}", args.output.display()))?;
     println!("{document}");
     Ok(())
 }

@@ -214,3 +214,23 @@ refused as `question '<id>' renders to <n> tokens, past the <max> this model
 was built for`, and a tokenizer that has no single token for an answer letter
 as `this tokenizer has no single token for the answer label "<label>", so it
 cannot be read from one position`.
+
+## Training a decision model
+
+Four commands turn labelled decisions into a measured adapter, each reading
+and writing the one labelled-decision document `ster calibrate` already reads:
+
+- `ster decisions fetch` reads rows of a Hugging Face classification dataset
+  into labelled decisions. Its configuration, split, text column and label
+  column are named by the caller; none is assumed, because a guessed column
+  trains on the wrong text in silence.
+- `ster decisions import` reads a JSONL file of `context`, `options` and
+  `label` rows; the question's id and wording are the caller's.
+- `ster decisions synthesize` writes labelled decisions with a hosted model
+  through Brama from a schema — a domain and the questions — one label per
+  state by construction.
+- `ster decisions split` holds out a seeded fraction of examples; `ster tune
+  decide` trains LoRA adapters on the training side; `ster decisions benchmark`
+  measures the base model and the adapter on the held-out side.
+
+Each has its own page on the documentation site under CLI commands.

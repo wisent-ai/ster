@@ -14,7 +14,7 @@ ster pairs inspect --pairs <FILE> [--dedupe-bits 3] [--dedupe-bands 8]
 ster pairs add --pairs <FILE> --positive <TEXT> --negative <TEXT> [--trait <NAME>]
 ster pairs remove --pairs <FILE> --index <N>
 ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTPUT>
-                      [--generator local|brama] [--generator-model <ROUTE>]
+                      --generator local|brama [--generator-model <ROUTE>]
                       [--model <MODEL>] [--revision <REVISION>] [--device <DEVICE>]
                       [--chat-template auto|off] [--precision f32|f16|bf16]
                       [--trait-name <NAME>] [--opposite <TEXT>]
@@ -128,7 +128,7 @@ for the whole run and the set would collapse to a single pair; advancing from
 temperature of zero is refused before the first generation on either route:
 `synthesis requires a temperature above zero; argmax generation repeats a single prompt`.
 
-`--generator` chooses who writes the text: `local`, the default, uses the same
+`--generator` chooses who writes the text, and is required: `local` uses the same
 local open-weight runtime every other Ster command uses, and `brama` sends the
 generation to a hosted model through the Brama gateway. `--model`,
 `--revision` and `--device` belong to the local route and are not read by the

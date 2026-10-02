@@ -81,7 +81,8 @@ impl Validate for PairsSaveRequest {
 pub(in crate::request) struct PairsSynthesizeRequest {
     /// Which model writes the pairs: local or brama. The model, revision and
     /// device below belong to the local route only; a brama body omits them.
-    #[serde(default = "default_generator")]
+    /// Neither route is assumed: a body without one is refused.
+    #[serde(default)]
     pub(in crate::request) generator: String,
     #[serde(default)]
     pub(in crate::request) generator_model: Option<String>,
@@ -129,6 +130,7 @@ impl Validate for PairsSynthesizeRequest {
         // The local route loads weights and so needs a model; the brama route
         // loads nothing and needs a gateway route instead.
         match self.generator.as_str() {
+            "" => return Err("pairs synthesize requires a generator, local or brama".to_owned()),
             "local" => self.model.check("pairs synthesize")?,
             "brama" => require(
                 self.generator_model.as_deref().unwrap_or_default(),

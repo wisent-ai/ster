@@ -3,14 +3,16 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Subcommand;
 use serde_json::json;
 use ster::{
-    brama,
-    pairs::{self, quality::dedupe::DedupeOptions, quality::diversity::DEFAULT_MAX_SAMPLE,
-        InspectOptions, SynthesisOptions},
     ChatChoice, ContrastivePair, DeviceChoice, GenerationOptions, PairSet, Precision, Runtime,
+    brama,
+    pairs::{
+        self, InspectOptions, SynthesisOptions, quality::dedupe::DedupeOptions,
+        quality::diversity::DEFAULT_MAX_SAMPLE,
+    },
 };
 
 use super::resolve_pairs;
@@ -57,8 +59,8 @@ pub(super) enum PairsCommand {
     Synthesize {
         /// Where the pair text comes from: local or brama. Steering always
         /// needs a local model; writing pairs does not, so this route may be
-        /// hosted.
-        #[arg(long, default_value = "local")]
+        /// hosted. Neither is assumed.
+        #[arg(long)]
         generator: String,
         /// Route the Brama generator writes with: a Brama alias, a canonical
         /// provider/model route, or a selector. Wisent's own served model is
@@ -128,13 +130,17 @@ pub(super) enum PairsCommand {
     Import(import::ImportArgs),
 }
 
-
 /// The `ster pairs` arms. Each one does the work and prints one pretty JSON
 /// document, exactly like the arms above; they live here rather than inline
 /// only to keep the top-level match readable.
 pub(super) fn run(command: PairsCommand) -> Result<()> {
     match command {
-        PairsCommand::Inspect { pairs, dedupe_bits, dedupe_bands, refusal_threshold } => {
+        PairsCommand::Inspect {
+            pairs,
+            dedupe_bits,
+            dedupe_bands,
+            refusal_threshold,
+        } => {
             let file = resolve_pairs(pairs)?;
             let pair_set = PairSet::load(&file)?;
             let options = InspectOptions {
@@ -150,14 +156,22 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         PairsCommand::Import(args) => import::run(args)?,
-        PairsCommand::Add { pairs: file, positive, negative, trait_name } => {
+        PairsCommand::Add {
+            pairs: file,
+            positive,
+            negative,
+            trait_name,
+        } => {
             // `PairSet::load` refuses a set with no pairs, so the first `add`
             // to a path that does not exist yet builds the set in memory
             // rather than loading one.
             let mut pair_set = if file.exists() {
                 PairSet::load(&file)?
             } else {
-                PairSet { trait_name: String::new(), pairs: Vec::new() }
+                PairSet {
+                    trait_name: String::new(),
+                    pairs: Vec::new(),
+                }
             };
             if let Some(name) = trait_name {
                 pair_set.trait_name = name;
@@ -252,12 +266,8 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                     let Some(model) = model else {
                         bail!("pairs synthesize with --generator local requires --model");
                     };
-                    let mut runtime = Runtime::load_at(
-                        &model,
-                        revision.as_deref(),
-                        device,
-                        precision,
-                    )?;
+                    let mut runtime =
+                        Runtime::load_at(&model, revision.as_deref(), device, precision)?;
                     // Synthesis is the first step of the funnel and everything
                     // downstream inherits what it writes. Addressed without
                     // its markers, an instruct checkpoint answers a pair

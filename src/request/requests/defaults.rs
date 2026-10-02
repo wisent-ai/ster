@@ -6,12 +6,6 @@ use serde_json::{Value, json};
 
 use crate::Precision;
 
-/// Steering needs a local model, but writing pair text does not, so the
-/// hosted route is opt-in and every existing client keeps the local one.
-pub(super) fn default_generator() -> String {
-    "local".to_owned()
-}
-
 pub(super) fn default_device() -> String {
     "cpu".to_owned()
 }

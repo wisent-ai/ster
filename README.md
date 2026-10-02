@@ -181,11 +181,12 @@ ster pairs add \
 ```
 
 `ster pairs synthesize` writes a whole set from a one-sentence trait
-description, generating both sides of every pair with the local runtime by
-default:
+description, generating both sides of every pair with the route `--generator`
+names — here the local runtime:
 
 ```bash
 ster pairs synthesize \
+  --generator local \
   --model meta-llama/Llama-3.2-1B \
   --trait "answers only from verifiable evidence and says so when it cannot" \
   --count 20 \
