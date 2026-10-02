@@ -140,7 +140,11 @@ pub(crate) fn read_rows(
     rows_per_unit: usize,
     run: impl Fn(&[&[u32]]) -> Result<Tensor>,
 ) -> Result<Vec<Tensor>> {
-    let stride = if batch <= 1 { 1 } else { batch * rows_per_unit.max(1) };
+    let stride = if batch <= 1 {
+        1
+    } else {
+        batch * rows_per_unit.max(1)
+    };
     let mut read = Vec::with_capacity(rows.len());
     for pass in rows.chunks(stride) {
         let output = run(pass)?;

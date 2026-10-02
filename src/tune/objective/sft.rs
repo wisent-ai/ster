@@ -72,19 +72,24 @@ pub fn sft(
     options: &SftOptions,
 ) -> Result<SftReport> {
     examples.validate(&examples.label())?;
-    let Trainable { spec, vars, tensors: trainable_tensors, parameters: trainable_parameters, limit } =
-        Preflight {
-            subject: "supervised fine-tuning",
-            unit: "example",
-            pass: "epoch",
-            noun: "adapter tensors",
-            epochs: options.epochs,
-            accumulation: options.accumulation,
-            batch: options.batch,
-            learning_rate: options.learning_rate,
-            max_sequence: options.max_sequence,
-        }
-        .open(runtime, varmap, &options.spec)?;
+    let Trainable {
+        spec,
+        vars,
+        tensors: trainable_tensors,
+        parameters: trainable_parameters,
+        limit,
+    } = Preflight {
+        subject: "supervised fine-tuning",
+        unit: "example",
+        pass: "epoch",
+        noun: "adapter tensors",
+        epochs: options.epochs,
+        accumulation: options.accumulation,
+        batch: options.batch,
+        learning_rate: options.learning_rate,
+        max_sequence: options.max_sequence,
+    }
+    .open(runtime, varmap, &options.spec)?;
 
     // Tokenized once, up front. Encoding is deterministic, so repeating it per
     // epoch would buy nothing, and doing it here means the skip report is
@@ -112,7 +117,10 @@ pub fn sft(
 
     let mut optimizer = AdamW::new(
         vars,
-        ParamsAdamW { lr: options.learning_rate, ..Default::default() },
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
     )
     .context("failed to initialize the AdamW optimizer")?;
 
@@ -157,8 +165,10 @@ pub fn sft(
             let mut summed: Option<Tensor> = None;
             let mut group_loss = 0f64;
             for forward in &plan.forwards {
-                let rows: Vec<&[u32]> =
-                    forward.iter().map(|&slot| encoded[slot].1.as_slice()).collect();
+                let rows: Vec<&[u32]> = forward
+                    .iter()
+                    .map(|&slot| encoded[slot].1.as_slice())
+                    .collect();
                 let read = batch::read_rows(&rows, options.batch, 1, |pass| {
                     runtime.forward_train_rows(pass)
                 })?;
@@ -226,7 +236,11 @@ pub fn sft(
         mean_final_epoch_loss,
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: spec
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,

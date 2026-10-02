@@ -15,7 +15,7 @@ use crate::{
 
 use super::super::requests::{
     PairsImportRequest, PairsInspectRequest, PairsSaveRequest, PairsSynthesizeRequest,
-    WorkspaceImportPairsRequest,
+    WorkspaceImportPairsRequest, WorkspacePairSetRequest, WorkspaceShowRequest,
 };
 
 pub(in crate::request) fn workspace_import_pairs_job(
@@ -24,6 +24,21 @@ pub(in crate::request) fn workspace_import_pairs_job(
     let report =
         crate::workspace::import_pair_set(Path::new(&request.source), request.name.as_deref())?;
     Ok(serde_json::to_value(report)?)
+}
+
+/// The same answer as `ster workspace show`.
+pub(in crate::request) fn workspace_show_job(_request: WorkspaceShowRequest) -> Result<Value> {
+    Ok(serde_json::to_value(crate::workspace::summary()?)?)
+}
+
+/// The same operation as `ster workspace select`.
+pub(in crate::request) fn workspace_select_job(request: WorkspacePairSetRequest) -> Result<Value> {
+    Ok(serde_json::to_value(crate::workspace::select_pair_set(&request.id)?)?)
+}
+
+/// The same operation as `ster workspace remove`.
+pub(in crate::request) fn workspace_remove_job(request: WorkspacePairSetRequest) -> Result<Value> {
+    Ok(serde_json::to_value(crate::workspace::remove_pair_set(&request.id)?)?)
 }
 
 /// A benchmark export read into a pair set by the same `pairs::benchmark`

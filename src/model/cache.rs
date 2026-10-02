@@ -3,8 +3,8 @@
 
 use std::{collections::HashMap, f32::consts::PI};
 
-use candle_core::{DType, Device, Tensor};
 use candle_core::Result;
+use candle_core::{DType, Device, Tensor};
 use candle_transformers::models::llama::{Config, Llama3RopeConfig, Llama3RopeType};
 
 #[derive(Debug, Clone)]
@@ -78,10 +78,16 @@ fn rotary_frequencies(config: &Config) -> Vec<f32> {
         .map(|index| 1f32 / config.rope_theta.powf(index as f32 / head_dim as f32))
         .collect();
     match &config.rope_scaling {
-        None | Some(Llama3RopeConfig { rope_type: Llama3RopeType::Default, .. }) => base,
+        None
+        | Some(Llama3RopeConfig {
+            rope_type: Llama3RopeType::Default,
+            ..
+        }) => base,
         Some(scaling) => {
-            let low_wavelength = scaling.original_max_position_embeddings as f32 / scaling.low_freq_factor;
-            let high_wavelength = scaling.original_max_position_embeddings as f32 / scaling.high_freq_factor;
+            let low_wavelength =
+                scaling.original_max_position_embeddings as f32 / scaling.low_freq_factor;
+            let high_wavelength =
+                scaling.original_max_position_embeddings as f32 / scaling.high_freq_factor;
             base.into_iter()
                 .map(|frequency| {
                     let wavelength = 2.0 * PI / frequency;

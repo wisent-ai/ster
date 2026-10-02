@@ -8,7 +8,7 @@ use crate::{model::Route, runtime::Runtime, workflow};
 
 use super::super::super::{
     batch,
-    preflight::{sequence_logprob, softplus, EncodedPair},
+    preflight::{EncodedPair, sequence_logprob, softplus},
 };
 use super::{DpoLoss, DpoOptions};
 
@@ -24,7 +24,11 @@ impl Scored {
     /// optimizer exists; zero is not a plausible log-probability and would
     /// surface immediately as a first loss that is not `ln 2`.
     pub(super) fn new(pair: EncodedPair) -> Self {
-        Self { pair, chosen_reference: 0.0, rejected_reference: 0.0 }
+        Self {
+            pair,
+            chosen_reference: 0.0,
+            rejected_reference: 0.0,
+        }
     }
 }
 
@@ -33,9 +37,15 @@ impl Scored {
 /// Run once, before the optimizer exists. The reference never changes, so
 /// re-deriving these every epoch would be `2 * pairs * (epochs - 1)` forward
 /// passes spent recomputing constants.
-pub(super) fn reference_scores(runtime: &Runtime, encoded: &mut [Scored], pairs: usize) -> Result<()> {
+pub(super) fn reference_scores(
+    runtime: &Runtime,
+    encoded: &mut [Scored],
+    pairs: usize,
+) -> Result<()> {
     let total = encoded.len();
-    workflow::progress(format!("scoring {total} pairs under the frozen reference model"));
+    workflow::progress(format!(
+        "scoring {total} pairs under the frozen reference model"
+    ));
     let device = runtime.device();
     let mut scored = 0usize;
     // Batched on the same knob the training loop uses, in input order: the

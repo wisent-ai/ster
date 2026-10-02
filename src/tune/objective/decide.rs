@@ -26,10 +26,10 @@
 //! * **An over-long rendering is skipped, not truncated.** A cut state is a
 //!   different state, and a label for a state the model did not see is noise.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap, ops::log_softmax};
-use rand::{seq::SliceRandom, rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::Serialize;
 
 use super::super::{
@@ -38,7 +38,7 @@ use super::super::{
     schedule,
 };
 use crate::{
-    decide::{render_rows, ExampleSet, Request},
+    decide::{ExampleSet, Request, render_rows},
     lora,
     runtime::Runtime,
     workflow,
@@ -104,19 +104,24 @@ pub fn decide(
     options: &DecideOptions,
 ) -> Result<DecideReport> {
     examples.validate()?;
-    let Trainable { spec, vars, tensors: trainable_tensors, parameters: trainable_parameters, limit } =
-        Preflight {
-            subject: "calibrated decision training",
-            unit: "row",
-            pass: "epoch",
-            noun: "adapter tensors",
-            epochs: options.epochs,
-            accumulation: options.accumulation,
-            batch: options.batch,
-            learning_rate: options.learning_rate,
-            max_sequence: options.max_sequence,
-        }
-        .open(runtime, varmap, &options.spec)?;
+    let Trainable {
+        spec,
+        vars,
+        tensors: trainable_tensors,
+        parameters: trainable_parameters,
+        limit,
+    } = Preflight {
+        subject: "calibrated decision training",
+        unit: "row",
+        pass: "epoch",
+        noun: "adapter tensors",
+        epochs: options.epochs,
+        accumulation: options.accumulation,
+        batch: options.batch,
+        learning_rate: options.learning_rate,
+        max_sequence: options.max_sequence,
+    }
+    .open(runtime, varmap, &options.spec)?;
 
     let mut rows: Vec<TrainingRow> = Vec::new();
     let mut questions = 0usize;
@@ -141,7 +146,11 @@ pub fn decide(
         let truths: Vec<usize> = request
             .questions
             .iter()
-            .map(|(id, question)| question.truth_index(&example.answers[id]).expect("validated label"))
+            .map(|(id, question)| {
+                question
+                    .truth_index(&example.answers[id])
+                    .expect("validated label")
+            })
             .collect();
         let (rendered, labels) = render_rows(runtime, &request, options.permutations)
             .with_context(|| format!("example {index} could not be rendered"))?;
@@ -163,7 +172,9 @@ pub fn decide(
             rows.push(TrainingRow {
                 ids: row.ids,
                 truth,
-                labels: (0..row.order.len()).map(|position| labels[&position].clone()).collect(),
+                labels: (0..row.order.len())
+                    .map(|position| labels[&position].clone())
+                    .collect(),
             });
         }
     }
@@ -171,8 +182,14 @@ pub fn decide(
         bail!("every rendering is longer than the sequence limit, so there is nothing to train on");
     }
 
-    let mut optimizer = AdamW::new(vars, ParamsAdamW { lr: options.learning_rate, ..Default::default() })
-        .context("failed to initialize the AdamW optimizer")?;
+    let mut optimizer = AdamW::new(
+        vars,
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
+    )
+    .context("failed to initialize the AdamW optimizer")?;
 
     let lengths: Vec<usize> = rows.iter().map(|row| row.ids.len()).collect();
     let scale = batch::divisor(options.batch, options.accumulation);
@@ -191,12 +208,22 @@ pub fn decide(
         let mut epoch_rows = 0usize;
 
         for plan in batch::plan(&order, &lengths, options.batch, options.accumulation) {
-            optimizer.set_learning_rate(schedule(options.learning_rate, step, total_steps, options.warmup_steps));
+            optimizer.set_learning_rate(schedule(
+                options.learning_rate,
+                step,
+                total_steps,
+                options.warmup_steps,
+            ));
             let mut summed: Option<Tensor> = None;
             let mut group_loss = 0f64;
             for forward in &plan.forwards {
-                let ids: Vec<&[u32]> = forward.iter().map(|&slot| rows[slot].ids.as_slice()).collect();
-                let read = batch::read_rows(&ids, options.batch, 1, |pass| runtime.forward_train_rows(pass))?;
+                let ids: Vec<&[u32]> = forward
+                    .iter()
+                    .map(|&slot| rows[slot].ids.as_slice())
+                    .collect();
+                let read = batch::read_rows(&ids, options.batch, 1, |pass| {
+                    runtime.forward_train_rows(pass)
+                })?;
                 for (position, &slot) in forward.iter().enumerate() {
                     let value = decision_loss(&read[position], &rows[slot], runtime)?;
                     group_loss += value.to_scalar::<f32>()? as f64;
@@ -210,7 +237,9 @@ pub fn decide(
             let Some(summed) = summed else {
                 bail!("an accumulation group contained no rows");
             };
-            optimizer.backward_step(&summed).context("failed to backpropagate the accumulated loss")?;
+            optimizer
+                .backward_step(&summed)
+                .context("failed to backpropagate the accumulated loss")?;
             let step_loss = (group_loss / plan.units as f64) as f32;
             epoch_loss += group_loss;
             epoch_rows += plan.units;
@@ -230,7 +259,11 @@ pub fn decide(
         if epoch + 1 == options.epochs {
             mean_final_epoch_loss = epoch_mean;
         }
-        workflow::progress(format!("epoch {}/{} mean loss {epoch_mean:.4}", epoch + 1, options.epochs));
+        workflow::progress(format!(
+            "epoch {}/{} mean loss {epoch_mean:.4}",
+            epoch + 1,
+            options.epochs
+        ));
     }
 
     Ok(DecideReport {
@@ -248,7 +281,11 @@ pub fn decide(
         mean_final_epoch_loss,
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: spec
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,
@@ -269,7 +306,10 @@ pub fn decide(
 fn decision_loss(logits: &Tensor, row: &TrainingRow, runtime: &Runtime) -> Result<Tensor> {
     let (_, positions, _) = logits.dims3()?;
     if positions != row.ids.len() {
-        bail!("the forward pass returned {positions} positions for {} tokens", row.ids.len());
+        bail!(
+            "the forward pass returned {positions} positions for {} tokens",
+            row.ids.len()
+        );
     }
     let last = logits.i((0, positions - 1, ..))?.to_dtype(DType::F32)?;
     let mut letters = Vec::with_capacity(row.labels.len());

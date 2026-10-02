@@ -31,16 +31,15 @@
 //! adapters it never saw would produce scores that mean nothing, so the
 //! artifact does not offer that as a possibility.
 
-
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::Tensor;
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::Serialize;
 
 use super::super::{
     batch,
-    preflight::{encode_pairs, pair_set_label, Preflight, Trainable},
+    preflight::{Preflight, Trainable, encode_pairs, pair_set_label},
     schedule,
 };
 use crate::{artifact::PairSet, lora, runtime::Runtime, workflow};
@@ -50,7 +49,7 @@ mod step;
 
 pub use head::{RewardHead, RewardModel};
 
-use step::{step_loss, Summary};
+use step::{Summary, step_loss};
 
 #[derive(Debug, Clone)]
 pub struct RewardOptions {
@@ -115,7 +114,13 @@ pub fn reward(
     options: &RewardOptions,
 ) -> Result<RewardReport> {
     pairs.validate(&pair_set_label(pairs))?;
-    let Trainable { spec, vars, tensors, parameters, limit } = Preflight {
+    let Trainable {
+        spec,
+        vars,
+        tensors,
+        parameters,
+        limit,
+    } = Preflight {
         subject: "reward modeling",
         unit: "pair",
         pass: "epoch",
@@ -134,14 +139,19 @@ pub fn reward(
 
     let mut optimizer = AdamW::new(
         vars,
-        ParamsAdamW { lr: options.learning_rate, ..Default::default() },
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
     )
     .context("failed to initialize the AdamW optimizer")?;
 
     // Both sides of a pair go through the same forward, so the width its rows
     // are padded to is the longer of the two.
-    let lengths: Vec<usize> =
-        encoded.iter().map(|pair| pair.chosen.len().max(pair.rejected.len())).collect();
+    let lengths: Vec<usize> = encoded
+        .iter()
+        .map(|pair| pair.chosen.len().max(pair.rejected.len()))
+        .collect();
     let scale = batch::divisor(options.batch, options.accumulation);
     let steps_per_epoch =
         batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation);
@@ -256,11 +266,14 @@ pub fn reward(
         mean_score_margin: epoch_summary.mean_margin(),
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: spec
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,
         batch: options.batch,
     })
 }
-

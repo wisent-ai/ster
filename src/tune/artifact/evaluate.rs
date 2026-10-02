@@ -61,7 +61,9 @@ use crate::{artifact::Document, lora, model::Route, runtime::Runtime, workflow};
 /// artifact written before a field existed is not a mismatch, and this is a
 /// courtesy on top of the run rather than a gate in front of it.
 pub fn warn_on_provenance(artifact: &Path, subject: &str, runtime: &Runtime) {
-    let Some(record) = provenance(artifact) else { return };
+    let Some(record) = provenance(artifact) else {
+        return;
+    };
     if let Some(trained) = record["chat_template"].as_str() {
         let now = runtime.chat_status().label();
         if trained != now {
@@ -97,7 +99,9 @@ pub fn warn_on_provenance(artifact: &Path, subject: &str, runtime: &Runtime) {
 /// silently on the `null` that produces.
 fn provenance(artifact: &Path) -> Option<serde_json::Value> {
     let sidecar = lora::Artifact::sidecar_path(artifact);
-    let bytes = std::fs::read(&sidecar).or_else(|_| std::fs::read(artifact)).ok()?;
+    let bytes = std::fs::read(&sidecar)
+        .or_else(|_| std::fs::read(artifact))
+        .ok()?;
     let document = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
     match Document::recognise(&bytes) {
         Document::Steering => Some(document),
@@ -218,8 +222,10 @@ pub fn evaluate(
     // grouping costs nothing an operator can see.
     for plan in batch::plan(&order, &lengths, options.batch, 1) {
         for forward in &plan.forwards {
-            let rows: Vec<&[u32]> =
-                forward.iter().map(|&slot| encoded[slot].1.as_slice()).collect();
+            let rows: Vec<&[u32]> = forward
+                .iter()
+                .map(|&slot| encoded[slot].1.as_slice())
+                .collect();
             // Adapted, because the adapters this runtime carries — if it
             // carries any — are the thing being evaluated. A bare checkpoint
             // has none and this is the base model's own score.

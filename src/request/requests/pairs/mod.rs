@@ -24,6 +24,32 @@ impl Validate for WorkspaceImportPairsRequest {
     }
 }
 
+/// `workspace/show`: no fields; the answer is `ster workspace show`'s.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::request) struct WorkspaceShowRequest {}
+
+impl Validate for WorkspaceShowRequest {
+    fn validate(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// `workspace/select` and `workspace/remove`: one imported set by its
+/// workspace name.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(in crate::request) struct WorkspacePairSetRequest {
+    #[serde(default)]
+    pub(in crate::request) id: String,
+}
+
+impl Validate for WorkspacePairSetRequest {
+    fn validate(&self) -> Result<(), String> {
+        require(&self.id, "a workspace pair-set request requires the set's id".to_owned())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::request) struct PairsInspectRequest {

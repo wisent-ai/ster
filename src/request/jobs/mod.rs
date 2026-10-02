@@ -27,7 +27,7 @@ pub(super) use decide::{calibrate_job, decide_job};
 
 pub(super) use pairs::{
     pairs_import_job, pairs_inspect_job, pairs_save_job, pairs_synthesize_job,
-    workspace_import_pairs_job,
+    workspace_import_pairs_job, workspace_remove_job, workspace_select_job, workspace_show_job,
 };
 pub(super) use tune::{
     tune_dpo_job, tune_evaluate_job, tune_grpo_job, tune_inspect_job, tune_merge_job,

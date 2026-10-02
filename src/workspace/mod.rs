@@ -11,9 +11,11 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 mod import;
+mod manage;
 mod state;
 
 pub use import::{import_pair_set, ImportReport};
+pub use manage::{remove_pair_set, select_pair_set};
 
 use state::{load_state, WORKSPACE_SCHEMA};
 

@@ -3,14 +3,13 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Init, VarMap};
 
 use crate::{
     lora,
     runtime::{DeviceChoice, Runtime},
-
 };
 
 /// The scalar head a reward model scores with: one row, `hidden_size` wide.
@@ -30,7 +29,13 @@ impl RewardHead {
     /// and the run needs no seed of its own.
     pub fn fresh(varmap: &VarMap, hidden: usize, device: &Device, dtype: DType) -> Result<Self> {
         let weight = varmap
-            .get((1, hidden), lora::REWARD_HEAD_TENSOR, Init::Const(0.0), dtype, device)
+            .get(
+                (1, hidden),
+                lora::REWARD_HEAD_TENSOR,
+                Init::Const(0.0),
+                dtype,
+                device,
+            )
             .with_context(|| format!("failed to create {}", lora::REWARD_HEAD_TENSOR))?;
         Ok(Self { weight })
     }
@@ -39,9 +44,7 @@ impl RewardHead {
     pub fn from_tensor(weight: Tensor) -> Result<Self> {
         let dims = weight.dims();
         if dims.len() != 2 || dims[0] != 1 {
-            bail!(
-                "reward head has shape {dims:?}, expected one row of hidden-size weights"
-            );
+            bail!("reward head has shape {dims:?}, expected one row of hidden-size weights");
         }
         Ok(Self { weight })
     }
@@ -67,7 +70,9 @@ impl RewardHead {
         // head is the smallest parameter in the run — one row — and it is the
         // one that rounds away first, so it is trained in F32 even when the
         // base weights are half. At F32 this is a clone.
-        let last = hidden.i((0, sequence - 1, ..))?.to_dtype(self.weight.dtype())?;
+        let last = hidden
+            .i((0, sequence - 1, ..))?
+            .to_dtype(self.weight.dtype())?;
         // An elementwise product folded to a scalar rather than a matmul: the
         // result is one number, and a `[1, hidden] x [hidden, 1]` matmul would
         // reshape twice to say the same thing.
@@ -108,7 +113,10 @@ impl RewardModel {
             .with_context(|| format!("reward artifact is missing {}", lora::REWARD_HEAD_TENSOR))?
             .to_device(runtime.device())?
             .to_dtype(runtime.dtype())?;
-        Ok(Self { runtime, head: RewardHead::from_tensor(weight)? })
+        Ok(Self {
+            runtime,
+            head: RewardHead::from_tensor(weight)?,
+        })
     }
 
     /// The reward this model assigns to one tokenized sequence.

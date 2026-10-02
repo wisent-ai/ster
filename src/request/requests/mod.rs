@@ -24,7 +24,7 @@ mod vectors;
 pub(super) use decide::{CalibrateRequest, DecideRequest};
 pub(super) use pairs::{
     PairsImportRequest, PairsInspectRequest, PairsSaveRequest, PairsSynthesizeRequest,
-    WorkspaceImportPairsRequest,
+    WorkspaceImportPairsRequest, WorkspacePairSetRequest, WorkspaceShowRequest,
 };
 pub(super) use tune::{
     TuneDpoRequest, TuneEvaluateRequest, TuneGrpoRequest, TuneInspectRequest, TuneMergeRequest,

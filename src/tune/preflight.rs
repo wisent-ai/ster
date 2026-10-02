@@ -2,8 +2,7 @@
 //! and its adapters, the optimizer over exactly what the run created, and the
 //! sentences an operator sees when a request cannot be trained.
 
-
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{Device, Tensor, Var};
 use candle_nn::VarMap;
 
@@ -77,13 +76,22 @@ impl Preflight<'_> {
             );
         }
         if self.batch == 0 {
-            bail!("{} requires a batch of at least one {}", self.subject, self.unit);
+            bail!(
+                "{} requires a batch of at least one {}",
+                self.subject,
+                self.unit
+            );
         }
         if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
-            bail!("{} requires a finite learning rate above zero", self.subject);
+            bail!(
+                "{} requires a finite learning rate above zero",
+                self.subject
+            );
         }
         if self.max_sequence < 2 {
-            bail!("max_sequence must be at least two tokens, so that one token can predict another");
+            bail!(
+                "max_sequence must be at least two tokens, so that one token can predict another"
+            );
         }
         let layer_count = runtime.layer_count();
         spec.validate(layer_count)?;
@@ -106,7 +114,13 @@ impl Preflight<'_> {
             spec.layers.len()
         ));
         let limit = self.max_sequence.min(runtime.context_length());
-        Ok(Trainable { spec, vars, tensors, parameters, limit })
+        Ok(Trainable {
+            spec,
+            vars,
+            tensors,
+            parameters,
+            limit,
+        })
     }
 }
 
@@ -232,7 +246,11 @@ pub(crate) fn encode_pairs(
             ));
             continue;
         }
-        encoded.push(EncodedPair { index, chosen, rejected });
+        encoded.push(EncodedPair {
+            index,
+            chosen,
+            rejected,
+        });
     }
     if encoded.is_empty() {
         bail!("every pair is longer than the sequence limit, so there is nothing to train on");

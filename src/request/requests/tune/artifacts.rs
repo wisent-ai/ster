@@ -4,7 +4,7 @@
 use serde::Deserialize;
 
 use super::super::defaults::*;
-use super::super::{require, ModelRequest, Validate};
+use super::super::{ModelRequest, Validate, require};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -5,6 +5,6 @@ mod evaluate;
 mod merge;
 
 pub use evaluate::{
-    evaluate, warn_on_provenance, EvaluateOptions, EvaluateReport, EvaluatedExample,
+    EvaluateOptions, EvaluateReport, EvaluatedExample, evaluate, warn_on_provenance,
 };
-pub use merge::{merge, MergeReport};
+pub use merge::{MergeReport, merge};

@@ -64,6 +64,9 @@ pub fn run(operation: &str) -> Result<i32> {
 fn dispatch(operation: &str, body: &[u8]) -> i32 {
     match operation {
         "workspace/import-pairs" => run_job(body, workspace_import_pairs_job),
+        "workspace/show" => run_job(body, workspace_show_job),
+        "workspace/select" => run_job(body, workspace_select_job),
+        "workspace/remove" => run_job(body, workspace_remove_job),
         "train" => run_job(body, train_job),
         "optimize" => run_job(body, optimize_job),
         "evaluate" => run_job(body, evaluate_job),

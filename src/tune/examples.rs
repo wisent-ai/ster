@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 // MARK: - Example sets
@@ -61,5 +61,3 @@ impl ExampleSet {
         }
     }
 }
-
-

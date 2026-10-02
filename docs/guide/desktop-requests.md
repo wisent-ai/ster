@@ -20,7 +20,7 @@ the empty object, so every field takes its default.
 |---|---|
 | `train`, `optimize`, `evaluate`, `generate`, `extract`, `inspect` | the [steering](steering.md) commands |
 | `decide`, `calibrate` | [`ster decide`](decisions.md), [`ster calibrate`](decisions/calibration.md) |
-| `workspace/import-pairs` | `ster workspace import-pairs` |
+| `workspace/import-pairs`, `workspace/show`, `workspace/select`, `workspace/remove` | `ster workspace import-pairs`, `show`, `select`, `remove` (`select` and `remove` take the set's `id`; all three answer `ster workspace show`'s document) |
 | `pairs/import`, `pairs/inspect`, `pairs/save`, `pairs/synthesize` | the [pair-set](pair-sets.md) commands (`pairs/import` takes `benchmark`, `source`, `output` and optional `examples`, `count`, `seed`, `traitName`, and answers `ster pairs import`'s document with the skipped-row report) |
 | `tune/sft`, `tune/dpo`, `tune/reward`, `tune/grpo`, `tune/merge`, `tune/evaluate`, `tune/inspect` | the [adapter](tuning/adapters.md) commands |
 

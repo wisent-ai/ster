@@ -1,6 +1,6 @@
 //! What a preference run is asked for, and what it reports back.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::lora;

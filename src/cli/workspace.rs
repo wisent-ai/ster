@@ -1,5 +1,5 @@
-//! `ster workspace`: taking a pair set into the local workspace, and showing
-//! what it holds.
+//! `ster workspace`: taking a pair set into the local workspace, choosing the
+//! active one, taking one out, and showing what it holds.
 
 use std::path::PathBuf;
 
@@ -20,6 +20,17 @@ pub(super) enum WorkspaceCommand {
     },
     /// Print imported pair sets and the active input.
     Show,
+    /// Make an imported pair set the active input.
+    Select {
+        /// Workspace name, as `ster workspace show` prints it.
+        id: String,
+    },
+    /// Take a pair set out of the workspace and delete the workspace's copy;
+    /// the source file is not touched.
+    Remove {
+        /// Workspace name, as `ster workspace show` prints it.
+        id: String,
+    },
 }
 
 pub(super) fn run(command: WorkspaceCommand) -> Result<()> {
@@ -47,6 +58,12 @@ pub(super) fn run(command: WorkspaceCommand) -> Result<()> {
         }
         WorkspaceCommand::Show => {
             super::answer(&ster::workspace::summary()?)?;
+        }
+        WorkspaceCommand::Select { id } => {
+            super::answer(&ster::workspace::select_pair_set(&id)?)?;
+        }
+        WorkspaceCommand::Remove { id } => {
+            super::answer(&ster::workspace::remove_pair_set(&id)?)?;
         }
     }
     Ok(())

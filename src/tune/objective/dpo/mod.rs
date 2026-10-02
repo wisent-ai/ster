@@ -40,7 +40,7 @@ use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 use super::super::{
     batch,
-    preflight::{encode_pairs, pair_set_label, Preflight, Trainable},
+    preflight::{Preflight, Trainable, encode_pairs, pair_set_label},
     schedule,
 };
 use crate::{artifact::PairSet, runtime::Runtime, workflow};
@@ -50,7 +50,7 @@ mod scoring;
 
 pub use options::{DpoLoss, DpoOptions, DpoReport};
 
-use scoring::{reference_scores, step_loss, Scored, Summary};
+use scoring::{Scored, Summary, reference_scores, step_loss};
 
 /// Trains the adapters `varmap` owns to prefer each pair's positive side.
 ///
@@ -68,7 +68,13 @@ pub fn dpo(
         bail!("direct preference optimization requires a finite beta above zero");
     }
     pairs.validate(&pair_set_label(pairs))?;
-    let Trainable { spec, vars, tensors, parameters, limit } = Preflight {
+    let Trainable {
+        spec,
+        vars,
+        tensors,
+        parameters,
+        limit,
+    } = Preflight {
         subject: "direct preference optimization",
         unit: "pair",
         pass: "epoch",
@@ -90,7 +96,10 @@ pub fn dpo(
 
     let mut optimizer = AdamW::new(
         vars,
-        ParamsAdamW { lr: options.learning_rate, ..Default::default() },
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
     )
     .context("failed to initialize the AdamW optimizer")?;
 
@@ -218,11 +227,14 @@ pub fn dpo(
         mean_rejected_reward: epoch_summary.mean_rejected(),
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: spec
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,
         batch: options.batch,
     })
 }
-
