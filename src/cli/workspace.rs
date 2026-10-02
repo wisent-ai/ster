@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 
 use super::onboarding;
@@ -35,13 +35,18 @@ pub(super) fn run(command: WorkspaceCommand) -> Result<()> {
             }
             let accepted = report.accepted();
             let refusal = report.reason.clone();
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            super::answer(&report)?;
             if !accepted {
-                bail!("{}", refusal.as_deref().unwrap_or("Ster did not accept the pair set"));
+                bail!(
+                    "{}",
+                    refusal
+                        .as_deref()
+                        .unwrap_or("Ster did not accept the pair set")
+                );
             }
         }
         WorkspaceCommand::Show => {
-            println!("{}", serde_json::to_string_pretty(&ster::workspace::summary()?)?);
+            super::answer(&ster::workspace::summary()?)?;
         }
     }
     Ok(())

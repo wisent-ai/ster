@@ -8,8 +8,8 @@ mod grpo;
 mod reward;
 mod sft;
 
-pub(super) use decide::{decide, DecideArgs};
-pub(super) use dpo::{dpo, DpoArgs};
-pub(super) use grpo::{grpo, GrpoArgs};
-pub(super) use reward::{reward, RewardArgs};
-pub(super) use sft::{sft, SftArgs};
+pub(super) use decide::{DecideArgs, decide};
+pub(super) use dpo::{DpoArgs, dpo};
+pub(super) use grpo::{GrpoArgs, grpo};
+pub(super) use reward::{RewardArgs, reward};
+pub(super) use sft::{SftArgs, sft};

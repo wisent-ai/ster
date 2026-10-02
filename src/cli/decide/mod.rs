@@ -9,8 +9,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use ster::{
-    decide::{self, Calibration, ExampleSet, Request, RAW_TEMPERATURE},
     ChatChoice, DecideOptions, Precision,
+    decide::{self, Calibration, ExampleSet, RAW_TEMPERATURE, Request},
 };
 
 use super::ModelArgs;
@@ -79,7 +79,13 @@ pub(super) struct CalibrateArgs {
 }
 
 pub(super) fn decide(args: DecideArgs) -> Result<()> {
-    let DecideArgs { read, request, calibration, output, explain } = args;
+    let DecideArgs {
+        read,
+        request,
+        calibration,
+        output,
+        explain,
+    } = args;
     // Both documents are read before a single weight is mapped, so a bad
     // request or a calibration for another model is refused in milliseconds
     // rather than after a full checkpoint load.
@@ -99,24 +105,31 @@ pub(super) fn decide(args: DecideArgs) -> Result<()> {
         &runtime,
         &request,
         options,
-        calibration.as_ref().map(|(path, _)| path.to_string_lossy()).as_deref(),
+        calibration
+            .as_ref()
+            .map(|(path, _)| path.to_string_lossy())
+            .as_deref(),
     )?;
-    let document = serde_json::to_string_pretty(&response)?;
     if let Some(output) = output {
-        fs::write(&output, &document).with_context(|| format!("failed to write {}", output.display()))?;
+        fs::write(&output, serde_json::to_string_pretty(&response)?)
+            .with_context(|| format!("failed to write {}", output.display()))?;
     }
-    println!("{document}");
+    super::answer(&response)?;
     Ok(())
 }
 
 pub(super) fn calibrate(args: CalibrateArgs) -> Result<()> {
-    let CalibrateArgs { read, examples, output } = args;
+    let CalibrateArgs {
+        read,
+        examples,
+        output,
+    } = args;
     let examples = ExampleSet::load(&examples)?;
     let (mut runtime, options) = read.load()?;
     runtime.set_chat_template(read.chat_template);
     let calibration = decide::calibrate(&runtime, &examples, options)?;
     calibration.save(&output)?;
-    println!("{}", serde_json::to_string_pretty(&calibration)?);
+    super::answer(&calibration)?;
     Ok(())
 }
 
@@ -148,7 +161,9 @@ impl ReadArgs {
 fn load_request(path: &Path) -> Result<Request> {
     if path.as_os_str() == "-" {
         let mut bytes = Vec::new();
-        std::io::stdin().read_to_end(&mut bytes).context("failed to read the request from standard input")?;
+        std::io::stdin()
+            .read_to_end(&mut bytes)
+            .context("failed to read the request from standard input")?;
         let request: Request =
             serde_json::from_slice(&bytes).context("invalid decide request on standard input")?;
         request.validate()?;

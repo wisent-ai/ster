@@ -185,12 +185,9 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
     note_precision(&mut report, precision)?;
     let artifact = runtime.adapter_artifact(&spec, report.clone())?;
     artifact.save(&output)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "path": output.display().to_string(),
-            "report": report,
-        }))?
-    );
+    crate::cli::answer(&json!({
+        "path": output.display().to_string(),
+        "report": report,
+    }))?;
     Ok(())
 }

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const PRODUCT_ID: &str = "ster";
 const JOURNEY_ID: &str = "first-use";
@@ -33,7 +33,7 @@ pub fn run(reset: bool, import_pairs: Option<&Path>, name: Option<&str>) -> Resu
 
     if let Some(source) = import_pairs {
         let report = ster::workspace::import_pair_set(source, name)?;
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        super::answer(&report)?;
         if report.accepted() {
             let destination = report
                 .path
@@ -73,7 +73,9 @@ pub fn run(reset: bool, import_pairs: Option<&Path>, name: Option<&str>) -> Resu
 
         let Some(next_screen_id) = next_screen_id(screen)? else {
             save_state(&state)?;
-            println!("\nFirst-use progress saved; import an existing pair set with the command shown above.");
+            println!(
+                "\nFirst-use progress saved; import an existing pair set with the command shown above."
+            );
             return Ok(());
         };
 
@@ -134,8 +136,7 @@ fn canonical_definition() -> Result<Value> {
         || definition.get("product_id").and_then(Value::as_str) != Some(PRODUCT_ID)
         || definition.get("journey_id").and_then(Value::as_str) != Some(JOURNEY_ID)
         || definition.get("journey_version").and_then(Value::as_str) != Some(JOURNEY_VERSION)
-        || definition.get("first_success_fact").and_then(Value::as_str)
-            != Some(FIRST_SUCCESS_FACT)
+        || definition.get("first_success_fact").and_then(Value::as_str) != Some(FIRST_SUCCESS_FACT)
     {
         bail!("canonical onboarding journey identity mismatch");
     }
@@ -248,4 +249,3 @@ fn render(screen: &Value) -> Result<()> {
     println!("\n{title}\n{body}");
     Ok(())
 }
-

@@ -153,7 +153,7 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                 ..InspectOptions::default()
             };
             let report = pairs::inspect(&pair_set, &options)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            super::answer(&report)?;
         }
         PairsCommand::Import(args) => import::run(args)?,
         PairsCommand::Add {
@@ -179,14 +179,11 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
             pair_set.pairs.push(ContrastivePair { positive, negative });
             let index = pair_set.pairs.len() - 1;
             pair_set.save(&file)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "path": file.display().to_string(),
-                    "pair_count": pair_set.pairs.len(),
-                    "added": {"index": index},
-                }))?
-            );
+            super::answer(&json!({
+                "path": file.display().to_string(),
+                "pair_count": pair_set.pairs.len(),
+                "added": {"index": index},
+            }))?;
         }
         PairsCommand::Remove { pairs: file, index } => {
             let mut pair_set = PairSet::load(&file)?;
@@ -201,18 +198,15 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
             // Removing the last pair leaves a set no loader would accept, so
             // `save` refuses and the file on disk is left as it was.
             pair_set.save(&file)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "path": file.display().to_string(),
-                    "pair_count": pair_set.pairs.len(),
-                    "removed": {
-                        "index": index,
-                        "positive": removed.positive,
-                        "negative": removed.negative,
-                    },
-                }))?
-            );
+            super::answer(&json!({
+                "path": file.display().to_string(),
+                "pair_count": pair_set.pairs.len(),
+                "removed": {
+                    "index": index,
+                    "positive": removed.positive,
+                    "negative": removed.negative,
+                },
+            }))?;
         }
         PairsCommand::Synthesize {
             generator,
@@ -285,13 +279,10 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                 value => bail!("unknown generator {value:?}; expected local or brama"),
             };
             pair_set.save(&output)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "path": output.display().to_string(),
-                    "report": report,
-                }))?
-            );
+            super::answer(&json!({
+                "path": output.display().to_string(),
+                "report": report,
+            }))?;
         }
     }
     Ok(())

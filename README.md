@@ -247,7 +247,9 @@ ster workspace  import, activate, and inspect persistent pair sets
 ster request    run one desktop request to completion: JSON body on stdin, NDJSON events on stdout
 ```
 
-Run `ster <command> --help` for exact arguments. Commands return non-zero on
+Run `ster <command> --help` for exact arguments. Every answer is one JSON
+document on stdout for machines; the global `--text` flag prints the same
+answer as `path: value` lines for a person. Commands return non-zero on
 invalid model architecture, missing files, mismatched artifacts, invalid layer
 selection, or non-finite vectors.
 

@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Dimensions of the toy: the smallest grouped-query Llama shape (fewer KV
 /// heads than query heads) that exercises every path Ster's decoder has.
@@ -82,7 +82,10 @@ fn write_safetensors(path: &Path, tensors: &[Tensor]) -> Result<()> {
 }
 
 fn special(token: &str) -> usize {
-    SPECIALS.iter().position(|s| *s == token).expect("a declared special token")
+    SPECIALS
+        .iter()
+        .position(|s| *s == token)
+        .expect("a declared special token")
 }
 
 fn config(vocab_size: usize) -> Value {
@@ -133,8 +136,18 @@ fn weights(vocab_size: usize) -> Vec<Tensor> {
     let mut rng = StdRng::seed_from_u64(SEED);
     let kv_width = HIDDEN / HEADS * KV_HEADS;
     let mut tensors = vec![
-        random(&mut rng, "model.embed_tokens.weight".into(), &[vocab_size, HIDDEN], EMBEDDING_SCALE),
-        random(&mut rng, "lm_head.weight".into(), &[vocab_size, HIDDEN], EMBEDDING_SCALE),
+        random(
+            &mut rng,
+            "model.embed_tokens.weight".into(),
+            &[vocab_size, HIDDEN],
+            EMBEDDING_SCALE,
+        ),
+        random(
+            &mut rng,
+            "lm_head.weight".into(),
+            &[vocab_size, HIDDEN],
+            EMBEDDING_SCALE,
+        ),
         ones("model.norm.weight".into(), HIDDEN),
     ];
     for layer in 0..LAYERS {
@@ -159,7 +172,11 @@ fn weights(vocab_size: usize) -> Vec<Tensor> {
 
 pub(super) fn run(out: &Path) -> Result<()> {
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
-    let tokens: Vec<&str> = SPECIALS.iter().copied().chain(WORDS.split_whitespace()).collect();
+    let tokens: Vec<&str> = SPECIALS
+        .iter()
+        .copied()
+        .chain(WORDS.split_whitespace())
+        .collect();
     let pretty = |value: &Value| serde_json::to_string_pretty(value).map(|text| text + "\n");
     fs::write(out.join("config.json"), pretty(&config(tokens.len()))?)?;
     fs::write(out.join("tokenizer.json"), pretty(&tokenizer(&tokens))?)?;

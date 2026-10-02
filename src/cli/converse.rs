@@ -117,15 +117,12 @@ pub(super) fn run(args: ConverseArgs) -> Result<()> {
     output
         .flush()
         .with_context(|| format!("cannot write {}", args.output.display()))?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "output": args.output.display().to_string(),
-            "conversations": prompts.prompts.len(),
-            "assistant_turns": turns_played,
-            "user_model": args.user_model,
-            "adapter": args.adapter.as_ref().map(|path| path.display().to_string()),
-        }))?
-    );
+    super::answer(&json!({
+        "output": args.output.display().to_string(),
+        "conversations": prompts.prompts.len(),
+        "assistant_turns": turns_played,
+        "user_model": args.user_model,
+        "adapter": args.adapter.as_ref().map(|path| path.display().to_string()),
+    }))?;
     Ok(())
 }

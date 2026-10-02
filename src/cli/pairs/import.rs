@@ -44,13 +44,10 @@ pub(super) fn run(args: ImportArgs) -> Result<()> {
     };
     let (set, report) = benchmark::import(&options)?;
     set.save(&args.output)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "output": args.output.display().to_string(),
-            "trait_name": set.trait_name,
-            "report": report,
-        }))?
-    );
+    super::super::answer(&json!({
+        "output": args.output.display().to_string(),
+        "trait_name": set.trait_name,
+        "report": report,
+    }))?;
     Ok(())
 }

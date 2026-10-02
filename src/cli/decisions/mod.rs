@@ -174,24 +174,14 @@ fn fetch(args: FetchArgs) -> Result<()> {
     };
     let (set, report) = decide::fetch(&options)?;
     write(&args.output, &set)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(
-            &json!({"path": args.output.display().to_string(), "report": report})
-        )?
-    );
+    super::answer(&json!({"path": args.output.display().to_string(), "report": report}))?;
     Ok(())
 }
 
 fn import(args: ImportArgs) -> Result<()> {
     let (set, report) = decide::import_jsonl(&args.input, &args.question_id, &args.instructions)?;
     write(&args.output, &set)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(
-            &json!({"path": args.output.display().to_string(), "report": report})
-        )?
-    );
+    super::answer(&json!({"path": args.output.display().to_string(), "report": report}))?;
     Ok(())
 }
 
@@ -204,12 +194,7 @@ fn synthesize(args: SynthesizeArgs) -> Result<()> {
     };
     let (set, report) = decide::synthesize(&gateway, &schema, &options)?;
     write(&args.output, &set)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(
-            &json!({"path": args.output.display().to_string(), "report": report})
-        )?
-    );
+    super::answer(&json!({"path": args.output.display().to_string(), "report": report}))?;
     Ok(())
 }
 
@@ -221,14 +206,11 @@ fn split(args: SplitArgs) -> Result<()> {
     let (train, holdout) = decide::split(&set, args.holdout, args.seed);
     write(&args.train_output, &train)?;
     write(&args.holdout_output, &holdout)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "train": {"path": args.train_output.display().to_string(), "examples": train.examples.len()},
-            "holdout": {"path": args.holdout_output.display().to_string(), "examples": holdout.examples.len()},
-            "seed": args.seed,
-        }))?
-    );
+    super::answer(&json!({
+        "train": {"path": args.train_output.display().to_string(), "examples": train.examples.len()},
+        "holdout": {"path": args.holdout_output.display().to_string(), "examples": holdout.examples.len()},
+        "seed": args.seed,
+    }))?;
     Ok(())
 }
 
@@ -285,9 +267,8 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let document = serde_json::to_string_pretty(&report)?;
-    std::fs::write(&args.output, &document)
+    std::fs::write(&args.output, serde_json::to_string_pretty(&report)?)
         .with_context(|| format!("failed to write {}", args.output.display()))?;
-    println!("{document}");
+    super::answer(&report)?;
     Ok(())
 }

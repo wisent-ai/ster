@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use serde_json::json;
-use ster::{decide::ExampleSet, lora, tune, ChatChoice, DecideTuneOptions, Precision, Runtime};
+use ster::{ChatChoice, DecideTuneOptions, Precision, Runtime, decide::ExampleSet, lora, tune};
 
 use super::super::super::ModelArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
@@ -102,8 +102,13 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
         layers: parse_adapter_layers(&layers)?,
         seed,
     };
-    let (mut runtime, varmap) =
-        Runtime::load_trainable_at(&model.model, model.revision.as_deref(), device, &spec, precision)?;
+    let (mut runtime, varmap) = Runtime::load_trainable_at(
+        &model.model,
+        model.revision.as_deref(),
+        device,
+        &spec,
+        precision,
+    )?;
     let chat = runtime.set_chat_template(chat_template);
     let options = DecideTuneOptions {
         spec: spec.clone(),
@@ -122,12 +127,9 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
     note_precision(&mut report, precision)?;
     let artifact = runtime.adapter_artifact(&spec, report.clone())?;
     artifact.save(&output)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "path": output.display().to_string(),
-            "report": report,
-        }))?
-    );
+    crate::cli::answer(&json!({
+        "path": output.display().to_string(),
+        "report": report,
+    }))?;
     Ok(())
 }

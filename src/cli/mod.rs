@@ -3,9 +3,12 @@
 //! what was asked for and prints the answer.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser};
+use serde::Serialize;
+use serde_json::Value;
 use ster::{DeviceChoice, Precision, Runtime};
 
 mod command;
@@ -29,8 +32,51 @@ use command::Command;
     long_about = "Ster reads hidden representations from open-weight Llama-family models, trains steering directions from contrastive pairs, evaluates those directions, and applies them during generation."
 )]
 struct Cli {
+    /// Print every answer as `path: value` lines for a person instead of
+    /// the JSON document machines read; both come from the same data.
+    #[arg(long, global = true)]
+    text: bool,
     #[command(subcommand)]
     command: Command,
+}
+
+/// Whether this invocation asked for text; set once before any command runs.
+static TEXT: OnceLock<bool> = OnceLock::new();
+
+/// Print one answer: the pretty JSON document, or with `--text` one
+/// `path: value` line per leaf field, nested keys joined with dots.
+pub(crate) fn answer<T: Serialize>(value: &T) -> Result<()> {
+    let value = serde_json::to_value(value)?;
+    if !TEXT.get().copied().unwrap_or(false) {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let mut lines = String::new();
+    render(&value, "", &mut lines);
+    print!("{lines}");
+    Ok(())
+}
+
+fn render(value: &Value, path: &str, lines: &mut String) {
+    match value {
+        Value::Object(fields) => {
+            for (key, field) in fields {
+                let child = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+                render(field, &child, lines);
+            }
+        }
+        Value::Array(items) => {
+            if items.is_empty() {
+                lines.push_str(&format!("{path}: []\n"));
+            }
+            for (index, item) in items.iter().enumerate() {
+                render(item, &format!("{path}[{index}]"), lines);
+            }
+        }
+        Value::String(text) => lines.push_str(&format!("{path}: {text}\n")),
+        Value::Null => lines.push_str(&format!("{path}: -\n")),
+        other => lines.push_str(&format!("{path}: {other}\n")),
+    }
 }
 
 #[derive(Debug, Args)]
@@ -62,7 +108,9 @@ impl ModelArgs {
 }
 
 pub(crate) fn run() -> Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let _ = TEXT.set(cli.text);
+    match cli.command {
         Command::Train(args) => vectors::train(args),
         Command::Optimize(args) => vectors::optimize(args),
         Command::Evaluate(args) => vectors::evaluate(args),

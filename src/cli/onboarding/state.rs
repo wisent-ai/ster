@@ -4,10 +4,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Map, Value};
+use anyhow::{Context, Result, bail};
+use serde_json::{Map, Value, json};
 
-use super::{screen_by_id, JOURNEY_ID, JOURNEY_VERSION, PRODUCT_ID, STATE_SCHEMA};
+use super::{JOURNEY_ID, JOURNEY_VERSION, PRODUCT_ID, STATE_SCHEMA, screen_by_id};
 
 pub(super) fn load_or_start_state(definition: &Value) -> Result<Value> {
     let path = state_path();
@@ -61,8 +61,7 @@ pub(super) fn save_state(state: &Value) -> Result<()> {
     fs::create_dir_all(parent)
         .with_context(|| format!("create onboarding state directory {}", parent.display()))?;
     let body = format!("{}\n", serde_json::to_string_pretty(state)?);
-    fs::write(&path, body)
-        .with_context(|| format!("write onboarding state {}", path.display()))
+    fs::write(&path, body).with_context(|| format!("write onboarding state {}", path.display()))
 }
 
 fn state_path() -> PathBuf {

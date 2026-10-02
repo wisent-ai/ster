@@ -2,9 +2,9 @@
 //! The arms go through the same `tune` and `lora` functions `ster request`
 //! calls and print one pretty JSON document each.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::json;
-use ster::{lora, workflow::parse_layers, Precision};
+use ster::{Precision, lora, workflow::parse_layers};
 
 mod artifact;
 mod command;
@@ -43,7 +43,11 @@ pub(super) fn note_precision(report: &mut serde_json::Value, precision: Precisio
 /// `query,query` builds one adapter, and the order follows the flag.
 pub(super) fn parse_targets(value: &str) -> Result<Vec<lora::Target>> {
     let mut targets = Vec::new();
-    for segment in value.split(',').map(str::trim).filter(|segment| !segment.is_empty()) {
+    for segment in value
+        .split(',')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+    {
         let target = lora::Target::parse(segment)?;
         if !targets.contains(&target) {
             targets.push(target);
