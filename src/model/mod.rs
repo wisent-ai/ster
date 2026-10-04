@@ -205,6 +205,10 @@ pub struct Architecture {
     pub embedding_multiplier: Option<f64>,
     /// What each sublayer's output is multiplied by before the residual add.
     pub residual_multiplier: Option<f64>,
+    /// Nemotron-H: every block is one norm and one sublayer. The layers in
+    /// this set run the feed-forward alone; its attention layers have no
+    /// feed-forward.
+    pub lone_sublayers: Option<u128>,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -350,6 +354,7 @@ impl Architecture {
             norm_offset: false,
             embedding_multiplier: None,
             residual_multiplier: None,
+            lone_sublayers: None,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
@@ -1025,6 +1030,17 @@ impl Names {
         state_space: "mixer",
         attention_norm: "norm",
         ..Self::LLAMA
+    };
+    /// Nemotron-H: Mamba's layout, every layer's one sublayer its `mixer` —
+    /// a Mamba-2 scan, attention (`q_proj`, `k_proj`, `v_proj`, `o_proj`)
+    /// or a feed-forward (`up_proj`, `down_proj`).
+    pub const NEMOTRON_H: Self = Self {
+        attention: "mixer",
+        output: "mixer.o_proj",
+        gate: None,
+        up: "mixer.up_proj",
+        down: "mixer.down_proj",
+        ..Self::MAMBA
     };
     /// Jamba: `mamba` or `self_attn` after `input_layernorm`,
     /// `pre_ff_layernorm` before `feed_forward`, and `final_layernorm`.

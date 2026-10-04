@@ -152,6 +152,9 @@ enum Mixer {
     Structured(Structured),
     /// LFM2's gated short convolution.
     ShortConv(ShortConv),
+    /// Nemotron-H's feed-forward layers: the feed-forward is the block's
+    /// one sublayer.
+    FeedForward(FeedForwardBlock),
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +244,25 @@ impl DecoderLayer {
                 parallel: false,
             });
         }
+        // Nemotron-H: one norm and one sublayer per block — the feed-forward
+        // alone on the layers that name it, attention alone on the others.
+        if let Some(feed_forward_layers) = architecture.lone_sublayers {
+            let mixer = if layer < u128::BITS as usize && feed_forward_layers & (1u128 << layer) != 0 {
+                Mixer::FeedForward(feed_forward_block(&builder, config, architecture, layer, adapters)?)
+            } else {
+                Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?)
+            };
+            return Ok(Self {
+                attention_norm: Some(norm(names.attention_norm)?),
+                mixer,
+                attention_output_norm: None,
+                feed_forward_norm: None,
+                feed_forward: None,
+                feed_forward_output_norm: None,
+                residual_multiplier: architecture.residual_multiplier,
+                parallel: false,
+            });
+        }
         // Which norms a block has comes from the architecture; what each is
         // called comes from the family's names (Llama's
         // `post_attention_layernorm` before the feed-forward, Gemma 2's
@@ -318,7 +340,7 @@ impl DecoderLayer {
     pub(super) fn window(&self) -> Option<usize> {
         match &self.mixer {
             Mixer::Attention(attention) => attention.window(),
-            Mixer::StateSpace(_) | Mixer::Structured(_) | Mixer::ShortConv(_) => None,
+            Mixer::StateSpace(_) | Mixer::Structured(_) | Mixer::ShortConv(_) | Mixer::FeedForward(_) => None,
         }
     }
 
@@ -339,6 +361,7 @@ impl DecoderLayer {
             Mixer::StateSpace(state_space) => state_space.forward(&normed, layer, cache)?,
             Mixer::Structured(structured) => structured.forward(&normed, layer, cache)?,
             Mixer::ShortConv(convolution) => convolution.forward(&normed, layer, cache)?,
+            Mixer::FeedForward(feed_forward) => feed_forward.forward(&normed, mode.route)?,
         };
         let attention = optional_norm(self.attention_output_norm.as_ref(), &mixed, mode.pass)?;
         let Some(feed_forward_block) = &self.feed_forward else {

@@ -86,13 +86,14 @@ pub(super) enum Family {
     Telechat,
     Lfm2Moe,
     GraniteMoeHybrid,
+    NemotronH,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 62] = [
+    pub(super) const ALL: [Self; 63] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -152,6 +153,7 @@ impl Family {
         Self::Telechat,
         Self::Lfm2Moe,
         Self::GraniteMoeHybrid,
+        Self::NemotronH,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -224,6 +226,7 @@ impl Family {
             Self::Telechat => "telechat",
             Self::Lfm2Moe => "lfm2_moe",
             Self::GraniteMoeHybrid => "granitemoehybrid",
+            Self::NemotronH => "nemotron_h",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -410,11 +413,13 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
 }
 
 /// The feed-forward non-linearity the config names, as `hidden_act`,
-/// `hidden_activation` or `activation_function`; SiLU when it names none.
+/// `hidden_activation`, `activation_function` or Nemotron-H's
+/// `mlp_hidden_act`; SiLU when it names none.
 fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> {
     let name = text(raw, "hidden_act")
         .or_else(|| text(raw, "hidden_activation"))
-        .or_else(|| text(raw, "activation_function"));
+        .or_else(|| text(raw, "activation_function"))
+        .or_else(|| text(raw, "mlp_hidden_act"));
     match name {
         None | Some("silu") | Some("swish") => Ok(Activation::Silu),
         Some("gelu_pytorch_tanh") | Some("gelu_new") | Some("gelu_fast") => Ok(Activation::GeluTanh),
@@ -1171,6 +1176,62 @@ pub(super) fn family(
                 parameter_norm: ParameterNorm::None,
                 layers: every_layer(layers, path)? & !attention,
                 feed_forward: true,
+                structured: Some(heads),
+            });
+        }
+        "nemotron_h" => {
+            // Nemotron-H: one norm and one sublayer per layer, its kind the
+            // layer's letter in `hybrid_override_pattern` — `M` a Mamba-2
+            // scan, `*` attention without rotation, `-` a squared-ReLU
+            // `up_proj`/`down_proj` feed-forward.
+            fits(layers, path)?;
+            let Some(pattern) = text(raw, "hybrid_override_pattern") else {
+                bail!("{} declares a Nemotron-H model without hybrid_override_pattern", path.display());
+            };
+            if pattern.chars().count() != layers {
+                bail!(
+                    "{} spells {} layers in hybrid_override_pattern for {layers} layers",
+                    path.display(),
+                    pattern.chars().count()
+                );
+            }
+            let (mut mamba, mut feed_forward) = (0u128, 0u128);
+            for (layer, kind) in pattern.chars().enumerate() {
+                match kind {
+                    'M' => mamba |= 1u128 << layer,
+                    '-' => feed_forward |= 1u128 << layer,
+                    '*' => {}
+                    other => bail!(
+                        "{} marks layer {layer} {other:?} in hybrid_override_pattern; Ster implements Nemotron-H's M (Mamba-2), * (attention) and - (feed-forward) layers",
+                        path.display()
+                    ),
+                }
+            }
+            let heads = structured(raw, "mamba_num_heads", "mamba_head_dim", "n_groups", path)?;
+            let (Some(state), Some(kernel)) = (whole(raw, "ssm_state_size"), whole(raw, "conv_kernel"))
+            else {
+                bail!(
+                    "{} declares a Nemotron-H model without ssm_state_size and conv_kernel",
+                    path.display()
+                );
+            };
+            architecture.names = Names::NEMOTRON_H;
+            architecture.positions = Positions::None;
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.lone_sublayers = Some(feed_forward);
+            architecture.state_space = Some(StateSpaceSpec {
+                inner: heads.heads * heads.head_dim,
+                state,
+                kernel,
+                step_rank: 0,
+                projection_bias: flag(raw, "use_bias"),
+                convolution_bias: raw.get("use_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                parameter_norm: ParameterNorm::None,
+                layers: mamba,
+                feed_forward: false,
                 structured: Some(heads),
             });
         }
