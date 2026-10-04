@@ -42,7 +42,11 @@ Included now:
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
   `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
   `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `mamba2`, `bamba`,
-  `smollm3`, `gemma`, `gemma2` or `gemma3_text`. Coverage is measured
+  `gpt_oss`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`. GPT-OSS adds a
+  learned sink logit per head to every attention softmax and routes over
+  biased experts with a clamped gate (`swiglu_limit`); OpenAI's own
+  checkpoints are MXFP4-quantized and refused, their BF16 exports load.
+  Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Mamba and Falcon-Mamba replace attention with a selective state-space

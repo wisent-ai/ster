@@ -21,9 +21,31 @@ struct Expert {
     down: Linear,
 }
 
+/// GPT-OSS's gate sharpness: the gate is `g · sigmoid(1.702 · g)`, the
+/// sigmoid approximation of GELU it was trained with.
+const GPT_OSS_GATE_SHARPNESS: f64 = 1.702;
+
 impl Expert {
-    fn forward(&self, input: &Tensor, activation: Activation) -> candle_core::Result<Tensor> {
-        let gated = (activation.apply(&self.gate.forward(input)?)? * self.up.forward(input)?)?;
+    /// `down(act(gate) · up)`; with a `limit`, GPT-OSS's clamped form,
+    /// `down((clamp(up, -limit, limit) + 1) · g · sigmoid(1.702 g))` where
+    /// `g = min(gate, limit)`.
+    fn forward(
+        &self,
+        input: &Tensor,
+        activation: Activation,
+        limit: Option<f64>,
+    ) -> candle_core::Result<Tensor> {
+        let gate = self.gate.forward(input)?;
+        let up = self.up.forward(input)?;
+        let gated = match limit {
+            Some(limit) => {
+                let gate = gate.minimum(limit)?;
+                let up = (up.clamp(-limit, limit)? + 1.0)?;
+                let sigmoid = ((gate.clone() * -GPT_OSS_GATE_SHARPNESS)?.exp()? + 1.0)?.recip()?;
+                ((gate * sigmoid)? * up)?
+            }
+            None => (activation.apply(&gate)? * up)?,
+        };
         self.down.forward(&gated)
     }
 
@@ -118,6 +140,40 @@ impl Experts {
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
                 (linear_no_bias(hidden, count, block.pp("router").pp("layer"))?, experts)
+            }
+            // GPT-OSS stacks every expert inputs-first: `gate_up_proj`
+            // `[experts, hidden, 2 * intermediate]` with gate and up columns
+            // interleaved (gate at even columns), `down_proj` `[experts,
+            // intermediate, hidden]`, each with a bias; the router has one
+            // too. Each expert's projections are laid out once at load.
+            ExpertLayout::GptOss => {
+                let block = builder.pp("mlp");
+                let experts_block = block.pp("experts");
+                let gate_up = experts_block.get((count, hidden, 2 * intermediate), "gate_up_proj")?;
+                let gate_up_bias = experts_block.get((count, 2 * intermediate), "gate_up_proj_bias")?;
+                let down = experts_block.get((count, intermediate, hidden), "down_proj")?;
+                let down_bias = experts_block.get((count, hidden), "down_proj_bias")?;
+                let experts = (0..count)
+                    .map(|expert| -> candle_core::Result<Expert> {
+                        let paired = gate_up.get(expert)?.reshape((hidden, intermediate, 2))?;
+                        let paired_bias = gate_up_bias.get(expert)?.reshape((intermediate, 2))?;
+                        let column = |slot: usize| -> candle_core::Result<Linear> {
+                            Ok(Linear::new(
+                                paired.narrow(2, slot, 1)?.squeeze(2)?.t()?.contiguous()?,
+                                Some(paired_bias.narrow(1, slot, 1)?.squeeze(1)?.contiguous()?),
+                            ))
+                        };
+                        Ok(Expert {
+                            gate: column(0)?,
+                            up: column(1)?,
+                            down: Linear::new(
+                                down.get(expert)?.t()?.contiguous()?,
+                                Some(down_bias.get(expert)?),
+                            ),
+                        })
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()?;
+                (candle_nn::linear(hidden, count, block.pp("router"))?, experts)
             }
         };
         let shared = match spec.shared {
@@ -245,7 +301,8 @@ impl Experts {
             }
             let index = Tensor::new(tokens.as_slice(), device)?;
             let inputs = flat.index_select(&index, 0)?;
-            let produced = self.experts[expert].forward(&inputs, self.activation)?;
+            let produced =
+                self.experts[expert].forward(&inputs, self.activation, self.spec.swiglu_limit)?;
             let weight = weights
                 .index_select(&index, 0)?
                 .narrow(1, expert, 1)?
@@ -253,7 +310,7 @@ impl Experts {
             output = output.index_add(&index, &produced.broadcast_mul(&weight)?, 0)?;
         }
         if let Some((shared, gate)) = &self.shared {
-            let produced = shared.forward(&flat, self.activation)?;
+            let produced = shared.forward(&flat, self.activation, None)?;
             let produced = match gate {
                 // sigmoid, composed so it has a backward pass.
                 Some(gate) => produced

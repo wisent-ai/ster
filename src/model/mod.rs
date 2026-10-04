@@ -152,6 +152,9 @@ pub struct Architecture {
     /// Normalise each head's query and key after the rotation (HunYuan)
     /// rather than before it.
     pub norm_after_rotary: bool,
+    /// A learned sink logit per head in every softmax (GPT-OSS's
+    /// `self_attn.sinks`).
+    pub attention_sinks: bool,
     pub query_key_value_bias: bool,
     pub output_bias: bool,
     /// Bias on the feed-forward projections (Starcoder2, Phi-2, Nemotron's
@@ -298,6 +301,7 @@ impl Architecture {
             rotary_dim: head_dim,
             query_key_norm: QueryKeyNorm::None,
             norm_after_rotary: false,
+            attention_sinks: false,
             query_key_value_bias: false,
             output_bias: false,
             feed_forward_bias: false,
@@ -618,6 +622,8 @@ pub struct MixtureOfExperts {
     pub selection_bias: bool,
     /// `routed_scaling_factor`, multiplying the routed experts' weights.
     pub routed_scale: Option<f64>,
+    /// GPT-OSS's `swiglu_limit`: its experts' clamped gate.
+    pub swiglu_limit: Option<f64>,
 }
 
 /// A shared expert's inner width and whether a sigmoid gate scales it.
@@ -660,6 +666,9 @@ pub enum ExpertLayout {
     Granite,
     /// `feed_forward.router`, `feed_forward.experts.{e}.gate_proj|up_proj|down_proj`.
     Jamba,
+    /// `mlp.router` (with bias) and every expert stacked inputs-first in
+    /// `mlp.experts.gate_up_proj` and `down_proj`, with biases.
+    GptOss,
 }
 
 /// Where a family keeps its tensors. `embeddings`, `positions`,

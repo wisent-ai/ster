@@ -76,13 +76,14 @@ pub(super) enum Family {
     HunYuanDense,
     Mamba2,
     Bamba,
+    GptOss,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 53] = [
+    pub(super) const ALL: [Self; 54] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -133,6 +134,7 @@ impl Family {
         Self::HunYuanDense,
         Self::Mamba2,
         Self::Bamba,
+        Self::GptOss,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -196,6 +198,7 @@ impl Family {
             Self::HunYuanDense => "hunyuan_v1_dense",
             Self::Mamba2 => "mamba2",
             Self::Bamba => "bamba",
+            Self::GptOss => "gpt_oss",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -1007,6 +1010,28 @@ pub(super) fn family(
             architecture.query_key_value_bias = flag(raw, "bias");
             architecture.output_bias = architecture.query_key_value_bias;
         }
+        "gpt_oss" => {
+            // GPT-OSS: biased attention projections with a learned sink per
+            // head, sliding-window layers from `layer_types`, and a mixture
+            // of `num_local_experts` biased experts behind a biased router,
+            // the top `num_experts_per_tok` renormalised, each with the
+            // clamped gate `swiglu_limit` bounds.
+            architecture.query_key_value_bias = true;
+            architecture.output_bias = true;
+            architecture.attention_sinks = true;
+            architecture.sliding_window = whole(raw, "sliding_window");
+            let mut routed = experts(
+                raw,
+                "num_local_experts",
+                "intermediate_size",
+                true,
+                ExpertLayout::GptOss,
+                0,
+                path,
+            )?;
+            routed.swiglu_limit = number(raw, "swiglu_limit");
+            architecture.experts = Some(routed);
+        }
         "hunyuan_v1_dense" => {
             // HunYuan: per-head query and key norms named `query_layernorm`
             // and `key_layernorm`, applied after the rotation.
@@ -1316,6 +1341,7 @@ fn experts(
         groups: None,
         selection_bias: false,
         routed_scale: None,
+        swiglu_limit: None,
     })
 }
 

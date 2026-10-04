@@ -50,6 +50,9 @@ pub(super) struct Attention {
     /// ALiBi's slope per head, `[1, heads, 1, 1]`, for a family whose
     /// positions are a linear bias on the scores (BLOOM, MPT).
     alibi: Option<Tensor>,
+    /// GPT-OSS's learned sink per head, `[1, heads, 1, 1]` in F32: one extra
+    /// logit every query's softmax divides by and no value is read for.
+    sinks: Option<Tensor>,
 }
 
 /// Which rotary table this layer rotates its query and key with.
@@ -223,6 +226,17 @@ impl Attention {
                 }
                 _ => None,
             },
+            sinks: if architecture.attention_sinks {
+                Some(
+                    layer_builder
+                        .pp(names.attention)
+                        .get(heads, "sinks")?
+                        .to_dtype(DType::F32)?
+                        .reshape((1, heads, 1, 1))?,
+                )
+            } else {
+                None
+            },
         })
     }
 
@@ -372,9 +386,23 @@ impl Attention {
         // `ops::softmax` is the same softmax spelled out of `max_keepdim`,
         // `broadcast_sub`, `exp`, `sum_keepdim` and `broadcast_div`, all of which
         // record a backward node.
+        // A sink adds one more logit per head to every query's softmax; its
+        // share of the probability is dropped rather than spent on a value.
+        let (attention, keys) = match &self.sinks {
+            Some(sinks) => {
+                let (batch, heads, queries, keys) = attention.dims4()?;
+                let column = sinks.broadcast_as((batch, heads, queries, 1))?;
+                (Tensor::cat(&[&attention, &column], 3)?, Some(keys))
+            }
+            None => (attention, None),
+        };
         let attention = match mode.pass {
-            Pass::Inference => candle_nn::ops::softmax_last_dim(&attention)?,
+            Pass::Inference => candle_nn::ops::softmax_last_dim(&attention.contiguous()?)?,
             Pass::Differentiable => candle_nn::ops::softmax(&attention, candle_core::D::Minus1)?,
+        };
+        let attention = match keys {
+            Some(keys) => attention.narrow(3, 0, keys)?,
+            None => attention,
         };
         let output = attention
             .matmul(&value.contiguous()?)?
