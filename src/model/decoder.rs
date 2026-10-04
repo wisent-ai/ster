@@ -62,6 +62,14 @@ impl SteeringLlama {
         mut architecture: Architecture,
         adapters: crate::lora::Adapters,
     ) -> candle_core::Result<Self> {
+        // A multimodal checkpoint keeps the language model below a wrapper
+        // (Gemma 3's `language_model`); the vision tower beside it is never
+        // mapped.
+        let builder = if architecture.names.wrapper.is_empty() {
+            builder
+        } else {
+            builder.pp(architecture.names.wrapper)
+        };
         // A checkpoint saved from the base model drops the family's root
         // (`wte` rather than `transformer.wte`); which one this is shows in
         // whether the embedding is where the root says.

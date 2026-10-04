@@ -56,7 +56,9 @@ Included now:
   `out_proj`), and Bamba interleaves it with attention on
   `attn_layer_indices` and a feed-forward after every layer. Configs written
   with Python's `Infinity`, `-Infinity` or `NaN` are read with those as
-  unstated. These are steered like any
+  unstated. Gemma 3's image-text checkpoints (`model_type` `gemma3`) load
+  as their `text_config` language model, read from below `language_model`;
+  the vision tower is never mapped. These are steered like any
   other model, and adapter training on them is refused because their
   state-space layers have no attention or feed-forward projection. Every
   other family is a rotary, grouped-query decoder with what its config

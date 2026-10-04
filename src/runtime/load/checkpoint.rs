@@ -124,8 +124,9 @@ impl Checkpoint {
     pub fn decoder_config(&self) -> Result<(Config, Architecture, BTreeSet<u32>)> {
         let bytes = fs::read(&self.config)
             .with_context(|| format!("failed to read {}", self.config.display()))?;
-        let mut raw: serde_json::Value = serde_json::from_slice(&finite_literals(&bytes))
+        let outer: serde_json::Value = serde_json::from_slice(&finite_literals(&bytes))
             .with_context(|| format!("invalid model config {}", self.config.display()))?;
+        let (mut raw, wrapper) = language_model(outer);
         let model_type = raw
             .get("model_type")
             .and_then(|value| value.as_str())
@@ -154,7 +155,8 @@ impl Checkpoint {
             // configs often leave the key out.
             llama.tie_word_embeddings = Some(true);
         }
-        let architecture = family(model_type, &raw, scaling.as_ref(), &llama, &self.config)?;
+        let mut architecture = family(model_type, &raw, scaling.as_ref(), &llama, &self.config)?;
+        architecture.names.wrapper = wrapper;
         let tokens = eos_tokens(&llama);
         Ok((llama.into_config(false), architecture, tokens))
     }
@@ -256,4 +258,36 @@ fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         Some(written) => std::borrow::Cow::Owned(written),
         None => std::borrow::Cow::Borrowed(bytes),
     }
+}
+
+/// The language model's config inside a multimodal one, and the prefix its
+/// weights sit below.
+///
+/// Gemma 3's image-text checkpoints (`model_type` `gemma3`) nest the text
+/// decoder's config under `text_config` and its weights under
+/// `language_model`; the vision tower beside it is never read. The keys the
+/// nested config leaves to the outer one (`eos_token_id`, `bos_token_id`,
+/// `tie_word_embeddings`, `quantization_config`) are copied in. Any other
+/// config is returned as it is, with no prefix.
+fn language_model(outer: serde_json::Value) -> (serde_json::Value, &'static str) {
+    const WRAPPED: &str = "gemma3";
+    const WRAPPER: &str = "language_model";
+    const INHERITED: [&str; 4] = [
+        "eos_token_id",
+        "bos_token_id",
+        "tie_word_embeddings",
+        "quantization_config",
+    ];
+    let wrapped = outer.get("model_type").and_then(|value| value.as_str()) == Some(WRAPPED);
+    let Some(mut inner) = outer.get("text_config").filter(|_| wrapped).cloned() else {
+        return (outer, "");
+    };
+    if let Some(object) = inner.as_object_mut() {
+        for key in INHERITED {
+            if let (false, Some(value)) = (object.contains_key(key), outer.get(key)) {
+                object.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    (inner, WRAPPER)
 }

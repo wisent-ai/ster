@@ -462,7 +462,15 @@ impl Architecture {
                 _ => Placement::whole(in_layer(names.down)),
             },
         };
+        // A multimodal checkpoint keeps the language model below a wrapper
+        // (Gemma 3's `language_model`).
+        let tensor = if names.wrapper.is_empty() {
+            placement.tensor
+        } else {
+            format!("{}.{}", names.wrapper, placement.tensor)
+        };
         Some(Placement {
+            tensor,
             transposed: self.conv1d,
             root: names.root,
             ..placement
@@ -701,6 +709,9 @@ pub struct Names {
     /// attention block.
     pub query_norm: &'static str,
     pub key_norm: &'static str,
+    /// The prefix a multimodal checkpoint keeps the whole language model
+    /// below (Gemma 3's `language_model`); empty for a text-only checkpoint.
+    pub wrapper: &'static str,
 }
 
 impl Names {
@@ -750,6 +761,7 @@ impl Names {
         state_space: "mamba",
         query_norm: "q_norm",
         key_norm: "k_norm",
+        wrapper: "",
     };
     /// Gemma 2 and 3: `post_attention_layernorm` is over attention's output,
     /// so the norm before the feed-forward is `pre_feedforward_layernorm`.
