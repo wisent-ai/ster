@@ -88,13 +88,14 @@ pub(super) enum Family {
     GraniteMoeHybrid,
     NemotronH,
     Jais2,
+    BailingMoe,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 64] = [
+    pub(super) const ALL: [Self; 65] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -156,6 +157,7 @@ impl Family {
         Self::GraniteMoeHybrid,
         Self::NemotronH,
         Self::Jais2,
+        Self::BailingMoe,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -230,6 +232,7 @@ impl Family {
             Self::GraniteMoeHybrid => "granitemoehybrid",
             Self::NemotronH => "nemotron_h",
             Self::Jais2 => "jais2",
+            Self::BailingMoe => "bailing_moe",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -1299,6 +1302,74 @@ pub(super) fn family(
                 feed_forward: false,
                 structured: Some(heads),
             });
+        }
+        "bailing_moe" => {
+            // Ling 1.x and 2.0: Llama's block under Bailing's names, one
+            // stacked `query_key_value`, per-head query and key norms when
+            // `use_qk_norm` holds, the first `first_k_dense_replace` layers
+            // dense and the rest routed over `num_experts` experts
+            // (`mlp.gate`, `mlp.experts.{e}`) beside
+            // `moe_intermediate_size · num_shared_experts` shared ones. Ling
+            // 1.x scores by softmax and renormalises under `norm_topk_prob`;
+            // Ling 2.0's `score_function` sigmoid adds `mlp.gate.expert_bias`
+            // to choose (`moe_router_enable_expert_bias`) within its best
+            // `topk_group` of `n_group` groups, always renormalises and
+            // scales by `routed_scaling_factor`.
+            if flag(raw, "norm_head") || flag(raw, "norm_softmax") {
+                bail!(
+                    "{} normalises its output head (norm_head) or its softmax (norm_softmax); Ster implements Ling's plain lm_head",
+                    path.display()
+                );
+            }
+            architecture.names = Names::BAILING;
+            architecture.qkv_layout = QkvLayout::Stacked;
+            architecture.query_key_value_bias = flag(raw, "use_qkv_bias");
+            architecture.output_bias = flag(raw, "use_bias");
+            if flag(raw, "use_qk_norm") {
+                architecture.query_key_norm = QueryKeyNorm::PerHead;
+            }
+            fits(layers, path)?;
+            let first_dense = whole(raw, "first_k_dense_replace").unwrap_or(0).min(layers);
+            let dense = (0..first_dense).fold(0u128, |set, layer| set | (1u128 << layer));
+            let sigmoid = match text(raw, "score_function") {
+                None | Some("softmax") => false,
+                Some("sigmoid") => true,
+                Some(other) => bail!(
+                    "{} declares score_function {other:?}; Ster implements softmax and sigmoid expert scores",
+                    path.display()
+                ),
+            };
+            let mut routed =
+                experts(raw, "num_experts", "moe_intermediate_size", false, ExpertLayout::Qwen, dense, path)?;
+            routed.normalize = (sigmoid || flag(raw, "norm_topk_prob")) && routed.top_k > 1;
+            routed.shared = whole(raw, "num_shared_experts")
+                .filter(|shared| *shared > 0)
+                .map(|shared| SharedExpert {
+                    intermediate: shared * routed.intermediate,
+                    module: "mlp.shared_experts",
+                    gated: false,
+                    form: SharedForm::GateUpDown,
+                });
+            if sigmoid {
+                routed.scoring = Scoring::Sigmoid;
+                routed.routed_scale = number(raw, "routed_scaling_factor");
+                routed.selection_bias =
+                    flag(raw, "moe_router_enable_expert_bias").then_some("mlp.gate.expert_bias");
+                routed.groups = match (whole(raw, "n_group"), whole(raw, "topk_group")) {
+                    (Some(groups), Some(chosen_groups)) => {
+                        if groups == 0 || routed.count % groups != 0 || chosen_groups > groups {
+                            bail!(
+                                "{} splits {} experts into {groups} groups and keeps {chosen_groups}; the groups must divide the experts evenly and at least as many must exist as are kept",
+                                path.display(),
+                                routed.count
+                            );
+                        }
+                        Some(ExpertGroups { groups, chosen_groups, rank_by_top_two: true })
+                    }
+                    _ => None,
+                };
+            }
+            architecture.experts = Some(routed);
         }
         "glm4_moe" => {
             // GLM-4.5's MoE: biased query, key and value, optional per-head

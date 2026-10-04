@@ -1066,6 +1066,18 @@ impl Names {
         feed_forward_norm: "pre_ff_layernorm",
         ..Self::LLAMA
     };
+    /// Ling (Bailing-MoE): `word_embeddings`, `attention.query_key_value`
+    /// with per-head `query_layernorm` and `key_layernorm`, and
+    /// `attention.dense` as the output.
+    pub const BAILING: Self = Self {
+        embeddings: "model.word_embeddings",
+        attention: "attention",
+        fused_qkv: "query_key_value",
+        output: "attention.dense",
+        query_norm: "query_layernorm",
+        key_norm: "key_layernorm",
+        ..Self::LLAMA
+    };
     /// InternLM2: `tok_embeddings`, `attention.wqkv` grouped by key-value
     /// head, `attention.wo`, `feed_forward.w1`/`w3`/`w2`, `attention_norm`
     /// and `ffn_norm`, and `output` as the head.
