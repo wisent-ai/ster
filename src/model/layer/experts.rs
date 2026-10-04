@@ -196,17 +196,25 @@ impl Experts {
             }
             None => None,
         };
-        let selection_bias = if spec.selection_bias {
-            Some(
-                builder
-                    .pp("mlp")
-                    .pp("gate")
-                    .get(count, "e_score_correction_bias")?
+        // DeepSeek stores the bias as `[experts]`, ERNIE as `[1, experts]`;
+        // either flattens to one score per expert.
+        let selection_bias = match spec.selection_bias {
+            Some(module) => {
+                let bias = builder
+                    .pp(module)
+                    .get_unchecked("e_score_correction_bias")?
+                    .flatten_all()?
                     .to_dtype(DType::F32)?
-                    .to_vec1::<f32>()?,
-            )
-        } else {
-            None
+                    .to_vec1::<f32>()?;
+                if bias.len() != count {
+                    candle_core::bail!(
+                        "{module}.e_score_correction_bias holds {} scores for {count} experts",
+                        bias.len()
+                    );
+                }
+                Some(bias)
+            }
+            None => None,
         };
         Ok(Self {
             router,

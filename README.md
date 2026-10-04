@@ -42,7 +42,8 @@ Included now:
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
   `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
   `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `mamba2`, `bamba`,
-  `gpt_oss`, `lfm2`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`. GPT-OSS
+  `gpt_oss`, `lfm2`, `ernie4_5_moe`, `smollm3`, `gemma`, `gemma2` or
+  `gemma3_text`. GPT-OSS
   adds a learned sink logit per head to every attention softmax and routes
   over biased experts with a clamped gate (`swiglu_limit`); OpenAI's own
   checkpoints are MXFP4-quantized and refused, their BF16 exports load.

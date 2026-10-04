@@ -79,13 +79,14 @@ pub(super) enum Family {
     Bamba,
     GptOss,
     Lfm2,
+    Ernie45Moe,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 55] = [
+    pub(super) const ALL: [Self; 56] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -138,6 +139,7 @@ impl Family {
         Self::Bamba,
         Self::GptOss,
         Self::Lfm2,
+        Self::Ernie45Moe,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -203,6 +205,7 @@ impl Family {
             Self::Bamba => "bamba",
             Self::GptOss => "gpt_oss",
             Self::Lfm2 => "lfm2",
+            Self::Ernie45Moe => "ernie4_5_moe",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -222,6 +225,7 @@ impl Family {
                 | Self::Cohere2
                 | Self::Starcoder2
                 | Self::Ernie45
+                | Self::Ernie45Moe
                 | Self::Gpt2
                 | Self::GptBigCode
                 | Self::Opt
@@ -265,6 +269,7 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         ("max_position_embeddings", &["n_positions", "max_seq_len"]),
         ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
         ("rope_theta", &["rotary_emb_base"]),
+        ("num_experts_per_tok", &["moe_k"]),
     ];
     for (llama, spellings) in aliases {
         if raw.get(*llama).is_some_and(|value| !value.is_null()) {
@@ -835,12 +840,48 @@ pub(super) fn family(
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.names = Names::UP_DOWN;
         }
-        "ernie4_5" => {
+        "ernie4_5" | "ernie4_5_moe" => {
             let bias = flag(raw, "use_bias");
             architecture.query_key_value_bias = bias;
             architecture.output_bias = bias;
             architecture.feed_forward_bias = bias;
             architecture.interleaved_rotary = true;
+            if model_type == "ernie4_5_moe" {
+                // ERNIE 4.5's experts cover the layers from
+                // `moe_layer_start_index` to `moe_layer_end_index` (the last
+                // when negative) every `moe_layer_interval`; scores are a
+                // softmax, chosen with `moe_statics.e_score_correction_bias`
+                // added and renormalised, beside `moe_num_shared_experts`
+                // shared experts.
+                fits(layers, path)?;
+                let start = whole(raw, "moe_layer_start_index").unwrap_or(0);
+                let end = raw
+                    .get("moe_layer_end_index")
+                    .and_then(Value::as_i64)
+                    .filter(|end| *end >= 0)
+                    .map_or(layers.saturating_sub(1), |end| end as usize);
+                let interval = whole(raw, "moe_layer_interval").unwrap_or(1).max(1);
+                let dense = (0..layers)
+                    .filter(|layer| *layer < start || *layer > end || (layer - start) % interval != 0)
+                    .fold(0u128, |set, layer| set | (1u128 << layer));
+                let mut routed = experts(
+                    raw,
+                    "moe_num_experts",
+                    "moe_intermediate_size",
+                    true,
+                    ExpertLayout::Qwen,
+                    dense,
+                    path,
+                )?;
+                routed.shared = whole(raw, "moe_num_shared_experts")
+                    .filter(|shared| *shared > 0)
+                    .map(|shared| SharedExpert {
+                        intermediate: shared * routed.intermediate,
+                        gated: false,
+                    });
+                routed.selection_bias = Some("mlp.moe_statics");
+                architecture.experts = Some(routed);
+            }
         }
         "minicpm" => {
             // MiniCPM's muP scales: the embedding by `scale_emb`, each
@@ -1399,7 +1440,7 @@ fn experts(
         dense_layers,
         scoring: Scoring::Softmax,
         groups: None,
-        selection_bias: false,
+        selection_bias: None,
         routed_scale: None,
         swiglu_limit: None,
     })
@@ -1483,7 +1524,7 @@ fn deepseek_experts(
             path.display()
         ),
     };
-    routed.selection_bias = method == "noaux_tc";
+    routed.selection_bias = (method == "noaux_tc").then_some("mlp.gate");
     let scale = number(raw, "routed_scaling_factor");
     routed.routed_scale = if v3_router || !(normalize && routed.top_k > 1) {
         scale

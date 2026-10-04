@@ -647,9 +647,10 @@ pub struct MixtureOfExperts {
     /// equal groups, and a token picks among the experts of its best
     /// `chosen_groups` groups only.
     pub groups: Option<ExpertGroups>,
-    /// DeepSeek-V3's `e_score_correction_bias`: added to the scores to choose
-    /// experts, never to weigh them.
-    pub selection_bias: bool,
+    /// Where the layer keeps its `e_score_correction_bias`, added to the
+    /// scores to choose experts and never to weigh them: DeepSeek-V3's
+    /// `mlp.gate`, ERNIE 4.5's `mlp.moe_statics`.
+    pub selection_bias: Option<&'static str>,
     /// `routed_scaling_factor`, multiplying the routed experts' weights.
     pub routed_scale: Option<f64>,
     /// GPT-OSS's `swiglu_limit`: its experts' clamped gate.
