@@ -224,6 +224,9 @@ pub struct Architecture {
     /// and then as many gate rows, and attention's output is multiplied by
     /// the gate's sigmoid before `o_proj`.
     pub output_gate: bool,
+    /// Step3's query bottleneck width (`share_q_dim`): the query is
+    /// `wq(inter_norm(q_proj(x)))`.
+    pub query_bottleneck: Option<usize>,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -421,6 +424,7 @@ impl Architecture {
             feed_forward_scales: None,
             delta_rule: None,
             output_gate: false,
+            query_bottleneck: None,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
@@ -509,6 +513,11 @@ impl Architecture {
         let in_attention = |leaf: &str| in_layer(&format!("{}.{leaf}", names.attention));
         // A Mamba block has no attention or feed-forward projection.
         if self.state_space.is_some() || self.delta_rule.is_some() {
+            return None;
+        }
+        // Step3's query passes a bottleneck and a norm before `wq`, so `wq`
+        // reads no hidden state an adapter could share.
+        if self.query_bottleneck.is_some() && target == Target::Query {
             return None;
         }
         if let Some(latent) = self.latent {
@@ -637,7 +646,9 @@ impl Architecture {
                 .map(Target::name)
                 .collect();
             let choices = choices.join(", ");
-            let why = if self.latent.is_some() && !feed_forward_target(*target) {
+            let why = if self.query_bottleneck.is_some() && *target == Target::Query {
+                "its query passes a bottleneck and a norm (Step3's q_proj and inter_norm) before wq"
+            } else if self.latent.is_some() && !feed_forward_target(*target) {
                 "its attention is latent (DeepSeek's low-rank query and key-value)"
             } else if self.experts.is_some() {
                 "its feed-forward is a mixture of experts"
@@ -840,6 +851,10 @@ pub enum ExpertLayout {
     /// `mixer.gate`, `mixer.experts.{e}.up_proj|down_proj`, no gate
     /// projection (Nemotron-H).
     NemotronH,
+    /// `moe.gate`, and every expert stacked in `moe.gate_proj` and
+    /// `moe.up_proj` (`[experts, width, hidden]`) and `moe.down_proj`
+    /// (`[experts, hidden, width]`) (Step3).
+    Step3,
     /// `mlp.experts.gate_up_proj` and `down_proj`, with biases.
     GptOss,
     /// `ffn.router.layer`, and every expert stacked in
@@ -1093,6 +1108,13 @@ impl Names {
     pub const FALCON: Self = Self {
         embedding_norm: "transformer.embedding_norm",
         ..Self::BLOOM
+    };
+    /// Step3: the query projection is `wq`, after the bottleneck `q_proj`
+    /// and `inter_norm`; the routed feed-forward is `moe`, the shared one
+    /// `share_expert`.
+    pub const STEP3: Self = Self {
+        query: "wq",
+        ..Self::LLAMA
     };
     /// Falcon's new decoder architecture: a parallel block with `ln_attn`
     /// before attention and `ln_mlp` before the feed-forward.

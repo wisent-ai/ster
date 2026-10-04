@@ -94,13 +94,14 @@ pub(super) enum Family {
     Qwen3Next,
     KimiLinear,
     MinimaxM2,
+    Step3Text,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 70] = [
+    pub(super) const ALL: [Self; 71] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -168,6 +169,7 @@ impl Family {
         Self::Qwen3Next,
         Self::KimiLinear,
         Self::MinimaxM2,
+        Self::Step3Text,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -248,6 +250,7 @@ impl Family {
             Self::Qwen3Next => "qwen3_next",
             Self::KimiLinear => "kimi_linear",
             Self::MinimaxM2 => "minimax_m2",
+            Self::Step3Text => "step3_text",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -335,7 +338,7 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         ("hidden_size", &["n_embd", "n_embed", "d_model"]),
         ("num_hidden_layers", &["n_layer", "n_layers", "num_layers"]),
         ("num_attention_heads", &["n_head", "n_heads"]),
-        ("num_key_value_heads", &["kv_n_heads"]),
+        ("num_key_value_heads", &["kv_n_heads", "num_attention_groups"]),
         ("max_position_embeddings", &["n_positions", "max_seq_len", "seq_length", "model_max_length"]),
         ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
         ("rope_theta", &["rotary_emb_base"]),
@@ -1718,6 +1721,56 @@ pub(super) fn family(
             if raw.get("n_routed_experts").is_some_and(|count| !count.is_null()) {
                 architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
             }
+        }
+        "step3_text" => {
+            // Step3 (its text decoder, `text_config` of `step3_vl`): the
+            // query narrows through `q_proj` to `share_q_dim`, passes the RMS
+            // norm `inter_norm` and widens through `wq`, beside
+            // `num_attention_groups` key-value heads; the layers
+            // `moe_layers_enum` lists (from zero; all but the first when
+            // absent) route over `moe_num_experts` experts stacked under
+            // `moe`, renormalised under `norm_expert_weight`, beside a shared
+            // `share_expert` `share_expert_dim` wide.
+            let Some(width) = whole(raw, "share_q_dim").filter(|width| *width > 0) else {
+                bail!("{} declares a Step3 model without share_q_dim", path.display());
+            };
+            fits(layers, path)?;
+            let routed_layers = match text(raw, "moe_layers_enum") {
+                Some(list) => {
+                    let mut set = 0u128;
+                    for entry in list.split(',') {
+                        match entry.trim().parse::<usize>() {
+                            Ok(layer) if layer < layers => set |= 1u128 << layer,
+                            _ => bail!(
+                                "{} lists moe_layers_enum entry {entry:?}, which names no layer below {layers}",
+                                path.display()
+                            ),
+                        }
+                    }
+                    set
+                }
+                None => every_layer(layers, path)? & !1u128,
+            };
+            architecture.names = Names::STEP3;
+            architecture.query_bottleneck = Some(width);
+            let mut routed = experts(
+                raw,
+                "moe_num_experts",
+                "moe_intermediate_size",
+                flag(raw, "norm_expert_weight"),
+                ExpertLayout::Step3,
+                every_layer(layers, path)? & !routed_layers,
+                path,
+            )?;
+            routed.shared = whole(raw, "share_expert_dim")
+                .filter(|width| *width > 0)
+                .map(|intermediate| SharedExpert {
+                    intermediate,
+                    module: "share_expert",
+                    gated: false,
+                    form: SharedForm::GateUpDown,
+                });
+            architecture.experts = Some(routed);
         }
         "minimax_m2" => {
             // MiniMax-M2: full attention on every layer with query and key

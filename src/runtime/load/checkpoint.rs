@@ -265,21 +265,25 @@ fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 ///
 /// Gemma 3's image-text checkpoints (`model_type` `gemma3`) nest the text
 /// decoder's config under `text_config` and its weights under
-/// `language_model`; the vision tower beside it is never read. The keys the
-/// nested config leaves to the outer one (`eos_token_id`, `bos_token_id`,
-/// `tie_word_embeddings`, `quantization_config`) are copied in. Any other
-/// config is returned as it is, with no prefix.
+/// `language_model`; Step3's (`step3_vl`) nest the config the same way and
+/// keep the text weights at the root. The vision tower beside it is never
+/// read. The keys the nested config leaves to the outer one
+/// (`eos_token_id`, `bos_token_id`, `tie_word_embeddings`,
+/// `quantization_config`) are copied in. Any other config is returned as it
+/// is, with no prefix.
 fn language_model(outer: serde_json::Value) -> (serde_json::Value, &'static str) {
-    const WRAPPED: &str = "gemma3";
-    const WRAPPER: &str = "language_model";
     const INHERITED: [&str; 4] = [
         "eos_token_id",
         "bos_token_id",
         "tie_word_embeddings",
         "quantization_config",
     ];
-    let wrapped = outer.get("model_type").and_then(|value| value.as_str()) == Some(WRAPPED);
-    let Some(mut inner) = outer.get("text_config").filter(|_| wrapped).cloned() else {
+    let prefix = match outer.get("model_type").and_then(|value| value.as_str()) {
+        Some("gemma3") => "language_model",
+        Some("step3_vl") => "",
+        _ => return (outer, ""),
+    };
+    let Some(mut inner) = outer.get("text_config").cloned() else {
         return (outer, "");
     };
     if let Some(object) = inner.as_object_mut() {
@@ -289,5 +293,5 @@ fn language_model(outer: serde_json::Value) -> (serde_json::Value, &'static str)
             }
         }
     }
-    (inner, WRAPPER)
+    (inner, prefix)
 }

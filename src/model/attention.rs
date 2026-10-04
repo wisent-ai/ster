@@ -60,6 +60,10 @@ pub(super) struct Attention {
     /// Qwen3-Next's gate rows of `q_proj`: attention's output is multiplied
     /// by their sigmoid before the output projection.
     output_gate: Option<Linear>,
+    /// Step3's query bottleneck: `q_proj` down to `share_q_dim` and the RMS
+    /// norm `inter_norm`, whose output the query projection (`wq`) reads in
+    /// place of the hidden state.
+    query_bottleneck: Option<(Linear, Norm)>,
 }
 
 /// Which rotary table this layer rotates its query and key with.
@@ -162,7 +166,13 @@ impl Attention {
                 )
             }
             QkvLayout::Separate => (
-                projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
+                projection(
+                    architecture.query_bottleneck.unwrap_or(input),
+                    query_width,
+                    bias,
+                    conv1d,
+                    builder.pp(names.query),
+                )?,
                 projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
                 projection(input, key_value_width, bias, conv1d, builder.pp(names.value))?,
             ),
@@ -294,6 +304,13 @@ impl Attention {
             clip_qkv: architecture.clip_qkv,
             key_scale: architecture.key_scale,
             output_gate,
+            query_bottleneck: match architecture.query_bottleneck {
+                Some(width) => Some((
+                    projection(input, width, bias, conv1d, builder.pp("q_proj"))?,
+                    spec.load(width, builder.pp("inter_norm"))?,
+                )),
+                None => None,
+            },
             sinks: if architecture.attention_sinks {
                 Some(
                     layer_builder
@@ -332,7 +349,13 @@ impl Attention {
         let (batch, sequence, _) = hidden.dims3()?;
         let (query, key, value) = match &self.projections {
             Projections::Standard { query, key, value } => {
-                let query = project(query, self.query_adapter.as_ref(), hidden, mode.route)?;
+                let query = match &self.query_bottleneck {
+                    Some((down, norm)) => {
+                        let narrowed = norm.forward(&down.forward(hidden)?, mode.pass)?;
+                        project(query, self.query_adapter.as_ref(), &narrowed, mode.route)?
+                    }
+                    None => project(query, self.query_adapter.as_ref(), hidden, mode.route)?,
+                };
                 let key = project(key, self.key_adapter.as_ref(), hidden, mode.route)?;
                 // Falcon-H1 multiplies every key by `key_multiplier`.
                 let key = match self.key_scale {

@@ -136,6 +136,24 @@ impl Experts {
                     .collect::<candle_core::Result<Vec<_>>>()?;
                 (linear_no_bias(hidden, count, block.pp(router))?, experts)
             }
+            // Step3 stacks each projection of every expert in one tensor as a
+            // projection stores it; each expert is a view of its slice.
+            ExpertLayout::Step3 => {
+                let block = builder.pp("moe");
+                let gate = block.get((count, intermediate, hidden), "gate_proj.weight")?;
+                let up = block.get((count, intermediate, hidden), "up_proj.weight")?;
+                let down = block.get((count, hidden, intermediate), "down_proj.weight")?;
+                let experts = (0..count)
+                    .map(|expert| -> candle_core::Result<Expert> {
+                        Ok(Expert {
+                            gate: Some(Linear::new(gate.get(expert)?, None)),
+                            up: Linear::new(up.get(expert)?, None),
+                            down: Linear::new(down.get(expert)?, None),
+                        })
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()?;
+                (linear_no_bias(hidden, count, block.pp("gate"))?, experts)
+            }
             // GraniteMoE stacks every expert into two tensors: `input_linear`
             // `[experts, 2 * intermediate, hidden]`, gate rows then up rows,
             // and `output_linear` `[experts, hidden, intermediate]`. Each
