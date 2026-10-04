@@ -858,6 +858,39 @@ impl Names {
         attention_norm: "norm",
         ..Self::LLAMA
     };
+    /// InternLM2: `tok_embeddings`, `attention.wqkv` grouped by key-value
+    /// head, `attention.wo`, `feed_forward.w1`/`w3`/`w2`, `attention_norm`
+    /// and `ffn_norm`, and `output` as the head.
+    pub const INTERNLM2: Self = Self {
+        embeddings: "model.tok_embeddings",
+        lm_head: "output",
+        attention: "attention",
+        fused_qkv: "wqkv",
+        output: "attention.wo",
+        gate: Some("feed_forward.w1"),
+        up: "feed_forward.w3",
+        down: "feed_forward.w2",
+        attention_norm: "attention_norm",
+        feed_forward_norm: "ffn_norm",
+        ..Self::LLAMA
+    };
+    /// EXAONE 3: everything below `transformer`, `h.{i}` with `ln_1` and
+    /// `ln_2`, `attn.attention.{q,k,v,out}_proj`, `mlp.c_fc_0` (gate),
+    /// `mlp.c_fc_1` (up) and `mlp.c_proj`, and `ln_f`.
+    pub const EXAONE: Self = Self {
+        root: "transformer",
+        embeddings: "transformer.wte",
+        layers: "transformer.h",
+        final_norm: "transformer.ln_f",
+        attention: "attn.attention",
+        output: "attn.attention.out_proj",
+        gate: Some("mlp.c_fc_0"),
+        up: "mlp.c_fc_1",
+        down: "mlp.c_proj",
+        attention_norm: "ln_1",
+        feed_forward_norm: "ln_2",
+        ..Self::LLAMA
+    };
 }
 
 /// Whether the feed-forward gates its up projection.

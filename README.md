@@ -40,8 +40,9 @@ Included now:
   `olmoe`, `exaone4`, `internlm3`, `seed_oss`, `arcee`, `ernie4_5`,
   `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `gpt2`,
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
-  `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `smollm3`, `gemma`,
-  `gemma2` or `gemma3_text`. Coverage is measured
+  `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
+  `internlm2`, `exaone`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`.
+  Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Mamba and Falcon-Mamba replace attention with a selective state-space

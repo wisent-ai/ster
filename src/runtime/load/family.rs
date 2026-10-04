@@ -69,13 +69,16 @@ pub(super) enum Family {
     MiniCpm3,
     Mamba,
     FalconMamba,
+    Glm4Moe,
+    InternLm2,
+    Exaone,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 46] = [
+    pub(super) const ALL: [Self; 49] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -119,6 +122,9 @@ impl Family {
         Self::MiniCpm3,
         Self::Mamba,
         Self::FalconMamba,
+        Self::Glm4Moe,
+        Self::InternLm2,
+        Self::Exaone,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -175,6 +181,9 @@ impl Family {
             Self::MiniCpm3 => "minicpm3",
             Self::Mamba => "mamba",
             Self::FalconMamba => "falcon_mamba",
+            Self::Glm4Moe => "glm4_moe",
+            Self::InternLm2 => "internlm2",
+            Self::Exaone => "exaone",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -232,7 +241,7 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     let aliases: &[(&str, &[&str])] = &[
         ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]),
         ("hidden_size", &["n_embd", "n_embed", "d_model"]),
-        ("num_hidden_layers", &["n_layer", "n_layers"]),
+        ("num_hidden_layers", &["n_layer", "n_layers", "num_layers"]),
         ("num_attention_heads", &["n_head", "n_heads"]),
         ("max_position_embeddings", &["n_positions", "max_seq_len"]),
         ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
@@ -810,6 +819,29 @@ pub(super) fn family(
                 },
             });
         }
+        "glm4_moe" => {
+            // GLM-4.5's MoE: biased query, key and value, optional per-head
+            // query and key norms, rotation over `partial_rotary_factor` by
+            // halves, and DeepSeek-V3's router and shared experts.
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            if flag(raw, "use_qk_norm") {
+                architecture.query_key_norm = QueryKeyNorm::PerHead;
+            }
+            architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
+        }
+        "internlm2" => {
+            // InternLM2: Llama's block under its own names, query, key and
+            // value fused in `wqkv` by key-value group, and `bias` on every
+            // attention projection.
+            architecture.names = Names::INTERNLM2;
+            architecture.qkv_layout = QkvLayout::Grouped;
+            architecture.query_key_value_bias = flag(raw, "bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+        }
+        "exaone" => {
+            // EXAONE 3 and 3.5: Llama's block under GPT-2-style names.
+            architecture.names = Names::EXAONE;
+        }
         "deepseek_v2" | "deepseek_v3" | "minicpm3" => {
             if architecture.latent.is_none() {
                 bail!(
@@ -1142,7 +1174,11 @@ fn deepseek_experts(
             intermediate: shared * routed.intermediate,
             gated: false,
         });
+    // GLM-4-MoE's router is DeepSeek-V3's and its configs leave the method
+    // out: sigmoid scores, `noaux_tc` selection.
+    let v3_router = matches!(model_type, "deepseek_v3" | "glm4_moe");
     routed.scoring = match text(raw, "scoring_func") {
+        None if model_type == "glm4_moe" => Scoring::Sigmoid,
         None | Some("softmax") => Scoring::Softmax,
         Some("sigmoid") => Scoring::Sigmoid,
         Some(other) => bail!(
@@ -1150,7 +1186,8 @@ fn deepseek_experts(
             path.display()
         ),
     };
-    let method = text(raw, "topk_method").unwrap_or("greedy");
+    let method = text(raw, "topk_method")
+        .unwrap_or(if model_type == "glm4_moe" { "noaux_tc" } else { "greedy" });
     routed.groups = match method {
         "greedy" => None,
         "group_limited_greedy" | "noaux_tc" => {
@@ -1181,7 +1218,7 @@ fn deepseek_experts(
     };
     routed.selection_bias = method == "noaux_tc";
     let scale = number(raw, "routed_scaling_factor");
-    routed.routed_scale = if model_type == "deepseek_v3" || !(normalize && routed.top_k > 1) {
+    routed.routed_scale = if v3_router || !(normalize && routed.top_k > 1) {
         scale
     } else {
         None
