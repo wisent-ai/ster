@@ -144,6 +144,7 @@ impl Runtime {
             );
         }
         validate_layers(&artifact.layers, base.config.num_hidden_layers)?;
+        base.architecture.check_targets(&artifact.targets)?;
         let adapters = lora::Adapters::from_artifact(&artifact, &base.device, base.dtype)?;
         let builder = base.builder()?;
         let model_impl = SteeringLlama::load_with_adapters(
@@ -193,6 +194,7 @@ impl Runtime {
     ) -> Result<(Self, VarMap)> {
         let base = BaseLoad::resolve(model, revision, device, precision)?;
         spec.validate(base.config.num_hidden_layers)?;
+        base.architecture.check_targets(&spec.targets)?;
         let spec = spec.resolved(base.config.num_hidden_layers);
         let widths = projection_widths(&base.config, &base.architecture);
         let varmap = VarMap::new();

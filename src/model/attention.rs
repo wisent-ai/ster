@@ -3,14 +3,17 @@
 //! may not see.
 
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear, linear_no_bias};
+use candle_nn::{Linear, Module, VarBuilder};
 use candle_transformers::models::llama::Config;
 
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Architecture, Cache, Mode, Pass, QueryKeyNorm, Route,
-    layer::{load_norm, normalize},
+    Architecture, Cache, Mode, NormKind, Pass, QueryKeyNorm, Route,
+    layer::{
+        norm::{Norm, NormSpec},
+        projection,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -24,10 +27,10 @@ pub(super) struct Attention {
     value_adapter: Option<Adapter>,
     output_adapter: Option<Adapter>,
     /// Query and key norms, applied before the rotary embedding: per head
-    /// (Qwen3, Gemma 3) or over the whole projection (OLMo 2). `None` on a
-    /// family that has neither.
-    query_norm: Option<RmsNorm>,
-    key_norm: Option<RmsNorm>,
+    /// (Qwen3, Gemma 3, Cohere, StableLM) or over the whole projection
+    /// (OLMo 2). `None` on a family that has neither.
+    query_norm: Option<Norm>,
+    key_norm: Option<Norm>,
     query_key_norm: QueryKeyNorm,
     heads: usize,
     key_value_heads: usize,
@@ -35,6 +38,8 @@ pub(super) struct Attention {
     /// How many keys behind it a query may see, on a sliding-window layer.
     window: Option<usize>,
     rotary: Rotary,
+    /// Rotate adjacent pairs (Cohere) instead of halves.
+    interleaved: bool,
     score_divisor: f64,
     softcap: Option<f64>,
 }
@@ -45,46 +50,53 @@ enum Rotary {
     Global,
     /// The sliding-window table (Gemma 3's `rope_local_base_freq`).
     Local,
-    /// No rotation at all (SmolLM3's NoPE layers).
+    /// No rotation at all (SmolLM3's NoPE layers, Cohere 2's global layers).
     None,
 }
 
-/// A projection, with the bias the architecture says this one carries.
-fn projection(
-    inputs: usize,
-    outputs: usize,
-    bias: bool,
-    builder: VarBuilder<'_>,
-) -> candle_core::Result<Linear> {
-    if bias {
-        linear(inputs, outputs, builder)
-    } else {
-        linear_no_bias(inputs, outputs, builder)
-    }
-}
-
 impl Attention {
+    /// `builder` is the layer's; the projections sit below `self_attn`.
     pub(super) fn load(
-        builder: VarBuilder<'_>,
+        layer_builder: &VarBuilder<'_>,
         config: &Config,
         architecture: &Architecture,
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
+        let builder = layer_builder.pp("self_attn");
         let input = config.hidden_size;
+        let heads = config.num_attention_heads;
+        let key_value_heads = config.num_key_value_heads;
         let head_dim = architecture.head_dim;
-        let query_width = architecture.attention_width(config.num_attention_heads);
-        let key_value_width = head_dim * config.num_key_value_heads;
+        let query_width = architecture.attention_width(heads);
+        let key_value_width = head_dim * key_value_heads;
         let bias = architecture.query_key_value_bias;
-        let norm = |width: usize, name: &str| {
-            load_norm(width, config.rms_norm_eps, architecture.norm_offset, builder.pp(name))
+        // A LayerNorm family's query and key norms carry no bias; the others
+        // are RMS norms like the rest of the block.
+        let spec = NormSpec {
+            kind: match architecture.norm {
+                NormKind::Layer { .. } => NormKind::Layer { bias: false },
+                NormKind::Rms => NormKind::Rms,
+            },
+            ..NormSpec::of(architecture)
         };
         let (query_norm, key_norm) = match architecture.query_key_norm {
             QueryKeyNorm::None => (None, None),
-            QueryKeyNorm::PerHead => (Some(norm(head_dim, "q_norm")?), Some(norm(head_dim, "k_norm")?)),
+            QueryKeyNorm::PerHead => (
+                Some(spec.load(head_dim, builder.pp("q_norm"))?),
+                Some(spec.load(head_dim, builder.pp("k_norm"))?),
+            ),
             QueryKeyNorm::Full => (
-                Some(norm(query_width, "q_norm")?),
-                Some(norm(key_value_width, "k_norm")?),
+                Some(spec.load(query_width, builder.pp("q_norm"))?),
+                Some(spec.load(key_value_width, builder.pp("k_norm"))?),
+            ),
+            QueryKeyNorm::HeadWeights => (
+                Some(spec.load_head_weights(heads, head_dim, builder.pp("q_norm"))?),
+                Some(spec.load_head_weights(key_value_heads, head_dim, builder.pp("k_norm"))?),
+            ),
+            QueryKeyNorm::HeadModules => (
+                Some(spec.load_head_modules(heads, head_dim, builder.pp("q_layernorm"))?),
+                Some(spec.load_head_modules(key_value_heads, head_dim, builder.pp("k_layernorm"))?),
             ),
         };
         let window = architecture.window(layer);
@@ -126,7 +138,7 @@ impl Attention {
                 query_width,
                 input,
                 architecture.output_bias,
-                builder.pp("o_proj"),
+                layer_builder.pp(architecture.names.output),
             )?,
             query_adapter: adapters.get(layer, Target::Query).cloned(),
             key_adapter: adapters.get(layer, Target::Key).cloned(),
@@ -135,11 +147,12 @@ impl Attention {
             query_norm,
             key_norm,
             query_key_norm: architecture.query_key_norm,
-            heads: config.num_attention_heads,
-            key_value_heads: config.num_key_value_heads,
+            heads,
+            key_value_heads,
             head_dim,
             window,
             rotary,
+            interleaved: architecture.interleaved_rotary,
             score_divisor: architecture.score_divisor,
             softcap: architecture.attention_softcap,
         })
@@ -170,24 +183,24 @@ impl Attention {
         let query = project(&self.query, self.query_adapter.as_ref(), hidden, mode.route)?;
         let key = project(&self.key, self.key_adapter.as_ref(), hidden, mode.route)?;
         // OLMo 2 normalises the whole projection before it is split into
-        // heads; Qwen3 and Gemma 3 normalise each head after the split.
+        // heads; every other query and key norm works per head after it.
         let (query, key) = if self.query_key_norm == QueryKeyNorm::Full {
             (
-                per_head_norm(self.query_norm.as_ref(), query, mode.pass)?,
-                per_head_norm(self.key_norm.as_ref(), key, mode.pass)?,
+                optional_norm(self.query_norm.as_ref(), query, mode.pass)?,
+                optional_norm(self.key_norm.as_ref(), key, mode.pass)?,
             )
         } else {
             (query, key)
         };
         let query = query.reshape((batch, sequence, self.heads, self.head_dim))?;
         let key = key.reshape((batch, sequence, self.key_value_heads, self.head_dim))?;
-        let (query, key) = if self.query_key_norm == QueryKeyNorm::PerHead {
-            (
-                per_head_norm(self.query_norm.as_ref(), query, mode.pass)?,
-                per_head_norm(self.key_norm.as_ref(), key, mode.pass)?,
-            )
-        } else {
+        let (query, key) = if self.query_key_norm == QueryKeyNorm::Full {
             (query, key)
+        } else {
+            (
+                optional_norm(self.query_norm.as_ref(), query, mode.pass)?,
+                optional_norm(self.key_norm.as_ref(), key, mode.pass)?,
+            )
         };
         let query = query.transpose(1, 2)?.contiguous()?;
         let mut key = key.transpose(1, 2)?.contiguous()?;
@@ -205,12 +218,15 @@ impl Attention {
             Rotary::Local => cache.local.as_ref().map(|(cos, sin)| (cos, sin)),
             Rotary::None => None,
         };
+        let rotate = |input: &Tensor, (cos, sin): (&Tensor, &Tensor)| {
+            apply_rotary(input, index_pos, cos, sin, cache.weights, mode.pass, self.interleaved)
+        };
         let query = match tables {
-            Some((cos, sin)) => apply_rotary(&query, index_pos, cos, sin, cache.weights, mode.pass)?,
+            Some(tables) => rotate(&query, tables)?,
             None => query,
         };
-        if let Some((cos, sin)) = tables {
-            key = apply_rotary(&key, index_pos, cos, sin, cache.weights, mode.pass)?;
+        if let Some(tables) = tables {
+            key = rotate(&key, tables)?;
         }
         if cache.use_kv_cache {
             if let Some((cached_key, cached_value)) = &cache.kvs[layer] {
@@ -278,13 +294,13 @@ impl Attention {
 }
 
 /// Normalizes the last axis when the architecture has the norm: one head's
-/// `head_dim` after the split (Qwen3, Gemma 3), or the whole projection before
-/// it (OLMo 2). Either way it happens before the rotary embedding. A family
-/// without the norm passes the projection through untouched.
-fn per_head_norm(norm: Option<&RmsNorm>, heads: Tensor, pass: Pass) -> candle_core::Result<Tensor> {
+/// `head_dim` after the split, or the whole projection before it (OLMo 2).
+/// Either way it happens before the rotary embedding. A family without the
+/// norm passes the projection through untouched.
+fn optional_norm(norm: Option<&Norm>, input: Tensor, pass: Pass) -> candle_core::Result<Tensor> {
     match norm {
-        Some(norm) => normalize(norm, &heads, pass),
-        None => Ok(heads),
+        Some(norm) => norm.forward(&input, pass),
+        None => Ok(input),
     }
 }
 
@@ -327,7 +343,8 @@ pub(super) fn project(
 /// The tables are `rotary_dim / 2` wide. When that is narrower than the head
 /// (a config's `partial_rotary_factor`), only the head's first `rotary_dim`
 /// components rotate and the rest pass through, as Phi-4-mini, GPT-NeoX and
-/// StableLM do.
+/// StableLM do. `interleaved` rotates adjacent pairs `(2i, 2i + 1)` instead
+/// of halves `d / 2` apart, as Cohere does.
 fn apply_rotary(
     input: &Tensor,
     index_pos: usize,
@@ -335,6 +352,7 @@ fn apply_rotary(
     sin: &Tensor,
     weights: DType,
     pass: Pass,
+    interleaved: bool,
 ) -> candle_core::Result<Tensor> {
     let (_, _, sequence, head_dim) = input.dims4()?;
     let rotary_dim = 2 * cos.dim(1)?;
@@ -349,15 +367,42 @@ fn apply_rotary(
     } else {
         (input, None)
     };
-    let rotated = match pass {
-        Pass::Inference => candle_nn::rotary_emb::rope(&rotating.contiguous()?, &cos, &sin)?,
-        Pass::Differentiable => rope_composed(&rotating, &cos, &sin)?,
+    let rotated = match (pass, interleaved) {
+        (Pass::Inference, false) => {
+            candle_nn::rotary_emb::rope(&rotating.contiguous()?, &cos, &sin)?
+        }
+        (Pass::Inference, true) => {
+            candle_nn::rotary_emb::rope_i(&rotating.contiguous()?, &cos, &sin)?
+        }
+        (Pass::Differentiable, false) => rope_composed(&rotating, &cos, &sin)?,
+        (Pass::Differentiable, true) => rope_interleaved_composed(&rotating, &cos, &sin)?,
     };
     let rotated = match kept {
         Some(kept) => Tensor::cat(&[&rotated, &kept], 3)?,
         None => rotated,
     };
     rotated.to_dtype(weights)
+}
+
+/// The interleaved rotation written out of ops that have a backward pass:
+/// `candle_nn::rotary_emb::rope_i` computes, for each pair `(2i, 2i + 1)`,
+/// `x[2i] * cos[i] - x[2i+1] * sin[i]` and `x[2i] * sin[i] + x[2i+1] * cos[i]`,
+/// and ends in a no-backward op like `rope`. The head is viewed as `d / 2`
+/// pairs, the two members rotated, and the pairs laid back out.
+fn rope_interleaved_composed(
+    input: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+) -> candle_core::Result<Tensor> {
+    let (batch, heads, sequence, head_dim) = input.dims4()?;
+    let pairs = input.reshape((batch, heads, sequence, head_dim / 2, 2))?;
+    let even = pairs.narrow(4, 0, 1)?.squeeze(4)?;
+    let odd = pairs.narrow(4, 1, 1)?.squeeze(4)?;
+    let cos = cos.unsqueeze(0)?.unsqueeze(0)?;
+    let sin = sin.unsqueeze(0)?.unsqueeze(0)?;
+    let rotated_even = (even.broadcast_mul(&cos)? - odd.broadcast_mul(&sin)?)?;
+    let rotated_odd = (even.broadcast_mul(&sin)? + odd.broadcast_mul(&cos)?)?;
+    Tensor::stack(&[&rotated_even, &rotated_odd], 4)?.reshape((batch, heads, sequence, head_dim))
 }
 
 /// The rotary embedding written out of ops that have a backward pass.

@@ -28,7 +28,7 @@
       "evidence": "README.md#Current product contract"
     },
     {
-      "claim": "The current runtime supports local and Hugging Face Llama, Mistral, Qwen2, Qwen3, Phi-3, Granite, OLMo 2, OLMo 3, SmolLM3, Gemma, Gemma 2 and Gemma 3 Safetensors checkpoints on CPU, with compile-time Metal and CUDA backends.",
+      "claim": "The current runtime supports local and Hugging Face Llama, Mistral, Qwen2, Qwen3, Phi-2, Phi-3, Granite, StableLM, Starcoder2, Command R, Nemotron, OLMo 2, OLMo 3, SmolLM3, Gemma, Gemma 2 and Gemma 3 Safetensors checkpoints on CPU, with compile-time Metal and CUDA backends.",
       "evidence": "README.md#Current product contract"
     },
     {

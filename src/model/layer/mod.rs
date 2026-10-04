@@ -1,20 +1,38 @@
-//! One decoder block: the feed-forward half, the two norms around it, and
-//! where a steering vector is added to the residual stream.
+//! One decoder block: the feed-forward half, the norms around both halves,
+//! and how their outputs join the residual stream.
+
+pub(super) mod norm;
 
 use candle_core::Tensor;
-use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
+use candle_nn::{Linear, VarBuilder, linear, linear_no_bias};
 use candle_transformers::models::llama::Config;
 
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Activation, Architecture, Cache, Mode, Pass, Route,
+    Activation, Architecture, Cache, FeedForwardKind, Mode, Pass, Route,
     attention::{Attention, project},
 };
+use norm::{Norm, NormSpec};
+
+/// A projection, with a bias when the architecture says it carries one.
+pub(super) fn projection(
+    inputs: usize,
+    outputs: usize,
+    bias: bool,
+    builder: VarBuilder<'_>,
+) -> candle_core::Result<Linear> {
+    if bias {
+        linear(inputs, outputs, builder)
+    } else {
+        linear_no_bias(inputs, outputs, builder)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct FeedForward {
-    gate: Linear,
+    /// `None` on a plain feed-forward (Starcoder2, Phi-2, Nemotron).
+    gate: Option<Linear>,
     up: Linear,
     down: Linear,
     gate_adapter: Option<Adapter>,
@@ -24,36 +42,39 @@ pub(super) struct FeedForward {
 }
 
 impl FeedForward {
+    /// `builder` is the layer's, so the family's names (`mlp.up_proj`,
+    /// `mlp.c_fc`, `mlp.fc1`) are read from the architecture whole.
     pub(super) fn load(
-        builder: VarBuilder<'_>,
+        builder: &VarBuilder<'_>,
         config: &Config,
         architecture: &Architecture,
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
         let (hidden, intermediate) = (config.hidden_size, config.intermediate_size);
+        let bias = architecture.feed_forward_bias;
+        let names = architecture.names;
         // Phi-3 stores the gate and up projections as one `gate_up_proj`,
         // gate rows first; each is a row slice of that mapped weight.
         let (gate, up) = if architecture.fused_projections {
-            let fused = builder.get((2 * intermediate, hidden), "gate_up_proj.weight")?;
+            let fused = builder.get((2 * intermediate, hidden), "mlp.gate_up_proj.weight")?;
             (
-                Linear::new(fused.narrow(0, 0, intermediate)?, None),
+                Some(Linear::new(fused.narrow(0, 0, intermediate)?, None)),
                 Linear::new(fused.narrow(0, intermediate, intermediate)?, None),
             )
         } else {
-            (
-                linear_no_bias(hidden, intermediate, builder.pp("gate_proj"))?,
-                linear_no_bias(hidden, intermediate, builder.pp("up_proj"))?,
-            )
+            let gate = match (architecture.feed_forward, names.gate) {
+                (FeedForwardKind::Gated, Some(name)) => {
+                    Some(projection(hidden, intermediate, bias, builder.pp(name))?)
+                }
+                _ => None,
+            };
+            (gate, projection(hidden, intermediate, bias, builder.pp(names.up))?)
         };
         Ok(Self {
             gate,
             up,
-            down: linear_no_bias(
-                config.intermediate_size,
-                config.hidden_size,
-                builder.pp("down_proj"),
-            )?,
+            down: projection(intermediate, hidden, bias, builder.pp(names.down))?,
             gate_adapter: adapters.get(layer, Target::Gate).cloned(),
             up_adapter: adapters.get(layer, Target::Up).cloned(),
             down_adapter: adapters.get(layer, Target::Down).cloned(),
@@ -61,35 +82,40 @@ impl FeedForward {
         })
     }
 
-    /// No `Pass` here — `silu` and the elementwise product both backpropagate,
-    /// so the feed-forward block is already differentiable as written — but a
-    /// `Route`, because its three projections are adapter sites like any other.
+    /// No `Pass` here — every activation and the elementwise product
+    /// backpropagate, so the feed-forward block is already differentiable as
+    /// written — but a `Route`, because its projections are adapter sites
+    /// like any other.
     pub(super) fn forward(&self, hidden: &Tensor, route: Route) -> candle_core::Result<Tensor> {
-        let gate = project(&self.gate, self.gate_adapter.as_ref(), hidden, route)?;
-        let gate = match self.activation {
-            Activation::Silu => candle_nn::ops::silu(&gate)?,
-            Activation::GeluTanh => gate.gelu()?,
+        let up = project(&self.up, self.up_adapter.as_ref(), hidden, route)?;
+        let inner = match &self.gate {
+            Some(gate) => {
+                let gate = project(gate, self.gate_adapter.as_ref(), hidden, route)?;
+                (self.activation.apply(&gate)? * up)?
+            }
+            None => self.activation.apply(&up)?,
         };
-        let gated = (gate * project(&self.up, self.up_adapter.as_ref(), hidden, route)?)?;
-        project(&self.down, self.down_adapter.as_ref(), &gated, route)
+        project(&self.down, self.down_adapter.as_ref(), &inner, route)
     }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct DecoderLayer {
-    /// The norm before attention; OLMo 2 has none.
-    attention_norm: Option<RmsNorm>,
+    /// The norm before attention (before both halves in a parallel block);
+    /// OLMo 2 has none.
+    attention_norm: Option<Norm>,
     attention: Attention,
     /// The norm over attention's output before the residual add (Gemma 2 and
     /// 3, OLMo 2).
-    attention_output_norm: Option<RmsNorm>,
-    /// The norm before the feed-forward; OLMo 2 has none.
-    feed_forward_norm: Option<RmsNorm>,
+    attention_output_norm: Option<Norm>,
+    /// The norm before the feed-forward; OLMo 2 and parallel blocks have none.
+    feed_forward_norm: Option<Norm>,
     feed_forward: FeedForward,
     /// The norm over the feed-forward's output before the residual add.
-    feed_forward_output_norm: Option<RmsNorm>,
+    feed_forward_output_norm: Option<Norm>,
     /// Granite's `residual_multiplier` on each sublayer's output.
     residual_multiplier: Option<f64>,
+    parallel: bool,
 }
 
 impl DecoderLayer {
@@ -100,14 +126,8 @@ impl DecoderLayer {
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
-        let norm = |name: &str| {
-            load_norm(
-                config.hidden_size,
-                config.rms_norm_eps,
-                architecture.norm_offset,
-                builder.pp(name),
-            )
-        };
+        let spec = NormSpec::of(architecture);
+        let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
         // The checkpoints name the same position differently:
         //
         // * Llama: `input_layernorm` before attention and
@@ -118,21 +138,24 @@ impl DecoderLayer {
         //   closes the block.
         // * OLMo 2: no norm before either sublayer; `post_attention_layernorm`
         //   and `post_feedforward_layernorm` sit over their outputs.
+        // * A parallel block (Cohere, Phi-2, StableLM's
+        //   `use_parallel_residual`): one `input_layernorm` feeds both halves.
         let (attention_norm, attention_output_norm, feed_forward_norm, feed_forward_output_norm) =
-            match (architecture.pre_norms, architecture.output_norms) {
-                (true, false) => (
+            match (architecture.parallel, architecture.pre_norms, architecture.output_norms) {
+                (true, _, _) => (Some(norm("input_layernorm")?), None, None, None),
+                (false, true, false) => (
                     Some(norm("input_layernorm")?),
                     None,
                     Some(norm("post_attention_layernorm")?),
                     None,
                 ),
-                (true, true) => (
+                (false, true, true) => (
                     Some(norm("input_layernorm")?),
                     Some(norm("post_attention_layernorm")?),
                     Some(norm("pre_feedforward_layernorm")?),
                     Some(norm("post_feedforward_layernorm")?),
                 ),
-                (false, _) => (
+                (false, false, _) => (
                     None,
                     Some(norm("post_attention_layernorm")?),
                     None,
@@ -141,24 +164,13 @@ impl DecoderLayer {
             };
         Ok(Self {
             attention_norm,
-            attention: Attention::load(
-                builder.pp("self_attn"),
-                config,
-                architecture,
-                layer,
-                adapters,
-            )?,
+            attention: Attention::load(&builder, config, architecture, layer, adapters)?,
             attention_output_norm,
             feed_forward_norm,
-            feed_forward: FeedForward::load(
-                builder.pp("mlp"),
-                config,
-                architecture,
-                layer,
-                adapters,
-            )?,
+            feed_forward: FeedForward::load(&builder, config, architecture, layer, adapters)?,
             feed_forward_output_norm,
             residual_multiplier: architecture.residual_multiplier,
+            parallel: architecture.parallel,
         })
     }
 
@@ -176,15 +188,15 @@ impl DecoderLayer {
         mask: Option<&Tensor>,
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
-        let attention = self.attention.forward(
-            &optional_norm(self.attention_norm.as_ref(), hidden, mode.pass)?,
-            index_pos,
-            layer,
-            cache,
-            mask,
-            mode,
-        )?;
+        let normed = optional_norm(self.attention_norm.as_ref(), hidden, mode.pass)?;
+        let attention = self
+            .attention
+            .forward(&normed, index_pos, layer, cache, mask, mode)?;
         let attention = optional_norm(self.attention_output_norm.as_ref(), &attention, mode.pass)?;
+        if self.parallel {
+            let feed_forward = self.feed_forward.forward(&normed, mode.route)?;
+            return (hidden + self.scaled(attention)?)? + self.scaled(feed_forward)?;
+        }
         let hidden = (hidden + self.scaled(attention)?)?;
         let feed_forward = self.feed_forward.forward(
             &optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?,
@@ -205,49 +217,9 @@ impl DecoderLayer {
 }
 
 /// `hidden` through `norm` when the block has one at this position.
-fn optional_norm(
-    norm: Option<&RmsNorm>,
-    hidden: &Tensor,
-    pass: Pass,
-) -> candle_core::Result<Tensor> {
+fn optional_norm(norm: Option<&Norm>, hidden: &Tensor, pass: Pass) -> candle_core::Result<Tensor> {
     match norm {
-        Some(norm) => normalize(norm, hidden, pass),
+        Some(norm) => norm.forward(hidden, pass),
         None => Ok(hidden.clone()),
-    }
-}
-
-/// An RMS norm as the checkpoint stores it. Gemma scales by `1 + weight`
-/// rather than `weight`, so its stored weights are shifted by one at load;
-/// the shifted tensor is a new one, never a variable, so the base stays
-/// frozen exactly as before.
-pub(super) fn load_norm(
-    size: usize,
-    eps: f64,
-    offset: bool,
-    builder: VarBuilder<'_>,
-) -> candle_core::Result<RmsNorm> {
-    if offset {
-        let weight = builder.get(size, "weight")?;
-        Ok(RmsNorm::new((weight + 1.0)?, eps))
-    } else {
-        rms_norm(size, eps, builder)
-    }
-}
-
-/// RMS normalisation: fused for inference, composed for training.
-///
-/// `RmsNorm::forward` dispatches to `candle_nn::ops::rms_norm`, which ends in
-/// `apply_op2_no_bwd` (candle-nn-0.11.0/src/ops.rs:684). `forward_diff`
-/// (candle-nn-0.11.0/src/layer_norm.rs:197) is the same normalisation built
-/// from `sqr`, `sum_keepdim`, `broadcast_div` and `broadcast_mul`, which do
-/// record backward nodes.
-pub(super) fn normalize(
-    norm: &RmsNorm,
-    hidden: &Tensor,
-    pass: Pass,
-) -> candle_core::Result<Tensor> {
-    match pass {
-        Pass::Inference => norm.forward(hidden),
-        Pass::Differentiable => norm.forward_diff(hidden),
     }
 }

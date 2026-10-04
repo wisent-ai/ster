@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 use candle_core::{DType, IndexOp, Tensor};
-use candle_nn::{Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias};
+use candle_nn::{Embedding, Linear, Module, VarBuilder, embedding};
 use candle_transformers::models::llama::Config;
 
 use crate::lora::Adapters;
@@ -13,14 +13,18 @@ use crate::lora::Adapters;
 use super::{
     Architecture, Cache, ForwardOutput, Mode, Readout, SteeringPlan,
     attention::padded_causal_mask,
-    layer::{DecoderLayer, load_norm, normalize},
+    layer::{
+        DecoderLayer,
+        norm::{Norm, NormSpec},
+        projection,
+    },
 };
 
 #[derive(Debug, Clone)]
 pub struct SteeringLlama {
     embeddings: Embedding,
     layers: Vec<DecoderLayer>,
-    final_norm: RmsNorm,
+    final_norm: Norm,
     lm_head: Linear,
     config: Config,
     architecture: Architecture,
@@ -59,15 +63,23 @@ impl SteeringLlama {
             builder.pp("model.embed_tokens"),
         )?;
         let lm_head = if config.tie_word_embeddings {
-            Linear::new(embeddings.embeddings().clone(), None)
+            let bias = if architecture.lm_head_bias {
+                Some(builder.pp("lm_head").get(config.vocab_size, "bias")?)
+            } else {
+                None
+            };
+            Linear::new(embeddings.embeddings().clone(), bias)
         } else {
-            linear_no_bias(config.hidden_size, config.vocab_size, builder.pp("lm_head"))?
+            projection(
+                config.hidden_size,
+                config.vocab_size,
+                architecture.lm_head_bias,
+                builder.pp("lm_head"),
+            )?
         };
-        let final_norm = load_norm(
+        let final_norm = NormSpec::of(&architecture).load(
             config.hidden_size,
-            config.rms_norm_eps,
-            architecture.norm_offset,
-            builder.pp("model.norm"),
+            builder.pp("model").pp(architecture.names.final_norm),
         )?;
         let layers = (0..config.num_hidden_layers)
             .map(|index| {
@@ -278,7 +290,7 @@ impl SteeringLlama {
                 }
             }
         }
-        let hidden = normalize(&self.final_norm, &hidden, mode.pass)?;
+        let hidden = self.final_norm.forward(&hidden, mode.pass)?;
         // Decoding only ever samples the next token, so it projects one row and
         // leaves the rest of the vocabulary matmul undone. Anything that scores
         // a sequence against its own successors needs every position, and a
@@ -304,11 +316,12 @@ impl SteeringLlama {
 }
 
 impl SteeringLlama {
-    /// Granite divides its final logits by `logits_scaling`; Gemma 2 and 3
-    /// bound them to `(-cap, cap)` with a tanh.
+    /// Cohere multiplies its final logits by `logit_scale` and Granite divides
+    /// them by `logits_scaling`; Gemma 2 and 3 bound them to `(-cap, cap)`
+    /// with a tanh.
     fn soft_cap(&self, logits: Tensor) -> candle_core::Result<Tensor> {
-        let logits = match self.architecture.logits_divisor {
-            Some(divisor) => (logits / divisor)?,
+        let logits = match self.architecture.logits_multiplier {
+            Some(multiplier) => (logits * multiplier)?,
             None => logits,
         };
         match self.architecture.final_softcap {

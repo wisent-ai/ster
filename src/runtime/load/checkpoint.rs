@@ -13,7 +13,7 @@ use hf_hub::{Repo, RepoType, api::sync::Api};
 
 use crate::{chat, model::Architecture};
 
-use super::family::{FAMILIES, family, take_rope_scaling};
+use super::family::{FAMILIES, TIED_BY_DEFAULT, family, fill_norm_eps, take_rope_scaling};
 
 /// A checkpoint's three files, resolved but not mapped.
 ///
@@ -145,12 +145,12 @@ impl Checkpoint {
             );
         }
         let scaling = take_rope_scaling(&mut raw, &self.config)?;
+        fill_norm_eps(&mut raw);
         let mut llama: LlamaConfig = serde_json::from_value(raw.clone())
             .with_context(|| format!("invalid {model_type} config {}", self.config.display()))?;
-        let gemma = model_type.starts_with("gemma");
-        if gemma && llama.tie_word_embeddings.is_none() {
-            // Gemma ties its word embeddings by default and its configs
-            // usually leave the key out.
+        if TIED_BY_DEFAULT.contains(&model_type) && llama.tie_word_embeddings.is_none() {
+            // These families tie their word embeddings by default and their
+            // configs often leave the key out.
             llama.tie_word_embeddings = Some(true);
         }
         let architecture = family(model_type, &raw, scaling.as_ref(), &llama, &self.config)?;

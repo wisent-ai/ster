@@ -10,7 +10,9 @@ use anyhow::{Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
-use crate::model::{Activation, Architecture, QueryKeyNorm, RopeScaling};
+use crate::model::{
+    Activation, Architecture, FeedForwardKind, Names, NormKind, QueryKeyNorm, RopeScaling,
+};
 
 /// The `model_type` values the decoder implements.
 pub(super) const FAMILIES: &[&str] = &[
@@ -18,8 +20,14 @@ pub(super) const FAMILIES: &[&str] = &[
     "mistral",
     "qwen2",
     "qwen3",
+    "phi",
     "phi3",
     "granite",
+    "stablelm",
+    "starcoder2",
+    "cohere",
+    "cohere2",
+    "nemotron",
     "olmo2",
     "olmo3",
     "smollm3",
@@ -27,6 +35,42 @@ pub(super) const FAMILIES: &[&str] = &[
     "gemma2",
     "gemma3_text",
 ];
+
+/// Families whose Transformers config class leaves `tie_word_embeddings` at
+/// the library default, true, so their configs often omit it.
+pub(super) const TIED_BY_DEFAULT: &[&str] =
+    &["gemma", "gemma2", "gemma3_text", "cohere", "cohere2", "starcoder2"];
+
+/// Candle's Llama config reads the norm epsilon as `rms_norm_eps`; the
+/// LayerNorm families spell it otherwise. The first spelling present is
+/// copied under Candle's name before the config is parsed.
+pub(super) fn fill_norm_eps(raw: &mut Value) {
+    if raw.get("rms_norm_eps").is_some() {
+        return;
+    }
+    let spelled = ["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]
+        .iter()
+        .find_map(|key| raw.get(*key).cloned());
+    if let (Some(eps), Some(object)) = (spelled, raw.as_object_mut()) {
+        object.insert("rms_norm_eps".to_owned(), eps);
+    }
+}
+
+/// The feed-forward non-linearity the config names, as `hidden_act` or
+/// `hidden_activation`; SiLU when it names none.
+fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> {
+    let name = text(raw, "hidden_act").or_else(|| text(raw, "hidden_activation"));
+    match name {
+        None | Some("silu") | Some("swish") => Ok(Activation::Silu),
+        Some("gelu_pytorch_tanh") | Some("gelu_new") | Some("gelu_fast") => Ok(Activation::GeluTanh),
+        Some("gelu") => Ok(Activation::Gelu),
+        Some("relu2") => Ok(Activation::Relu2),
+        Some(other) => bail!(
+            "{} declares hidden_act {other:?} for its {model_type} feed-forward; Ster implements silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast and relu2",
+            path.display()
+        ),
+    }
+}
 
 /// A `rope_scaling` Candle's Llama config cannot read (anything but Llama
 /// 3's), taken out of the config before it is parsed so Ster can apply it
@@ -122,7 +166,11 @@ pub(super) fn family(
     path: &Path,
 ) -> Result<Architecture> {
     let layers = llama.num_hidden_layers;
-    let mut architecture = Architecture::llama(llama.hidden_size, llama.num_attention_heads);
+    let mut architecture = Architecture::llama(
+        llama.hidden_size,
+        llama.num_attention_heads,
+        llama.rms_norm_eps,
+    );
     if let Some(head_dim) = whole(raw, "head_dim") {
         architecture.head_dim = head_dim;
         architecture.score_divisor = (head_dim as f64).sqrt();
@@ -141,14 +189,10 @@ pub(super) fn family(
         architecture.rotary_dim = rotary_dim;
     }
     architecture.rope_scaling = rope_scaling(scaling, architecture.rotary_dim, raw, llama, path)?;
-    let gemma = model_type.starts_with("gemma");
-    if !gemma {
-        if let Some(activation) = text(raw, "hidden_act").filter(|name| *name != "silu") {
-            bail!(
-                "{} declares hidden_act {activation:?}; Ster's {model_type} feed-forward gate is silu",
-                path.display()
-            );
-        }
+    // Gemma's configs name `gelu` but Transformers runs the tanh
+    // approximation for every Gemma, so the family decides, not the key.
+    if !model_type.starts_with("gemma") {
+        architecture.activation = activation(raw, model_type, path)?;
     }
     match model_type {
         "llama" | "mistral" | "phi3" => {
@@ -187,7 +231,76 @@ pub(super) fn family(
             if let Some(multiplier) = number(raw, "attention_multiplier") {
                 architecture.score_divisor = 1.0 / multiplier;
             }
-            architecture.logits_divisor = number(raw, "logits_scaling");
+            architecture.logits_multiplier = number(raw, "logits_scaling").map(|scale| 1.0 / scale);
+        }
+        "stablelm" => {
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.query_key_value_bias = flag(raw, "use_qkv_bias");
+            architecture.parallel = flag(raw, "use_parallel_residual");
+            if flag(raw, "qk_layernorm") {
+                architecture.query_key_norm = QueryKeyNorm::HeadModules;
+            }
+        }
+        "starcoder2" => {
+            let bias = raw.get("use_bias").and_then(Value::as_bool).unwrap_or(true);
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.query_key_value_bias = bias;
+            architecture.output_bias = bias;
+            architecture.feed_forward_bias = bias;
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.names = Names::STARCODER2;
+            architecture.sliding_window = whole(raw, "sliding_window");
+            if architecture.sliding_window.is_some() {
+                architecture.sliding_layers = every_layer(layers, path)?;
+            }
+        }
+        "cohere" | "cohere2" => {
+            architecture.norm = NormKind::Layer { bias: false };
+            architecture.parallel = true;
+            architecture.interleaved_rotary = true;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.logits_multiplier = number(raw, "logit_scale");
+            if flag(raw, "use_qk_norm") {
+                architecture.query_key_norm = QueryKeyNorm::HeadWeights;
+            }
+            if model_type == "cohere2" {
+                // Every `sliding_window_pattern`-th layer attends globally and
+                // applies no rotary embedding; the rest are local and rotate.
+                architecture.sliding_window = whole(raw, "sliding_window");
+                if let Some(pattern) = whole(raw, "sliding_window_pattern").filter(|p| *p > 0) {
+                    fits(layers, path)?;
+                    architecture.sliding_layers = (0..layers)
+                        .filter(|layer| (layer + 1) % pattern != 0)
+                        .fold(0, |set, layer| set | (1u128 << layer));
+                }
+            }
+        }
+        "nemotron" => {
+            // LayerNorm1P: a LayerNorm whose stored scale is an offset from one.
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.norm_offset = true;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.names = Names::NEMOTRON;
+        }
+        "phi" => {
+            if flag(raw, "qk_layernorm") {
+                bail!(
+                    "{} declares qk_layernorm; Ster implements Phi without query and key norms",
+                    path.display()
+                );
+            }
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.parallel = true;
+            architecture.query_key_value_bias = true;
+            architecture.output_bias = true;
+            architecture.feed_forward_bias = true;
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.lm_head_bias = true;
+            architecture.names = Names::PHI;
         }
         "olmo2" | "olmo3" => {
             architecture.query_key_norm = QueryKeyNorm::Full;
@@ -245,6 +358,9 @@ pub(super) fn family(
     }
     if let Some(types) = raw.get("layer_types").and_then(Value::as_array) {
         architecture.sliding_layers = listed_layers(types, layers, path)?;
+    }
+    if model_type == "cohere2" {
+        architecture.unrotated_layers = every_layer(layers, path)? & !architecture.sliding_layers;
     }
     if architecture.sliding_layers != 0 && architecture.sliding_window.is_none() {
         bail!(

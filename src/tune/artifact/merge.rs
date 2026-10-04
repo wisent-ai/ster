@@ -141,7 +141,9 @@ pub fn merge(
     let mut dtype: Option<DType> = None;
     for &layer in &artifact.layers {
         for &target in &artifact.targets {
-            let name = target.checkpoint_tensor(layer);
+            let name = architecture.checkpoint_tensor(target, layer).with_context(|| {
+                format!("this model has no {} projection to merge into", target.name())
+            })?;
             // A fused checkpoint (Phi-3) has no tensor per projection; the
             // update lands on that projection's rows of the fused matrix.
             let (name, rows) = if tensors.contains_key(&name) {

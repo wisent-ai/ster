@@ -34,33 +34,43 @@ JSON artifacts and native Candle runtime.
 Included now:
 
 - local and Hugging Face checkpoints published as unquantized Safetensors
-  whose `model_type` is `llama`, `mistral`, `qwen2`, `qwen3`, `phi3`,
-  `granite`, `olmo2`, `olmo3`, `smollm3`, `gemma`, `gemma2` or
-  `gemma3_text`. Coverage is measured against vLLM's list of text-only
-  architectures; every architecture on it that Ster does not load is tracked
-  with what the decoder lacks for it. Each family is the same rotary,
-  grouped-query decoder with what its config adds read from the config
-  itself: a stated `head_dim` (attention wider or narrower than the residual
-  stream), query and key norms per head (Qwen3, Gemma 3) or over the whole
-  projection (OLMo 2 and 3), Qwen2's query/key/value bias and
-  `attention_bias`, sliding-window attention on the layers `sliding_window`,
+  whose `model_type` is `llama`, `mistral`, `qwen2`, `qwen3`, `phi`, `phi3`,
+  `granite`, `stablelm`, `starcoder2`, `cohere`, `cohere2`, `nemotron`,
+  `olmo2`, `olmo3`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`. Coverage
+  is measured against vLLM's list of text-only architectures; every
+  architecture on it that Ster does not load is tracked with what the decoder
+  lacks for it. Each family is the same rotary, grouped-query decoder with
+  what its config adds read from the config itself: a stated `head_dim`
+  (attention wider or narrower than the residual stream), RMS or LayerNorm
+  norms (with a bias for StableLM, Starcoder2, Phi-2 and Nemotron, without
+  for Cohere, offset from one for Gemma and Nemotron), query and key norms
+  per head (Qwen3, Gemma 3, Cohere's `use_qk_norm`, StableLM's
+  `qk_layernorm`) or over the whole projection (OLMo 2 and 3), projection
+  bias (`attention_bias`, `use_qkv_bias`, `use_bias`, `mlp_bias`, Phi-2's
+  biased head), a gated feed-forward or a plain one (Starcoder2's `c_fc` and
+  `c_proj`, Phi-2's `fc1` and `fc2`, Nemotron's squared ReLU), sequential or
+  parallel blocks (Cohere, Phi-2, StableLM's `use_parallel_residual`),
+  sliding-window attention on the layers `sliding_window`,
   `max_window_layers`, `sliding_window_pattern` or `layer_types` name,
   Phi-3's fused `qkv_proj` and `gate_up_proj` (split at load, and merged back
   row by row by `ster tune merge`), OLMo 2's norms after each sublayer instead
   of before it, Granite's embedding, residual, attention and logit
-  multipliers, SmolLM3's unrotated `no_rope_layers`, rotation of only the
-  `partial_rotary_factor` share of each head (Phi-4-mini), `linear` rotary
+  multipliers, Cohere's `logit_scale` and interleaved rotation, unrotated
+  layers (SmolLM3's `no_rope_layers`, Cohere 2's global layers), rotation of
+  only the `partial_rotary_factor` share of each head, `linear` rotary
   scaling and Phi-3's `longrope` (short factors within the original context,
-  long ones past it),
-  and Gemma's `1 + weight` norms, scaled embedding, tanh GELU gate and tied
-  embeddings, plus Gemma 2's and 3's post-attention and post-feed-forward
-  norms, `query_pre_attn_scalar` and logit soft-capping, and Gemma 3's
-  separate `rope_local_base_freq` on sliding-window layers. A quantized
-  checkpoint (one that declares `quantization_config`, such as GPTQ) is
-  refused with the sentence that names it, as is a config whose `hidden_act`
-  is not `silu` where the family's gate is SiLU, that rotates an odd or empty
-  share of each head (`partial_rotary_factor`), or whose `rope_scaling` is not
-  `llama3`, `linear` or Phi-3's `longrope`;
+  long ones past it), and Gemma's `1 + weight` norms, scaled embedding, tanh
+  GELU gate and tied embeddings, plus Gemma 2's and 3's post-attention and
+  post-feed-forward norms, `query_pre_attn_scalar` and logit soft-capping,
+  and Gemma 3's separate `rope_local_base_freq` on sliding-window layers. A
+  quantized checkpoint (one that declares `quantization_config`, such as
+  GPTQ) is refused with the sentence that names it, as is a config whose
+  `hidden_act` is not silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast or
+  relu2, that rotates an odd or empty share of each head
+  (`partial_rotary_factor`), or whose `rope_scaling` is not `llama3`,
+  `linear` or Phi-3's `longrope`. Adapter targets a family has no projection
+  for (the gate of a plain feed-forward) are refused before any adapter is
+  built;
 - CPU execution, with compile-time Metal and CUDA backends;
 - pair-set authoring and inspection for duplicates, refusals, length balance,
   and diversity, with no model loaded;

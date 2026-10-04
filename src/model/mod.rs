@@ -84,12 +84,13 @@ mod layer;
 pub use cache::Cache;
 pub use decoder::SteeringLlama;
 
+use crate::lora::Target;
+
 /// How a checkpoint's decoder differs from the plain Llama block.
 ///
-/// Every family Ster loads is the same pre-norm, rotary, grouped-query
-/// decoder with a gated feed-forward and Llama's tensor names; what changes
-/// between them is a handful of switches, each read from the checkpoint's own
-/// `config.json` rather than assumed:
+/// Every family Ster loads is a rotary, grouped-query decoder; what changes
+/// between them is a handful of switches and tensor names, each read from the
+/// checkpoint's own `config.json` rather than assumed:
 ///
 /// * **Head width** — `head_dim` when the config states it (Qwen3, Gemma),
 ///   otherwise `hidden_size / num_attention_heads`. Attention may then be
@@ -129,6 +130,16 @@ pub use decoder::SteeringLlama;
 /// * **Rotary scaling** — `linear` divides every angle by a factor; Phi-3's
 ///   `longrope` rescales each frequency by a stated factor, a short list
 ///   inside the original context and a long one beyond it.
+/// * **Norm kind** — RMS for most families; LayerNorm, with a bias
+///   (StableLM, Starcoder2, Phi-2, Nemotron) or without (Cohere), for others.
+/// * **Feed-forward kind** — a gated feed-forward for most; a plain
+///   up-activation-down one for Starcoder2, Phi-2 and Nemotron, with its own
+///   tensor names and optional bias.
+/// * **Parallel blocks** — Cohere, Phi-2 and StableLM with
+///   `use_parallel_residual` feed one normalised input to attention and the
+///   feed-forward and add both outputs to the residual at once.
+/// * **Interleaved rotation** — Cohere rotates adjacent pairs rather than
+///   halves.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Architecture {
     pub head_dim: usize,
@@ -138,6 +149,18 @@ pub struct Architecture {
     pub query_key_norm: QueryKeyNorm,
     pub query_key_value_bias: bool,
     pub output_bias: bool,
+    /// Bias on the feed-forward projections (Starcoder2, Phi-2, Nemotron's
+    /// `mlp_bias`).
+    pub feed_forward_bias: bool,
+    pub feed_forward: FeedForwardKind,
+    pub norm: NormKind,
+    /// The norm epsilon, read from whichever key the family spells it with.
+    pub norm_eps: f64,
+    pub parallel: bool,
+    pub interleaved_rotary: bool,
+    /// A bias on the vocabulary projection (Phi-2).
+    pub lm_head_bias: bool,
+    pub names: Names,
     pub sliding_window: Option<usize>,
     /// Bit `i` set means layer `i` attends through the sliding window.
     pub sliding_layers: u128,
@@ -167,13 +190,14 @@ pub struct Architecture {
     pub score_divisor: f64,
     pub attention_softcap: Option<f64>,
     pub final_softcap: Option<f64>,
-    /// What final logits are divided by (Granite's `logits_scaling`).
-    pub logits_divisor: Option<f64>,
+    /// What final logits are multiplied by: Cohere's `logit_scale`, or one
+    /// over Granite's `logits_scaling`.
+    pub logits_multiplier: Option<f64>,
 }
 
 impl Architecture {
     /// The plain Llama block with a head width derived from the residual one.
-    pub fn llama(hidden_size: usize, heads: usize) -> Self {
+    pub fn llama(hidden_size: usize, heads: usize, norm_eps: f64) -> Self {
         let head_dim = hidden_size / heads;
         Self {
             head_dim,
@@ -181,6 +205,14 @@ impl Architecture {
             query_key_norm: QueryKeyNorm::None,
             query_key_value_bias: false,
             output_bias: false,
+            feed_forward_bias: false,
+            feed_forward: FeedForwardKind::Gated,
+            norm: NormKind::Rms,
+            norm_eps,
+            parallel: false,
+            interleaved_rotary: false,
+            lm_head_bias: false,
+            names: Names::LLAMA,
             sliding_window: None,
             sliding_layers: 0,
             unrotated_layers: 0,
@@ -196,7 +228,7 @@ impl Architecture {
             score_divisor: (head_dim as f64).sqrt(),
             attention_softcap: None,
             final_softcap: None,
-            logits_divisor: None,
+            logits_multiplier: None,
         }
     }
 
@@ -215,6 +247,100 @@ impl Architecture {
     pub fn attention_width(&self, heads: usize) -> usize {
         heads * self.head_dim
     }
+
+    /// The checkpoint tensor `target` adapts at `layer`, or `None` when this
+    /// family has no such projection (the gate of a plain feed-forward).
+    pub fn checkpoint_tensor(&self, target: Target, layer: usize) -> Option<String> {
+        let leaf = match target {
+            Target::Query => "self_attn.q_proj",
+            Target::Key => "self_attn.k_proj",
+            Target::Value => "self_attn.v_proj",
+            Target::Output => self.names.output,
+            Target::Gate => self.names.gate?,
+            Target::Up => self.names.up,
+            Target::Down => self.names.down,
+        };
+        Some(format!("model.layers.{layer}.{leaf}.weight"))
+    }
+
+    /// Refuses adapter targets this family has no projection for, so a gate
+    /// adapter on a plain feed-forward is not created and then never trained.
+    pub fn check_targets(&self, targets: &[Target]) -> Result<()> {
+        if let Some(target) = targets
+            .iter()
+            .find(|target| self.checkpoint_tensor(**target, 0).is_none())
+        {
+            bail!(
+                "this model's feed-forward has no {} projection; choose adapter targets among query, key, value, output, up, down",
+                target.name()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Where a family keeps the tensors whose names differ from Llama's, below
+/// `model.layers.{layer}` and `model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Names {
+    /// The attention output projection.
+    pub output: &'static str,
+    /// The feed-forward gate, absent from a plain feed-forward.
+    pub gate: Option<&'static str>,
+    pub up: &'static str,
+    pub down: &'static str,
+    /// The norm after the last block, below `model`.
+    pub final_norm: &'static str,
+}
+
+impl Names {
+    pub const LLAMA: Self = Self {
+        output: "self_attn.o_proj",
+        gate: Some("mlp.gate_proj"),
+        up: "mlp.up_proj",
+        down: "mlp.down_proj",
+        final_norm: "norm",
+    };
+    /// Starcoder2's plain feed-forward.
+    pub const STARCODER2: Self = Self {
+        gate: None,
+        up: "mlp.c_fc",
+        down: "mlp.c_proj",
+        ..Self::LLAMA
+    };
+    /// Nemotron's plain feed-forward keeps Llama's up and down names.
+    pub const NEMOTRON: Self = Self {
+        gate: None,
+        ..Self::LLAMA
+    };
+    /// Phi-2: `dense` for the attention output, `fc1`/`fc2`, and a
+    /// `final_layernorm`.
+    pub const PHI: Self = Self {
+        output: "self_attn.dense",
+        gate: None,
+        up: "mlp.fc1",
+        down: "mlp.fc2",
+        final_norm: "final_layernorm",
+    };
+}
+
+/// Whether the feed-forward gates its up projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedForwardKind {
+    /// `down(act(gate(x)) * up(x))`.
+    Gated,
+    /// `down(act(up(x)))`.
+    Plain,
+}
+
+/// How a family normalises, read from its config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormKind {
+    /// Root mean square, no mean subtraction, no bias.
+    Rms,
+    /// Mean subtracted, then divided by the standard deviation; `bias` says
+    /// whether a bias tensor follows the scale.
+    Layer { bias: bool },
 }
 
 /// A rotary scaling read from the config's `rope_scaling`, beyond Llama 3's.
@@ -238,18 +364,40 @@ pub enum RopeScaling {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryKeyNorm {
     None,
-    /// One norm over each head's `head_dim` (Qwen3, Gemma 3).
+    /// One norm over each head's `head_dim`, shared by every head (Qwen3,
+    /// Gemma 3).
     PerHead,
     /// One norm over the whole projection (OLMo 2).
     Full,
+    /// A separate scale per head, stored as one `[heads, head_dim]` tensor
+    /// (Cohere's `use_qk_norm`).
+    HeadWeights,
+    /// A separate norm per head, stored as one module per head (StableLM's
+    /// `qk_layernorm`).
+    HeadModules,
 }
 
-/// The non-linearity on the feed-forward gate.
+/// The non-linearity in the feed-forward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activation {
     Silu,
-    /// `gelu_pytorch_tanh`, which Candle's `gelu` computes.
+    /// `gelu_pytorch_tanh` and `gelu_new`, which Candle's `gelu` computes.
     GeluTanh,
+    /// The exact, erf-based GELU.
+    Gelu,
+    /// Squared ReLU (Nemotron's `relu2`).
+    Relu2,
+}
+
+impl Activation {
+    pub(crate) fn apply(self, input: &Tensor) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Silu => candle_nn::ops::silu(input),
+            Self::GeluTanh => input.gelu(),
+            Self::Gelu => input.gelu_erf(),
+            Self::Relu2 => input.relu()?.sqr(),
+        }
+    }
 }
 
 /// Whether the forward pass must be differentiable.
