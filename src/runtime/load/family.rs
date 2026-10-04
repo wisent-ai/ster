@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, ExpertGroups, ExpertLayout, FeedForwardKind,
-    LatentAttention, MixtureOfExperts, Names, NormKind, Positions, QkvLayout, QueryKeyNorm,
-    RopeScaling, Scoring, SharedExpert, StateSpaceSpec,
+    LatentAttention, MixtureOfExperts, Names, NormKind, ParameterNorm, Positions, QkvLayout,
+    QueryKeyNorm, RopeScaling, Scoring, SharedExpert, StateSpaceSpec,
 };
 
 /// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
@@ -72,13 +72,14 @@ pub(super) enum Family {
     Glm4Moe,
     InternLm2,
     Exaone,
+    Jamba,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 49] = [
+    pub(super) const ALL: [Self; 50] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -125,6 +126,7 @@ impl Family {
         Self::Glm4Moe,
         Self::InternLm2,
         Self::Exaone,
+        Self::Jamba,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -184,6 +186,7 @@ impl Family {
             Self::Glm4Moe => "glm4_moe",
             Self::InternLm2 => "internlm2",
             Self::Exaone => "exaone",
+            Self::Jamba => "jamba",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -813,11 +816,68 @@ pub(super) fn family(
                 projection_bias: flag(raw, "use_bias"),
                 convolution_bias: raw.get("use_conv_bias").and_then(Value::as_bool).unwrap_or(true),
                 parameter_norm: if model_type == "falcon_mamba" {
-                    Some(number(raw, "mixer_rms_eps").unwrap_or(llama.rms_norm_eps))
+                    ParameterNorm::Bare(number(raw, "mixer_rms_eps").unwrap_or(llama.rms_norm_eps))
                 } else {
-                    None
+                    ParameterNorm::None
                 },
+                layers: every_layer(layers, path)?,
+                feed_forward: false,
             });
+        }
+        "jamba" => {
+            // Jamba: attention on every `attn_layer_period`-th layer from
+            // `attn_layer_offset` — with no position signal at all — and
+            // Mamba elsewhere with weighted norms on its step and matrices;
+            // every layer has a feed-forward, routed over `num_experts` on
+            // every `expert_layer_period`-th layer from `expert_layer_offset`.
+            fits(layers, path)?;
+            let periodic = |period: &str, offset: &str| -> u128 {
+                let period = whole(raw, period).unwrap_or(1).max(1);
+                let offset = whole(raw, offset).unwrap_or(0);
+                (0..layers)
+                    .filter(|layer| layer % period == offset)
+                    .fold(0, |set, layer| set | (1u128 << layer))
+            };
+            let attention = periodic("attn_layer_period", "attn_layer_offset");
+            let routed = periodic("expert_layer_period", "expert_layer_offset");
+            let hidden = llama.hidden_size;
+            let inner = whole(raw, "mamba_expand").map(|expand| expand * hidden);
+            let (Some(inner), Some(state), Some(kernel)) =
+                (inner, whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+            else {
+                bail!(
+                    "{} declares a Jamba model without mamba_expand, mamba_d_state and mamba_d_conv",
+                    path.display()
+                );
+            };
+            let step_rank = match raw.get("mamba_dt_rank") {
+                Some(Value::String(rule)) if rule == "auto" => hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK),
+                _ => whole(raw, "mamba_dt_rank").unwrap_or(hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)),
+            };
+            architecture.names = Names::JAMBA;
+            architecture.positions = Positions::None;
+            architecture.state_space = Some(StateSpaceSpec {
+                inner,
+                state,
+                kernel,
+                step_rank,
+                projection_bias: flag(raw, "mamba_proj_bias"),
+                convolution_bias: raw.get("mamba_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                parameter_norm: ParameterNorm::Weighted(llama.rms_norm_eps),
+                layers: every_layer(layers, path)? & !attention,
+                feed_forward: true,
+            });
+            if whole(raw, "num_experts").is_some_and(|count| count > 1) {
+                architecture.experts = Some(experts(
+                    raw,
+                    "num_experts",
+                    "intermediate_size",
+                    false,
+                    ExpertLayout::Jamba,
+                    every_layer(layers, path)? & !routed,
+                    path,
+                )?);
+            }
         }
         "glm4_moe" => {
             // GLM-4.5's MoE: biased query, key and value, optional per-head

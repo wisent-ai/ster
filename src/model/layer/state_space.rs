@@ -14,9 +14,12 @@
 use candle_core::{D, DType, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 
-use crate::model::{Cache, StateSpaceSpec};
+use crate::model::{Cache, NormKind, ParameterNorm, Pass, StateSpaceSpec};
 
-use super::projection;
+use super::{
+    norm::{Norm, NormSpec},
+    projection,
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct StateSpace {
@@ -31,14 +34,18 @@ pub(super) struct StateSpace {
     /// `D`, `[inner]`, in F32.
     skip: Tensor,
     output: Linear,
+    /// Jamba's `dt_layernorm`, `b_layernorm` and `c_layernorm`.
+    parameter_norms: Option<[Norm; 3]>,
     spec: StateSpaceSpec,
 }
 
 impl StateSpace {
-    /// `builder` is the mixer's (`backbone.layers.{i}.mixer`).
+    /// `builder` is the mixer's (`backbone.layers.{i}.mixer`, or Jamba's
+    /// `model.layers.{i}.mamba`).
     pub(super) fn load(
         builder: VarBuilder<'_>,
         hidden: usize,
+        eps: f64,
         spec: &StateSpaceSpec,
     ) -> candle_core::Result<Self> {
         let StateSpaceSpec {
@@ -64,6 +71,21 @@ impl StateSpace {
             decay: builder.get((inner, state), "A_log")?.to_dtype(DType::F32)?.exp()?.neg()?,
             skip: builder.get(inner, "D")?.to_dtype(DType::F32)?,
             output: projection(inner, hidden, projection_bias, false, builder.pp("out_proj"))?,
+            parameter_norms: match spec.parameter_norm {
+                ParameterNorm::Weighted(norm_eps) => {
+                    let norms = NormSpec {
+                        kind: NormKind::Rms,
+                        eps: if norm_eps > 0.0 { norm_eps } else { eps },
+                        offset: false,
+                    };
+                    Some([
+                        norms.load(step_rank, builder.pp("dt_layernorm"))?,
+                        norms.load(state, builder.pp("b_layernorm"))?,
+                        norms.load(state, builder.pp("c_layernorm"))?,
+                    ])
+                }
+                _ => None,
+            },
             spec: *spec,
         })
     }
@@ -119,15 +141,20 @@ impl StateSpace {
 
         // The step size and the input and output matrices, per token.
         let parameters = self.parameters.forward(&stream.to_dtype(dtype)?)?.to_dtype(DType::F32)?;
-        let normalise = |part: Tensor| -> candle_core::Result<Tensor> {
-            match parameter_norm {
-                Some(eps) => bare_rms(&part, eps),
-                None => Ok(part),
+        let normalise = |part: Tensor, which: usize| -> candle_core::Result<Tensor> {
+            match (parameter_norm, &self.parameter_norms) {
+                (ParameterNorm::Bare(eps), _) => bare_rms(&part, eps),
+                // The stored scale is at the weights' dtype; the norm widens
+                // to F32 inside and the result returns to F32 for the scan.
+                (ParameterNorm::Weighted(_), Some(norms)) => norms[which]
+                    .forward(&part.to_dtype(dtype)?.contiguous()?, Pass::Differentiable)?
+                    .to_dtype(DType::F32),
+                _ => Ok(part),
             }
         };
-        let step = normalise(parameters.narrow(2, 0, step_rank)?)?;
-        let input_matrix = normalise(parameters.narrow(2, step_rank, state)?)?;
-        let output_matrix = normalise(parameters.narrow(2, step_rank + state, state)?)?;
+        let step = normalise(parameters.narrow(2, 0, step_rank)?, 0)?;
+        let input_matrix = normalise(parameters.narrow(2, step_rank, state)?, 1)?;
+        let output_matrix = normalise(parameters.narrow(2, step_rank + state, state)?, 2)?;
         let step = softplus(&self.step.forward(&step.to_dtype(dtype)?)?.to_dtype(DType::F32)?)?;
 
         // The selective scan: state ← exp(Δ·A) ⊙ state + Δ·B·x, y = state·C + D·x.

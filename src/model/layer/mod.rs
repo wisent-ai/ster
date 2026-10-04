@@ -173,18 +173,30 @@ impl DecoderLayer {
         let spec = NormSpec::of(architecture);
         let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
         let names = architecture.names;
-        // A Mamba block is one norm, the mixer, and the residual add.
-        if let Some(state_space) = &architecture.state_space {
+        // A state-space block is one norm, the mixer and the residual add —
+        // the whole block in Mamba; in Jamba a norm and a feed-forward follow
+        // as in any other block.
+        if let Some(state_space) = architecture.state_space_at(layer) {
+            let feed_forward = if state_space.feed_forward {
+                Some(feed_forward_block(&builder, config, architecture, layer, adapters)?)
+            } else {
+                None
+            };
             return Ok(Self {
                 attention_norm: Some(norm(names.attention_norm)?),
                 mixer: Mixer::StateSpace(StateSpace::load(
-                    builder.pp(names.attention),
+                    builder.pp(names.state_space),
                     config.hidden_size,
+                    config.rms_norm_eps,
                     state_space,
                 )?),
                 attention_output_norm: None,
-                feed_forward_norm: None,
-                feed_forward: None,
+                feed_forward_norm: if feed_forward.is_some() {
+                    Some(norm(names.feed_forward_norm)?)
+                } else {
+                    None
+                },
+                feed_forward,
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
@@ -234,24 +246,35 @@ impl DecoderLayer {
             mixer: Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
             attention_output_norm,
             feed_forward_norm,
-            feed_forward: Some(match &architecture.experts {
-                Some(experts) if architecture.routed(layer) => FeedForwardBlock::Routed(
-                    Experts::load(&builder, config.hidden_size, experts, architecture.activation)?,
-                ),
-                _ => FeedForwardBlock::Dense(FeedForward::load(
-                    &builder,
-                    config,
-                    architecture,
-                    layer,
-                    adapters,
-                )?),
-            }),
+            feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
             feed_forward_output_norm,
             residual_multiplier: architecture.residual_multiplier,
             parallel: architecture.parallel,
         })
     }
+}
 
+/// The feed-forward layer `layer` has: the routed experts on a layer the
+/// mixture covers, the dense feed-forward otherwise.
+fn feed_forward_block(
+    builder: &VarBuilder<'_>,
+    config: &Config,
+    architecture: &Architecture,
+    layer: usize,
+    adapters: &Adapters,
+) -> candle_core::Result<FeedForwardBlock> {
+    Ok(match &architecture.experts {
+        Some(experts) if architecture.routed(layer) => FeedForwardBlock::Routed(Experts::load(
+            builder,
+            config.hidden_size,
+            experts,
+            architecture.activation,
+        )?),
+        _ => FeedForwardBlock::Dense(FeedForward::load(builder, config, architecture, layer, adapters)?),
+    })
+}
+
+impl DecoderLayer {
     /// The window this layer's attention looks through, if any.
     pub(super) fn window(&self) -> Option<usize> {
         match &self.mixer {

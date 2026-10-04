@@ -41,16 +41,19 @@ Included now:
   `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `gpt2`,
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
   `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
-  `internlm2`, `exaone`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`.
-  Coverage is measured
+  `internlm2`, `exaone`, `jamba`, `smollm3`, `gemma`, `gemma2` or
+  `gemma3_text`. Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Mamba and Falcon-Mamba replace attention with a selective state-space
   mixer (`in_proj`, a causal depthwise `conv1d`, `x_proj`, `dt_proj`,
   `A_log`, `D`, `out_proj`, scanned token by token and carried between
-  decode steps); they are steered like any other model, and adapter training
-  on them is refused because they have no attention or feed-forward
-  projection. Every other family is a rotary, grouped-query decoder with what its config
+  decode steps); Jamba interleaves that mixer, with weighted norms on its
+  step and matrices, with position-free attention, and gives every layer a
+  feed-forward, routed on its expert layers. These are steered like any
+  other model, and adapter training on them is refused because their
+  state-space layers have no attention or feed-forward projection. Every
+  other family is a rotary, grouped-query decoder with what its config
   adds read from the config itself: a stated `head_dim` (attention wider or
   narrower than the residual stream), RMS or LayerNorm norms (with a bias
   for StableLM, Starcoder2, Phi-2, Nemotron and Orion, without for Cohere,

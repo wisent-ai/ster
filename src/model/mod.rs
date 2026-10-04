@@ -220,7 +220,8 @@ pub struct Architecture {
 }
 
 /// Mamba's mixer dimensions, from `intermediate_size` (or `expand` times the
-/// width), `state_size`, `conv_kernel` and `time_step_rank`.
+/// width), `state_size`, `conv_kernel` and `time_step_rank`, and which layers
+/// use it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StateSpaceSpec {
     pub inner: usize,
@@ -231,9 +232,25 @@ pub struct StateSpaceSpec {
     pub projection_bias: bool,
     /// `use_conv_bias`.
     pub convolution_bias: bool,
-    /// Falcon-Mamba's `mixer_rms_eps`: a scale-free RMS norm on the step and
-    /// the input and output matrices.
-    pub parameter_norm: Option<f64>,
+    /// A norm on the step and the input and output matrices.
+    pub parameter_norm: ParameterNorm,
+    /// Bit `i` set means layer `i` mixes with the state-space model rather
+    /// than attention: every layer in Mamba, the non-attention ones in Jamba.
+    pub layers: u128,
+    /// A feed-forward follows the mixer (Jamba); Mamba's block is the mixer
+    /// alone.
+    pub feed_forward: bool,
+}
+
+/// The norm on a state-space mixer's step and input and output matrices.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParameterNorm {
+    None,
+    /// Falcon-Mamba's `mixer_rms_eps`: an RMS norm with no scale.
+    Bare(f64),
+    /// Jamba's `dt_layernorm`, `b_layernorm` and `c_layernorm`: RMS norms
+    /// with a stored scale.
+    Weighted(f64),
 }
 
 /// Multi-head latent attention (DeepSeek-V2 and V3, MiniCPM3): query and key
@@ -315,6 +332,14 @@ impl Architecture {
     /// Width of the query projection and of the attention output.
     pub fn attention_width(&self, heads: usize) -> usize {
         heads * self.head_dim
+    }
+
+    /// The state-space mixer layer `layer` uses in place of attention, if
+    /// any.
+    pub fn state_space_at(&self, layer: usize) -> Option<&StateSpaceSpec> {
+        self.state_space
+            .as_ref()
+            .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
     }
 
     /// Whether layer `layer`'s feed-forward is the mixture of experts.
@@ -606,6 +631,8 @@ pub enum ExpertLayout {
     /// `block_sparse_moe.router.layer`, and every expert stacked in
     /// `block_sparse_moe.input_linear` and `output_linear`.
     Granite,
+    /// `feed_forward.router`, `feed_forward.experts.{e}.gate_proj|up_proj|down_proj`.
+    Jamba,
 }
 
 /// Where a family keeps its tensors. `embeddings`, `positions`,
@@ -649,6 +676,8 @@ pub struct Names {
     pub feed_forward_norm: &'static str,
     /// The norm over the feed-forward's output, in a block that has one.
     pub feed_forward_output_norm: &'static str,
+    /// A state-space mixer, below a layer.
+    pub state_space: &'static str,
 }
 
 impl Names {
@@ -695,6 +724,7 @@ impl Names {
         attention_output_norm: "post_attention_layernorm",
         feed_forward_norm: "post_attention_layernorm",
         feed_forward_output_norm: "post_feedforward_layernorm",
+        state_space: "mamba",
     };
     /// Gemma 2 and 3: `post_attention_layernorm` is over attention's output,
     /// so the norm before the feed-forward is `pre_feedforward_layernorm`.
@@ -854,8 +884,18 @@ impl Names {
         embeddings: "backbone.embeddings",
         layers: "backbone.layers",
         final_norm: "backbone.norm_f",
-        attention: "mixer",
+        state_space: "mixer",
         attention_norm: "norm",
+        ..Self::LLAMA
+    };
+    /// Jamba: `mamba` or `self_attn` after `input_layernorm`,
+    /// `pre_ff_layernorm` before `feed_forward`, and `final_layernorm`.
+    pub const JAMBA: Self = Self {
+        final_norm: "model.final_layernorm",
+        gate: Some("feed_forward.gate_proj"),
+        up: "feed_forward.up_proj",
+        down: "feed_forward.down_proj",
+        feed_forward_norm: "pre_ff_layernorm",
         ..Self::LLAMA
     };
     /// InternLM2: `tok_embeddings`, `attention.wqkv` grouped by key-value

@@ -81,8 +81,12 @@ impl Experts {
                     .collect::<candle_core::Result<Vec<_>>>()?;
                 (linear_no_bias(hidden, count, block.pp("gate"))?, experts)
             }
-            ExpertLayout::Qwen => {
-                let block = builder.pp("mlp");
+            ExpertLayout::Qwen | ExpertLayout::Jamba => {
+                let (block, router) = if spec.layout == ExpertLayout::Jamba {
+                    (builder.pp("feed_forward"), "router")
+                } else {
+                    (builder.pp("mlp"), "gate")
+                };
                 let experts = (0..count)
                     .map(|expert| {
                         Expert::load(
@@ -93,7 +97,7 @@ impl Experts {
                         )
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
-                (linear_no_bias(hidden, count, block.pp("gate"))?, experts)
+                (linear_no_bias(hidden, count, block.pp(router))?, experts)
             }
             // GraniteMoE stacks every expert into two tensors: `input_linear`
             // `[experts, 2 * intermediate, hidden]`, gate rows then up rows,
