@@ -105,7 +105,7 @@ impl Runtime {
         if suffixes.is_empty() || suffixes.iter().any(|suffix| suffix.is_empty()) {
             bail!("a decision forward pass needs at least one token");
         }
-        let mut shared = Cache::new(true, self.dtype, self.model.config(), &self.device)?;
+        let mut shared = self.cache(true)?;
         if !prefix.is_empty() {
             let input = Tensor::new(prefix, &self.device)?.unsqueeze(0)?;
             self.model.forward(&input, 0, &mut shared, None, &[])?;
@@ -123,6 +123,18 @@ impl Runtime {
                 Ok(logits.squeeze(0)?.to_vec1::<f32>()?)
             })
             .collect()
+    }
+
+    /// A fresh decode state: rotary tables over this model's head width, one
+    /// key-value slot per layer.
+    pub(super) fn cache(&self, use_kv_cache: bool) -> candle_core::Result<Cache> {
+        Cache::new(
+            use_kv_cache,
+            self.dtype,
+            self.model.config(),
+            self.model.architecture().head_dim,
+            &self.device,
+        )
     }
 
     /// A forward that must produce logits, unwrapped.
@@ -151,7 +163,7 @@ impl Runtime {
             bail!("{empty}");
         }
         let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
-        let mut cache = Cache::new(false, self.dtype, self.model.config(), &self.device)?;
+        let mut cache = self.cache(false)?;
         Ok(self.model.forward_pass(&input, 0, &mut cache, None, &[], mode)?)
     }
 
@@ -175,7 +187,7 @@ impl Runtime {
             flat.resize(flat.len() + width - row.len(), 0);
         }
         let input = Tensor::from_vec(flat, (rows.len(), width), &self.device)?;
-        let mut cache = Cache::new(false, self.dtype, self.model.config(), &self.device)?;
+        let mut cache = self.cache(false)?;
         Ok(self.model.forward_batch(&input, &lengths, &mut cache, None, mode)?)
     }
 
@@ -193,7 +205,7 @@ impl Runtime {
         validate_layers(layers, self.layer_count())?;
         let ids = self.encode_prompt(prompt)?;
         let input = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?;
-        let mut cache = Cache::new(false, self.dtype, self.model.config(), &self.device)?;
+        let mut cache = self.cache(false)?;
         let output = self.model.forward(&input, 0, &mut cache, None, layers)?;
         Ok(output.activations.into_iter().collect())
     }

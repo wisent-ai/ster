@@ -3,7 +3,7 @@
 //! may not see.
 
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear_no_bias, rms_norm};
+use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear, linear_no_bias, rms_norm};
 use candle_transformers::models::llama::Config;
 
 use crate::lora::{Adapter, Adapters, Target};
@@ -27,6 +27,24 @@ pub(super) struct Attention {
     heads: usize,
     key_value_heads: usize,
     head_dim: usize,
+    /// How many keys behind it a query may see, on a sliding-window layer.
+    window: Option<usize>,
+    score_divisor: f64,
+    softcap: Option<f64>,
+}
+
+/// A projection, with the bias the architecture says this one carries.
+fn projection(
+    inputs: usize,
+    outputs: usize,
+    bias: bool,
+    builder: VarBuilder<'_>,
+) -> candle_core::Result<Linear> {
+    if bias {
+        linear(inputs, outputs, builder)
+    } else {
+        linear_no_bias(inputs, outputs, builder)
+    }
 }
 
 impl Attention {
@@ -38,9 +56,10 @@ impl Attention {
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
         let input = config.hidden_size;
-        let query_width = config.hidden_size;
-        let head_dim = config.hidden_size / config.num_attention_heads;
+        let head_dim = architecture.head_dim;
+        let query_width = architecture.attention_width(config.num_attention_heads);
         let key_value_width = head_dim * config.num_key_value_heads;
+        let bias = architecture.query_key_value_bias;
         let (query_norm, key_norm) = if architecture.query_key_norm {
             (
                 Some(rms_norm(
@@ -58,10 +77,15 @@ impl Attention {
             (None, None)
         };
         Ok(Self {
-            query: linear_no_bias(input, query_width, builder.pp("q_proj"))?,
-            key: linear_no_bias(input, key_value_width, builder.pp("k_proj"))?,
-            value: linear_no_bias(input, key_value_width, builder.pp("v_proj"))?,
-            output: linear_no_bias(query_width, input, builder.pp("o_proj"))?,
+            query: projection(input, query_width, bias, builder.pp("q_proj"))?,
+            key: projection(input, key_value_width, bias, builder.pp("k_proj"))?,
+            value: projection(input, key_value_width, bias, builder.pp("v_proj"))?,
+            output: projection(
+                query_width,
+                input,
+                architecture.output_bias,
+                builder.pp("o_proj"),
+            )?,
             query_adapter: adapters.get(layer, Target::Query).cloned(),
             key_adapter: adapters.get(layer, Target::Key).cloned(),
             value_adapter: adapters.get(layer, Target::Value).cloned(),
@@ -71,7 +95,15 @@ impl Attention {
             heads: config.num_attention_heads,
             key_value_heads: config.num_key_value_heads,
             head_dim,
+            window: architecture.window(layer),
+            score_divisor: architecture.score_divisor,
+            softcap: architecture.attention_softcap,
         })
+    }
+
+    /// The window this layer attends through, if it is a sliding-window layer.
+    pub(super) fn window(&self) -> Option<usize> {
+        self.window
     }
 
     /// One attention block, optionally under a caller-supplied mask.
@@ -90,7 +122,7 @@ impl Attention {
         mask: Option<&Tensor>,
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
-        let (batch, sequence, hidden_size) = hidden.dims3()?;
+        let (batch, sequence, _) = hidden.dims3()?;
         let query = project(&self.query, self.query_adapter.as_ref(), hidden, mode.route)?
             .reshape((batch, sequence, self.heads, self.head_dim))?;
         let query = per_head_norm(self.query_norm.as_ref(), query, mode.pass)?
@@ -139,7 +171,14 @@ impl Attention {
         let query = query.to_dtype(DType::F32)?;
         let key = key.to_dtype(DType::F32)?;
         let value = value.to_dtype(DType::F32)?;
-        let attention = (query.matmul(&key.t()?)? / (self.head_dim as f64).sqrt())?;
+        let attention = (query.matmul(&key.t()?)? / self.score_divisor)?;
+        // Gemma 2 bounds every score to `(-cap, cap)` with a tanh before the
+        // mask, so no single key can take the whole softmax.
+        let attention = match self.softcap {
+            Some(cap) => ((attention / cap)?.tanh()? * cap)?,
+            None => attention,
+        };
+        let keys = attention.dim(candle_core::D::Minus1)?;
         let attention = match mask {
             // A supplied mask already carries the causal constraint, so it is
             // applied at every batch size instead of only when the query axis
@@ -150,11 +189,12 @@ impl Attention {
                 masked_fill(&attention, &mask, f32::NEG_INFINITY)?
             }
             // A lone query with no supplied mask can only reach keys that
-            // already exist, so there is nothing causality would remove.
-            None if sequence == 1 => attention,
+            // already exist, so there is nothing causality would remove — and
+            // nothing a window would either, while every key is inside it.
+            None if sequence == 1 && self.window.is_none_or(|window| keys <= window) => attention,
             None => {
                 let mask = cache
-                    .mask(sequence, index_pos)?
+                    .mask(sequence, index_pos, self.window)?
                     .broadcast_as(attention.shape())?;
                 masked_fill(&attention, &mask, f32::NEG_INFINITY)?
             }
@@ -172,7 +212,7 @@ impl Attention {
             .to_dtype(input_dtype)?;
         let output = output
             .transpose(1, 2)?
-            .reshape((batch, sequence, hidden_size))?;
+            .reshape((batch, sequence, self.heads * self.head_dim))?;
         project(
             &self.output,
             self.output_adapter.as_ref(),
@@ -319,12 +359,19 @@ fn masked_fill(values: &Tensor, mask: &Tensor, replacement: f32) -> candle_core:
 /// row `query >= length` keeps keys `0..length`, which is never empty because
 /// a zero length is refused.
 ///
+/// On a sliding-window layer a real query also loses every key `window` or
+/// more positions behind it. A filler query keeps all real keys instead: a
+/// window past the end of its row could leave it none, and a row of negative
+/// infinities is a NaN that a training step would carry back into the
+/// adapters even though no loss reads that row.
+///
 /// Masked entries are `1`, matching [`Cache::mask`], so both feed the same
 /// `masked_fill` and the same `f32::NEG_INFINITY`, which softmax turns into
 /// exactly zero weight.
 pub(super) fn padded_causal_mask(
     lengths: &[usize],
     sequence: usize,
+    window: Option<usize>,
     device: &Device,
 ) -> candle_core::Result<Tensor> {
     let mut values = vec![0u8; lengths.len() * sequence * sequence];
@@ -335,6 +382,13 @@ pub(super) fn padded_causal_mask(
             let visible = (query + 1).min(length);
             for slot in values[offset + visible..offset + sequence].iter_mut() {
                 *slot = 1;
+            }
+            if query < length {
+                for key in 0..visible {
+                    if super::cache::hidden_key(query, key, window) {
+                        values[offset + key] = 1;
+                    }
+                }
             }
         }
     }

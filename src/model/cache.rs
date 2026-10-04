@@ -9,7 +9,7 @@ use candle_transformers::models::llama::{Config, Llama3RopeConfig, Llama3RopeTyp
 
 #[derive(Debug, Clone)]
 pub struct Cache {
-    masks: HashMap<(usize, usize), Tensor>,
+    masks: HashMap<(usize, usize, Option<usize>), Tensor>,
     pub(super) use_kv_cache: bool,
     pub(super) kvs: Vec<Option<(Tensor, Tensor)>>,
     /// Rotary tables, held in F32 whatever the weights are. See [`Cache::new`].
@@ -34,8 +34,17 @@ impl Cache {
     /// megabytes once rather than per forward, and [`apply_rotary`] casts each
     /// query and key back to the weights' dtype afterwards so the key-value
     /// cache still stores half-precision keys.
-    pub fn new(use_kv_cache: bool, dtype: DType, config: &Config, device: &Device) -> Result<Self> {
-        let inv_freq = rotary_frequencies(config);
+    ///
+    /// `head_dim` is the architecture's head width, which a config may state
+    /// apart from `hidden_size / num_attention_heads`; the rotation spans it.
+    pub fn new(
+        use_kv_cache: bool,
+        dtype: DType,
+        config: &Config,
+        head_dim: usize,
+        device: &Device,
+    ) -> Result<Self> {
+        let inv_freq = rotary_frequencies(config, head_dim);
         let theta = Tensor::new(inv_freq, device)?;
         let positions = Tensor::arange(0, config.max_position_embeddings as u32, device)?
             .to_dtype(DType::F32)?
@@ -52,8 +61,16 @@ impl Cache {
         })
     }
 
-    pub(super) fn mask(&mut self, seq_len: usize, index_pos: usize) -> candle_core::Result<Tensor> {
-        let key = (seq_len, index_pos + seq_len);
+    /// The causal mask for `seq_len` queries starting at `index_pos`, with keys
+    /// beyond `window` positions behind a query hidden too when the layer
+    /// attends through a sliding window.
+    pub(super) fn mask(
+        &mut self,
+        seq_len: usize,
+        index_pos: usize,
+        window: Option<usize>,
+    ) -> candle_core::Result<Tensor> {
+        let key = (seq_len, index_pos + seq_len, window);
         if let Some(mask) = self.masks.get(&key) {
             return Ok(mask.clone());
         }
@@ -61,8 +78,10 @@ impl Cache {
         let mut values = vec![0u8; seq_len * key_len];
         for query in 0..seq_len {
             let absolute_query = index_pos + query;
-            for key_position in (absolute_query + 1)..key_len {
-                values[query * key_len + key_position] = 1;
+            for key_position in 0..key_len {
+                if hidden_key(absolute_query, key_position, window) {
+                    values[query * key_len + key_position] = 1;
+                }
             }
         }
         let mask = Tensor::from_vec(values, (seq_len, key_len), &self.device)?;
@@ -71,8 +90,13 @@ impl Cache {
     }
 }
 
-fn rotary_frequencies(config: &Config) -> Vec<f32> {
-    let head_dim = config.hidden_size / config.num_attention_heads;
+/// Whether `query` may not see `key`: it is in the query's future, or it is
+/// `window` or more positions behind it.
+pub(super) fn hidden_key(query: usize, key: usize, window: Option<usize>) -> bool {
+    key > query || window.is_some_and(|window| query - key >= window)
+}
+
+fn rotary_frequencies(config: &Config, head_dim: usize) -> Vec<f32> {
     let base: Vec<f32> = (0..head_dim)
         .step_by(2)
         .map(|index| 1f32 / config.rope_theta.powf(index as f32 / head_dim as f32))

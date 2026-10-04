@@ -7,7 +7,7 @@ use candle_transformers::generation::{LogitsProcessor, Sampling};
 
 use crate::{
     artifact::SteeringArtifact,
-    model::{Cache, SteeringPlan},
+    model::SteeringPlan,
 };
 
 use super::super::{Runtime, validate_layers};
@@ -144,7 +144,7 @@ impl Runtime {
             }
         };
         let mut sampler = LogitsProcessor::from_sampling(options.seed, sampling);
-        let mut cache = Cache::new(true, self.dtype, self.model.config(), &self.device)?;
+        let mut cache = self.cache(true)?;
         for step in 0..options.max_new_tokens {
             let (context, index_pos) = if step == 0 {
                 (tokens.clone(), 0)

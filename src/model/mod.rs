@@ -84,18 +84,91 @@ mod layer;
 pub use cache::Cache;
 pub use decoder::SteeringLlama;
 
-/// What a checkpoint's decoder adds to the Llama shape every Ster model has.
+/// How a checkpoint's decoder differs from the plain Llama block.
 ///
-/// Qwen3 is a Llama decoder with one more normalisation: an RMS norm over
-/// each head's query and key, applied after the projection and before the
-/// rotary embedding, with a learned weight per head dimension
-/// (`self_attn.q_norm`, `self_attn.k_norm`). Everything else — the norms
-/// around each block, the gated feed-forward, grouped-query attention, the
-/// rotary convention — is the same, so it is a flag on one decoder rather
-/// than a second one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Every family Ster loads is the same pre-norm, rotary, grouped-query
+/// decoder with a gated feed-forward and Llama's tensor names; what changes
+/// between them is a handful of switches, each read from the checkpoint's own
+/// `config.json` rather than assumed:
+///
+/// * **Head width** — `head_dim` when the config states it (Qwen3, Gemma),
+///   otherwise `hidden_size / num_attention_heads`. Attention may then be
+///   wider or narrower than the residual stream.
+/// * **Per-head query and key norms** — Qwen3's `self_attn.q_norm` and
+///   `self_attn.k_norm`, applied after the projection and before the rotary
+///   embedding.
+/// * **Projection bias** — Qwen2 adds a bias to query, key and value; a Llama
+///   or Mistral config with `attention_bias` adds one to the output too.
+/// * **Sliding-window attention** — a query on a local layer sees only the
+///   `sliding_window` keys behind it. Which layers are local comes from the
+///   config's `layer_types` when it lists them, otherwise from the family:
+///   every layer for Mistral, layers from `max_window_layers` on for Qwen2 and
+///   Qwen3 with `use_sliding_window`, every even layer for Gemma 2.
+/// * **Gemma's conventions** — every RMS norm scales by `1 + weight`, the
+///   embedding is multiplied by `sqrt(hidden_size)`, the feed-forward gate is
+///   the tanh-approximated GELU, and the word embeddings are tied.
+/// * **Gemma 2's additions** — a norm after attention and another after the
+///   feed-forward, scores scaled by `query_pre_attn_scalar` instead of the head
+///   width, and `tanh` soft-capping of attention scores and final logits.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Architecture {
+    pub head_dim: usize,
     pub query_key_norm: bool,
+    pub query_key_value_bias: bool,
+    pub output_bias: bool,
+    pub sliding_window: Option<usize>,
+    /// Bit `i` set means layer `i` attends through the sliding window.
+    pub sliding_layers: u128,
+    pub norm_offset: bool,
+    pub embedding_scale: bool,
+    pub activation: Activation,
+    pub sandwich_norms: bool,
+    /// What attention scores are divided by: `sqrt(head_dim)`, or Gemma 2's
+    /// `sqrt(query_pre_attn_scalar)`.
+    pub score_divisor: f64,
+    pub attention_softcap: Option<f64>,
+    pub final_softcap: Option<f64>,
+}
+
+impl Architecture {
+    /// The plain Llama block with a head width derived from the residual one.
+    pub fn llama(hidden_size: usize, heads: usize) -> Self {
+        let head_dim = hidden_size / heads;
+        Self {
+            head_dim,
+            query_key_norm: false,
+            query_key_value_bias: false,
+            output_bias: false,
+            sliding_window: None,
+            sliding_layers: 0,
+            norm_offset: false,
+            embedding_scale: false,
+            activation: Activation::Silu,
+            sandwich_norms: false,
+            score_divisor: (head_dim as f64).sqrt(),
+            attention_softcap: None,
+            final_softcap: None,
+        }
+    }
+
+    /// The window layer `layer` attends through, or `None` for full attention.
+    pub fn window(&self, layer: usize) -> Option<usize> {
+        let sliding = layer < 128 && self.sliding_layers & (1u128 << layer) != 0;
+        self.sliding_window.filter(|_| sliding)
+    }
+
+    /// Width of the query projection and of the attention output.
+    pub fn attention_width(&self, heads: usize) -> usize {
+        heads * self.head_dim
+    }
+}
+
+/// The non-linearity on the feed-forward gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation {
+    Silu,
+    /// `gelu_pytorch_tanh`, which Candle's `gelu` computes.
+    GeluTanh,
 }
 
 /// Whether the forward pass must be differentiable.

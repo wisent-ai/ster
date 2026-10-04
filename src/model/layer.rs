@@ -8,7 +8,7 @@ use candle_transformers::models::llama::Config;
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Architecture, Cache, Mode, Pass, Route,
+    Activation, Architecture, Cache, Mode, Pass, Route,
     attention::{Attention, project},
 };
 
@@ -20,12 +20,14 @@ pub(super) struct FeedForward {
     gate_adapter: Option<Adapter>,
     up_adapter: Option<Adapter>,
     down_adapter: Option<Adapter>,
+    activation: Activation,
 }
 
 impl FeedForward {
     pub(super) fn load(
         builder: VarBuilder<'_>,
         config: &Config,
+        architecture: Architecture,
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
@@ -48,6 +50,7 @@ impl FeedForward {
             gate_adapter: adapters.get(layer, Target::Gate).cloned(),
             up_adapter: adapters.get(layer, Target::Up).cloned(),
             down_adapter: adapters.get(layer, Target::Down).cloned(),
+            activation: architecture.activation,
         })
     }
 
@@ -55,12 +58,12 @@ impl FeedForward {
     /// so the feed-forward block is already differentiable as written — but a
     /// `Route`, because its three projections are adapter sites like any other.
     pub(super) fn forward(&self, hidden: &Tensor, route: Route) -> candle_core::Result<Tensor> {
-        let gated = (candle_nn::ops::silu(&project(
-            &self.gate,
-            self.gate_adapter.as_ref(),
-            hidden,
-            route,
-        )?)? * project(&self.up, self.up_adapter.as_ref(), hidden, route)?)?;
+        let gate = project(&self.gate, self.gate_adapter.as_ref(), hidden, route)?;
+        let gate = match self.activation {
+            Activation::Silu => candle_nn::ops::silu(&gate)?,
+            Activation::GeluTanh => gate.gelu()?,
+        };
+        let gated = (gate * project(&self.up, self.up_adapter.as_ref(), hidden, route)?)?;
         project(&self.down, self.down_adapter.as_ref(), &gated, route)
     }
 }
@@ -69,8 +72,12 @@ impl FeedForward {
 pub(super) struct DecoderLayer {
     attention_norm: RmsNorm,
     attention: Attention,
+    /// Gemma 2's norm over the attention output, before the residual add.
+    attention_output_norm: Option<RmsNorm>,
     feed_forward_norm: RmsNorm,
     feed_forward: FeedForward,
+    /// Gemma 2's norm over the feed-forward output, before the residual add.
+    feed_forward_output_norm: Option<RmsNorm>,
 }
 
 impl DecoderLayer {
@@ -81,12 +88,30 @@ impl DecoderLayer {
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
-        Ok(Self {
-            attention_norm: rms_norm(
+        let norm = |name: &str| {
+            load_norm(
                 config.hidden_size,
                 config.rms_norm_eps,
-                builder.pp("input_layernorm"),
-            )?,
+                architecture.norm_offset,
+                builder.pp(name),
+            )
+        };
+        // Llama names the norm before the feed-forward
+        // `post_attention_layernorm`; Gemma 2 uses that name for the norm
+        // after attention and calls the one before the feed-forward
+        // `pre_feedforward_layernorm`.
+        let (attention_output_norm, feed_forward_norm, feed_forward_output_norm) =
+            if architecture.sandwich_norms {
+                (
+                    Some(norm("post_attention_layernorm")?),
+                    norm("pre_feedforward_layernorm")?,
+                    Some(norm("post_feedforward_layernorm")?),
+                )
+            } else {
+                (None, norm("post_attention_layernorm")?, None)
+            };
+        Ok(Self {
+            attention_norm: norm("input_layernorm")?,
             attention: Attention::load(
                 builder.pp("self_attn"),
                 config,
@@ -94,13 +119,22 @@ impl DecoderLayer {
                 layer,
                 adapters,
             )?,
-            feed_forward_norm: rms_norm(
-                config.hidden_size,
-                config.rms_norm_eps,
-                builder.pp("post_attention_layernorm"),
+            attention_output_norm,
+            feed_forward_norm,
+            feed_forward: FeedForward::load(
+                builder.pp("mlp"),
+                config,
+                architecture,
+                layer,
+                adapters,
             )?,
-            feed_forward: FeedForward::load(builder.pp("mlp"), config, layer, adapters)?,
+            feed_forward_output_norm,
         })
+    }
+
+    /// The window this layer's attention looks through, if any.
+    pub(super) fn window(&self) -> Option<usize> {
+        self.attention.window()
     }
 
     pub(super) fn forward(
@@ -120,12 +154,38 @@ impl DecoderLayer {
             mask,
             mode,
         )?;
+        let attention = match &self.attention_output_norm {
+            Some(norm) => normalize(norm, &attention, mode.pass)?,
+            None => attention,
+        };
         let hidden = (hidden + attention)?;
         let feed_forward = self.feed_forward.forward(
             &normalize(&self.feed_forward_norm, &hidden, mode.pass)?,
             mode.route,
         )?;
+        let feed_forward = match &self.feed_forward_output_norm {
+            Some(norm) => normalize(norm, &feed_forward, mode.pass)?,
+            None => feed_forward,
+        };
         hidden + feed_forward
+    }
+}
+
+/// An RMS norm as the checkpoint stores it. Gemma scales by `1 + weight`
+/// rather than `weight`, so its stored weights are shifted by one at load;
+/// the shifted tensor is a new one, never a variable, so the base stays
+/// frozen exactly as before.
+pub(super) fn load_norm(
+    size: usize,
+    eps: f64,
+    offset: bool,
+    builder: VarBuilder<'_>,
+) -> candle_core::Result<RmsNorm> {
+    if offset {
+        let weight = builder.get(size, "weight")?;
+        Ok(RmsNorm::new((weight + 1.0)?, eps))
+    } else {
+        rms_norm(size, eps, builder)
     }
 }
 

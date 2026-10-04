@@ -58,12 +58,14 @@ pub struct Runtime {
 
 impl Runtime {
 
-    /// The three projection widths an adapter has to match: the residual
-    /// width, the width of a fused key or value projection, and the feed
-    /// forward width. Grouped-query attention makes the second one smaller
-    /// than the first, which is why it cannot be derived from `hidden_size`.
-    pub fn config_dims(&self) -> (usize, usize, usize) {
-        projection_widths(self.model.config())
+    /// The projection widths an adapter has to match: the residual width,
+    /// the attention width, one key or value projection, and the feed
+    /// forward. Grouped-query attention makes the key and value width smaller
+    /// than the attention width, and a stated `head_dim` can make the
+    /// attention width differ from the residual one, which is why none of
+    /// them can be derived from `hidden_size`.
+    pub fn config_dims(&self) -> crate::lora::Widths {
+        projection_widths(self.model.config(), self.model.architecture())
     }
 
     pub fn device(&self) -> &Device {

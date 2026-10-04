@@ -8,7 +8,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::{Init, VarMap};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
-use super::{artifact::Artifact, Spec, Target};
+use super::{artifact::Artifact, Spec, Target, Widths};
 
 /// `count` draws from a normal distribution with mean zero and the given
 /// standard deviation, taken from `rng` so the sequence is the seed's.
@@ -120,9 +120,7 @@ impl Adapters {
     pub fn fresh(
         spec: &Spec,
         varmap: &VarMap,
-        hidden: usize,
-        kv_width: usize,
-        intermediate: usize,
+        widths: Widths,
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
@@ -148,7 +146,7 @@ impl Adapters {
         let mut entries = BTreeMap::new();
         for layer in layers {
             for target in &spec.targets {
-                let (outputs, inputs) = target.widths(hidden, kv_width, intermediate);
+                let (outputs, inputs) = target.widths(widths);
                 let (a_name, b_name) = Adapter::tensor_names(layer, *target);
                 let a = varmap
                     .get((spec.rank, inputs), &a_name, Init::Const(0.0), dtype, device)

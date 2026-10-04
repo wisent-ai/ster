@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 use candle_core::{DType, IndexOp, Tensor};
-use candle_nn::{
-    Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
-};
+use candle_nn::{Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias};
 use candle_transformers::models::llama::Config;
 
 use crate::lora::Adapters;
@@ -15,7 +13,7 @@ use crate::lora::Adapters;
 use super::{
     Architecture, Cache, ForwardOutput, Mode, Readout, SteeringPlan,
     attention::padded_causal_mask,
-    layer::{DecoderLayer, normalize},
+    layer::{DecoderLayer, load_norm, normalize},
 };
 
 #[derive(Debug, Clone)]
@@ -25,6 +23,7 @@ pub struct SteeringLlama {
     final_norm: RmsNorm,
     lm_head: Linear,
     config: Config,
+    architecture: Architecture,
     adapters: Adapters,
 }
 
@@ -64,9 +63,10 @@ impl SteeringLlama {
         } else {
             linear_no_bias(config.hidden_size, config.vocab_size, builder.pp("lm_head"))?
         };
-        let final_norm = rms_norm(
+        let final_norm = load_norm(
             config.hidden_size,
             config.rms_norm_eps,
+            architecture.norm_offset,
             builder.pp("model.norm"),
         )?;
         let layers = (0..config.num_hidden_layers)
@@ -86,6 +86,7 @@ impl SteeringLlama {
             final_norm,
             lm_head,
             config,
+            architecture,
             adapters,
         })
     }
@@ -96,6 +97,10 @@ impl SteeringLlama {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub fn architecture(&self) -> &Architecture {
+        &self.architecture
     }
 
     pub fn forward(
@@ -210,20 +215,31 @@ impl SteeringLlama {
                 bail!("row {row} claims {length} tokens in a batch only {sequence} wide");
             }
         }
-        let mask = padded_causal_mask(lengths, sequence, tokens.device())?;
-        Ok(self.decode(tokens, 0, cache, steering, &[], Some(&mask), mode)?)
+        let full = padded_causal_mask(lengths, sequence, None, tokens.device())?;
+        let windowed = match self.architecture.sliding_window {
+            Some(window) if self.architecture.sliding_layers != 0 => Some(padded_causal_mask(
+                lengths,
+                sequence,
+                Some(window),
+                tokens.device(),
+            )?),
+            _ => None,
+        };
+        let masks = BatchMasks { full, windowed };
+        Ok(self.decode(tokens, 0, cache, steering, &[], Some(&masks), mode)?)
     }
 
     /// The decoder loop both entry points run.
     ///
-    /// `mask`, when present, replaces the cache's causal mask for every layer:
-    /// a batched caller builds one combined causal and key-padding mask up
-    /// front and hands the same handle down the stack, because the constraint
-    /// depends only on the batch's lengths and so is identical at every one of
-    /// the model's layers. `None` is the historical single-sequence path,
-    /// which still asks the cache for a mask keyed by shape alone — a padding
-    /// mask has no such key, since two batches of the same shape can pad
-    /// differently, which is why it is built per call and never memoised.
+    /// `masks`, when present, replace the cache's causal mask for every layer:
+    /// a batched caller builds the combined causal and key-padding mask up
+    /// front — once for full attention and once more for a sliding window, if
+    /// the model has one — and every layer takes the one its attention uses,
+    /// because the constraint depends only on the batch's lengths and the
+    /// layer's window. `None` is the historical single-sequence path, which
+    /// still asks the cache for a mask keyed by shape and window alone — a
+    /// padding mask has no such key, since two batches of the same shape can
+    /// pad differently, which is why it is built per call and never memoised.
     fn decode(
         &self,
         tokens: &Tensor,
@@ -231,13 +247,19 @@ impl SteeringLlama {
         cache: &mut Cache,
         steering: Option<&SteeringPlan>,
         capture_layers: &[usize],
-        mask: Option<&Tensor>,
+        masks: Option<&BatchMasks>,
         mode: Mode,
     ) -> candle_core::Result<ForwardOutput> {
         let (_, sequence) = tokens.dims2()?;
         let mut hidden = self.embeddings.forward(tokens)?;
+        if self.architecture.embedding_scale {
+            // Gemma multiplies the embedding by `sqrt(hidden_size)`, in the
+            // embedding's own dtype, before the first block.
+            hidden = (hidden * (self.config.hidden_size as f64).sqrt())?;
+        }
         let mut activations = BTreeMap::new();
         for (index, layer) in self.layers.iter().enumerate() {
+            let mask = masks.map(|masks| masks.for_window(layer.window()));
             hidden = layer.forward(&hidden, index_pos, index, cache, mask, mode)?;
             if capture_layers.binary_search(&index).is_ok() {
                 let activation = hidden
@@ -263,13 +285,13 @@ impl SteeringLlama {
         let logits = match mode.readout {
             Readout::LastPosition => {
                 let last = hidden.i((.., sequence - 1, ..))?.contiguous()?;
-                Some(self.lm_head.forward(&last)?.to_dtype(DType::F32)?)
+                Some(self.soft_cap(self.lm_head.forward(&last)?.to_dtype(DType::F32)?)?)
             }
-            Readout::EveryPosition => Some(
+            Readout::EveryPosition => Some(self.soft_cap(
                 self.lm_head
                     .forward(&hidden.contiguous()?)?
                     .to_dtype(DType::F32)?,
-            ),
+            )?),
             Readout::Hidden => None,
         };
         Ok(ForwardOutput {
@@ -277,5 +299,31 @@ impl SteeringLlama {
             hidden: hidden.to_dtype(DType::F32)?,
             activations,
         })
+    }
+}
+
+impl SteeringLlama {
+    /// Gemma 2 bounds its final logits to `(-cap, cap)` with a tanh.
+    fn soft_cap(&self, logits: Tensor) -> candle_core::Result<Tensor> {
+        match self.architecture.final_softcap {
+            Some(cap) => (logits / cap)?.tanh()? * cap,
+            None => Ok(logits),
+        }
+    }
+}
+
+/// The padded causal masks one batch needs: full attention, and the sliding
+/// window when the model has local layers.
+pub(super) struct BatchMasks {
+    full: Tensor,
+    windowed: Option<Tensor>,
+}
+
+impl BatchMasks {
+    fn for_window(&self, window: Option<usize>) -> &Tensor {
+        match (window, &self.windowed) {
+            (Some(_), Some(windowed)) => windowed,
+            _ => &self.full,
+        }
     }
 }

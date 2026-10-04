@@ -33,12 +33,19 @@ JSON artifacts and native Candle runtime.
 
 Included now:
 
-- local and Hugging Face Llama (`model_type` llama) and Qwen3 (`model_type`
-  qwen3, with its per-head query and key norms) checkpoints published as
-  unquantized Safetensors. A quantized checkpoint (one that declares
-  `quantization_config`, such as GPTQ) is refused with the sentence that names
-  it, as is a checkpoint whose attention is not as wide as its residual
-  stream, or whose attention projections carry a bias;
+- local and Hugging Face checkpoints published as unquantized Safetensors
+  whose `model_type` is `llama`, `mistral`, `qwen2`, `qwen3`, `gemma` or
+  `gemma2`. Each is the same rotary, grouped-query decoder with what its
+  config adds read from the config itself: a stated `head_dim` (attention
+  wider or narrower than the residual stream), Qwen3's per-head query and key
+  norms, Qwen2's query/key/value bias and `attention_bias`, sliding-window
+  attention on the layers `sliding_window`, `max_window_layers` or
+  `layer_types` name, and Gemma's `1 + weight` norms, scaled embedding, tanh
+  GELU gate and tied embeddings, plus Gemma 2's post-attention and
+  post-feed-forward norms, `query_pre_attn_scalar` and logit soft-capping. A
+  quantized checkpoint (one that declares `quantization_config`, such as GPTQ)
+  is refused with the sentence that names it, as is a Llama-shaped config
+  whose `hidden_act` is not `silu`;
 - CPU execution, with compile-time Metal and CUDA backends;
 - pair-set authoring and inspection for duplicates, refusals, length balance,
   and diversity, with no model loaded;
@@ -73,9 +80,12 @@ Included now:
 
 Explicit boundaries:
 
-- The current native runtime accepts `model_type: "llama"` and
-  `model_type: "qwen3"`. Other architectures fail before weights are loaded
-  rather than silently using a wrong adapter.
+- The native runtime implements the dense rotary decoders above. Families
+  whose blocks are built differently — mixture-of-experts layers (Mixtral,
+  Qwen3-MoE, DeepSeek), fused projection tensors (Phi-3), Gemma 3's dual
+  rotary bases, encoder-decoder and non-rotary models (GPT-2, Falcon, BLOOM)
+  — fail before weights are loaded rather than silently running a wrong
+  decoder.
 - Ster controls local open-weight models. Hosted model routing belongs to Brama.
 - Steering reads hidden states, so it always runs on a local open-weight model.
   Writing pair text needs no activations, so `ster pairs synthesize` may take

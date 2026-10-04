@@ -13,6 +13,8 @@ use hf_hub::{Repo, RepoType, api::sync::Api};
 
 use crate::{chat, model::Architecture};
 
+use super::family::{FAMILIES, family};
+
 /// A checkpoint's three files, resolved but not mapped.
 ///
 /// `Runtime::load` maps the weights the moment it resolves them, which is what
@@ -128,46 +130,27 @@ impl Checkpoint {
             .get("model_type")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        let architecture = match model_type {
-            "llama" => Architecture {
-                query_key_norm: false,
-            },
-            "qwen3" => Architecture {
-                query_key_norm: true,
-            },
-            _ => bail!(
-                "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face checkpoint with model_type llama or qwen3"
-            ),
-        };
+        if !FAMILIES.contains(&model_type) {
+            bail!(
+                "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face checkpoint whose model_type is one of {}",
+                FAMILIES.join(", ")
+            );
+        }
         if raw.get("quantization_config").is_some() {
             bail!(
                 "{} is a quantized checkpoint (it declares quantization_config); Ster maps unquantized safetensors only, so use the checkpoint it was quantized from",
                 self.config.display()
             );
         }
-        if raw.get("attention_bias").and_then(|value| value.as_bool()) == Some(true) {
-            bail!(
-                "{} declares attention_bias true; Ster's attention projections carry no bias",
-                self.config.display()
-            );
-        }
-        let llama: LlamaConfig = serde_json::from_slice(&bytes)
+        let mut llama: LlamaConfig = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid {model_type} config {}", self.config.display()))?;
-        // Ster derives a head's width from the residual width, so a checkpoint
-        // whose attention is wider or narrower than its residual stream would
-        // be split into heads of the wrong size. It is refused with both
-        // numbers rather than loaded wrong.
-        if let Some(head_dim) = raw.get("head_dim").and_then(|value| value.as_u64()) {
-            let attention_width = head_dim as usize * llama.num_attention_heads;
-            if attention_width != llama.hidden_size {
-                bail!(
-                    "{} has {} heads of {head_dim} ({attention_width} wide) over a {}-wide residual stream; Ster supports only attention as wide as the residual stream",
-                    self.config.display(),
-                    llama.num_attention_heads,
-                    llama.hidden_size
-                );
-            }
+        let gemma = model_type.starts_with("gemma");
+        if gemma && llama.tie_word_embeddings.is_none() {
+            // Gemma ties its word embeddings by default and its configs
+            // usually leave the key out.
+            llama.tie_word_embeddings = Some(true);
         }
+        let architecture = family(model_type, &raw, &llama, &self.config)?;
         let tokens = eos_tokens(&llama);
         Ok((llama.into_config(false), architecture, tokens))
     }

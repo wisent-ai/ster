@@ -29,7 +29,7 @@ use command::Command;
     name = "ster",
     version,
     about = "Understand, measure, and control model representations",
-    long_about = "Ster reads hidden representations from open-weight Llama and Qwen3 models, trains steering directions from contrastive pairs, evaluates those directions, and applies them during generation."
+    long_about = "Ster reads hidden representations from open-weight Llama, Mistral, Qwen2, Qwen3, Gemma and Gemma 2 models, trains steering directions from contrastive pairs, evaluates those directions, and applies them during generation."
 )]
 struct Cli {
     /// Print every answer as `path: value` lines for a person instead of

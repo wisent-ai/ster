@@ -20,6 +20,7 @@ use crate::{
 use super::{DeviceChoice, Runtime, device::Precision, validate_layers};
 
 mod checkpoint;
+mod family;
 
 pub use checkpoint::Checkpoint;
 
@@ -193,14 +194,12 @@ impl Runtime {
         let base = BaseLoad::resolve(model, revision, device, precision)?;
         spec.validate(base.config.num_hidden_layers)?;
         let spec = spec.resolved(base.config.num_hidden_layers);
-        let (hidden, kv_width, intermediate) = projection_widths(&base.config);
+        let widths = projection_widths(&base.config, &base.architecture);
         let varmap = VarMap::new();
         let adapters = lora::Adapters::fresh(
             &spec,
             &varmap,
-            hidden,
-            kv_width,
-            intermediate,
+            widths,
             &base.device,
             base.param_dtype,
         )?;
@@ -296,17 +295,19 @@ impl BaseLoad {
     }
 }
 
-/// Residual width, fused key/value projection width, feed forward width.
+/// The width of every projection an adapter can sit on.
 ///
 /// Grouped-query attention gives the key and value projections fewer heads
 /// than the query projection, so their output is `num_key_value_heads *
-/// head_dim` wide rather than `hidden_size` wide. An adapter sized from
-/// `hidden_size` would fail to matmul against them.
-pub(super) fn projection_widths(config: &Config) -> (usize, usize, usize) {
-    let head_dim = config.hidden_size / config.num_attention_heads;
-    (
-        config.hidden_size,
-        config.num_key_value_heads * head_dim,
-        config.intermediate_size,
-    )
+/// head_dim` wide rather than `hidden_size` wide, and a config that states
+/// `head_dim` can make the query and output projections differ from the
+/// residual width too. An adapter sized from `hidden_size` would fail to
+/// matmul against them.
+pub(super) fn projection_widths(config: &Config, architecture: &Architecture) -> lora::Widths {
+    lora::Widths {
+        hidden: config.hidden_size,
+        attention: architecture.attention_width(config.num_attention_heads),
+        key_value: config.num_key_value_heads * architecture.head_dim,
+        intermediate: config.intermediate_size,
+    }
 }

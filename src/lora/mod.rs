@@ -20,6 +20,17 @@ mod artifact;
 pub use adapter::{Adapter, Adapters};
 pub use artifact::{Artifact, Kind, ARTIFACT_SCHEMA_VERSION, REWARD_HEAD_TENSOR};
 
+/// The widths a model's projections have, which an adapter's factors must
+/// match: the residual stream, the attention (query and output projection),
+/// one key or value projection, and the feed-forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Widths {
+    pub hidden: usize,
+    pub attention: usize,
+    pub key_value: usize,
+    pub intermediate: usize,
+}
+
 /// Which projections carry adapters.
 ///
 /// `Ord` is derived because [`Adapters`] keys a [`BTreeMap`] by
@@ -105,21 +116,26 @@ impl Target {
 
     /// The `(outputs, inputs)` shape of the projection this target adapts.
     ///
-    /// Grouped-query attention makes key and value narrower than query, and the
-    /// feed-forward block is wider than the residual stream, so the adapter
-    /// factors are not square and cannot be derived from `hidden` alone.
-    fn widths(self, hidden: usize, kv_width: usize, intermediate: usize) -> (usize, usize) {
+    /// Grouped-query attention makes key and value narrower than query, a
+    /// stated `head_dim` can make the attention width differ from the
+    /// residual width, and the feed-forward block is wider than the residual
+    /// stream, so the adapter factors are not square and cannot be derived
+    /// from `hidden` alone.
+    fn widths(self, widths: Widths) -> (usize, usize) {
         match self {
-            Self::Query | Self::Output => (hidden, hidden),
-            Self::Key | Self::Value => (kv_width, hidden),
-            Self::Gate | Self::Up => (intermediate, hidden),
-            Self::Down => (hidden, intermediate),
+            Self::Query => (widths.attention, widths.hidden),
+            Self::Output => (widths.hidden, widths.attention),
+            Self::Key | Self::Value => (widths.key_value, widths.hidden),
+            Self::Gate | Self::Up => (widths.intermediate, widths.hidden),
+            Self::Down => (widths.hidden, widths.intermediate),
         }
     }
 
     /// Whether the projection reads the residual stream, so `a` is `[rank, hidden_size]`.
+    /// The output projection reads the attention width instead, which a
+    /// stated `head_dim` can make different.
     fn reads_hidden(self) -> bool {
-        !matches!(self, Self::Down)
+        !matches!(self, Self::Down | Self::Output)
     }
 
     /// Whether the projection writes the residual stream, so `b` is `[hidden_size, rank]`.
