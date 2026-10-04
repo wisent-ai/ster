@@ -11,7 +11,7 @@
 //! `out_proj`.
 //!
 //! The decode state is the convolution's last `kernel - 1` inputs and, for
-//! a scan, the scan state, kept in the cache's key-value slot for the layer.
+//! a scan, the scan state, kept in the cache's recurrent-state slot for the layer.
 
 use candle_core::{D, DType, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
@@ -119,7 +119,7 @@ impl StateSpace {
 
         // The causal depthwise convolution, continued from the inputs the
         // previous call ended on.
-        let saved = if cache.use_kv_cache { cache.kvs[layer].clone() } else { None };
+        let saved = if cache.use_kv_cache { cache.states[layer].clone() } else { None };
         let (history, scan) = match saved {
             Some((history, scan)) => (Some(history), scan),
             None => (None, Tensor::zeros((batch, inner, state), DType::F32, hidden.device())?),
@@ -169,7 +169,7 @@ impl StateSpace {
         }
         let scanned = Tensor::stack(&outputs, 1)?;
         if cache.use_kv_cache {
-            cache.kvs[layer] = Some((next_history, scan));
+            cache.states[layer] = Some((next_history, scan));
         }
         let gated = (scanned * candle_nn::ops::silu(&gate.to_dtype(DType::F32)?)?)?;
         self.output.forward(&gated.to_dtype(dtype)?)
@@ -259,7 +259,7 @@ impl ShortConv {
         let gate_in = projected.narrow(2, 0, width)?;
         let gate_out = projected.narrow(2, width, width)?;
         let stream = projected.narrow(2, 2 * width, width)?;
-        let saved = if cache.use_kv_cache { cache.kvs[layer].clone() } else { None };
+        let saved = if cache.use_kv_cache { cache.states[layer].clone() } else { None };
         let (convolved, next_history) = causal_convolution(
             &(gate_in * stream)?.transpose(1, 2)?,
             saved.map(|(history, _)| history),
@@ -270,7 +270,7 @@ impl ShortConv {
         if cache.use_kv_cache {
             // The slot holds a pair; a convolution has nothing to scan, so
             // the second is the same history handle.
-            cache.kvs[layer] = Some((next_history.clone(), next_history));
+            cache.states[layer] = Some((next_history.clone(), next_history));
         }
         let gated = (gate_out.to_dtype(DType::F32)? * convolved.transpose(1, 2)?)?;
         self.output.forward(&gated.to_dtype(dtype)?)

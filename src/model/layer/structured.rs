@@ -11,7 +11,7 @@
 //! `A_log`, `D`, `norm` and `out_proj`.
 //!
 //! The decode state is the convolution's last `conv_kernel - 1` inputs and
-//! the scan state, kept in the cache's key-value slot for the layer.
+//! the scan state, kept in the cache's recurrent-state slot for the layer.
 
 use candle_core::{D, DType, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
@@ -35,8 +35,12 @@ pub(super) struct Structured {
     decay: Tensor,
     /// `D`, `[heads]`, in F32.
     skip: Tensor,
-    /// The gated norm's scale, `[inner]`.
-    norm: Tensor,
+    /// The gated norm's scale, `[inner]`; `None` when the family leaves the
+    /// gated output unnormalised.
+    norm: Option<Tensor>,
+    /// Falcon-H1's `ssm_multipliers` laid out over the projection's width,
+    /// `[projected]`.
+    projection_scales: Option<Tensor>,
     eps: f64,
     output: Linear,
     spec: StateSpaceSpec,
@@ -80,7 +84,28 @@ impl Structured {
             step_bias: f32_vector("dt_bias")?,
             decay: f32_vector("A_log")?.exp()?.neg()?,
             skip: f32_vector("D")?,
-            norm: builder.pp("norm").get(inner, "weight")?,
+            norm: if heads.gated_norm {
+                Some(builder.pp("norm").get(inner, "weight")?)
+            } else {
+                None
+            },
+            projection_scales: match heads.projection_scales {
+                Some([gate, stream, written, read, step]) => {
+                    let matrix = heads.groups * state;
+                    let scales: Vec<f32> = [
+                        (gate, inner),
+                        (stream, inner),
+                        (written, matrix),
+                        (read, matrix),
+                        (step, heads.heads),
+                    ]
+                    .iter()
+                    .flat_map(|(scale, width)| std::iter::repeat_n(*scale as f32, *width))
+                    .collect();
+                    Some(Tensor::from_vec(scales, projected, builder.device())?)
+                }
+                None => None,
+            },
             eps,
             output: projection(inner, hidden, projection_bias, false, builder.pp("out_proj"))?,
             spec: *spec,
@@ -109,18 +134,28 @@ impl Structured {
             head_dim,
             groups,
             step_limit,
+            input_scale,
+            ..
         } = self.heads;
         let channels = inner + 2 * groups * state;
         let dtype = hidden.dtype();
         let device = hidden.device();
-        let projected = self.input.forward(hidden)?;
+        let projected = if input_scale == 1.0 {
+            self.input.forward(hidden)?
+        } else {
+            self.input.forward(&(hidden * input_scale)?)?
+        };
+        let projected = match &self.projection_scales {
+            Some(scales) => projected.broadcast_mul(&scales.to_dtype(projected.dtype())?)?,
+            None => projected,
+        };
         let gate = projected.narrow(2, 0, inner)?;
         let mixed = projected.narrow(2, inner, channels)?;
         let step = projected.narrow(2, inner + channels, heads)?.to_dtype(DType::F32)?;
 
         // The causal depthwise convolution over `x`, `B` and `C`, continued
         // from the inputs the previous call ended on.
-        let saved = if cache.use_kv_cache { cache.kvs[layer].clone() } else { None };
+        let saved = if cache.use_kv_cache { cache.states[layer].clone() } else { None };
         let (history, scan) = match saved {
             Some((history, scan)) => (Some(history), scan),
             None => (
@@ -180,12 +215,16 @@ impl Structured {
         }
         let scanned = Tensor::stack(&outputs, 1)?;
         if cache.use_kv_cache {
-            cache.kvs[layer] = Some((next_history, scan));
+            cache.states[layer] = Some((next_history, scan));
         }
 
-        // SiLU of the gate, then an RMS norm over each group's share of the
-        // inner width, scaled by the stored weight.
+        // SiLU of the gate, then (unless the family has none) an RMS norm
+        // over each group's share of the inner width, scaled by the stored
+        // weight.
         let gated = (scanned * candle_nn::ops::silu(&gate.to_dtype(DType::F32)?)?)?;
+        let Some(norm) = &self.norm else {
+            return self.output.forward(&gated.to_dtype(dtype)?);
+        };
         let grouped = gated.reshape((batch, sequence, groups, inner / groups))?;
         let width = (inner / groups) as f64;
         let square = (grouped.sqr()?.sum_keepdim(D::Minus1)? / width)?;
@@ -193,7 +232,7 @@ impl Structured {
             .broadcast_div(&(square + self.eps)?.sqrt()?)?
             .reshape((batch, sequence, inner))?
             .to_dtype(dtype)?
-            .broadcast_mul(&self.norm)?;
+            .broadcast_mul(norm)?;
         self.output.forward(&normed)
     }
 }

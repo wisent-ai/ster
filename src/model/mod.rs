@@ -209,6 +209,14 @@ pub struct Architecture {
     /// this set run the feed-forward alone; its attention layers have no
     /// feed-forward.
     pub lone_sublayers: Option<u128>,
+    /// Falcon-H1: every layer runs attention and a Mamba-2 scan on the same
+    /// normed input and adds both, each scaled, before the feed-forward.
+    pub parallel_scan: Option<ParallelScan>,
+    /// Falcon-H1's `key_multiplier` on every key.
+    pub key_scale: Option<f64>,
+    /// Falcon-H1's `mlp_multipliers`: the gate's pre-activation and the
+    /// feed-forward's output are multiplied by these.
+    pub feed_forward_scales: Option<(f64, f64)>,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -287,6 +295,24 @@ pub struct StructuredSpec {
     pub groups: usize,
     /// `time_step_limit`: the step is clamped to this range after softplus.
     pub step_limit: (f64, f64),
+    /// Falcon-H1's `ssm_in_multiplier` on the mixer's input (one elsewhere).
+    pub input_scale: f64,
+    /// Falcon-H1's `ssm_multipliers` on the projection's five parts — gate,
+    /// stream, input matrix, output matrix and step — in that order.
+    pub projection_scales: Option<[f64; 5]>,
+    /// Whether the gated output passes the group RMS norm (`mamba.norm`);
+    /// Falcon-H1's `mamba_rms_norm` false leaves it gated only.
+    pub gated_norm: bool,
+}
+
+/// Falcon-H1's parallel block: attention reads its input times
+/// `attention_in`, and the attention and scan outputs are multiplied by
+/// `attention_out` and `scan_out` before they join the residual stream.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParallelScan {
+    pub attention_in: f64,
+    pub attention_out: f64,
+    pub scan_out: f64,
 }
 
 /// The norm on a state-space mixer's step and input and output matrices.
@@ -355,6 +381,9 @@ impl Architecture {
             embedding_multiplier: None,
             residual_multiplier: None,
             lone_sublayers: None,
+            parallel_scan: None,
+            key_scale: None,
+            feed_forward_scales: None,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,

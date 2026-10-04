@@ -13,7 +13,7 @@ use candle_transformers::models::llama::Config;
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Activation, Architecture, Cache, FeedForwardKind, Mode, Pass, Route,
+    Activation, Architecture, Cache, FeedForwardKind, Mode, ParallelScan, Pass, Route,
     attention::{Attention, project},
 };
 use experts::Experts;
@@ -70,6 +70,9 @@ pub(super) struct FeedForward {
     up_adapter: Option<Adapter>,
     down_adapter: Option<Adapter>,
     activation: Activation,
+    /// Falcon-H1's `mlp_multipliers`: on the gate before its activation,
+    /// and on the output.
+    scales: Option<(f64, f64)>,
 }
 
 impl FeedForward {
@@ -122,6 +125,7 @@ impl FeedForward {
             up_adapter: adapters.get(layer, Target::Up).cloned(),
             down_adapter: adapters.get(layer, Target::Down).cloned(),
             activation: architecture.activation,
+            scales: architecture.feed_forward_scales,
         })
     }
 
@@ -134,11 +138,19 @@ impl FeedForward {
         let inner = match &self.gate {
             Some(gate) => {
                 let gate = project(gate, self.gate_adapter.as_ref(), hidden, route)?;
+                let gate = match self.scales {
+                    Some((gate_scale, _)) => (gate * gate_scale)?,
+                    None => gate,
+                };
                 (self.activation.apply(&gate)? * up)?
             }
             None => self.activation.apply(&up)?,
         };
-        project(&self.down, self.down_adapter.as_ref(), &inner, route)
+        let output = project(&self.down, self.down_adapter.as_ref(), &inner, route)?;
+        match self.scales {
+            Some((_, output_scale)) => output * output_scale,
+            None => Ok(output),
+        }
     }
 }
 
@@ -155,6 +167,35 @@ enum Mixer {
     /// Nemotron-H's feed-forward layers: the feed-forward is the block's
     /// one sublayer.
     FeedForward(FeedForwardBlock),
+    /// Falcon-H1: attention and a Mamba-2 scan side by side.
+    Parallel(Box<ParallelMixers>),
+}
+
+/// Falcon-H1's two mixers on one normed input, each output scaled before
+/// the two are added.
+#[derive(Debug, Clone)]
+struct ParallelMixers {
+    attention: Attention,
+    scan: Structured,
+    scales: ParallelScan,
+}
+
+impl ParallelMixers {
+    fn forward(
+        &self,
+        normed: &Tensor,
+        index_pos: usize,
+        layer: usize,
+        cache: &mut Cache,
+        mask: Option<&Tensor>,
+        mode: Mode,
+    ) -> candle_core::Result<Tensor> {
+        let ParallelScan { attention_in, attention_out, scan_out } = self.scales;
+        let scanned = (self.scan.forward(normed, layer, cache)? * scan_out)?;
+        let attended =
+            self.attention.forward(&(normed * attention_in)?, index_pos, layer, cache, mask, mode)?;
+        scanned + (attended * attention_out)?
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +280,35 @@ impl DecoderLayer {
                     None
                 },
                 feed_forward,
+                feed_forward_output_norm: None,
+                residual_multiplier: architecture.residual_multiplier,
+                parallel: false,
+            });
+        }
+        // Falcon-H1: attention and a Mamba-2 scan side by side on one normed
+        // input, added to the residual, then a norm and the feed-forward.
+        if let (Some(scales), Some(state_space)) =
+            (architecture.parallel_scan, architecture.state_space.as_ref())
+        {
+            let Some(heads) = state_space.structured else {
+                candle_core::bail!("a parallel scan runs Mamba-2 heads, and this architecture states none");
+            };
+            return Ok(Self {
+                attention_norm: Some(norm(names.attention_norm)?),
+                mixer: Mixer::Parallel(Box::new(ParallelMixers {
+                    attention: Attention::load(&builder, config, architecture, layer, adapters)?,
+                    scan: Structured::load(
+                        builder.pp(names.state_space),
+                        config.hidden_size,
+                        config.rms_norm_eps,
+                        state_space,
+                        heads,
+                    )?,
+                    scales,
+                })),
+                attention_output_norm: None,
+                feed_forward_norm: Some(norm(names.feed_forward_norm)?),
+                feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
@@ -340,6 +410,7 @@ impl DecoderLayer {
     pub(super) fn window(&self) -> Option<usize> {
         match &self.mixer {
             Mixer::Attention(attention) => attention.window(),
+            Mixer::Parallel(mixers) => mixers.attention.window(),
             Mixer::StateSpace(_) | Mixer::Structured(_) | Mixer::ShortConv(_) | Mixer::FeedForward(_) => None,
         }
     }
@@ -362,6 +433,7 @@ impl DecoderLayer {
             Mixer::Structured(structured) => structured.forward(&normed, layer, cache)?,
             Mixer::ShortConv(convolution) => convolution.forward(&normed, layer, cache)?,
             Mixer::FeedForward(feed_forward) => feed_forward.forward(&normed, mode.route)?,
+            Mixer::Parallel(mixers) => mixers.forward(&normed, index_pos, layer, cache, mask, mode)?,
         };
         let attention = optional_norm(self.attention_output_norm.as_ref(), &mixed, mode.pass)?;
         let Some(feed_forward_block) = &self.feed_forward else {

@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, ExpertGroups, ExpertLayout, FeedForwardKind,
-    LatentAttention, MixtureOfExperts, Names, NormKind, ParameterNorm, Positions, QkvLayout,
+    LatentAttention, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm, Positions, QkvLayout,
     QueryKeyNorm, RopeScaling, Scoring, SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec,
     StructuredSpec,
 };
@@ -90,13 +90,14 @@ pub(super) enum Family {
     Jais2,
     BailingMoe,
     TeleFlm,
+    FalconH1,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 66] = [
+    pub(super) const ALL: [Self; 67] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -160,6 +161,7 @@ impl Family {
         Self::Jais2,
         Self::BailingMoe,
         Self::TeleFlm,
+        Self::FalconH1,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -236,6 +238,7 @@ impl Family {
             Self::Jais2 => "jais2",
             Self::BailingMoe => "bailing_moe",
             Self::TeleFlm => "TeleFLM",
+            Self::FalconH1 => "falcon_h1",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -1395,6 +1398,77 @@ pub(super) fn family(
             }
             architecture.experts = Some(routed);
         }
+        "falcon_h1" => {
+            // Falcon-H1: every layer runs attention and a Mamba-2 scan side
+            // by side on one normed input (`input_layernorm`), then
+            // `pre_ff_layernorm` and the feed-forward, all under Jamba's
+            // names, with muP multipliers on the embeddings, the attention
+            // input and output, every key, the scan input, the five parts
+            // of its projection and its output, the feed-forward's gate and
+            // output, and the logits.
+            let scale = |key: &str| number(raw, key).unwrap_or(1.0);
+            if raw.get("attn_layer_indices").is_some_and(|indices| !indices.is_null())
+                || raw.get("mamba_use_mlp").and_then(Value::as_bool) == Some(false)
+                || flag(raw, "mamba_norm_before_gate")
+                || flag(raw, "mamba_proj_bias") != flag(raw, "projectors_bias")
+            {
+                bail!(
+                    "{} declares attn_layer_indices, mamba_use_mlp false, mamba_norm_before_gate, or a projectors_bias unlike mamba_proj_bias; Ster implements Falcon-H1 with attention, a scan and a feed-forward on every layer, the gate before the norm, and one bias setting for the scan's projections",
+                    path.display()
+                );
+            }
+            let mut heads = structured(raw, "mamba_n_heads", "mamba_d_head", "mamba_n_groups", path)?;
+            let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+            else {
+                bail!(
+                    "{} declares a Falcon-H1 model without mamba_d_state and mamba_d_conv",
+                    path.display()
+                );
+            };
+            let inner = whole(raw, "mamba_d_ssm").unwrap_or_else(|| {
+                (number(raw, "mamba_expand").unwrap_or(2.0) * llama.hidden_size as f64) as usize
+            });
+            if inner != heads.heads * heads.head_dim {
+                bail!(
+                    "{} sizes its scan at {inner} but {} heads of {} make {}; the inner width must be the heads' total",
+                    path.display(),
+                    heads.heads,
+                    heads.head_dim,
+                    heads.heads * heads.head_dim
+                );
+            }
+            let [gate_scale, output_scale] = numbers::<2>(raw, "mlp_multipliers", path)?;
+            heads.input_scale = scale("ssm_in_multiplier");
+            heads.projection_scales = Some(numbers::<5>(raw, "ssm_multipliers", path)?);
+            heads.gated_norm = raw.get("mamba_rms_norm").and_then(Value::as_bool).unwrap_or(true);
+            architecture.names = Names::JAMBA;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.embedding_multiplier = number(raw, "embedding_multiplier");
+            architecture.logits_multiplier = number(raw, "lm_head_multiplier");
+            architecture.key_scale = number(raw, "key_multiplier");
+            architecture.feed_forward_scales = Some((gate_scale, output_scale));
+            architecture.parallel_scan = Some(ParallelScan {
+                attention_in: scale("attention_in_multiplier"),
+                attention_out: scale("attention_out_multiplier"),
+                scan_out: scale("ssm_out_multiplier"),
+            });
+            architecture.state_space = Some(StateSpaceSpec {
+                inner,
+                state,
+                kernel,
+                step_rank: 0,
+                projection_bias: flag(raw, "mamba_proj_bias"),
+                convolution_bias: raw.get("mamba_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                parameter_norm: ParameterNorm::None,
+                // The scan runs inside every layer's parallel block, never
+                // as a layer of its own.
+                layers: 0,
+                feed_forward: true,
+                structured: Some(heads),
+            });
+        }
         "glm4_moe" => {
             // GLM-4.5's MoE: biased query, key and value, optional per-head
             // query and key norms, rotation over `partial_rotary_factor` by
@@ -2081,6 +2155,9 @@ fn structured(
         head_dim,
         groups,
         step_limit: (bound(0, 0.0), bound(1, f64::INFINITY)),
+        input_scale: 1.0,
+        projection_scales: None,
+        gated_norm: true,
     })
 }
 
@@ -2097,6 +2174,15 @@ fn qwen_dense_layers(raw: &Value, layers: usize, path: &Path) -> Result<u128> {
     Ok((0..layers)
         .filter(|layer| listed.contains(layer) || (layer + 1) % step != 0)
         .fold(0, |set, layer| set | (1u128 << layer)))
+}
+
+/// A list of exactly `N` numbers under `key`.
+fn numbers<const N: usize>(raw: &Value, key: &str, path: &Path) -> Result<[f64; N]> {
+    raw.get(key)
+        .and_then(Value::as_array)
+        .and_then(|list| list.iter().map(Value::as_f64).collect::<Option<Vec<f64>>>())
+        .and_then(|values| <[f64; N]>::try_from(values).ok())
+        .with_context(|| format!("{} declares {key} that is not {N} numbers", path.display()))
 }
 
 fn flag(raw: &Value, key: &str) -> bool {

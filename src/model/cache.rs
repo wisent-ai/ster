@@ -13,7 +13,13 @@ use super::RopeScaling;
 pub struct Cache {
     masks: HashMap<(usize, usize, Option<usize>), Tensor>,
     pub(super) use_kv_cache: bool,
+    /// Each attention layer's cached keys and values.
     pub(super) kvs: Vec<Option<(Tensor, Tensor)>>,
+    /// Each recurrent mixer's decode state: its convolution history and its
+    /// scan (Mamba, Mamba-2, LFM2's convolution). Kept apart from `kvs` so a
+    /// layer that runs attention and a scan side by side (Falcon-H1) keeps
+    /// both.
+    pub(super) states: Vec<Option<(Tensor, Tensor)>>,
     /// Rotary tables, held in F32 whatever the weights are. See [`Cache::new`].
     pub(super) cos: Tensor,
     pub(super) sin: Tensor,
@@ -126,6 +132,7 @@ impl Cache {
             masks: HashMap::new(),
             use_kv_cache,
             kvs: vec![None; config.num_hidden_layers],
+            states: vec![None; config.num_hidden_layers],
             cos,
             sin,
             local,

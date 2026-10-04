@@ -55,6 +55,8 @@ pub(super) struct Attention {
     sinks: Option<Tensor>,
     /// The bound every query, key and value component is clamped to.
     clip_qkv: Option<f64>,
+    /// Falcon-H1's `key_multiplier` on every key.
+    key_scale: Option<f64>,
 }
 
 /// Which rotary table this layer rotates its query and key with.
@@ -258,6 +260,7 @@ impl Attention {
                 _ => None,
             },
             clip_qkv: architecture.clip_qkv,
+            key_scale: architecture.key_scale,
             sinks: if architecture.attention_sinks {
                 Some(
                     layer_builder
@@ -298,6 +301,11 @@ impl Attention {
             Projections::Standard { query, key, value } => {
                 let query = project(query, self.query_adapter.as_ref(), hidden, mode.route)?;
                 let key = project(key, self.key_adapter.as_ref(), hidden, mode.route)?;
+                // Falcon-H1 multiplies every key by `key_multiplier`.
+                let key = match self.key_scale {
+                    Some(scale) => (key * scale)?,
+                    None => key,
+                };
                 // OLMo 2 normalises the whole projection before it is split
                 // into heads; every other query and key norm works per head
                 // after it.
