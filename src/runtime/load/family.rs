@@ -12,9 +12,9 @@ use serde_json::Value;
 
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
-    LatentAttention, LightningSpec, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm, Positions, QkvLayout,
-    QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec, SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec,
-    StructuredSpec,
+    GlobalAttention, LatentAttention, LightningSpec, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm,
+    PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
+    SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec, StructuredSpec,
 };
 
 /// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
@@ -101,10 +101,12 @@ pub(super) enum Family {
     Gemma,
     Gemma2,
     Gemma3Text,
+    Gemma4Text,
+    Gemma4UnifiedText,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 74] = [
+    pub(super) const ALL: [Self; 76] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -179,6 +181,8 @@ impl Family {
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
+        Self::Gemma4Text,
+        Self::Gemma4UnifiedText,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -263,6 +267,8 @@ impl Family {
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
+            Self::Gemma4Text => "gemma4_text",
+            Self::Gemma4UnifiedText => "gemma4_unified_text",
         }
     }
 
@@ -275,6 +281,8 @@ impl Family {
             Self::Gemma
                 | Self::Gemma2
                 | Self::Gemma3Text
+                | Self::Gemma4Text
+                | Self::Gemma4UnifiedText
                 | Self::Cohere
                 | Self::Cohere2
                 | Self::Starcoder2
@@ -360,7 +368,7 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         ("max_position_embeddings", &["n_positions", "max_seq_len", "seq_length", "model_max_length"]),
         ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
         ("rope_theta", &["rotary_emb_base"]),
-        ("num_experts_per_tok", &["moe_k", "moe_top_k", "moe_topk", "num_experts_per_token"]),
+        ("num_experts_per_tok", &["moe_k", "moe_top_k", "moe_topk", "num_experts_per_token", "top_k_experts"]),
     ];
     for (llama, spellings) in aliases {
         if raw.get(*llama).is_some_and(|value| !value.is_null()) {
@@ -482,8 +490,30 @@ fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> 
 /// Configs written by Transformers 5 state the rotation in one
 /// `rope_parameters` object; its `rope_theta` is read as the base and, unless
 /// its `rope_type` is `default`, the object as the scaling, never over keys
-/// the config states at the top level.
+/// the config states at the top level. Gemma 3's and 4's state one object per
+/// layer type: the `full_attention` one is the model's rotation, and the
+/// `sliding_attention` one's base is `rope_local_base_freq`.
 pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<Value>> {
+    let per_type = raw.get("rope_parameters").filter(|value| value.get("full_attention").is_some()).cloned();
+    if let Some(per_type) = per_type {
+        if let Some(sliding) = per_type.get("sliding_attention").filter(|value| value.is_object()) {
+            let kind = scaling_kind(sliding);
+            if !matches!(kind, "default" | "") {
+                bail!(
+                    "{} scales its sliding_attention rotation ({kind:?}); Ster scales only the full-attention layers' rotation",
+                    path.display()
+                );
+            }
+            if let (Some(theta), Some(object)) =
+                (sliding.get("rope_theta").filter(|theta| theta.is_number()).cloned(), raw.as_object_mut())
+            {
+                object.entry("rope_local_base_freq").or_insert(theta);
+            }
+        }
+        if let (Some(full), Some(object)) = (per_type.get("full_attention").cloned(), raw.as_object_mut()) {
+            object.insert("rope_parameters".to_owned(), full);
+        }
+    }
     if let Some(parameters) = raw.get("rope_parameters").filter(|value| value.is_object()).cloned() {
         let scaled = !matches!(scaling_kind(&parameters), "default" | "");
         if let Some(object) = raw.as_object_mut() {
@@ -501,7 +531,7 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
     };
     match scaling_kind(scaling) {
         "llama3" => Ok(None),
-        "default" | "linear" | "longrope" | "yarn" => Ok(raw
+        "default" | "linear" | "longrope" | "yarn" | "proportional" => Ok(raw
             .as_object_mut()
             .and_then(|object| object.remove("rope_scaling"))),
         // HunYuan states `dynamic` with an `alpha`: a fixed NTK-aware base,
@@ -635,7 +665,21 @@ fn rope_scaling(
                 attention: attention as f32,
             })
         }
+        "proportional" => Ok(proportional(scaling, rotary_dim)),
         _ => Ok(RopeScaling::None),
+    }
+}
+
+/// Gemma 4's proportional rotation over `width` components, as
+/// Transformers' `_compute_proportional_rope_parameters` computes it: the
+/// first `partial_rotary_factor · width / 2` frequency pairs, rounded down,
+/// rotate at `rope_theta^(-2i / width)`, the rest are zero, and every
+/// frequency is divided by `factor`.
+fn proportional(scaling: &Value, width: usize) -> RopeScaling {
+    let share = scaling.get("partial_rotary_factor").and_then(Value::as_f64).unwrap_or(1.0);
+    RopeScaling::Proportional {
+        rotated: (share * width as f64 / 2.0).floor() as usize,
+        factor: scaling.get("factor").and_then(Value::as_f64).unwrap_or(1.0) as f32,
     }
 }
 
@@ -2313,6 +2357,99 @@ pub(super) fn family(
                         .filter(|layer| (layer + 1) % pattern != 0)
                         .fold(0, |set, layer| set | (1u128 << layer));
                 }
+            }
+        }
+        "gemma4_text" | "gemma4_unified_text" => {
+            // Gemma 4: Gemma 3's norms around both sublayers and per-head
+            // query and key norms, but norms that scale by their weight
+            // itself, scores left undivided, a scale-free norm over each
+            // head's value, and every block's output times its
+            // `layer_scalar`. Its full-attention layers have wider heads
+            // (`global_head_dim`), under `attention_k_eq_v` their own
+            // key-value heads (`num_global_key_value_heads`) and values taken
+            // from the key projection, and rotate by the `full_attention`
+            // rotation over that width; the sliding-window layers rotate by
+            // their own base.
+            if raw.get("use_bidirectional_attention").and_then(Value::as_str) == Some("all") {
+                bail!(
+                    "{} declares use_bidirectional_attention \"all\", so every token sees the whole sequence; Ster runs causal decoders only",
+                    path.display()
+                );
+            }
+            if flag(raw, "use_double_wide_mlp") {
+                bail!(
+                    "{} declares use_double_wide_mlp, a doubled feed-forward on the key-value-sharing layers; Ster builds every Gemma 4 feed-forward intermediate_size wide",
+                    path.display()
+                );
+            }
+            let Some(global_head_dim) = whole(raw, "global_head_dim") else {
+                bail!("{} declares a Gemma 4 model without global_head_dim", path.display());
+            };
+            let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
+                bail!("{} declares a Gemma 4 model without layer_types", path.display());
+            };
+            architecture.local_rope_theta = number(raw, "rope_local_base_freq").map(|theta| theta as f32);
+            if architecture.local_rope_theta.is_none() {
+                bail!(
+                    "{} declares a Gemma 4 model without a sliding_attention rotation base",
+                    path.display()
+                );
+            }
+            architecture.embedding_multiplier = Some((llama.hidden_size as f64).sqrt());
+            architecture.activation = Activation::GeluTanh;
+            architecture.output_norms = true;
+            architecture.names = Names::GEMMA2;
+            architecture.query_key_norm = QueryKeyNorm::PerHead;
+            architecture.value_norm = true;
+            architecture.score_divisor = 1.0;
+            architecture.layer_scalar = true;
+            architecture.final_softcap = number(raw, "final_logit_softcapping");
+            architecture.sliding_window = whole(raw, "sliding_window");
+            architecture.sliding_layers = listed_layers(types, layers, path)?;
+            let key_is_value = flag(raw, "attention_k_eq_v");
+            architecture.global_attention = Some(GlobalAttention {
+                head_dim: global_head_dim,
+                // Transformers gives the full-attention layers their own
+                // key-value head count only under `attention_k_eq_v`.
+                key_value_heads: whole(raw, "num_global_key_value_heads").filter(|_| key_is_value),
+                key_is_value,
+            });
+            architecture.rope_scaling = rope_scaling(scaling, global_head_dim, raw, llama, path)?;
+            // The last `num_kv_shared_layers` layers reuse the keys and
+            // values of the last earlier layer of their kind.
+            let shared = whole(raw, "num_kv_shared_layers").unwrap_or(0);
+            if shared > 0 {
+                if shared >= layers {
+                    bail!(
+                        "{} shares keys and values on {shared} of {layers} layers, leaving none to produce them",
+                        path.display()
+                    );
+                }
+                let first = layers - shared;
+                architecture.shared_key_values = Some(first);
+                if let Some(layer) = (first..layers).find(|layer| architecture.key_value_source(*layer).is_none()) {
+                    bail!(
+                        "{} shares keys and values from layer {first} on, but layer {layer} has no earlier layer of its kind to share them from",
+                        path.display()
+                    );
+                }
+            }
+            if let Some(width) = whole(raw, "hidden_size_per_layer_input").filter(|width| *width > 0) {
+                architecture.per_layer_input = Some(PerLayerInputSpec {
+                    width,
+                    vocab: whole(raw, "vocab_size_per_layer_input").unwrap_or(llama.vocab_size),
+                });
+            }
+            if flag(raw, "enable_moe_block") {
+                architecture.side_experts = Some(experts(
+                    raw,
+                    "num_experts",
+                    "moe_intermediate_size",
+                    true,
+                    ExpertLayout::Gemma4,
+                    0,
+                    path,
+                )?);
             }
         }
         other => bail!("model architecture {other:?} has no decoder in this Ster build"),

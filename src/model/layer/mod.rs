@@ -7,7 +7,7 @@ mod recurrent;
 pub(super) mod shared;
 
 use candle_core::Tensor;
-use candle_nn::{Linear, VarBuilder, linear, linear_no_bias};
+use candle_nn::{Linear, Module, VarBuilder, linear, linear_no_bias};
 use candle_transformers::models::llama::Config;
 
 use crate::lora::{Adapter, Adapters, Target};
@@ -26,21 +26,49 @@ use recurrent::{
     structured::Structured,
 };
 
-/// The feed-forward half of a block: one dense feed-forward, or a router
-/// over experts.
+/// The feed-forward half of a block: one dense feed-forward, a router over
+/// experts, or Gemma 4's dense feed-forward beside its experts.
 #[derive(Debug, Clone)]
 enum FeedForwardBlock {
     Dense(FeedForward),
     Routed(Experts),
+    Paired(Box<PairedExperts>),
 }
 
 impl FeedForwardBlock {
-    fn forward(&self, hidden: &Tensor, route: Route) -> candle_core::Result<Tensor> {
+    /// `hidden` is the normed input, except for a paired block, which norms
+    /// the residual itself for each of its halves.
+    fn forward(&self, hidden: &Tensor, mode: Mode) -> candle_core::Result<Tensor> {
         match self {
-            Self::Dense(dense) => dense.forward(hidden, route),
+            Self::Dense(dense) => dense.forward(hidden, mode.route),
             Self::Routed(experts) => experts.forward(hidden),
+            Self::Paired(paired) => {
+                let dense = paired.dense.forward(&paired.dense_norm.forward(hidden, mode.pass)?, mode.route)?;
+                let dense = paired.dense_output_norm.forward(&dense, mode.pass)?;
+                let routed = paired.experts.forward_routed(
+                    &paired.router_norm.forward(hidden, mode.pass)?,
+                    &paired.experts_norm.forward(hidden, mode.pass)?,
+                )?;
+                dense + paired.experts_output_norm.forward(&routed, mode.pass)?
+            }
         }
     }
+}
+
+/// Gemma 4's experts beside its dense feed-forward: the dense half reads the
+/// residual through `pre_feedforward_layernorm` and is normed by
+/// `post_feedforward_layernorm_1`; the router reads it through a scale-free
+/// norm, the experts through `pre_feedforward_layernorm_2`, and their sum
+/// is normed by `post_feedforward_layernorm_2`.
+#[derive(Debug, Clone)]
+struct PairedExperts {
+    dense: FeedForward,
+    dense_norm: Norm,
+    dense_output_norm: Norm,
+    experts: Experts,
+    router_norm: Norm,
+    experts_norm: Norm,
+    experts_output_norm: Norm,
 }
 
 /// A projection, with a bias when the architecture says it carries one.
@@ -219,8 +247,97 @@ impl ParallelMixers {
     }
 }
 
+/// One decoder layer: its block, and what Gemma 4 adds after it — the
+/// per-layer input and the `layer_scalar` the whole output is multiplied by.
 #[derive(Debug, Clone)]
 pub(super) struct DecoderLayer {
+    block: Block,
+    per_layer_input: Option<PerLayerInput>,
+    scalar: Option<Tensor>,
+}
+
+/// What every layer reads beside the hidden state: the embeddings the first
+/// layer received (Zamba2's hybrid layers) and the layer's own slice of
+/// Gemma 4's per-layer inputs.
+pub(super) struct LayerInputs<'a> {
+    pub embedded: &'a Tensor,
+    pub per_layer: Option<Tensor>,
+}
+
+/// Gemma 4's per-layer input: `per_layer_input_gate` and the activation over
+/// the block's output, times the layer's input, through
+/// `per_layer_projection` and `post_per_layer_input_norm`.
+#[derive(Debug, Clone)]
+struct PerLayerInput {
+    gate: Linear,
+    projection: Linear,
+    norm: Norm,
+    activation: Activation,
+}
+
+impl DecoderLayer {
+    /// `shared` is, on a Zamba2 hybrid layer, the shared block it uses and
+    /// that block's builder (`model.layers.{owner}.shared_transformer`).
+    pub(super) fn load(
+        builder: VarBuilder<'_>,
+        config: &Config,
+        architecture: &Architecture,
+        layer: usize,
+        adapters: &Adapters,
+        shared: Option<(&SharedBlock, &VarBuilder<'_>)>,
+    ) -> candle_core::Result<Self> {
+        let per_layer_input = match architecture.per_layer_input {
+            Some(spec) => Some(PerLayerInput {
+                gate: linear_no_bias(config.hidden_size, spec.width, builder.pp("per_layer_input_gate"))?,
+                projection: linear_no_bias(spec.width, config.hidden_size, builder.pp("per_layer_projection"))?,
+                norm: NormSpec::of(architecture)
+                    .load(config.hidden_size, builder.pp("post_per_layer_input_norm"))?,
+                activation: architecture.activation,
+            }),
+            None => None,
+        };
+        let scalar = if architecture.layer_scalar { Some(builder.get(1, "layer_scalar")?) } else { None };
+        Ok(Self {
+            block: Block::load(builder, config, architecture, layer, adapters, shared)?,
+            per_layer_input,
+            scalar,
+        })
+    }
+
+    /// The window this layer's attention looks through, if any.
+    pub(super) fn window(&self) -> Option<usize> {
+        self.block.window()
+    }
+
+    pub(super) fn forward(
+        &self,
+        hidden: &Tensor,
+        inputs: &LayerInputs<'_>,
+        index_pos: usize,
+        layer: usize,
+        cache: &mut Cache,
+        mask: Option<&Tensor>,
+        mode: Mode,
+    ) -> candle_core::Result<Tensor> {
+        let output = self.block.forward(hidden, inputs.embedded, index_pos, layer, cache, mask, mode)?;
+        let output = match (&self.per_layer_input, &inputs.per_layer) {
+            (Some(per_layer), Some(input)) => {
+                let gated = (per_layer.activation.apply(&per_layer.gate.forward(&output)?)? * input)?;
+                let added = per_layer.norm.forward(&per_layer.projection.forward(&gated)?, mode.pass)?;
+                (output + added)?
+            }
+            (Some(_), None) => candle_core::bail!("layer {layer} takes a per-layer input and was given none"),
+            (None, _) => output,
+        };
+        match &self.scalar {
+            Some(scalar) => output.broadcast_mul(scalar),
+            None => Ok(output),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Block {
     /// The norm before the mixer (before both halves in a parallel block);
     /// OLMo 2 has none.
     attention_norm: Option<Norm>,
@@ -251,10 +368,8 @@ struct BlockScales {
     feed_forward: (f64, f64),
 }
 
-impl DecoderLayer {
-    /// `shared` is, on a Zamba2 hybrid layer, the shared block it uses and
-    /// that block's builder (`model.layers.{owner}.shared_transformer`).
-    pub(super) fn load(
+impl Block {
+    fn load(
         builder: VarBuilder<'_>,
         config: &Config,
         architecture: &Architecture,
@@ -505,7 +620,8 @@ impl DecoderLayer {
             attention_norm,
             mixer: Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
             attention_output_norm,
-            feed_forward_norm,
+            // Gemma 4's paired block norms the residual itself.
+            feed_forward_norm: if architecture.side_experts.is_some() { None } else { feed_forward_norm },
             feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
             feed_forward_output_norm,
             residual_multiplier: architecture.residual_multiplier,
@@ -528,6 +644,19 @@ fn feed_forward_block(
     layer: usize,
     adapters: &Adapters,
 ) -> candle_core::Result<FeedForwardBlock> {
+    if let Some(experts) = &architecture.side_experts {
+        let spec = NormSpec::of(architecture);
+        let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
+        return Ok(FeedForwardBlock::Paired(Box::new(PairedExperts {
+            dense: FeedForward::load(builder, config, architecture, layer, adapters)?,
+            dense_norm: norm(architecture.names.feed_forward_norm)?,
+            dense_output_norm: norm("post_feedforward_layernorm_1")?,
+            experts: Experts::load(builder, config.hidden_size, experts, architecture.activation)?,
+            router_norm: spec.unscaled(config.hidden_size, builder)?,
+            experts_norm: norm("pre_feedforward_layernorm_2")?,
+            experts_output_norm: norm("post_feedforward_layernorm_2")?,
+        })));
+    }
     Ok(match &architecture.experts {
         Some(experts) if architecture.routed(layer) => FeedForwardBlock::Routed(Experts::load(
             builder,
@@ -539,9 +668,9 @@ fn feed_forward_block(
     })
 }
 
-impl DecoderLayer {
-    /// The window this layer's attention looks through, if any.
-    pub(super) fn window(&self) -> Option<usize> {
+impl Block {
+    /// The window this block's attention looks through, if any.
+    fn window(&self) -> Option<usize> {
         match &self.mixer {
             Mixer::Attention(attention) => attention.window(),
             Mixer::Parallel(mixers) => mixers.attention.window(),
@@ -577,7 +706,7 @@ impl DecoderLayer {
             Mixer::ShortConv(convolution) => convolution.forward(&normed, layer, cache)?,
             Mixer::DeltaRule(delta) => delta.forward(&normed, layer, cache)?,
             Mixer::Lightning(lightning) => lightning.forward(&normed, layer, cache)?,
-            Mixer::FeedForward(feed_forward) => feed_forward.forward(&normed, mode.route)?,
+            Mixer::FeedForward(feed_forward) => feed_forward.forward(&normed, mode)?,
             Mixer::Parallel(mixers) => mixers.forward(&normed, index_pos, layer, cache, mask, mode)?,
             Mixer::Hybrid(hybrid) => {
                 let shared = hybrid.shared.forward(&normed, embedded, index_pos, layer, cache, mask, mode)?;
@@ -598,7 +727,7 @@ impl DecoderLayer {
             };
             let hidden = join(if from_normed { &normed } else { hidden }, attention, mixer)?;
             let normed = optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?;
-            let output = feed_forward_block.forward(&normed, mode.route)?;
+            let output = feed_forward_block.forward(&normed, mode)?;
             return join(if from_normed { &normed } else { &hidden }, output, feed_forward);
         }
         if self.parallel {
@@ -608,13 +737,13 @@ impl DecoderLayer {
                 Some(norm) => norm.forward(hidden, mode.pass)?,
                 None => normed,
             };
-            let feed_forward = feed_forward_block.forward(&feed_forward_input, mode.route)?;
+            let feed_forward = feed_forward_block.forward(&feed_forward_input, mode)?;
             return (hidden + self.scaled(attention)?)? + self.scaled(feed_forward)?;
         }
         let hidden = (hidden + self.scaled(attention)?)?;
         let feed_forward = feed_forward_block.forward(
             &optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?,
-            mode.route,
+            mode,
         )?;
         let feed_forward =
             optional_norm(self.feed_forward_output_norm.as_ref(), &feed_forward, mode.pass)?;

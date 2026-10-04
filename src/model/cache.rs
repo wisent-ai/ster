@@ -21,6 +21,10 @@ pub struct Cache {
     /// layer that runs attention and a scan side by side (Falcon-H1) keeps
     /// both.
     pub(super) states: Vec<Option<(Tensor, Tensor)>>,
+    /// The keys and values of the current call that Gemma 4's
+    /// key-value-sharing layers reuse, under the layer that produced them.
+    /// Rewritten on every call, whether or not `kvs` keeps a history.
+    pub(super) shared: Vec<Option<(Tensor, Tensor)>>,
     /// The global rotation, held in F32 whatever the weights are. See
     /// [`Cache::new`].
     pub(super) global: RotaryTable,
@@ -52,10 +56,11 @@ impl Cache {
     /// cache does not grow with `max_position_embeddings` (ten million for
     /// MiniMax-Text-01).
     ///
-    /// The architecture supplies the width the rotation spans (`rotary_dim`,
-    /// which a config may set apart from the head width), the scaling on the
-    /// global rotation, and a second base for sliding-window layers when the
-    /// family has one.
+    /// The architecture supplies the width the global rotation spans
+    /// (`rotary_dim`, which a config may set apart from the head width, or
+    /// Gemma 4's full-attention head width), the scaling on the global
+    /// rotation, and a second base for sliding-window layers when the family
+    /// has one, over `rotary_dim`.
     pub fn new(
         use_kv_cache: bool,
         dtype: DType,
@@ -63,7 +68,7 @@ impl Cache {
         architecture: &super::Architecture,
         device: &Device,
     ) -> Result<Self> {
-        let rotary_dim = architecture.rotary_dim;
+        let rotary_dim = architecture.global_rotary_dim();
         let global = rotary_frequencies(config, rotary_dim, config.rope_theta);
         let (global, long) = match &architecture.rope_scaling {
             RopeScaling::None => (RotaryTable::new(global, 1.0, device)?, None),
@@ -110,9 +115,25 @@ impl Cache {
                 )?,
                 None,
             ),
+            RopeScaling::Proportional { rotated, factor } => (
+                RotaryTable::new(
+                    global
+                        .into_iter()
+                        .enumerate()
+                        .map(|(pair, frequency)| if pair < *rotated { frequency / factor } else { 0.0 })
+                        .collect(),
+                    1.0,
+                    device,
+                )?,
+                None,
+            ),
         };
         let local = match architecture.local_rope_theta {
-            Some(theta) => Some(RotaryTable::new(base_frequencies(rotary_dim, theta), 1.0, device)?),
+            Some(theta) => Some(RotaryTable::new(
+                base_frequencies(architecture.rotary_dim, theta),
+                1.0,
+                device,
+            )?),
             None => None,
         };
         Ok(Self {
@@ -120,6 +141,7 @@ impl Cache {
             use_kv_cache,
             kvs: vec![None; config.num_hidden_layers],
             states: vec![None; config.num_hidden_layers],
+            shared: vec![None; config.num_hidden_layers],
             global,
             local,
             long,

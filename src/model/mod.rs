@@ -235,6 +235,25 @@ pub struct Architecture {
     pub scaled_residuals: Option<ScaledResiduals>,
     /// Zamba2's shared transformer blocks.
     pub shared_blocks: Option<SharedBlocksSpec>,
+    /// Gemma 4's full-attention layers: wider heads, their own key-value
+    /// head count, and values read from the key projection.
+    pub global_attention: Option<GlobalAttention>,
+    /// A scale-free RMS norm over each head's value (Gemma 4's `v_norm`).
+    pub value_norm: bool,
+    /// Gemma 4's key-value sharing: from this layer on, a layer projects
+    /// only its query and reuses the keys and values of the last earlier
+    /// layer of its own kind (`num_kv_shared_layers`).
+    pub shared_key_values: Option<usize>,
+    /// Gemma 4's per-layer inputs (`hidden_size_per_layer_input`).
+    pub per_layer_input: Option<PerLayerInputSpec>,
+    /// Gemma 4's experts beside the dense feed-forward on every layer: the
+    /// router reads the residual through a scale-free norm, the experts read
+    /// it through `pre_feedforward_layernorm_2`, and the two outputs, each
+    /// normed, are added.
+    pub side_experts: Option<MixtureOfExperts>,
+    /// Every block's output multiplied by its stored `layer_scalar`
+    /// (Gemma 4).
+    pub layer_scalar: bool,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -262,6 +281,31 @@ pub struct Architecture {
     /// LFM2's gated short convolution in place of attention on the layers it
     /// covers.
     pub short_convolution: Option<ShortConvolution>,
+}
+
+/// Gemma 4's full-attention layers: heads `head_dim` wide
+/// (`global_head_dim`), `key_value_heads` of them when the config states
+/// `num_global_key_value_heads`, and, under `key_is_value`
+/// (`attention_k_eq_v`), values taken from the key projection before its
+/// norm, with no `v_proj`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalAttention {
+    pub head_dim: usize,
+    pub key_value_heads: Option<usize>,
+    pub key_is_value: bool,
+}
+
+/// Gemma 4's per-layer inputs: `embed_tokens_per_layer` (`vocab` rows of
+/// `width` per layer, multiplied by `sqrt(width)`) beside
+/// `per_layer_model_projection` of the scaled embeddings (times
+/// `hidden_size^-0.5`, then `per_layer_projection_norm`), the two added and
+/// multiplied by `2^-0.5`. Each layer gates its slice with
+/// `per_layer_input_gate`, projects it back with `per_layer_projection`,
+/// normalises it with `post_per_layer_input_norm` and adds it to its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerLayerInputSpec {
+    pub width: usize,
+    pub vocab: usize,
 }
 
 /// LFM2's gated short convolution: `in_proj` to `B`, `C` and `x`, a causal
@@ -489,6 +533,12 @@ impl Architecture {
             lightning: None,
             scaled_residuals: None,
             shared_blocks: None,
+            global_attention: None,
+            value_norm: false,
+            shared_key_values: None,
+            per_layer_input: None,
+            side_experts: None,
+            layer_scalar: false,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
@@ -507,6 +557,38 @@ impl Architecture {
     pub fn window(&self, layer: usize) -> Option<usize> {
         let sliding = layer < 128 && self.sliding_layers & (1u128 << layer) != 0;
         self.sliding_window.filter(|_| sliding)
+    }
+
+    /// The full-attention spec layer `layer` uses: Gemma 4's on a layer
+    /// that attends past any window, `None` otherwise.
+    pub fn global_at(&self, layer: usize) -> Option<GlobalAttention> {
+        self.global_attention.filter(|_| self.window(layer).is_none())
+    }
+
+    /// How many components the global rotation spans: the full-attention
+    /// heads' width under Gemma 4's `global_head_dim`, `rotary_dim`
+    /// otherwise.
+    pub fn global_rotary_dim(&self) -> usize {
+        self.global_attention.map_or(self.rotary_dim, |global| global.head_dim)
+    }
+
+    /// The layer whose keys and values a Gemma 4 key-value-sharing layer
+    /// reuses: the last layer before the sharing ones whose attention is of
+    /// the same kind (sliding-window or full).
+    pub fn key_value_source(&self, layer: usize) -> Option<usize> {
+        let first = self.shared_key_values.filter(|first| layer >= *first)?;
+        let kind = self.window(layer).is_some();
+        (0..first).rev().find(|earlier| self.window(*earlier).is_some() == kind)
+    }
+
+    /// Whether `layer` is the one whose keys and values the sharing layers of
+    /// its kind reuse.
+    pub fn stores_key_values(&self, layer: usize) -> bool {
+        let Some(first) = self.shared_key_values.filter(|first| layer < *first) else {
+            return false;
+        };
+        let kind = self.window(layer).is_some();
+        (layer + 1..first).all(|later| self.window(later).is_some() != kind)
     }
 
     /// Whether layer `layer` applies the rotary embedding: never for a family
@@ -590,6 +672,11 @@ impl Architecture {
         // Step3's query passes a bottleneck and a norm before `wq`, so `wq`
         // reads no hidden state an adapter could share.
         if self.query_bottleneck.is_some() && target == Target::Query {
+            return None;
+        }
+        // Gemma 4's full-attention heads are wider than its sliding-window
+        // ones, so no attention projection has one shape on every layer.
+        if self.global_attention.is_some() && !feed_forward {
             return None;
         }
         if let Some(latent) = self.latent {
@@ -725,6 +812,8 @@ impl Architecture {
             let choices = choices.join(", ");
             let why = if self.query_bottleneck.is_some() && *target == Target::Query {
                 "its query passes a bottleneck and a norm (Step3's q_proj and inter_norm) before wq"
+            } else if self.global_attention.is_some() && !feed_forward_target(*target) {
+                "its full-attention layers' heads are wider than its sliding-window layers' (Gemma 4's global_head_dim)"
             } else if self.latent.is_some() && !feed_forward_target(*target) {
                 "its attention is latent (DeepSeek's low-rank query and key-value)"
             } else if self.experts.is_some() {
@@ -937,6 +1026,10 @@ pub enum ExpertLayout {
     /// `ffn.router.layer`, and every expert stacked in
     /// `ffn.experts.mlp.w1`, `v1` and `w2`, each `[experts · width, hidden]`.
     Dbrx,
+    /// `router.proj`, `router.scale` and `router.per_expert_scale`, and
+    /// every expert stacked in `experts.gate_up_proj` (`[experts, 2 · width,
+    /// hidden]`, gate rows first) and `experts.down_proj` (Gemma 4).
+    Gemma4,
 }
 
 /// Where a family keeps its tensors. `embeddings`, `positions`,
@@ -1387,6 +1480,10 @@ pub enum RopeScaling {
         beta_slow: f32,
         attention: f32,
     },
+    /// Gemma 4's proportional rotation: the first `rotated` frequency pairs
+    /// keep their value and the rest are zero, so those components pass
+    /// through unrotated; every frequency is divided by `factor`.
+    Proportional { rotated: usize, factor: f32 },
 }
 
 /// Where a query and key norm sits, if the family has one.

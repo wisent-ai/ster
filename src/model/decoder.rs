@@ -14,7 +14,7 @@ use super::{
     Architecture, Cache, ForwardOutput, Mode, Positions, Readout, SteeringPlan,
     attention::padded_causal_mask,
     layer::{
-        DecoderLayer,
+        DecoderLayer, LayerInputs,
         norm::{Norm, NormSpec},
         projection,
         shared::SharedBlock,
@@ -30,6 +30,8 @@ pub struct SteeringLlama {
     /// BLOOM's norm straight after the embedding.
     embedding_norm: Option<Norm>,
     layers: Vec<DecoderLayer>,
+    /// Gemma 4's per-layer input tables.
+    per_layer: Option<PerLayerEmbeddings>,
     final_norm: Norm,
     lm_head: Linear,
     config: Config,
@@ -117,6 +119,23 @@ impl SteeringLlama {
             )?
         };
         let final_norm = spec.load(config.hidden_size, builder.pp(names.final_norm))?;
+        let per_layer = match architecture.per_layer_input {
+            Some(per_layer) => {
+                let root = if names.root.is_empty() { builder.clone() } else { builder.pp(names.root) };
+                let packed = config.num_hidden_layers * per_layer.width;
+                Some(PerLayerEmbeddings {
+                    embeddings: embedding(per_layer.vocab, packed, root.pp("embed_tokens_per_layer"))?,
+                    projection: candle_nn::linear_no_bias(
+                        config.hidden_size,
+                        packed,
+                        root.pp("per_layer_model_projection"),
+                    )?,
+                    norm: spec.load(per_layer.width, root.pp("per_layer_projection_norm"))?,
+                    width: per_layer.width,
+                })
+            }
+            None => None,
+        };
         // Zamba2's shared blocks are mapped once, from the first hybrid
         // layers that use them, and every later use shares their tensors.
         let shared = match architecture.shared_blocks {
@@ -155,6 +174,7 @@ impl SteeringLlama {
             positions,
             embedding_norm,
             layers,
+            per_layer,
             final_norm,
             lm_head,
             config,
@@ -324,8 +344,6 @@ impl SteeringLlama {
     ) -> candle_core::Result<ForwardOutput> {
         let (_, sequence) = tokens.dims2()?;
         let mut hidden = self.embeddings.forward(tokens)?;
-        // Zamba2's hybrid layers read the embeddings beside the hidden state.
-        let embedded = hidden.clone();
         if let Some((table, offset)) = &self.positions {
             let first = (index_pos + offset) as u32;
             let rows = Tensor::arange(first, first + sequence as u32, tokens.device())?;
@@ -340,10 +358,21 @@ impl SteeringLlama {
             // before the first block.
             hidden = (hidden * multiplier)?;
         }
+        // Zamba2's hybrid layers read the embeddings beside the hidden state;
+        // Gemma 4 projects its per-layer inputs from them.
+        let embedded = hidden.clone();
+        let per_layer = match &self.per_layer {
+            Some(per_layer) => Some(per_layer.inputs(tokens, &embedded, self.layers.len(), mode)?),
+            None => None,
+        };
         let mut activations = BTreeMap::new();
         for (index, layer) in self.layers.iter().enumerate() {
             let mask = masks.map(|masks| masks.for_window(layer.window()));
-            hidden = layer.forward(&hidden, &embedded, index_pos, index, cache, mask, mode)?;
+            let inputs = LayerInputs {
+                embedded: &embedded,
+                per_layer: per_layer.as_ref().map(|all| all.i((.., .., index, ..))).transpose()?,
+            };
+            hidden = layer.forward(&hidden, &inputs, index_pos, index, cache, mask, mode)?;
             if capture_layers.binary_search(&index).is_ok() {
                 let activation = hidden
                     .i((0, sequence - 1, ..))?
@@ -398,6 +427,34 @@ impl SteeringLlama {
             Some(cap) => (logits / cap)?.tanh()? * cap,
             None => Ok(logits),
         }
+    }
+}
+
+/// Gemma 4's per-layer input tables, below the model root:
+/// `embed_tokens_per_layer`, `per_layer_model_projection` and
+/// `per_layer_projection_norm`.
+#[derive(Debug, Clone)]
+struct PerLayerEmbeddings {
+    embeddings: Embedding,
+    projection: Linear,
+    norm: Norm,
+    width: usize,
+}
+
+impl PerLayerEmbeddings {
+    /// Every layer's input, `[batch, sequence, layers, width]`: the token's
+    /// row of `embed_tokens_per_layer` times `sqrt(width)`, plus the scaled
+    /// embeddings projected, times `hidden_size^-0.5` and normed, the sum
+    /// times `2^-0.5`, as Transformers' `get_per_layer_inputs` and
+    /// `project_per_layer_inputs` compute them.
+    fn inputs(&self, tokens: &Tensor, embedded: &Tensor, layers: usize, mode: Mode) -> candle_core::Result<Tensor> {
+        let (batch, sequence) = tokens.dims2()?;
+        let hidden = embedded.dim(candle_core::D::Minus1)?;
+        let shape = (batch, sequence, layers, self.width);
+        let identity = (self.embeddings.forward(tokens)? * (self.width as f64).sqrt())?.reshape(shape)?;
+        let context = (self.projection.forward(embedded)? * (hidden as f64).powf(-0.5))?.reshape(shape)?;
+        let context = self.norm.forward(&context, mode.pass)?;
+        (context + identity)? * std::f64::consts::FRAC_1_SQRT_2
     }
 }
 

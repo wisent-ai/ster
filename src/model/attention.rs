@@ -68,6 +68,12 @@ pub(super) struct Attention {
     /// by [`Attention::with_low_rank`] on each invocation's copy of the
     /// shared block.
     low_rank: Option<Box<[LowRank; 3]>>,
+    /// Gemma 4's scale-free norm over each head's value.
+    value_norm: Option<Norm>,
+    /// This layer's keys and values are the ones Gemma 4's key-value-sharing
+    /// layers of its kind reuse; each call leaves them in the cache's
+    /// `shared` slot.
+    stores_key_values: bool,
 }
 
 /// A low-rank term `up(down(x))` the base model adds to a projection.
@@ -120,10 +126,21 @@ impl Attention {
         let names = architecture.names;
         let builder = layer_builder.pp(names.attention);
         let heads = config.num_attention_heads;
-        let key_value_heads = config.num_key_value_heads;
-        let head_dim = architecture.head_dim;
-        let query_width = architecture.attention_width(heads);
+        let window = architecture.window(layer);
+        // Gemma 4's full-attention layers have their own head width and
+        // key-value head count.
+        let global = architecture.global_at(layer);
+        let key_value_heads =
+            global.and_then(|global| global.key_value_heads).unwrap_or(config.num_key_value_heads);
+        let head_dim = global.map_or(architecture.head_dim, |global| global.head_dim);
+        let query_width = match global {
+            Some(_) => heads * head_dim,
+            None => architecture.attention_width(heads),
+        };
+        let value_dim = if global.is_some() { head_dim } else { architecture.value_dim() };
         let key_value_width = head_dim * key_value_heads;
+        // A Gemma 4 key-value-sharing layer projects its query alone.
+        let source = architecture.key_value_source(layer);
         let bias = architecture.query_key_value_bias;
         let conv1d = architecture.conv1d;
         // A LayerNorm family's query and key norms carry no bias; the others
@@ -139,7 +156,10 @@ impl Attention {
             QueryKeyNorm::None => (None, None),
             QueryKeyNorm::PerHead => (
                 Some(spec.load(head_dim, builder.pp(names.query_norm))?),
-                Some(spec.load(head_dim, builder.pp(names.key_norm))?),
+                match source {
+                    Some(_) => None,
+                    None => Some(spec.load(head_dim, builder.pp(names.key_norm))?),
+                },
             ),
             QueryKeyNorm::Full => (
                 Some(spec.load(query_width, builder.pp(names.query_norm))?),
@@ -154,7 +174,6 @@ impl Attention {
                 Some(spec.load_head_modules(key_value_heads, head_dim, builder.pp("k_layernorm"))?),
             ),
         };
-        let window = architecture.window(layer);
         let rotary = if !architecture.rotates(layer) {
             Rotary::None
         } else if window.is_some() && architecture.local_rope_theta.is_some() {
@@ -163,7 +182,12 @@ impl Attention {
             Rotary::Global
         };
         let mut output_gate = None;
-        let projections = if let Some(spec) = architecture.latent {
+        let projections = if let Some(source) = source {
+            Projections::QueryOnly {
+                query: projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
+                source,
+            }
+        } else if let Some(spec) = architecture.latent {
             Projections::Latent(Latent::load(&builder, input, heads, spec, bias, NormSpec::of(architecture))?)
         } else {
         let (query, key, value) = match architecture.qkv_layout {
@@ -192,7 +216,7 @@ impl Attention {
                 (
                     part(0)?,
                     projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
-                    projection(input, key_value_width, bias, conv1d, builder.pp(names.value))?,
+                    Some(projection(input, key_value_width, bias, conv1d, builder.pp(names.value))?),
                 )
             }
             QkvLayout::Separate => (
@@ -204,7 +228,13 @@ impl Attention {
                     builder.pp(names.query),
                 )?,
                 projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
-                projection(input, key_value_width, bias, conv1d, builder.pp(names.value))?,
+                // Gemma 4's full-attention layers under `attention_k_eq_v`
+                // have no `v_proj`: the value is the key projection.
+                if global.is_some_and(|global| global.key_is_value) {
+                    None
+                } else {
+                    Some(projection(input, key_value_width, bias, conv1d, builder.pp(names.value))?)
+                },
             ),
             // Phi-3, GPT-2 and GPT-BigCode store query, key and value as one
             // matrix, rows in that order. Each projection is a row slice of it
@@ -229,7 +259,7 @@ impl Attention {
                 (
                     slice(0, query_width)?,
                     slice(query_width, key_value_width)?,
-                    slice(query_width + key_value_width, key_value_width)?,
+                    Some(slice(query_width + key_value_width, key_value_width)?),
                 )
             }
             // GPT-NeoX, BLOOM and Falcon lay the rows out by key-value group:
@@ -258,7 +288,7 @@ impl Attention {
                             .transpose()?,
                     ))
                 };
-                (part(0, per_group)?, part(per_group, 1)?, part(per_group + 1, 1)?)
+                (part(0, per_group)?, part(per_group, 1)?, Some(part(per_group + 1, 1)?))
             }
             // TeleChat2 keeps the query apart and stacks each key-value
             // head's key rows, then its value rows, in one `key_value`
@@ -286,7 +316,7 @@ impl Attention {
                 (
                     projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
                     part(0)?,
-                    part(1)?,
+                    Some(part(1)?),
                 )
             }
         };
@@ -295,7 +325,7 @@ impl Attention {
         Ok(Self {
             projections,
             output: projection(
-                heads * architecture.value_dim(),
+                heads * value_dim,
                 config.hidden_size,
                 architecture.output_bias,
                 conv1d,
@@ -312,7 +342,9 @@ impl Attention {
             heads,
             key_value_heads: if architecture.latent.is_some() { heads } else { key_value_heads },
             head_dim,
-            value_dim: architecture.value_dim(),
+            value_dim,
+            value_norm: if architecture.value_norm { Some(spec.unscaled(head_dim, &builder)?) } else { None },
+            stores_key_values: architecture.stores_key_values(layer),
             window,
             rotary,
             interleaved: architecture.interleaved_rotary,
@@ -385,7 +417,9 @@ impl Attention {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, _) = hidden.dims3()?;
-        let (query, key, value) = match &self.projections {
+        // `None` for a Gemma 4 key-value-sharing layer, which projects only
+        // its query.
+        let (query, key_value) = match &self.projections {
             Projections::Standard { query, key, value } => {
                 let query = match &self.query_bottleneck {
                     Some((down, norm)) => {
@@ -395,14 +429,21 @@ impl Attention {
                     None => project(query, self.query_adapter.as_ref(), hidden, mode.route)?,
                 };
                 let key = project(key, self.key_adapter.as_ref(), hidden, mode.route)?;
+                // Gemma 4's full-attention layers under `attention_k_eq_v`
+                // take the value from the key projection, before any norm.
+                let value = match value {
+                    Some(value) => project(value, self.value_adapter.as_ref(), hidden, mode.route)?,
+                    None => key.clone(),
+                };
                 // Zamba2's per-invocation low-rank terms belong to the base
                 // model, so they apply on every route.
-                let (query, key) = match &self.low_rank {
+                let (query, key, value) = match &self.low_rank {
                     Some(low_rank) => (
                         (query + low_rank[0].forward(hidden)?)?,
                         (key + low_rank[1].forward(hidden)?)?,
+                        (value + low_rank[2].forward(hidden)?)?,
                     ),
-                    None => (query, key),
+                    None => (query, key, value),
                 };
                 // Falcon-H1 multiplies every key by `key_multiplier`.
                 let key = match self.key_scale {
@@ -420,11 +461,6 @@ impl Attention {
                 } else {
                     (query, key)
                 };
-                let value = project(value, self.value_adapter.as_ref(), hidden, mode.route)?;
-                let value = match &self.low_rank {
-                    Some(low_rank) => (value + low_rank[2].forward(hidden)?)?,
-                    None => value,
-                };
                 // OLMo, OLMoE and DBRX clip every query, key and value
                 // component to `±clip_qkv` (after OLMoE's norms).
                 let clip = |projected: Tensor| match self.clip_qkv {
@@ -433,25 +469,29 @@ impl Attention {
                 };
                 (
                     clip(query)?.reshape((batch, sequence, self.heads, self.head_dim))?,
-                    clip(key)?.reshape((batch, sequence, self.key_value_heads, self.head_dim))?,
-                    clip(value)?.reshape((batch, sequence, self.key_value_heads, self.value_dim))?,
+                    Some((
+                        clip(key)?.reshape((batch, sequence, self.key_value_heads, self.head_dim))?,
+                        clip(value)?.reshape((batch, sequence, self.key_value_heads, self.value_dim))?,
+                    )),
                 )
             }
             Projections::Latent(latent) => {
-                latent.forward(hidden, self.heads, self.query_adapter.as_ref(), mode)?
+                let (query, key, value) = latent.forward(hidden, self.heads, self.query_adapter.as_ref(), mode)?;
+                (query, Some((key, value)))
             }
+            Projections::QueryOnly { query, .. } => (
+                project(query, self.query_adapter.as_ref(), hidden, mode.route)?
+                    .reshape((batch, sequence, self.heads, self.head_dim))?,
+                None,
+            ),
         };
-        let (query, key) = if self.query_key_norm == QueryKeyNorm::Full || self.norm_after_rotary {
-            (query, key)
+        let norm_before_rotary = self.query_key_norm != QueryKeyNorm::Full && !self.norm_after_rotary;
+        let query = if norm_before_rotary {
+            optional_norm(self.query_norm.as_ref(), query, mode.pass)?
         } else {
-            (
-                optional_norm(self.query_norm.as_ref(), query, mode.pass)?,
-                optional_norm(self.key_norm.as_ref(), key, mode.pass)?,
-            )
+            query
         };
         let query = query.transpose(1, 2)?.contiguous()?;
-        let mut key = key.transpose(1, 2)?.contiguous()?;
-        let mut value = value.transpose(1, 2)?.contiguous()?;
         let table = match self.rotary {
             // LongRoPE switches every position to the long factors once the
             // sequence runs past the original context, as Phi-3 does.
@@ -471,24 +511,52 @@ impl Attention {
             Some(angles) => rotate(&query, angles)?,
             None => query,
         };
-        if let Some(angles) = &angles {
-            key = rotate(&key, angles)?;
-        }
-        let (query, mut key) = if self.norm_after_rotary {
-            (
-                optional_norm(self.query_norm.as_ref(), query, mode.pass)?,
-                optional_norm(self.key_norm.as_ref(), key, mode.pass)?,
-            )
+        let query = if self.norm_after_rotary {
+            optional_norm(self.query_norm.as_ref(), query, mode.pass)?
         } else {
-            (query, key)
+            query
         };
-        if cache.use_kv_cache {
-            if let Some((cached_key, cached_value)) = &cache.kvs[layer] {
-                key = Tensor::cat(&[cached_key, &key], 2)?.contiguous()?;
-                value = Tensor::cat(&[cached_value, &value], 2)?.contiguous()?;
+        let (key, value) = match key_value {
+            Some((key, value)) => {
+                let key = if norm_before_rotary {
+                    optional_norm(self.key_norm.as_ref(), key, mode.pass)?
+                } else {
+                    key
+                };
+                let value = optional_norm(self.value_norm.as_ref(), value, mode.pass)?;
+                let mut key = key.transpose(1, 2)?.contiguous()?;
+                let mut value = value.transpose(1, 2)?.contiguous()?;
+                if let Some(angles) = &angles {
+                    key = rotate(&key, angles)?;
+                }
+                if self.norm_after_rotary {
+                    key = optional_norm(self.key_norm.as_ref(), key, mode.pass)?;
+                }
+                if cache.use_kv_cache {
+                    if let Some((cached_key, cached_value)) = &cache.kvs[layer] {
+                        key = Tensor::cat(&[cached_key, &key], 2)?.contiguous()?;
+                        value = Tensor::cat(&[cached_value, &value], 2)?.contiguous()?;
+                    }
+                    cache.kvs[layer] = Some((key.clone(), value.clone()));
+                }
+                if self.stores_key_values {
+                    cache.shared[layer] = Some((key.clone(), value.clone()));
+                }
+                (key, value)
             }
-            cache.kvs[layer] = Some((key.clone(), value.clone()));
-        }
+            // The source layer ran earlier in this same call and left every
+            // key and value this one may see, history included.
+            None => {
+                let Projections::QueryOnly { source, .. } = &self.projections else {
+                    candle_core::bail!("layer {layer} has neither key and value projections nor a layer to share them from");
+                };
+                cache.shared[*source].clone().ok_or_else(|| {
+                    candle_core::Error::Msg(format!(
+                        "layer {layer} shares the keys and values of layer {source}, which left none in this call"
+                    ))
+                })?
+            }
+        };
         let repeats = self.heads / self.key_value_heads;
         let key = repeat_key_value(key, repeats)?;
         let value = repeat_key_value(value, repeats)?;
@@ -582,14 +650,19 @@ impl Attention {
 /// Where a layer's query, key and value come from.
 #[derive(Debug, Clone)]
 enum Projections {
-    /// One projection each (possibly row views of one fused tensor).
+    /// One projection each (possibly row views of one fused tensor); no
+    /// value projection where the value is the key projection (Gemma 4's
+    /// `attention_k_eq_v`).
     Standard {
         query: Linear,
         key: Linear,
-        value: Linear,
+        value: Option<Linear>,
     },
     /// DeepSeek's low-rank bottlenecks.
     Latent(Latent),
+    /// A Gemma 4 key-value-sharing layer: its query, and the layer whose
+    /// keys and values it reuses.
+    QueryOnly { query: Linear, source: usize },
 }
 
 /// Multi-head latent attention's projections, by DeepSeek's names below the

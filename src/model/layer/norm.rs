@@ -49,6 +49,17 @@ impl NormSpec {
         self.assemble(weight, bias)
     }
 
+    /// A norm over `width` that stores no scale, so its scale is a constant
+    /// one (Gemma 4's `v_norm` and its router's norm).
+    pub fn unscaled(self, width: usize, builder: &VarBuilder<'_>) -> candle_core::Result<Norm> {
+        Ok(Norm {
+            weight: Tensor::ones(width, builder.dtype(), builder.device())?,
+            bias: None,
+            kind: self.kind,
+            eps: self.eps,
+        })
+    }
+
     /// A per-head norm whose scale is one `[heads, head_dim]` tensor
     /// (Cohere's `q_norm` and `k_norm`).
     pub fn load_head_weights(

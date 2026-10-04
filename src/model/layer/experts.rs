@@ -80,6 +80,10 @@ pub(super) struct Experts {
     /// The expert every token goes through, and Qwen2-MoE's sigmoid gate
     /// that scales it (DeepSeek's shared experts are added as they are).
     shared: Option<(Expert, Option<Linear>)>,
+    /// Gemma 4's `router.per_expert_scale`, `[1, experts]` in F32: each
+    /// chosen expert's weight is multiplied by its own scale after the
+    /// renormalisation.
+    expert_scales: Option<Tensor>,
     spec: MixtureOfExperts,
     activation: Activation,
 }
@@ -229,6 +233,32 @@ impl Experts {
                     .collect::<candle_core::Result<Vec<_>>>()?;
                 (linear_no_bias(hidden, count, block.pp("router").pp("layer"))?, experts)
             }
+            // Gemma 4 stacks every expert's gate rows above its up rows in
+            // `experts.gate_up_proj` `[experts, 2 · width, hidden]` and keeps
+            // `experts.down_proj` `[experts, hidden, width]`; each expert is a
+            // view of its slice. Its router multiplies the normed input by
+            // `router.scale` and by `hidden^-0.5` before `router.proj`; both
+            // fold into the projection's columns once at load.
+            ExpertLayout::Gemma4 => {
+                let block = builder.pp("experts");
+                let gate_up = block.get((count, 2 * intermediate, hidden), "gate_up_proj")?;
+                let down = block.get((count, hidden, intermediate), "down_proj")?;
+                let experts = (0..count)
+                    .map(|expert| -> candle_core::Result<Expert> {
+                        let rows = gate_up.get(expert)?;
+                        Ok(Expert {
+                            gate: Some(Linear::new(rows.narrow(0, 0, intermediate)?, None)),
+                            up: Linear::new(rows.narrow(0, intermediate, intermediate)?, None),
+                            down: Linear::new(down.get(expert)?, None),
+                        })
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()?;
+                let router = builder.pp("router");
+                let scale = (router.get(hidden, "scale")? * (hidden as f64).powf(-0.5))?;
+                let projection = router.get((count, hidden), "proj.weight")?;
+                let weight = projection.broadcast_mul(&scale.reshape((1, hidden))?)?;
+                (Linear::new(weight, None), experts)
+            }
         };
         let shared = match spec.shared {
             Some(SharedExpert { intermediate, module, gated, form }) => {
@@ -286,11 +316,23 @@ impl Experts {
             }
             None => None,
         };
+        let expert_scales = if spec.layout == ExpertLayout::Gemma4 {
+            Some(
+                builder
+                    .pp("router")
+                    .get(count, "per_expert_scale")?
+                    .to_dtype(DType::F32)?
+                    .reshape((1, count))?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             router,
             selection_bias,
             experts,
             shared,
+            expert_scales,
             spec: spec.clone(),
             activation,
         })
@@ -363,12 +405,22 @@ impl Experts {
     /// `exp` and `sum`, `index_select`, `index_add`, the mask multiply — has a
     /// backward pass.
     pub(super) fn forward(&self, hidden: &Tensor) -> candle_core::Result<Tensor> {
+        self.forward_routed(hidden, hidden)
+    }
+
+    /// [`Experts::forward`] with the router reading `router_input` rather
+    /// than the experts' input (Gemma 4's router reads the residual through
+    /// a scale-free norm, its experts through `pre_feedforward_layernorm_2`).
+    pub(super) fn forward_routed(&self, router_input: &Tensor, hidden: &Tensor) -> candle_core::Result<Tensor> {
         let (batch, sequence, width) = hidden.dims3()?;
         let tokens = batch * sequence;
         let flat = hidden.reshape((tokens, width))?;
         let device = flat.device();
         let count = self.experts.len();
-        let logits = self.router.forward(&flat)?.to_dtype(DType::F32)?;
+        let logits = self
+            .router
+            .forward(&router_input.reshape((tokens, router_input.dim(D::Minus1)?))?)?
+            .to_dtype(DType::F32)?;
         let mut routed: Vec<Vec<u32>> = vec![Vec::new(); count];
         let weights = match self.spec.scoring {
             Scoring::Softmax => self.ranked(candle_nn::ops::softmax(&logits, D::Minus1)?, &mut routed)?,
@@ -380,6 +432,10 @@ impl Experts {
         };
         let weights = match self.spec.routed_scale {
             Some(scale) => (weights * scale)?,
+            None => weights,
+        };
+        let weights = match &self.expert_scales {
+            Some(scales) => weights.broadcast_mul(scales)?,
             None => weights,
         };
         let mut output = flat.zeros_like()?;
