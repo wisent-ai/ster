@@ -31,17 +31,24 @@ impl FeedForward {
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
+        let (hidden, intermediate) = (config.hidden_size, config.intermediate_size);
+        // Phi-3 stores the gate and up projections as one `gate_up_proj`,
+        // gate rows first; each is a row slice of that mapped weight.
+        let (gate, up) = if architecture.fused_projections {
+            let fused = builder.get((2 * intermediate, hidden), "gate_up_proj.weight")?;
+            (
+                Linear::new(fused.narrow(0, 0, intermediate)?, None),
+                Linear::new(fused.narrow(0, intermediate, intermediate)?, None),
+            )
+        } else {
+            (
+                linear_no_bias(hidden, intermediate, builder.pp("gate_proj"))?,
+                linear_no_bias(hidden, intermediate, builder.pp("up_proj"))?,
+            )
+        };
         Ok(Self {
-            gate: linear_no_bias(
-                config.hidden_size,
-                config.intermediate_size,
-                builder.pp("gate_proj"),
-            )?,
-            up: linear_no_bias(
-                config.hidden_size,
-                config.intermediate_size,
-                builder.pp("up_proj"),
-            )?,
+            gate,
+            up,
             down: linear_no_bias(
                 config.intermediate_size,
                 config.hidden_size,

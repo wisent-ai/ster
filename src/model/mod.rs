@@ -104,6 +104,9 @@ pub use decoder::SteeringLlama;
 ///   config's `layer_types` when it lists them, otherwise from the family:
 ///   every layer for Mistral, layers from `max_window_layers` on for Qwen2 and
 ///   Qwen3 with `use_sliding_window`, every even layer for Gemma 2.
+/// * **Fused projections** — Phi-3 stores query, key and value as one
+///   `qkv_proj` and the gate and up projections as one `gate_up_proj`; each
+///   is split back into the separate projections at load.
 /// * **Gemma's conventions** — every RMS norm scales by `1 + weight`, the
 ///   embedding is multiplied by `sqrt(hidden_size)`, the feed-forward gate is
 ///   the tanh-approximated GELU, and the word embeddings are tied.
@@ -119,6 +122,7 @@ pub struct Architecture {
     pub sliding_window: Option<usize>,
     /// Bit `i` set means layer `i` attends through the sliding window.
     pub sliding_layers: u128,
+    pub fused_projections: bool,
     pub norm_offset: bool,
     pub embedding_scale: bool,
     pub activation: Activation,
@@ -141,6 +145,7 @@ impl Architecture {
             output_bias: false,
             sliding_window: None,
             sliding_layers: 0,
+            fused_projections: false,
             norm_offset: false,
             embedding_scale: false,
             activation: Activation::Silu,

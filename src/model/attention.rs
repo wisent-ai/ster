@@ -76,10 +76,33 @@ impl Attention {
         } else {
             (None, None)
         };
+        // Phi-3 stores query, key and value as one `qkv_proj` matrix, rows in
+        // that order. Each projection is a row slice of it — a view of the
+        // mapped weight, not a copy — so every adapter site stays separate.
+        let (query, key, value) = if architecture.fused_projections {
+            let fused = builder.get(
+                (query_width + 2 * key_value_width, input),
+                "qkv_proj.weight",
+            )?;
+            (
+                Linear::new(fused.narrow(0, 0, query_width)?, None),
+                Linear::new(fused.narrow(0, query_width, key_value_width)?, None),
+                Linear::new(
+                    fused.narrow(0, query_width + key_value_width, key_value_width)?,
+                    None,
+                ),
+            )
+        } else {
+            (
+                projection(input, query_width, bias, builder.pp("q_proj"))?,
+                projection(input, key_value_width, bias, builder.pp("k_proj"))?,
+                projection(input, key_value_width, bias, builder.pp("v_proj"))?,
+            )
+        };
         Ok(Self {
-            query: projection(input, query_width, bias, builder.pp("q_proj"))?,
-            key: projection(input, key_value_width, bias, builder.pp("k_proj"))?,
-            value: projection(input, key_value_width, bias, builder.pp("v_proj"))?,
+            query,
+            key,
+            value,
             output: projection(
                 query_width,
                 input,

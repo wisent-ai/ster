@@ -13,7 +13,8 @@ use serde_json::Value;
 use crate::model::{Activation, Architecture};
 
 /// The `model_type` values the decoder implements.
-pub(super) const FAMILIES: &[&str] = &["llama", "mistral", "qwen2", "qwen3", "gemma", "gemma2"];
+pub(super) const FAMILIES: &[&str] =
+    &["llama", "mistral", "qwen2", "qwen3", "phi3", "gemma", "gemma2"];
 
 /// What `model_type` adds to the Llama block, from the config's own keys.
 pub(super) fn family(
@@ -28,6 +29,12 @@ pub(super) fn family(
         architecture.head_dim = head_dim;
         architecture.score_divisor = (head_dim as f64).sqrt();
     }
+    if let Some(factor) = number(raw, "partial_rotary_factor").filter(|factor| *factor != 1.0) {
+        bail!(
+            "{} rotates only a {factor} share of each head (partial_rotary_factor); Ster rotates the whole head",
+            path.display()
+        );
+    }
     let gemma = model_type.starts_with("gemma");
     if !gemma {
         if let Some(activation) = text(raw, "hidden_act").filter(|name| *name != "silu") {
@@ -38,12 +45,14 @@ pub(super) fn family(
         }
     }
     match model_type {
-        "llama" | "mistral" => {
+        "llama" | "mistral" | "phi3" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
+            architecture.fused_projections = model_type == "phi3";
             // Mistral v0.2 and later publish `sliding_window: null`, which is
-            // full attention on every layer.
-            if model_type == "mistral" {
+            // full attention on every layer; Phi-3 states a window it applies
+            // on every layer.
+            if model_type != "llama" {
                 architecture.sliding_window = whole(raw, "sliding_window");
                 if architecture.sliding_window.is_some() {
                     architecture.sliding_layers = every_layer(layers, path)?;

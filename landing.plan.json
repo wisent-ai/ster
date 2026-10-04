@@ -180,7 +180,7 @@
         },
         {
           "question": "What checkpoints can the current runtime use?",
-          "answer": "The runtime supports local and Hugging Face Llama, Mistral, Qwen2, Qwen3, Gemma and Gemma 2 Safetensors checkpoints on CPU, with compile-time Metal and CUDA backends."
+          "answer": "The runtime supports local and Hugging Face Llama, Mistral, Qwen2, Qwen3, Phi-3, Gemma and Gemma 2 Safetensors checkpoints on CPU, with compile-time Metal and CUDA backends."
         },
         {
           "question": "What stops a vector from the wrong model being applied?",
