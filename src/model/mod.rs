@@ -149,6 +149,9 @@ pub struct Architecture {
     /// states a `partial_rotary_factor`.
     pub rotary_dim: usize,
     pub query_key_norm: QueryKeyNorm,
+    /// Normalise each head's query and key after the rotation (HunYuan)
+    /// rather than before it.
+    pub norm_after_rotary: bool,
     pub query_key_value_bias: bool,
     pub output_bias: bool,
     /// Bias on the feed-forward projections (Starcoder2, Phi-2, Nemotron's
@@ -279,6 +282,7 @@ impl Architecture {
             head_dim,
             rotary_dim: head_dim,
             query_key_norm: QueryKeyNorm::None,
+            norm_after_rotary: false,
             query_key_value_bias: false,
             output_bias: false,
             feed_forward_bias: false,
@@ -678,6 +682,10 @@ pub struct Names {
     pub feed_forward_output_norm: &'static str,
     /// A state-space mixer, below a layer.
     pub state_space: &'static str,
+    /// The per-head or whole-projection query and key norms, below the
+    /// attention block.
+    pub query_norm: &'static str,
+    pub key_norm: &'static str,
 }
 
 impl Names {
@@ -725,6 +733,8 @@ impl Names {
         feed_forward_norm: "post_attention_layernorm",
         feed_forward_output_norm: "post_feedforward_layernorm",
         state_space: "mamba",
+        query_norm: "q_norm",
+        key_norm: "k_norm",
     };
     /// Gemma 2 and 3: `post_attention_layernorm` is over attention's output,
     /// so the norm before the feed-forward is `pre_feedforward_layernorm`.
@@ -929,6 +939,13 @@ impl Names {
         down: "mlp.c_proj",
         attention_norm: "ln_1",
         feed_forward_norm: "ln_2",
+        ..Self::LLAMA
+    };
+    /// HunYuan's per-head query and key norms are `query_layernorm` and
+    /// `key_layernorm`.
+    pub const HUNYUAN: Self = Self {
+        query_norm: "query_layernorm",
+        key_norm: "key_layernorm",
         ..Self::LLAMA
     };
 }

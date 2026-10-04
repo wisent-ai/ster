@@ -73,13 +73,14 @@ pub(super) enum Family {
     InternLm2,
     Exaone,
     Jamba,
+    HunYuanDense,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 50] = [
+    pub(super) const ALL: [Self; 51] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -127,6 +128,7 @@ impl Family {
         Self::InternLm2,
         Self::Exaone,
         Self::Jamba,
+        Self::HunYuanDense,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -187,6 +189,7 @@ impl Family {
             Self::InternLm2 => "internlm2",
             Self::Exaone => "exaone",
             Self::Jamba => "jamba",
+            Self::HunYuanDense => "hunyuan_v1_dense",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -346,12 +349,38 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
         "default" | "linear" | "longrope" | "yarn" => Ok(raw
             .as_object_mut()
             .and_then(|object| object.remove("rope_scaling"))),
+        // HunYuan states `dynamic` with an `alpha`: a fixed NTK-aware base,
+        // `rope_theta * alpha^(d / (d - 2))` over the head width `d`, the
+        // same at every length.
+        "dynamic" if scaling.get("alpha").and_then(Value::as_f64).is_some() => {
+            let alpha = scaling.get("alpha").and_then(Value::as_f64).unwrap_or(1.0);
+            let width = whole(raw, "head_dim").or_else(|| {
+                Some(whole(raw, "hidden_size")? / whole(raw, "num_attention_heads")?.max(1))
+            });
+            let Some(width) = width.filter(|width| *width > 2) else {
+                bail!(
+                    "{} declares dynamic rope_scaling with alpha but no head width to scale by",
+                    path.display()
+                );
+            };
+            let theta = number(raw, "rope_theta").unwrap_or(DEFAULT_ROPE_THETA);
+            let scaled = theta * alpha.powf(width as f64 / (width as f64 - 2.0));
+            if let Some(object) = raw.as_object_mut() {
+                object.remove("rope_scaling");
+                object.insert("rope_theta".to_owned(), Value::from(scaled));
+            }
+            Ok(None)
+        }
         other => bail!(
-            "{} declares rope_scaling {other:?}; Ster implements llama3, linear, longrope and yarn rotary scaling",
+            "{} declares rope_scaling {other:?}; Ster implements llama3, linear, longrope, yarn and HunYuan's alpha-scaled dynamic rotary scaling",
             path.display()
         ),
     }
 }
+
+/// The rotary base a config without `rope_theta` uses, Llama's and Candle's
+/// default.
+const DEFAULT_ROPE_THETA: f64 = 10_000.0;
 
 fn scaling_kind(scaling: &Value) -> &str {
     scaling
@@ -897,6 +926,18 @@ pub(super) fn family(
             architecture.qkv_layout = QkvLayout::Grouped;
             architecture.query_key_value_bias = flag(raw, "bias");
             architecture.output_bias = architecture.query_key_value_bias;
+        }
+        "hunyuan_v1_dense" => {
+            // HunYuan: per-head query and key norms named `query_layernorm`
+            // and `key_layernorm`, applied after the rotation.
+            architecture.names = Names::HUNYUAN;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            if flag(raw, "use_qk_norm") {
+                architecture.query_key_norm = QueryKeyNorm::PerHead;
+                architecture.norm_after_rotary = true;
+            }
         }
         "exaone" => {
             // EXAONE 3 and 3.5: Llama's block under GPT-2-style names.

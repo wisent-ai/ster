@@ -31,6 +31,9 @@ pub(super) struct Attention {
     query_norm: Option<Norm>,
     key_norm: Option<Norm>,
     query_key_norm: QueryKeyNorm,
+    /// Normalise each head's query and key after the rotation rather than
+    /// before it (HunYuan).
+    norm_after_rotary: bool,
     heads: usize,
     key_value_heads: usize,
     head_dim: usize,
@@ -91,16 +94,16 @@ impl Attention {
         let (query_norm, key_norm) = match architecture.query_key_norm {
             QueryKeyNorm::None => (None, None),
             QueryKeyNorm::PerHead => (
-                Some(spec.load(head_dim, builder.pp("q_norm"))?),
-                Some(spec.load(head_dim, builder.pp("k_norm"))?),
+                Some(spec.load(head_dim, builder.pp(names.query_norm))?),
+                Some(spec.load(head_dim, builder.pp(names.key_norm))?),
             ),
             QueryKeyNorm::Full => (
-                Some(spec.load(query_width, builder.pp("q_norm"))?),
-                Some(spec.load(key_value_width, builder.pp("k_norm"))?),
+                Some(spec.load(query_width, builder.pp(names.query_norm))?),
+                Some(spec.load(key_value_width, builder.pp(names.key_norm))?),
             ),
             QueryKeyNorm::HeadWeights => (
-                Some(spec.load_head_weights(heads, head_dim, builder.pp("q_norm"))?),
-                Some(spec.load_head_weights(key_value_heads, head_dim, builder.pp("k_norm"))?),
+                Some(spec.load_head_weights(heads, head_dim, builder.pp(names.query_norm))?),
+                Some(spec.load_head_weights(key_value_heads, head_dim, builder.pp(names.key_norm))?),
             ),
             QueryKeyNorm::HeadModules => (
                 Some(spec.load_head_modules(heads, head_dim, builder.pp("q_layernorm"))?),
@@ -197,6 +200,7 @@ impl Attention {
             query_norm,
             key_norm,
             query_key_norm: architecture.query_key_norm,
+            norm_after_rotary: architecture.norm_after_rotary,
             heads,
             key_value_heads: if architecture.latent.is_some() { heads } else { key_value_heads },
             head_dim,
@@ -270,7 +274,7 @@ impl Attention {
                 latent.forward(hidden, self.heads, self.query_adapter.as_ref(), mode)?
             }
         };
-        let (query, key) = if self.query_key_norm == QueryKeyNorm::Full {
+        let (query, key) = if self.query_key_norm == QueryKeyNorm::Full || self.norm_after_rotary {
             (query, key)
         } else {
             (
@@ -301,6 +305,14 @@ impl Attention {
         if let Some(tables) = tables {
             key = rotate(&key, tables)?;
         }
+        let (query, mut key) = if self.norm_after_rotary {
+            (
+                optional_norm(self.query_norm.as_ref(), query, mode.pass)?,
+                optional_norm(self.key_norm.as_ref(), key, mode.pass)?,
+            )
+        } else {
+            (query, key)
+        };
         if cache.use_kv_cache {
             if let Some((cached_key, cached_value)) = &cache.kvs[layer] {
                 key = Tensor::cat(&[cached_key, &key], 2)?.contiguous()?;

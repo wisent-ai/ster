@@ -41,8 +41,8 @@ Included now:
   `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `gpt2`,
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
   `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
-  `internlm2`, `exaone`, `jamba`, `smollm3`, `gemma`, `gemma2` or
-  `gemma3_text`. Coverage is measured
+  `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `smollm3`, `gemma`,
+  `gemma2` or `gemma3_text`. Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Mamba and Falcon-Mamba replace attention with a selective state-space
@@ -108,7 +108,8 @@ Included now:
   `hidden_act` (or `activation_function`) is not silu, gelu,
   gelu_pytorch_tanh, gelu_new, gelu_fast, relu or relu2, that rotates an odd
   or empty share of each head, whose `rope_scaling` is not `llama3`,
-  `linear`, Phi-3's `longrope` or `yarn`, or that asks for a variant the decoder
+  `linear`, Phi-3's `longrope`, `yarn` or HunYuan's `dynamic` with an
+  `alpha` (a fixed base of `rope_theta * alpha^(d / (d - 2))`), or that asks for a variant the decoder
   does not implement (GPT-2's `scale_attn_by_inverse_layer_idx`, OPT's
   post-norm `do_layer_norm_before: false` or `word_embed_proj_dim`, BLOOM's
   `apply_residual_connection_post_layernorm`). Adapter targets a family has
