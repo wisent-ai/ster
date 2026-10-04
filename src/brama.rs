@@ -41,10 +41,6 @@ pub const BEARER_VAR: &str = "BRAMA_BEARER";
 /// Brama refuses `max_tokens` outside `1..=32768`; see [`Gateway::complete`].
 const MAX_TOKENS_LIMIT: usize = 32_768;
 
-/// How much of an unrecognized error body is worth quoting back. Long enough to
-/// identify a proxy's HTML error page, short enough not to flood a terminal.
-const BODY_EXCERPT: usize = 240;
-
 pub struct Gateway {
     base: String,
     bearer: String,
@@ -245,13 +241,19 @@ fn refusal(status: u16, body: &str) -> anyhow::Error {
     }
 }
 
+/// An unrecognized error body as a refusal quotes it: a proxy's HTML error
+/// page by its title, anything else whole.
 fn excerpt(body: &str) -> String {
     let body = body.trim();
     if body.is_empty() {
         return "<empty body>".to_owned();
     }
-    match body.char_indices().nth(BODY_EXCERPT) {
-        Some((cut, _)) => format!("{}…", &body[..cut]),
+    let title = body
+        .split_once("<title>")
+        .and_then(|(_, rest)| rest.split_once("</title>"))
+        .map(|(title, _)| title.trim());
+    match title {
+        Some(title) => format!("an HTML page titled {title:?} ({} bytes)", body.len()),
         None => body.to_owned(),
     }
 }
