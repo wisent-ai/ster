@@ -117,10 +117,12 @@ pub(super) enum Family {
     ExaoneMoe,
     Solar,
     Step1,
+    TeleChat3,
+    Param2Moe,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 90] = [
+    pub(super) const ALL: [Self; 92] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -211,6 +213,8 @@ impl Family {
         Self::ExaoneMoe,
         Self::Solar,
         Self::Step1,
+        Self::TeleChat3,
+        Self::Param2Moe,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -311,6 +315,8 @@ impl Family {
             Self::ExaoneMoe => "exaone_moe",
             Self::Solar => "solar",
             Self::Step1 => "step1",
+            Self::TeleChat3 => "telechat3",
+            Self::Param2Moe => "param2moe",
         }
     }
 
@@ -575,7 +581,7 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
     };
     match scaling_kind(scaling) {
         "llama3" => Ok(None),
-        "default" | "linear" | "longrope" | "yarn" | "proportional" => Ok(raw
+        "default" | "linear" | "longrope" | "yarn" | "telechat3-yarn" | "proportional" => Ok(raw
             .as_object_mut()
             .and_then(|object| object.remove("rope_scaling"))),
         // HunYuan states `dynamic` with an `alpha`: a fixed NTK-aware base,
@@ -610,7 +616,7 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
             Ok(None)
         }
         other => bail!(
-            "{} declares rope_scaling {other:?}; Ster implements llama3, linear, longrope, yarn and dynamic rotary scaling",
+            "{} declares rope_scaling {other:?}; Ster implements llama3, linear, longrope, yarn, telechat3-yarn, proportional and dynamic rotary scaling",
             path.display()
         ),
     }
@@ -684,7 +690,10 @@ fn rope_scaling(
                 long_attention: magnitude("long_mscale") as f32,
             })
         }
-        "yarn" => {
+        // TeleChat3's `telechat3-yarn` is YaRN with a gentler temperature
+        // slope (its `_compute_telechat_yarn_parameters`).
+        kind @ ("yarn" | "telechat3-yarn") => {
+            let slope = if kind == "yarn" { YARN_SLOPE } else { TELECHAT3_YARN_SLOPE };
             let Some(factor) = scaling.get("factor").and_then(Value::as_f64) else {
                 bail!("{} declares yarn rope_scaling with no factor", path.display());
             };
@@ -698,8 +707,8 @@ fn rope_scaling(
             // magnitude is `mscale / mscale_all_dim` when both are stated,
             // otherwise the stated `attention_factor`, otherwise YaRN's own.
             let attention = match (stated("mscale"), stated("mscale_all_dim")) {
-                (Some(mscale), Some(all)) => yarn_mscale(factor, mscale) / yarn_mscale(factor, all),
-                _ => stated("attention_factor").unwrap_or_else(|| yarn_mscale(factor, 1.0)),
+                (Some(mscale), Some(all)) => yarn_mscale(factor, mscale, slope) / yarn_mscale(factor, all, slope),
+                _ => stated("attention_factor").unwrap_or_else(|| yarn_mscale(factor, 1.0, slope)),
             };
             Ok(RopeScaling::Yarn {
                 factor: factor as f32,
@@ -732,14 +741,19 @@ fn proportional(scaling: &Value, width: usize) -> RopeScaling {
 const YARN_BETA_FAST: f64 = 32.0;
 const YARN_BETA_SLOW: f64 = 1.0;
 
+/// YaRN's temperature slope (Peng et al., 2023; Transformers'
+/// `get_mscale`), and TeleChat3's (`get_mscale` in its
+/// `modeling_telechat3.py`).
+const YARN_SLOPE: f64 = 0.1;
+const TELECHAT3_YARN_SLOPE: f64 = 0.07;
+
 /// YaRN's attention temperature for a context stretched by `factor`:
-/// `0.1 * mscale * ln(factor) + 1`, or one when nothing is stretched.
-fn yarn_mscale(factor: f64, mscale: f64) -> f64 {
-    const SLOPE: f64 = 0.1;
+/// `slope * mscale * ln(factor) + 1`, or one when nothing is stretched.
+fn yarn_mscale(factor: f64, mscale: f64, slope: f64) -> f64 {
     if factor <= 1.0 {
         1.0
     } else {
-        SLOPE * mscale * factor.ln() + 1.0
+        slope * mscale * factor.ln() + 1.0
     }
 }
 
@@ -809,7 +823,7 @@ pub(super) fn family(
             .and_then(Value::as_f64)
             .filter(|value| *value != 0.0);
         if let (RopeScaling::Yarn { factor, .. }, Some(all)) = (&architecture.rope_scaling, all) {
-            let temperature = yarn_mscale(f64::from(*factor), all);
+            let temperature = yarn_mscale(f64::from(*factor), all, YARN_SLOPE);
             architecture.score_divisor /= temperature * temperature;
         }
     }
@@ -1266,6 +1280,14 @@ pub(super) fn family(
                 weight: inference,
             });
         }
+        "telechat3" => {
+            // TeleChat3: Llama's block with `attention_bias` on every
+            // attention projection and `mlp_bias`; its `telechat3-yarn`
+            // rotation is read with the other scalings.
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+        }
         "step1" => {
             // Step1 (Step-Audio's language model): Llama's block with
             // `num_attention_groups` key-value heads and no rotation;
@@ -1613,7 +1635,8 @@ pub(super) fn family(
                 structured: Some(heads),
             });
         }
-        "bailing_moe" => {
+        // Param2-MoE is Ling 2.0's block and router under its own name.
+        "bailing_moe" | "param2moe" => {
             // Ling 1.x and 2.0: Llama's block under Bailing's names, one
             // stacked `query_key_value`, per-head query and key norms when
             // `use_qk_norm` holds, the first `first_k_dense_replace` layers
