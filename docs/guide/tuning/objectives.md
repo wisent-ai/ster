@@ -158,12 +158,21 @@ smaller one is refused with
 `--temperature` must exceed zero for the same reason `pairs synthesize`
 requires it: argmax would draw one identical completion per group.
 
-`--reward` names where a completion's score comes from, and the two sources
+`--reward` names where a completion's score comes from, and the three sources
 exist for different reasons. `length`, the default, counts the tokens the
 policy emitted — a deterministic function with no model behind it, which is
 what makes the loop runnable and checkable with no judge, no artifact and no
-download. If reward does not rise under it, the bug is in the loop. Anything
-else is a path to a reward artifact from `ster tune reward`, loaded frozen
+download. If reward does not rise under it, the bug is in the loop. An
+`http://` or `https://` address is an outside scorer, for a quality Ster holds
+no model of (an AI-text detector, a house judge): every completion is posted as
+`{"text": "<completion>"}`, with `STER_REWARD_BEARER` as the bearer when it is
+set, and the reward is the number at the JSON pointer the address's fragment
+names — `--reward 'https://detector.example/score#/ai_probability'`; the
+fragment is not sent. An address without a fragment is refused with
+`reward scorer "…" names no field`, and a scorer that answers an HTTP error,
+something other than JSON, or no number at the pointer stops the run with
+what it answered, because a missing reward is not a zero. Anything else is a
+path to a reward artifact from `ster tune reward`, loaded frozen
 beside the policy; a generation adapter passed there is refused with
 `adapter artifact is a generation adapter, not a reward model`, and a path that
 is neither with

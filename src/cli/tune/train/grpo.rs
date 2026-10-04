@@ -25,8 +25,10 @@ pub(in crate::cli) struct GrpoArgs {
     #[arg(long)]
     output: PathBuf,
     /// Where a completion's reward comes from: the keyword length, which
-    /// counts sampled tokens and needs no judge, or the path to a reward
-    /// artifact written by ster tune reward.
+    /// counts sampled tokens and needs no judge; the path to a reward
+    /// artifact written by ster tune reward; or an outside scorer,
+    /// http(s)://host/path#/json/pointer, sent {"text": completion} (with
+    /// STER_REWARD_BEARER as the bearer when set) and read at the pointer.
     #[arg(long, default_value = "length")]
     reward: String,
     /// Completions sampled per prompt. Their mean is the baseline, which is

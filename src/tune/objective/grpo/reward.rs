@@ -11,17 +11,21 @@ use crate::{
 };
 
 use super::super::RewardModel;
+use super::scorer::Scorer;
 
 /// Where a completion's reward comes from.
 ///
-/// The two arms exist for different reasons and neither is a placeholder for
-/// the other. [`Reward::Length`] is a deterministic function of the completion
+/// The arms exist for different reasons and none is a placeholder for
+/// another. [`Reward::Length`] is a deterministic function of the completion
 /// with no model behind it, which is what makes the loop runnable and checkable
 /// with no judge, no artifact and no download — if reward does not rise under
-/// it, the bug is in the loop. [`Reward::Model`] is the real thing.
+/// it, the bug is in the loop. [`Reward::Model`] is a reward Ster trained;
+/// [`Reward::Scorer`] is one only an outside service can give.
 pub enum Reward {
     Length,
     Model(Box<RewardModel>),
+    /// An outside scorer over HTTP ([`Scorer`]); the completion's text only.
+    Scorer(Scorer),
 }
 
 impl Reward {
@@ -29,7 +33,8 @@ impl Reward {
     /// be ambiguous; the keyword wins, and the refusal below says so.
     pub const LENGTH: &'static str = "length";
 
-    /// Resolves `--reward`: the keyword, or a path to a reward artifact.
+    /// Resolves `--reward`: the keyword, an `http(s)://…#/pointer` scorer,
+    /// or a path to a reward artifact.
     pub fn parse(
         value: &str,
         model: &str,
@@ -44,6 +49,9 @@ impl Reward {
         }
         if trimmed == Self::LENGTH {
             return Ok(Self::Length);
+        }
+        if let Some(scorer) = Scorer::parse(trimmed)? {
+            return Ok(Self::Scorer(scorer));
         }
         let path = Path::new(trimmed);
         if !path.exists() {
@@ -60,6 +68,7 @@ impl Reward {
         match self {
             Self::Length => Self::LENGTH.to_owned(),
             Self::Model(_) => format!("reward:{requested}"),
+            Self::Scorer(_) => format!("scorer:{requested}"),
         }
     }
 
@@ -78,6 +87,7 @@ impl Reward {
                 ids.extend_from_slice(&completion.tokens);
                 model.score(&ids)
             }
+            Self::Scorer(scorer) => scorer.score(&completion.text),
         }
     }
 }

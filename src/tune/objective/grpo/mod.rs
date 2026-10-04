@@ -55,6 +55,7 @@ use crate::{
 mod group;
 mod reward;
 mod rollout;
+mod scorer;
 
 pub use reward::{GrpoIteration, GrpoOptions, GrpoReport, Reward};
 pub use rollout::{Rollout, UserSimulator, rollout};
