@@ -53,6 +53,8 @@ pub(super) struct Attention {
     /// GPT-OSS's learned sink per head, `[1, heads, 1, 1]` in F32: one extra
     /// logit every query's softmax divides by and no value is read for.
     sinks: Option<Tensor>,
+    /// The bound every query, key and value component is clamped to.
+    clip_qkv: Option<f64>,
 }
 
 /// Which rotary table this layer rotates its query and key with.
@@ -226,6 +228,7 @@ impl Attention {
                 }
                 _ => None,
             },
+            clip_qkv: architecture.clip_qkv,
             sinks: if architecture.attention_sinks {
                 Some(
                     layer_builder
@@ -278,10 +281,16 @@ impl Attention {
                     (query, key)
                 };
                 let value = project(value, self.value_adapter.as_ref(), hidden, mode.route)?;
+                // OLMo, OLMoE and DBRX clip every query, key and value
+                // component to `±clip_qkv` (after OLMoE's norms).
+                let clip = |projected: Tensor| match self.clip_qkv {
+                    Some(limit) => projected.clamp(-limit, limit),
+                    None => Ok(projected),
+                };
                 (
-                    query.reshape((batch, sequence, self.heads, self.head_dim))?,
-                    key.reshape((batch, sequence, self.key_value_heads, self.head_dim))?,
-                    value.reshape((batch, sequence, self.key_value_heads, self.value_dim))?,
+                    clip(query)?.reshape((batch, sequence, self.heads, self.head_dim))?,
+                    clip(key)?.reshape((batch, sequence, self.key_value_heads, self.head_dim))?,
+                    clip(value)?.reshape((batch, sequence, self.key_value_heads, self.value_dim))?,
                 )
             }
             Projections::Latent(latent) => {

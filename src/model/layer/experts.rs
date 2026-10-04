@@ -175,6 +175,27 @@ impl Experts {
                     .collect::<candle_core::Result<Vec<_>>>()?;
                 (candle_nn::linear(hidden, count, block.pp("router"))?, experts)
             }
+            // DBRX stacks every expert's rows: `w1` (gate) and `v1` (up) are
+            // `[experts · width, hidden]` as a projection stores them, and
+            // `w2` is the same shape, so each expert's down projection is
+            // its rows turned once at load.
+            ExpertLayout::Dbrx => {
+                let block = builder.pp("ffn");
+                let mlp = block.pp("experts").pp("mlp");
+                let stacked = |name: &str| mlp.get((count * intermediate, hidden), name);
+                let (gate, up, down) = (stacked("w1")?, stacked("v1")?, stacked("w2")?);
+                let experts = (0..count)
+                    .map(|expert| -> candle_core::Result<Expert> {
+                        let rows = |tensor: &Tensor| tensor.narrow(0, expert * intermediate, intermediate);
+                        Ok(Expert {
+                            gate: Linear::new(rows(&gate)?, None),
+                            up: Linear::new(rows(&up)?, None),
+                            down: Linear::new(rows(&down)?.t()?.contiguous()?, None),
+                        })
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()?;
+                (linear_no_bias(hidden, count, block.pp("router").pp("layer"))?, experts)
+            }
         };
         let shared = match spec.shared {
             Some(SharedExpert { intermediate, gated }) => {

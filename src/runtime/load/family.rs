@@ -80,13 +80,14 @@ pub(super) enum Family {
     GptOss,
     Lfm2,
     Ernie45Moe,
+    Dbrx,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 56] = [
+    pub(super) const ALL: [Self; 57] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -140,6 +141,7 @@ impl Family {
         Self::GptOss,
         Self::Lfm2,
         Self::Ernie45Moe,
+        Self::Dbrx,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -206,6 +208,7 @@ impl Family {
             Self::GptOss => "gpt_oss",
             Self::Lfm2 => "lfm2",
             Self::Ernie45Moe => "ernie4_5_moe",
+            Self::Dbrx => "dbrx",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -242,8 +245,8 @@ impl Family {
 /// Transformers' `OPTLearnedPositionalEmbedding` reads `position + offset`.
 const OPT_POSITION_OFFSET: usize = 2;
 
-/// OLMo 1's configs state no norm epsilon; Transformers' `OlmoLayerNorm`
-/// passes this one to `F.layer_norm` itself.
+/// OLMo 1's and DBRX's configs state no norm epsilon; their LayerNorms use
+/// PyTorch's default, which this is.
 const OLMO_NORM_EPS: f64 = 1e-5;
 
 /// GPT-J, GPT-2, GPT-BigCode and BLOOM make the feed-forward this many times
@@ -261,15 +264,31 @@ const GPT_INNER_PER_HIDDEN: u64 = 4;
 /// an inner width get four times the residual; GPT-BigCode's `multi_query`
 /// becomes one key-value head.
 pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
+    // DBRX keeps its attention and feed-forward settings in `attn_config` and
+    // `ffn_config`; they are lifted beside the rest before any key is read,
+    // never over a key the top level already states.
+    if model_type == "dbrx" {
+        let nested: Vec<(String, Value)> = ["attn_config", "ffn_config"]
+            .iter()
+            .filter_map(|section| raw.get(*section).and_then(Value::as_object))
+            .flat_map(|section| section.iter().map(|(key, value)| (key.clone(), value.clone())))
+            .collect();
+        if let Some(object) = raw.as_object_mut() {
+            for (key, value) in nested {
+                object.entry(key).or_insert(value);
+            }
+        }
+    }
     let aliases: &[(&str, &[&str])] = &[
         ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]),
         ("hidden_size", &["n_embd", "n_embed", "d_model"]),
         ("num_hidden_layers", &["n_layer", "n_layers", "num_layers"]),
         ("num_attention_heads", &["n_head", "n_heads"]),
+        ("num_key_value_heads", &["kv_n_heads"]),
         ("max_position_embeddings", &["n_positions", "max_seq_len"]),
         ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
         ("rope_theta", &["rotary_emb_base"]),
-        ("num_experts_per_tok", &["moe_k"]),
+        ("num_experts_per_tok", &["moe_k", "moe_top_k"]),
     ];
     for (llama, spellings) in aliases {
         if raw.get(*llama).is_some_and(|value| !value.is_null()) {
@@ -284,7 +303,8 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     }
     let missing = |raw: &Value, key: &str| raw.get(key).map_or(true, Value::is_null);
     let mut defaults: Vec<(&str, Value)> = Vec::new();
-    if model_type == "olmo" && missing(raw, "rms_norm_eps") {
+    // OLMo 1 and DBRX state no epsilon; their LayerNorms use PyTorch's.
+    if matches!(model_type, "olmo" | "dbrx") && missing(raw, "rms_norm_eps") {
         defaults.push(("rms_norm_eps", Value::from(OLMO_NORM_EPS)));
     }
     let four_times = matches!(model_type, "gptj" | "gpt2" | "gpt_bigcode" | "bloom" | "falcon");
@@ -690,12 +710,7 @@ pub(super) fn family(
             }
         }
         "olmoe" => {
-            if raw.get("clip_qkv").is_some_and(|clip| !clip.is_null()) {
-                bail!(
-                    "{} declares clip_qkv; Ster implements OLMoE without clipping query, key and value",
-                    path.display()
-                );
-            }
+            architecture.clip_qkv = number(raw, "clip_qkv");
             architecture.query_key_norm = QueryKeyNorm::Full;
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
@@ -800,16 +815,38 @@ pub(super) fn family(
             }
         }
         "olmo" => {
-            if raw.get("clip_qkv").is_some_and(|clip| !clip.is_null()) {
-                bail!(
-                    "{} declares clip_qkv; Ster implements OLMo without clipping query, key and value",
-                    path.display()
-                );
-            }
             // OLMo 1's LayerNorm stores neither a scale nor a bias.
             architecture.norm = NormKind::Bare;
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
+            architecture.clip_qkv = number(raw, "clip_qkv");
+        }
+        "dbrx" => {
+            // DBRX: LayerNorms without bias, one `Wqkv` clipped to
+            // `clip_qkv`, and a mixture of `moe_num_experts` experts whose
+            // top `moe_top_k` weights are divided by their p-norm, p being
+            // `moe_normalize_expert_weights`.
+            let normalize = match raw.get("moe_normalize_expert_weights") {
+                None | Some(Value::Null) => false,
+                Some(power) if power.as_f64() == Some(1.0) => true,
+                Some(other) => bail!(
+                    "{} normalises expert weights by their {other}-norm; Ster implements the 1-norm (moe_normalize_expert_weights 1) or none",
+                    path.display()
+                ),
+            };
+            architecture.names = Names::DBRX;
+            architecture.norm = NormKind::Layer { bias: false };
+            architecture.qkv_layout = QkvLayout::Stacked;
+            architecture.clip_qkv = number(raw, "clip_qkv");
+            architecture.experts = Some(experts(
+                raw,
+                "moe_num_experts",
+                "intermediate_size",
+                normalize,
+                ExpertLayout::Dbrx,
+                0,
+                path,
+            )?);
         }
         "exaone4" => {
             // OLMo 2's post-norm block with per-head query and key norms.

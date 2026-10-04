@@ -155,6 +155,9 @@ pub struct Architecture {
     /// A learned sink logit per head in every softmax (GPT-OSS's
     /// `self_attn.sinks`).
     pub attention_sinks: bool,
+    /// `clip_qkv`: every query, key and value component clamped to this
+    /// bound (OLMo, OLMoE, DBRX).
+    pub clip_qkv: Option<f64>,
     pub query_key_value_bias: bool,
     pub output_bias: bool,
     /// Bias on the feed-forward projections (Starcoder2, Phi-2, Nemotron's
@@ -318,6 +321,7 @@ impl Architecture {
             query_key_norm: QueryKeyNorm::None,
             norm_after_rotary: false,
             attention_sinks: false,
+            clip_qkv: None,
             query_key_value_bias: false,
             output_bias: false,
             feed_forward_bias: false,
@@ -700,6 +704,9 @@ pub enum ExpertLayout {
     /// `mlp.router` (with bias) and every expert stacked inputs-first in
     /// `mlp.experts.gate_up_proj` and `down_proj`, with biases.
     GptOss,
+    /// `ffn.router.layer`, and every expert stacked in
+    /// `ffn.experts.mlp.w1`, `v1` and `w2`, each `[experts · width, hidden]`.
+    Dbrx,
 }
 
 /// Where a family keeps its tensors. `embeddings`, `positions`,
@@ -1013,6 +1020,21 @@ impl Names {
     pub const HUNYUAN: Self = Self {
         query_norm: "query_layernorm",
         key_norm: "key_layernorm",
+        ..Self::LLAMA
+    };
+    /// DBRX: everything below `transformer`, `blocks.{i}` with
+    /// `norm_attn_norm.norm_1`, `norm_attn_norm.attn.Wqkv` and `out_proj`,
+    /// `norm_attn_norm.norm_2`, and `norm_f`.
+    pub const DBRX: Self = Self {
+        root: "transformer",
+        embeddings: "transformer.wte",
+        layers: "transformer.blocks",
+        final_norm: "transformer.norm_f",
+        attention: "norm_attn_norm.attn",
+        fused_qkv: "Wqkv",
+        output: "norm_attn_norm.attn.out_proj",
+        attention_norm: "norm_attn_norm.norm_1",
+        feed_forward_norm: "norm_attn_norm.norm_2",
         ..Self::LLAMA
     };
     /// LFM2: `operator_norm` before the convolution or attention (whose
