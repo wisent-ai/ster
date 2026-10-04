@@ -67,7 +67,7 @@ impl Attention {
     pub(super) fn load(
         builder: VarBuilder<'_>,
         config: &Config,
-        architecture: Architecture,
+        architecture: &Architecture,
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
@@ -196,7 +196,12 @@ impl Attention {
             .transpose(1, 2)?
             .contiguous()?;
         let tables = match self.rotary {
-            Rotary::Global => Some((&cache.cos, &cache.sin)),
+            // LongRoPE switches every position to the long factors once the
+            // sequence runs past the original context, as Phi-3 does.
+            Rotary::Global => match &cache.long {
+                Some((cos, sin, original)) if index_pos + sequence > *original => Some((cos, sin)),
+                _ => Some((&cache.cos, &cache.sin)),
+            },
             Rotary::Local => cache.local.as_ref().map(|(cos, sin)| (cos, sin)),
             Rotary::None => None,
         };
@@ -318,6 +323,11 @@ pub(super) fn project(
 /// At F32 every cast here short-circuits to a handle clone
 /// (candle-core-0.11.0/src/tensor.rs:2453), so the F32 path is unchanged down
 /// to the op it records.
+///
+/// The tables are `rotary_dim / 2` wide. When that is narrower than the head
+/// (a config's `partial_rotary_factor`), only the head's first `rotary_dim`
+/// components rotate and the rest pass through, as Phi-4-mini, GPT-NeoX and
+/// StableLM do.
 fn apply_rotary(
     input: &Tensor,
     index_pos: usize,
@@ -326,13 +336,26 @@ fn apply_rotary(
     weights: DType,
     pass: Pass,
 ) -> candle_core::Result<Tensor> {
-    let (_, _, sequence, _) = input.dims4()?;
+    let (_, _, sequence, head_dim) = input.dims4()?;
+    let rotary_dim = 2 * cos.dim(1)?;
     let cos = cos.narrow(0, index_pos, sequence)?;
     let sin = sin.narrow(0, index_pos, sequence)?;
     let input = input.to_dtype(DType::F32)?;
+    let (rotating, kept) = if rotary_dim < head_dim {
+        (
+            input.narrow(3, 0, rotary_dim)?,
+            Some(input.narrow(3, rotary_dim, head_dim - rotary_dim)?),
+        )
+    } else {
+        (input, None)
+    };
     let rotated = match pass {
-        Pass::Inference => candle_nn::rotary_emb::rope(&input.contiguous()?, &cos, &sin)?,
-        Pass::Differentiable => rope_composed(&input, &cos, &sin)?,
+        Pass::Inference => candle_nn::rotary_emb::rope(&rotating.contiguous()?, &cos, &sin)?,
+        Pass::Differentiable => rope_composed(&rotating, &cos, &sin)?,
+    };
+    let rotated = match kept {
+        Some(kept) => Tensor::cat(&[&rotated, &kept], 3)?,
+        None => rotated,
     };
     rotated.to_dtype(weights)
 }

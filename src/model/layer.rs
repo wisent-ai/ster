@@ -27,7 +27,7 @@ impl FeedForward {
     pub(super) fn load(
         builder: VarBuilder<'_>,
         config: &Config,
-        architecture: Architecture,
+        architecture: &Architecture,
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
@@ -96,7 +96,7 @@ impl DecoderLayer {
     pub(super) fn load(
         builder: VarBuilder<'_>,
         config: &Config,
-        architecture: Architecture,
+        architecture: &Architecture,
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {

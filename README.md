@@ -48,16 +48,19 @@ Included now:
   Phi-3's fused `qkv_proj` and `gate_up_proj` (split at load, and merged back
   row by row by `ster tune merge`), OLMo 2's norms after each sublayer instead
   of before it, Granite's embedding, residual, attention and logit
-  multipliers, SmolLM3's unrotated `no_rope_layers`, `linear` rotary scaling,
+  multipliers, SmolLM3's unrotated `no_rope_layers`, rotation of only the
+  `partial_rotary_factor` share of each head (Phi-4-mini), `linear` rotary
+  scaling and Phi-3's `longrope` (short factors within the original context,
+  long ones past it),
   and Gemma's `1 + weight` norms, scaled embedding, tanh GELU gate and tied
   embeddings, plus Gemma 2's and 3's post-attention and post-feed-forward
   norms, `query_pre_attn_scalar` and logit soft-capping, and Gemma 3's
   separate `rope_local_base_freq` on sliding-window layers. A quantized
   checkpoint (one that declares `quantization_config`, such as GPTQ) is
   refused with the sentence that names it, as is a config whose `hidden_act`
-  is not `silu` where the family's gate is SiLU, that rotates only part of
-  each head (`partial_rotary_factor`), or whose `rope_scaling` is neither
-  `llama3` nor `linear`;
+  is not `silu` where the family's gate is SiLU, that rotates an odd or empty
+  share of each head (`partial_rotary_factor`), or whose `rope_scaling` is not
+  `llama3`, `linear` or Phi-3's `longrope`;
 - CPU execution, with compile-time Metal and CUDA backends;
 - pair-set authoring and inspection for duplicates, refusals, length balance,
   and diversity, with no model loaded;

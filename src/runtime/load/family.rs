@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
-use crate::model::{Activation, Architecture, QueryKeyNorm};
+use crate::model::{Activation, Architecture, QueryKeyNorm, RopeScaling};
 
 /// The `model_type` values the decoder implements.
 pub(super) const FAMILIES: &[&str] = &[
@@ -28,40 +28,96 @@ pub(super) const FAMILIES: &[&str] = &[
     "gemma3_text",
 ];
 
-/// A `rope_scaling` Candle's Llama config cannot read, taken out of the
-/// config before it is parsed and applied by Ster itself: the factor of a
-/// `linear` scaling, which divides every rotary angle.
-pub(super) fn linear_rope_factor(raw: &mut Value, path: &Path) -> Result<Option<f32>> {
+/// A `rope_scaling` Candle's Llama config cannot read (anything but Llama
+/// 3's), taken out of the config before it is parsed so Ster can apply it
+/// itself. Returns what was taken.
+pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<Value>> {
     let Some(scaling) = raw.get("rope_scaling").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
-    let kind = scaling
-        .get("rope_type")
-        .or_else(|| scaling.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    match kind {
-        "llama3" | "default" => Ok(None),
-        "linear" => {
-            let Some(factor) = scaling.get("factor").and_then(Value::as_f64) else {
-                bail!("{} declares linear rope_scaling with no factor", path.display());
-            };
-            if let Some(object) = raw.as_object_mut() {
-                object.remove("rope_scaling");
-            }
-            Ok(Some(factor as f32))
-        }
+    match scaling_kind(scaling) {
+        "llama3" => Ok(None),
+        "default" | "linear" | "longrope" => Ok(raw
+            .as_object_mut()
+            .and_then(|object| object.remove("rope_scaling"))),
         other => bail!(
-            "{} declares rope_scaling {other:?}; Ster implements llama3 and linear rotary scaling",
+            "{} declares rope_scaling {other:?}; Ster implements llama3, linear and longrope rotary scaling",
             path.display()
         ),
     }
 }
 
-/// What `model_type` adds to the Llama block, from the config's own keys.
+fn scaling_kind(scaling: &Value) -> &str {
+    scaling
+        .get("rope_type")
+        .or_else(|| scaling.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+/// The scaling [`take_rope_scaling`] took, over `rotary_dim` components.
+fn rope_scaling(
+    scaling: Option<&Value>,
+    rotary_dim: usize,
+    raw: &Value,
+    llama: &LlamaConfig,
+    path: &Path,
+) -> Result<RopeScaling> {
+    let Some(scaling) = scaling else {
+        return Ok(RopeScaling::None);
+    };
+    match scaling_kind(scaling) {
+        "linear" => {
+            let Some(factor) = scaling.get("factor").and_then(Value::as_f64) else {
+                bail!("{} declares linear rope_scaling with no factor", path.display());
+            };
+            Ok(RopeScaling::Linear(factor as f32))
+        }
+        "longrope" => {
+            let factors = |key: &str| -> Result<Vec<f32>> {
+                let values: Option<Vec<f32>> = scaling
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .and_then(|list| list.iter().map(|v| v.as_f64().map(|v| v as f32)).collect());
+                match values {
+                    Some(values) if values.len() == rotary_dim / 2 => Ok(values),
+                    _ => bail!(
+                        "{} declares longrope {key} that is not {} numbers, one per rotated frequency",
+                        path.display(),
+                        rotary_dim / 2
+                    ),
+                }
+            };
+            let (short, long) = (factors("short_factor")?, factors("long_factor")?);
+            // Phi-3 states the original context at the top level and derives
+            // the factor from it, as Transformers does.
+            let maximum = llama.max_position_embeddings;
+            let (original, factor) = match whole(raw, "original_max_position_embeddings") {
+                Some(original) => (original, maximum as f64 / original as f64),
+                None => (maximum, scaling.get("factor").and_then(Value::as_f64).unwrap_or(1.0)),
+            };
+            let attention = match scaling.get("attention_factor").and_then(Value::as_f64) {
+                Some(attention) => attention,
+                None if factor <= 1.0 => 1.0,
+                None => (1.0 + factor.ln() / (original as f64).ln()).sqrt(),
+            };
+            Ok(RopeScaling::LongRope {
+                short,
+                long,
+                original,
+                attention: attention as f32,
+            })
+        }
+        _ => Ok(RopeScaling::None),
+    }
+}
+
+/// What `model_type` adds to the Llama block, from the config's own keys and
+/// the `rope_scaling` [`take_rope_scaling`] took out of them.
 pub(super) fn family(
     model_type: &str,
     raw: &Value,
+    scaling: Option<&Value>,
     llama: &LlamaConfig,
     path: &Path,
 ) -> Result<Architecture> {
@@ -71,12 +127,20 @@ pub(super) fn family(
         architecture.head_dim = head_dim;
         architecture.score_divisor = (head_dim as f64).sqrt();
     }
+    architecture.rotary_dim = architecture.head_dim;
     if let Some(factor) = number(raw, "partial_rotary_factor").filter(|factor| *factor != 1.0) {
-        bail!(
-            "{} rotates only a {factor} share of each head (partial_rotary_factor); Ster rotates the whole head",
-            path.display()
-        );
+        // Transformers truncates the product, then rotates halves of it.
+        let rotary_dim = (architecture.head_dim as f64 * factor) as usize;
+        if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > architecture.head_dim {
+            bail!(
+                "{} rotates {rotary_dim} of {} components per head (partial_rotary_factor {factor}); the rotated width must be even, above zero and at most the head",
+                path.display(),
+                architecture.head_dim
+            );
+        }
+        architecture.rotary_dim = rotary_dim;
     }
+    architecture.rope_scaling = rope_scaling(scaling, architecture.rotary_dim, raw, llama, path)?;
     let gemma = model_type.starts_with("gemma");
     if !gemma {
         if let Some(activation) = text(raw, "hidden_act").filter(|name| *name != "silu") {

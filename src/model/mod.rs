@@ -124,9 +124,17 @@ pub use decoder::SteeringLlama;
 /// * **Rotary per layer** — SmolLM3 skips the rotary embedding on the layers
 ///   its `no_rope_layers` marks; Gemma 3 rotates local layers with
 ///   `rope_local_base_freq` and global ones with `rope_theta`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// * **Partial rotation** — `partial_rotary_factor` rotates only the first
+///   share of each head (Phi-4-mini); the rest passes through.
+/// * **Rotary scaling** — `linear` divides every angle by a factor; Phi-3's
+///   `longrope` rescales each frequency by a stated factor, a short list
+///   inside the original context and a long one beyond it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Architecture {
     pub head_dim: usize,
+    /// How many components of each head rotate: `head_dim` unless the config
+    /// states a `partial_rotary_factor`.
+    pub rotary_dim: usize,
     pub query_key_norm: QueryKeyNorm,
     pub query_key_value_bias: bool,
     pub output_bias: bool,
@@ -138,9 +146,9 @@ pub struct Architecture {
     /// The rotary base sliding-window layers use, when it differs from
     /// `rope_theta` (Gemma 3).
     pub local_rope_theta: Option<f32>,
-    /// Linear position scaling on the global rotary table: every angle is
-    /// divided by it (`rope_scaling` of type `linear`).
-    pub rope_linear_factor: Option<f32>,
+    /// A rotary scaling Ster applies itself; Llama 3's is carried by Candle's
+    /// config instead.
+    pub rope_scaling: RopeScaling,
     pub fused_projections: bool,
     pub norm_offset: bool,
     /// What the embedding is multiplied by before the first block.
@@ -169,6 +177,7 @@ impl Architecture {
         let head_dim = hidden_size / heads;
         Self {
             head_dim,
+            rotary_dim: head_dim,
             query_key_norm: QueryKeyNorm::None,
             query_key_value_bias: false,
             output_bias: false,
@@ -176,7 +185,7 @@ impl Architecture {
             sliding_layers: 0,
             unrotated_layers: 0,
             local_rope_theta: None,
-            rope_linear_factor: None,
+            rope_scaling: RopeScaling::None,
             fused_projections: false,
             norm_offset: false,
             embedding_multiplier: None,
@@ -206,6 +215,23 @@ impl Architecture {
     pub fn attention_width(&self, heads: usize) -> usize {
         heads * self.head_dim
     }
+}
+
+/// A rotary scaling read from the config's `rope_scaling`, beyond Llama 3's.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RopeScaling {
+    None,
+    /// Every angle divided by the factor.
+    Linear(f32),
+    /// Phi-3's LongRoPE: each frequency divided by its own factor, from
+    /// `short` while the sequence is within `original` positions and from
+    /// `long` once it goes beyond, and both tables multiplied by `attention`.
+    LongRope {
+        short: Vec<f32>,
+        long: Vec<f32>,
+        original: usize,
+        attention: f32,
+    },
 }
 
 /// Where a query and key norm sits, if the family has one.

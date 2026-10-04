@@ -45,7 +45,7 @@ impl Runtime {
     ) -> Result<Self> {
         let base = BaseLoad::resolve(model, revision, device, precision)?;
         let builder = base.builder()?;
-        let model_impl = SteeringLlama::load(builder, base.config.clone(), base.architecture)?;
+        let model_impl = SteeringLlama::load(builder, base.config.clone(), base.architecture.clone())?;
         Ok(base.finish(model, model_impl))
     }
 
@@ -149,7 +149,7 @@ impl Runtime {
         let model_impl = SteeringLlama::load_with_adapters(
             builder,
             base.config.clone(),
-            base.architecture,
+            base.architecture.clone(),
             adapters,
         )?;
         Ok((base.finish(model, model_impl), artifact))
@@ -207,7 +207,7 @@ impl Runtime {
         let model_impl = SteeringLlama::load_with_adapters(
             builder,
             base.config.clone(),
-            base.architecture,
+            base.architecture.clone(),
             adapters,
         )?;
         Ok((base.finish(model, model_impl), varmap))

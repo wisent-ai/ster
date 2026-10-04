@@ -74,7 +74,7 @@ impl SteeringLlama {
                 DecoderLayer::load(
                     builder.pp(format!("model.layers.{index}")),
                     &config,
-                    architecture,
+                    &architecture,
                     index,
                     &adapters,
                 )

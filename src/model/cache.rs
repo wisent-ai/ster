@@ -7,6 +7,8 @@ use candle_core::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_transformers::models::llama::{Config, Llama3RopeConfig, Llama3RopeType};
 
+use super::RopeScaling;
+
 #[derive(Debug, Clone)]
 pub struct Cache {
     masks: HashMap<(usize, usize, Option<usize>), Tensor>,
@@ -18,6 +20,9 @@ pub struct Cache {
     /// The tables sliding-window layers rotate with, when the family gives
     /// them their own base (Gemma 3's `rope_local_base_freq`).
     pub(super) local: Option<(Tensor, Tensor)>,
+    /// LongRoPE's tables for a sequence that runs past the original context,
+    /// and that context's length.
+    pub(super) long: Option<(Tensor, Tensor, usize)>,
     /// The dtype the base weights were mapped at. [`apply_rotary`] casts each
     /// rotated query and key back to it, so a half-precision checkpoint keeps
     /// a half-precision key-value cache and residual stream.
@@ -33,15 +38,15 @@ impl Cache {
     /// `max_position_embeddings` does — two neighbouring positions late in the
     /// context round to the same angle, which rotates two different tokens
     /// identically and is invisible in the loss. The tables are one
-    /// `[positions, head_dim / 2]` matrix, so holding them wide costs a few
+    /// `[positions, rotary_dim / 2]` matrix, so holding them wide costs a few
     /// megabytes once rather than per forward, and [`apply_rotary`] casts each
     /// query and key back to the weights' dtype afterwards so the key-value
     /// cache still stores half-precision keys.
     ///
-    /// The architecture supplies the head width the rotation spans (a config
-    /// may state it apart from `hidden_size / num_attention_heads`), a linear
-    /// position scaling for the global table, and a second base for
-    /// sliding-window layers when the family has one.
+    /// The architecture supplies the width the rotation spans (`rotary_dim`,
+    /// which a config may set apart from the head width), the scaling on the
+    /// global table, and a second base for sliding-window layers when the
+    /// family has one.
     pub fn new(
         use_kv_cache: bool,
         dtype: DType,
@@ -49,18 +54,40 @@ impl Cache {
         architecture: &super::Architecture,
         device: &Device,
     ) -> Result<Self> {
-        let head_dim = architecture.head_dim;
-        let mut global = rotary_frequencies(config, head_dim, config.rope_theta);
-        if let Some(factor) = architecture.rope_linear_factor {
-            for frequency in &mut global {
-                *frequency /= factor;
+        let rotary_dim = architecture.rotary_dim;
+        let positions = config.max_position_embeddings;
+        let global = rotary_frequencies(config, rotary_dim, config.rope_theta);
+        let ((cos, sin), long) = match &architecture.rope_scaling {
+            RopeScaling::None => (angle_tables(global, positions, 1.0, device)?, None),
+            RopeScaling::Linear(factor) => (
+                angle_tables(
+                    global.into_iter().map(|frequency| frequency / factor).collect(),
+                    positions,
+                    1.0,
+                    device,
+                )?,
+                None,
+            ),
+            RopeScaling::LongRope {
+                short,
+                long,
+                original,
+                attention,
+            } => {
+                let rescaled = |factors: &[f32]| -> Vec<f32> {
+                    global.iter().zip(factors).map(|(frequency, factor)| frequency / factor).collect()
+                };
+                let short = angle_tables(rescaled(short), positions, *attention, device)?;
+                let (long_cos, long_sin) =
+                    angle_tables(rescaled(long), positions, *attention, device)?;
+                (short, Some((long_cos, long_sin, *original)))
             }
-        }
-        let (cos, sin) = angle_tables(global, config.max_position_embeddings, device)?;
+        };
         let local = match architecture.local_rope_theta {
             Some(theta) => Some(angle_tables(
-                base_frequencies(head_dim, theta),
-                config.max_position_embeddings,
+                base_frequencies(rotary_dim, theta),
+                positions,
+                1.0,
                 device,
             )?),
             None => None,
@@ -72,6 +99,7 @@ impl Cache {
             cos,
             sin,
             local,
+            long,
             weights: dtype,
             device: device.clone(),
         })
@@ -113,10 +141,12 @@ pub(super) fn hidden_key(query: usize, key: usize, window: Option<usize>) -> boo
 }
 
 /// `cos` and `sin` of every position times every frequency, `[positions,
-/// head_dim / 2]`, in F32.
+/// rotary_dim / 2]`, in F32, each multiplied by `magnitude` (LongRoPE's
+/// attention factor; one otherwise, where the multiply is skipped).
 fn angle_tables(
     frequencies: Vec<f32>,
     positions: usize,
+    magnitude: f32,
     device: &Device,
 ) -> Result<(Tensor, Tensor)> {
     let theta = Tensor::new(frequencies, device)?;
@@ -124,7 +154,11 @@ fn angle_tables(
         .to_dtype(DType::F32)?
         .reshape((positions, 1))?;
     let angles = positions.matmul(&theta.reshape((1, theta.elem_count()))?)?;
-    Ok((angles.cos()?, angles.sin()?))
+    if magnitude == 1.0 {
+        return Ok((angles.cos()?, angles.sin()?));
+    }
+    let magnitude = f64::from(magnitude);
+    Ok(((angles.cos()? * magnitude)?, (angles.sin()? * magnitude)?))
 }
 
 fn base_frequencies(head_dim: usize, theta: f32) -> Vec<f32> {
