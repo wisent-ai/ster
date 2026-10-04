@@ -57,14 +57,15 @@ impl SteeringLlama {
         architecture: Architecture,
         adapters: crate::lora::Adapters,
     ) -> candle_core::Result<Self> {
+        let names = architecture.names;
         let embeddings = embedding(
             config.vocab_size,
             config.hidden_size,
-            builder.pp("model.embed_tokens"),
+            builder.pp(names.embeddings),
         )?;
         let lm_head = if config.tie_word_embeddings {
             let bias = if architecture.lm_head_bias {
-                Some(builder.pp("lm_head").get(config.vocab_size, "bias")?)
+                Some(builder.pp(names.lm_head).get(config.vocab_size, "bias")?)
             } else {
                 None
             };
@@ -74,17 +75,15 @@ impl SteeringLlama {
                 config.hidden_size,
                 config.vocab_size,
                 architecture.lm_head_bias,
-                builder.pp("lm_head"),
+                builder.pp(names.lm_head),
             )?
         };
-        let final_norm = NormSpec::of(&architecture).load(
-            config.hidden_size,
-            builder.pp("model").pp(architecture.names.final_norm),
-        )?;
+        let final_norm =
+            NormSpec::of(&architecture).load(config.hidden_size, builder.pp(names.final_norm))?;
         let layers = (0..config.num_hidden_layers)
             .map(|index| {
                 DecoderLayer::load(
-                    builder.pp(format!("model.layers.{index}")),
+                    builder.pp(format!("{}.{index}", names.layers)),
                     &config,
                     &architecture,
                     index,

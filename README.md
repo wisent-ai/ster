@@ -38,8 +38,8 @@ Included now:
   `qwen3`, `qwen3_moe`, `phi`, `phi3`, `granite`, `granitemoe`, `stablelm`,
   `starcoder2`, `cohere`, `cohere2`, `nemotron`, `olmo`, `olmo2`, `olmo3`,
   `olmoe`, `exaone4`, `internlm3`, `seed_oss`, `arcee`, `ernie4_5`,
-  `minicpm`, `orion`, `glm`, `glm4`, `smollm3`, `gemma`, `gemma2` or
-  `gemma3_text`. Coverage is measured
+  `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `smollm3`, `gemma`,
+  `gemma2` or `gemma3_text`. Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Each family is the same rotary, grouped-query decoder with what its config
@@ -60,15 +60,20 @@ Included now:
   StableLM's `use_parallel_residual`),
   sliding-window attention on the layers `sliding_window`,
   `max_window_layers`, `sliding_window_pattern` or `layer_types` name,
-  Phi-3's fused `qkv_proj` and `gate_up_proj` and GLM's fused `gate_up_proj`
-  (split at load, and merged back row by row by `ster tune merge`), OLMo 2's
+  Phi-3's fused `qkv_proj` and `gate_up_proj`, GLM's fused `gate_up_proj` and
+  GPT-NeoX's head-interleaved `query_key_value` (split at load, and merged
+  back row by row by `ster tune merge`), each family's own tensor paths
+  (GPT-NeoX's `gpt_neox.layers` and `embed_out`, GPT-J's `transformer.h`,
+  `ln_1` and `ln_f`), parallel blocks with one norm or two, OLMo 2's
   and EXAONE 4's norms after each sublayer instead of before it, GLM-4's
   `post_self_attn_layernorm` and `post_mlp_layernorm`, Granite's and
   MiniCPM's embedding, residual and logit multipliers, Granite's attention
   multiplier, Cohere's `logit_scale`, interleaved rotation (Cohere, GLM,
-  ERNIE 4.5), unrotated
+  ERNIE 4.5, GPT-J), unrotated
   layers (SmolLM3's `no_rope_layers`, Cohere 2's global layers), rotation of
-  only the `partial_rotary_factor` share of each head, `linear` rotary
+  only part of each head (`partial_rotary_factor`, GPT-NeoX's `rotary_pct`,
+  GPT-J's `rotary_dim`), GPT-style key names (`n_embd`, `n_layer`, `n_head`,
+  `n_positions`, `n_inner`, `rotary_emb_base`), `linear` rotary
   scaling and Phi-3's `longrope` (short factors within the original context,
   long ones past it), and Gemma's `1 + weight` norms, scaled embedding, tanh
   GELU gate and tied embeddings, plus Gemma 2's and 3's post-attention and
@@ -77,8 +82,8 @@ Included now:
   quantized checkpoint (one that declares `quantization_config`, such as
   GPTQ) is refused with the sentence that names it, as is a config whose
   `hidden_act` is not silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast or
-  relu2, that rotates an odd or empty share of each head
-  (`partial_rotary_factor`), or whose `rope_scaling` is not `llama3`,
+  relu2, that rotates an odd or empty share of each head, or whose
+  `rope_scaling` is not `llama3`,
   `linear` or Phi-3's `longrope`. Adapter targets a family has no projection
   for (the gate of a plain feed-forward, every feed-forward projection of a
   mixture of experts) are refused before any adapter is built;

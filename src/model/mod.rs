@@ -75,6 +75,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 use candle_core::{DType, Device, Tensor};
+use candle_transformers::models::llama::Config;
 
 mod attention;
 mod cache;
@@ -157,6 +158,9 @@ pub struct Architecture {
     /// The norm epsilon, read from whichever key the family spells it with.
     pub norm_eps: f64,
     pub parallel: bool,
+    /// A parallel block whose feed-forward has its own norm (GPT-NeoX)
+    /// rather than sharing attention's (Cohere, Phi-2, GPT-J).
+    pub parallel_norms: bool,
     pub interleaved_rotary: bool,
     /// A bias on the vocabulary projection (Phi-2).
     pub lm_head_bias: bool,
@@ -172,8 +176,7 @@ pub struct Architecture {
     /// A rotary scaling Ster applies itself; Llama 3's is carried by Candle's
     /// config instead.
     pub rope_scaling: RopeScaling,
-    /// Query, key and value stored as one `qkv_proj` (Phi-3).
-    pub fused_attention: bool,
+    pub qkv_layout: QkvLayout,
     /// Gate and up stored as one `gate_up_proj`, gate rows first (Phi-3,
     /// GLM).
     pub fused_feed_forward: bool,
@@ -217,6 +220,7 @@ impl Architecture {
             norm: NormKind::Rms,
             norm_eps,
             parallel: false,
+            parallel_norms: false,
             interleaved_rotary: false,
             lm_head_bias: false,
             names: Names::LLAMA,
@@ -225,7 +229,7 @@ impl Architecture {
             unrotated_layers: 0,
             local_rope_theta: None,
             rope_scaling: RopeScaling::None,
-            fused_attention: false,
+            qkv_layout: QkvLayout::Separate,
             fused_feed_forward: false,
             norm_offset: false,
             embedding_multiplier: None,
@@ -264,32 +268,76 @@ impl Architecture {
         })
     }
 
-    /// The checkpoint tensor `target` adapts at `layer`, or `None` when this
-    /// family has no single such projection: the gate of a plain feed-forward,
-    /// or any feed-forward projection of a mixture of experts.
-    pub fn checkpoint_tensor(&self, target: Target, layer: usize) -> Option<String> {
+    /// Where `target`'s weight lives at `layer`, or `None` when this family
+    /// has no single such projection: the gate of a plain feed-forward, or
+    /// any feed-forward projection of a mixture of experts.
+    ///
+    /// A fused tensor holds several projections; the placement then names the
+    /// row blocks this projection owns, so merging adds the update to those
+    /// rows alone. Phi-3 stacks query, key and value; GPT-NeoX interleaves
+    /// them head by head; Phi-3 and GLM stack gate above up.
+    pub fn placement(&self, target: Target, layer: usize, config: &Config) -> Option<Placement> {
         let feed_forward = matches!(target, Target::Gate | Target::Up | Target::Down);
         if feed_forward && self.experts.is_some() {
             return None;
         }
-        let leaf = match target {
-            Target::Query => "self_attn.q_proj",
-            Target::Key => "self_attn.k_proj",
-            Target::Value => "self_attn.v_proj",
-            Target::Output => self.names.output,
-            Target::Gate => self.names.gate?,
-            Target::Up => self.names.up,
-            Target::Down => self.names.down,
+        let names = self.names;
+        let in_layer = |leaf: &str| format!("{}.{layer}.{leaf}.weight", names.layers);
+        let in_attention = |leaf: &str| in_layer(&format!("{}.{leaf}", names.attention));
+        let head_dim = self.head_dim;
+        let query = self.attention_width(config.num_attention_heads);
+        let key_value = config.num_key_value_heads * head_dim;
+        let attention_offset = match target {
+            Target::Query => Some(0),
+            Target::Key => Some(1),
+            Target::Value => Some(2),
+            _ => None,
         };
-        Some(format!("model.layers.{layer}.{leaf}.weight"))
+        if let Some(slot) = attention_offset {
+            return Some(match self.qkv_layout {
+                QkvLayout::Separate => Placement::whole(in_attention(match target {
+                    Target::Query => names.query,
+                    Target::Key => names.key,
+                    _ => names.value,
+                })),
+                QkvLayout::Stacked => {
+                    let (start, rows) = match slot {
+                        0 => (0, query),
+                        1 => (query, key_value),
+                        _ => (query + key_value, key_value),
+                    };
+                    Placement::blocks(in_attention(names.fused_qkv), vec![(start, 0, rows)])
+                }
+                QkvLayout::HeadInterleaved => Placement::blocks(
+                    in_attention(names.fused_qkv),
+                    (0..config.num_attention_heads)
+                        .map(|head| (head * 3 * head_dim + slot * head_dim, head * head_dim, head_dim))
+                        .collect(),
+                ),
+            });
+        }
+        let intermediate = config.intermediate_size;
+        Some(match target {
+            Target::Output => Placement::whole(in_layer(names.output)),
+            Target::Gate if self.fused_feed_forward => {
+                Placement::blocks(in_layer(names.fused_gate_up), vec![(0, 0, intermediate)])
+            }
+            Target::Up if self.fused_feed_forward => Placement::blocks(
+                in_layer(names.fused_gate_up),
+                vec![(intermediate, 0, intermediate)],
+            ),
+            Target::Gate => Placement::whole(in_layer(names.gate?)),
+            Target::Up => Placement::whole(in_layer(names.up)),
+            _ => Placement::whole(in_layer(names.down)),
+        })
     }
 
     /// Refuses adapter targets this family has no single projection for, so
     /// an adapter is not created and then never trained.
-    pub fn check_targets(&self, targets: &[Target]) -> Result<()> {
+    pub fn check_targets(&self, targets: &[Target], config: &Config) -> Result<()> {
         if let Some(target) = targets
             .iter()
-            .find(|target| self.checkpoint_tensor(**target, 0).is_none())
+            .find(|target| self.placement(**target, 0, config).is_none())
         {
             let (why, choices) = if self.experts.is_some() {
                 ("its feed-forward is a mixture of experts", "query, key, value, output")
@@ -303,6 +351,41 @@ impl Architecture {
         }
         Ok(())
     }
+}
+
+/// Where one projection's weight sits in the checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    pub tensor: String,
+    /// `None` when the projection is the whole tensor; otherwise the row
+    /// blocks it owns, as `(row in the tensor, row in the projection,
+    /// rows)`.
+    pub blocks: Option<Vec<(usize, usize, usize)>>,
+}
+
+impl Placement {
+    fn whole(tensor: String) -> Self {
+        Self { tensor, blocks: None }
+    }
+
+    fn blocks(tensor: String, blocks: Vec<(usize, usize, usize)>) -> Self {
+        Self {
+            tensor,
+            blocks: Some(blocks),
+        }
+    }
+}
+
+/// How a checkpoint stores the query, key and value projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QkvLayout {
+    /// Three tensors.
+    Separate,
+    /// One tensor, all query rows, then key, then value (Phi-3).
+    Stacked,
+    /// One tensor, head by head: each head's query, key and value rows in
+    /// turn (GPT-NeoX).
+    HeadInterleaved,
 }
 
 /// A routed feed-forward: how many experts, how many run per token, and
@@ -335,38 +418,62 @@ pub enum ExpertLayout {
     Granite,
 }
 
-/// Where a family keeps the tensors whose names differ from Llama's, below
-/// `model.layers.{layer}` and `model`.
+/// Where a family keeps its tensors. Paths without a dot prefix are below
+/// one layer (`{layers}.{i}`); `embeddings`, `layers`, `final_norm` and
+/// `lm_head` are from the checkpoint root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Names {
+    pub embeddings: &'static str,
+    pub layers: &'static str,
+    pub final_norm: &'static str,
+    pub lm_head: &'static str,
+    /// The attention block, below a layer.
+    pub attention: &'static str,
+    /// The projections, below the attention block.
+    pub query: &'static str,
+    pub key: &'static str,
+    pub value: &'static str,
+    pub fused_qkv: &'static str,
     /// The attention output projection.
     pub output: &'static str,
     /// The feed-forward gate, absent from a plain feed-forward.
     pub gate: Option<&'static str>,
     pub up: &'static str,
     pub down: &'static str,
+    pub fused_gate_up: &'static str,
+    /// The norm before attention (before both halves of a one-norm parallel
+    /// block).
+    pub attention_norm: &'static str,
     /// The norm over attention's output, in a block that has one.
     pub attention_output_norm: &'static str,
     /// The norm before the feed-forward.
     pub feed_forward_norm: &'static str,
     /// The norm over the feed-forward's output, in a block that has one.
     pub feed_forward_output_norm: &'static str,
-    /// The norm after the last block, below `model`.
-    pub final_norm: &'static str,
 }
 
 impl Names {
     /// Llama's names; OLMo 2's post-norm block reuses
     /// `post_attention_layernorm` for the norm over attention's output.
     pub const LLAMA: Self = Self {
+        embeddings: "model.embed_tokens",
+        layers: "model.layers",
+        final_norm: "model.norm",
+        lm_head: "lm_head",
+        attention: "self_attn",
+        query: "q_proj",
+        key: "k_proj",
+        value: "v_proj",
+        fused_qkv: "qkv_proj",
         output: "self_attn.o_proj",
         gate: Some("mlp.gate_proj"),
         up: "mlp.up_proj",
         down: "mlp.down_proj",
+        fused_gate_up: "mlp.gate_up_proj",
+        attention_norm: "input_layernorm",
         attention_output_norm: "post_attention_layernorm",
         feed_forward_norm: "post_attention_layernorm",
         feed_forward_output_norm: "post_feedforward_layernorm",
-        final_norm: "norm",
     };
     /// Gemma 2 and 3: `post_attention_layernorm` is over attention's output,
     /// so the norm before the feed-forward is `pre_feedforward_layernorm`.
@@ -401,7 +508,36 @@ impl Names {
         gate: None,
         up: "mlp.fc1",
         down: "mlp.fc2",
-        final_norm: "final_layernorm",
+        final_norm: "model.final_layernorm",
+        ..Self::LLAMA
+    };
+    /// GPT-NeoX and Pythia: everything below `gpt_neox`, one head-interleaved
+    /// `query_key_value`, `dense_h_to_4h`/`dense_4h_to_h`, and `embed_out`.
+    pub const GPT_NEOX: Self = Self {
+        embeddings: "gpt_neox.embed_in",
+        layers: "gpt_neox.layers",
+        final_norm: "gpt_neox.final_layer_norm",
+        lm_head: "embed_out",
+        attention: "attention",
+        fused_qkv: "query_key_value",
+        output: "attention.dense",
+        gate: None,
+        up: "mlp.dense_h_to_4h",
+        down: "mlp.dense_4h_to_h",
+        ..Self::LLAMA
+    };
+    /// GPT-J: everything below `transformer`, `h.{i}`, `ln_1`, `attn`,
+    /// `out_proj`, `fc_in`/`fc_out`, and `ln_f`.
+    pub const GPT_J: Self = Self {
+        embeddings: "transformer.wte",
+        layers: "transformer.h",
+        final_norm: "transformer.ln_f",
+        attention: "attn",
+        output: "attn.out_proj",
+        gate: None,
+        up: "mlp.fc_in",
+        down: "mlp.fc_out",
+        attention_norm: "ln_1",
         ..Self::LLAMA
     };
 }

@@ -9,7 +9,7 @@ use candle_transformers::models::llama::Config;
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Architecture, Cache, Mode, NormKind, Pass, QueryKeyNorm, Route,
+    Architecture, Cache, Mode, NormKind, Pass, QkvLayout, QueryKeyNorm, Route,
     layer::{
         norm::{Norm, NormSpec},
         projection,
@@ -55,7 +55,8 @@ enum Rotary {
 }
 
 impl Attention {
-    /// `builder` is the layer's; the projections sit below `self_attn`.
+    /// `builder` is the layer's; the projections sit below the family's
+    /// attention block (`self_attn`, `attention`, `attn`).
     pub(super) fn load(
         layer_builder: &VarBuilder<'_>,
         config: &Config,
@@ -63,7 +64,8 @@ impl Attention {
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
-        let builder = layer_builder.pp("self_attn");
+        let names = architecture.names;
+        let builder = layer_builder.pp(names.attention);
         let input = config.hidden_size;
         let heads = config.num_attention_heads;
         let key_value_heads = config.num_key_value_heads;
@@ -107,28 +109,56 @@ impl Attention {
         } else {
             Rotary::Global
         };
-        // Phi-3 stores query, key and value as one `qkv_proj` matrix, rows in
-        // that order. Each projection is a row slice of it — a view of the
-        // mapped weight, not a copy — so every adapter site stays separate.
-        let (query, key, value) = if architecture.fused_attention {
-            let fused = builder.get(
-                (query_width + 2 * key_value_width, input),
-                "qkv_proj.weight",
-            )?;
-            (
-                Linear::new(fused.narrow(0, 0, query_width)?, None),
-                Linear::new(fused.narrow(0, query_width, key_value_width)?, None),
-                Linear::new(
-                    fused.narrow(0, query_width + key_value_width, key_value_width)?,
-                    None,
-                ),
-            )
-        } else {
-            (
-                projection(input, query_width, bias, builder.pp("q_proj"))?,
-                projection(input, key_value_width, bias, builder.pp("k_proj"))?,
-                projection(input, key_value_width, bias, builder.pp("v_proj"))?,
-            )
+        let (query, key, value) = match architecture.qkv_layout {
+            QkvLayout::Separate => (
+                projection(input, query_width, bias, builder.pp(names.query))?,
+                projection(input, key_value_width, bias, builder.pp(names.key))?,
+                projection(input, key_value_width, bias, builder.pp(names.value))?,
+            ),
+            // Phi-3 stores query, key and value as one matrix, rows in that
+            // order. Each projection is a row slice of it — a view of the
+            // mapped weight, not a copy — so every adapter site stays
+            // separate.
+            QkvLayout::Stacked => {
+                let rows = query_width + 2 * key_value_width;
+                let fused = builder.pp(names.fused_qkv);
+                let weight = fused.get((rows, input), "weight")?;
+                let bias = if bias { Some(fused.get(rows, "bias")?) } else { None };
+                let slice = |start: usize, width: usize| -> candle_core::Result<Linear> {
+                    Ok(Linear::new(
+                        weight.narrow(0, start, width)?,
+                        bias.as_ref().map(|bias| bias.narrow(0, start, width)).transpose()?,
+                    ))
+                };
+                (
+                    slice(0, query_width)?,
+                    slice(query_width, key_value_width)?,
+                    slice(query_width + key_value_width, key_value_width)?,
+                )
+            }
+            // GPT-NeoX lays the rows out head by head — each head's query,
+            // key and value in turn — so a projection is every third block
+            // of `head_dim` rows. Gathering them is a copy, made once at load.
+            QkvLayout::HeadInterleaved => {
+                let fused = builder.pp(names.fused_qkv);
+                let weight = fused
+                    .get((3 * query_width, input), "weight")?
+                    .reshape((heads, 3, head_dim, input))?;
+                let bias = if bias {
+                    Some(fused.get(3 * query_width, "bias")?.reshape((heads, 3, head_dim))?)
+                } else {
+                    None
+                };
+                let part = |slot: usize| -> candle_core::Result<Linear> {
+                    Ok(Linear::new(
+                        weight.narrow(1, slot, 1)?.contiguous()?.reshape((query_width, input))?,
+                        bias.as_ref()
+                            .map(|bias| bias.narrow(1, slot, 1)?.contiguous()?.reshape(query_width))
+                            .transpose()?,
+                    ))
+                };
+                (part(0)?, part(1)?, part(2)?)
+            }
         };
         Ok(Self {
             query,

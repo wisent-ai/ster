@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::model::{
     Activation, Architecture, ExpertLayout, FeedForwardKind, MixtureOfExperts, Names, NormKind,
-    QueryKeyNorm, RopeScaling,
+    QkvLayout, QueryKeyNorm, RopeScaling,
 };
 
 /// The `model_type` values the decoder implements.
@@ -46,6 +46,8 @@ pub(super) const FAMILIES: &[&str] = &[
     "orion",
     "glm",
     "glm4",
+    "gpt_neox",
+    "gptj",
     "smollm3",
     "gemma",
     "gemma2",
@@ -68,20 +70,51 @@ pub(super) const TIED_BY_DEFAULT: &[&str] = &[
 /// passes this one to `F.layer_norm` itself.
 const OLMO_NORM_EPS: f64 = 1e-5;
 
-/// Candle's Llama config reads the norm epsilon as `rms_norm_eps`; the
-/// LayerNorm families spell it otherwise. The first spelling present is
-/// copied under Candle's name before the config is parsed, and OLMo 1, which
-/// states none, gets the one its norm is defined with.
-pub(super) fn fill_norm_eps(raw: &mut Value, model_type: &str) {
-    if raw.get("rms_norm_eps").is_some() {
-        return;
+/// GPT-J's feed-forward is this many times the residual width when the config
+/// leaves `n_inner` null, as Transformers' `GPTJBlock` computes it.
+const GPTJ_INNER_PER_HIDDEN: u64 = 4;
+
+/// Candle's Llama config reads Llama's key names. Other families spell the
+/// same dimension otherwise (GPT-J's `n_embd`, `n_layer`, `n_head`,
+/// `n_positions`, `n_inner`; GPT-NeoX's `rotary_emb_base`; the LayerNorm
+/// families' epsilon). Before the config is parsed, the first spelling
+/// present is copied under Llama's name; a key Llama's name already holds is
+/// left alone. OLMo 1, which states no epsilon, gets the one its norm is
+/// defined with, and GPT-J without `n_inner` gets its four-times-hidden width.
+pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
+    let aliases: &[(&str, &[&str])] = &[
+        ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]),
+        ("hidden_size", &["n_embd"]),
+        ("num_hidden_layers", &["n_layer"]),
+        ("num_attention_heads", &["n_head"]),
+        ("max_position_embeddings", &["n_positions"]),
+        ("intermediate_size", &["n_inner"]),
+        ("rope_theta", &["rotary_emb_base"]),
+    ];
+    for (llama, spellings) in aliases {
+        if raw.get(*llama).is_some_and(|value| !value.is_null()) {
+            continue;
+        }
+        let found = spellings
+            .iter()
+            .find_map(|key| raw.get(*key).filter(|value| !value.is_null()).cloned());
+        if let (Some(value), Some(object)) = (found, raw.as_object_mut()) {
+            object.insert((*llama).to_owned(), value);
+        }
     }
-    let spelled = ["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]
-        .iter()
-        .find_map(|key| raw.get(*key).cloned())
-        .or_else(|| (model_type == "olmo").then(|| Value::from(OLMO_NORM_EPS)));
-    if let (Some(eps), Some(object)) = (spelled, raw.as_object_mut()) {
-        object.insert("rms_norm_eps".to_owned(), eps);
+    let missing = |raw: &Value, key: &str| raw.get(key).map_or(true, Value::is_null);
+    let default = match model_type {
+        "olmo" if missing(raw, "rms_norm_eps") => {
+            Some(("rms_norm_eps", Value::from(OLMO_NORM_EPS)))
+        }
+        "gptj" if missing(raw, "intermediate_size") => raw
+            .get("hidden_size")
+            .and_then(Value::as_u64)
+            .map(|hidden| ("intermediate_size", Value::from(GPTJ_INNER_PER_HIDDEN * hidden))),
+        _ => None,
+    };
+    if let (Some((key, value)), Some(object)) = (default, raw.as_object_mut()) {
+        object.insert(key.to_owned(), value);
     }
 }
 
@@ -204,18 +237,22 @@ pub(super) fn family(
         architecture.head_dim = head_dim;
         architecture.score_divisor = (head_dim as f64).sqrt();
     }
-    architecture.rotary_dim = architecture.head_dim;
-    if let Some(factor) = number(raw, "partial_rotary_factor").filter(|factor| *factor != 1.0) {
-        // Transformers truncates the product, then rotates halves of it.
-        let rotary_dim = (architecture.head_dim as f64 * factor) as usize;
-        if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > architecture.head_dim {
-            bail!(
-                "{} rotates {rotary_dim} of {} components per head (partial_rotary_factor {factor}); the rotated width must be even, above zero and at most the head",
-                path.display(),
-                architecture.head_dim
-            );
-        }
-        architecture.rotary_dim = rotary_dim;
+    // The rotated share of each head: `partial_rotary_factor` (or GPT-NeoX's
+    // `rotary_pct`) as a fraction, which Transformers truncates, or GPT-J's
+    // `rotary_dim` as a width.
+    let head_dim = architecture.head_dim;
+    let fraction = number(raw, "partial_rotary_factor").or_else(|| number(raw, "rotary_pct"));
+    architecture.rotary_dim = match (fraction, whole(raw, "rotary_dim")) {
+        (Some(factor), _) => (head_dim as f64 * factor) as usize,
+        (None, Some(width)) => width,
+        (None, None) => head_dim,
+    };
+    let rotary_dim = architecture.rotary_dim;
+    if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
+        bail!(
+            "{} rotates {rotary_dim} of {head_dim} components per head (partial_rotary_factor, rotary_pct or rotary_dim); the rotated width must be even, above zero and at most the head",
+            path.display()
+        );
     }
     architecture.rope_scaling = rope_scaling(scaling, architecture.rotary_dim, raw, llama, path)?;
     // Gemma's configs name `gelu` but Transformers runs the tanh
@@ -227,7 +264,9 @@ pub(super) fn family(
         "llama" | "mistral" | "mixtral" | "phi3" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.fused_attention = model_type == "phi3";
+            if model_type == "phi3" {
+                architecture.qkv_layout = QkvLayout::Stacked;
+            }
             architecture.fused_feed_forward = model_type == "phi3";
             // Mistral v0.2 and later publish `sliding_window: null`, which is
             // full attention on every layer; Phi-3 states a window it applies
@@ -472,6 +511,35 @@ pub(super) fn family(
         }
         "orion" => {
             architecture.norm = NormKind::Layer { bias: true };
+        }
+        "gpt_neox" => {
+            // Pythia and GPT-NeoX: LayerNorm with bias, a head-interleaved
+            // `query_key_value`, biased projections and a plain GELU
+            // feed-forward; parallel blocks by default, each half with its own
+            // norm.
+            architecture.names = Names::GPT_NEOX;
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.qkv_layout = QkvLayout::HeadInterleaved;
+            let bias = raw.get("attention_bias").and_then(Value::as_bool).unwrap_or(true);
+            architecture.query_key_value_bias = bias;
+            architecture.output_bias = bias;
+            architecture.feed_forward_bias = true;
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.parallel =
+                raw.get("use_parallel_residual").and_then(Value::as_bool).unwrap_or(true);
+            architecture.parallel_norms = true;
+        }
+        "gptj" => {
+            // GPT-J: one `ln_1` before both halves of a parallel block,
+            // unbiased attention, a biased plain feed-forward and head, and
+            // interleaved rotation over `rotary_dim`.
+            architecture.names = Names::GPT_J;
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.parallel = true;
+            architecture.feed_forward_bias = true;
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.lm_head_bias = true;
+            architecture.interleaved_rotary = true;
         }
         "glm" | "glm4" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");

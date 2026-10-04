@@ -99,7 +99,7 @@ pub fn merge(
 
     let source = Checkpoint::resolve(model, revision)?;
     let (config, architecture, _) = source.decoder_config()?;
-    architecture.check_targets(&artifact.targets)?;
+    architecture.check_targets(&artifact.targets, &config)?;
     if artifact.hidden_size != config.hidden_size {
         bail!(
             "adapter width {} does not match model width {}",
@@ -142,19 +142,12 @@ pub fn merge(
     let mut dtype: Option<DType> = None;
     for &layer in &artifact.layers {
         for &target in &artifact.targets {
-            let name = architecture.checkpoint_tensor(target, layer).with_context(|| {
-                format!("this model has no {} projection to merge into", target.name())
-            })?;
-            // A fused checkpoint (Phi-3) has no tensor per projection; the
-            // update lands on that projection's rows of the fused matrix.
-            let (name, rows) = if tensors.contains_key(&name) {
-                (name, None)
-            } else {
-                match fused_rows(target, layer, &config, &architecture) {
-                    Some((fused, offset)) => (fused, Some(offset)),
-                    None => (name, None),
-                }
-            };
+            // A fused checkpoint (Phi-3, GLM, GPT-NeoX) has no tensor per
+            // projection; the update lands on the rows that projection owns.
+            let placement = architecture
+                .placement(target, layer, &config)
+                .with_context(|| format!("this model has no {} projection to merge into", target.name()))?;
+            let name = placement.tensor;
             let base = tensors
                 .get(&name)
                 .with_context(|| format!("checkpoint has no tensor {name} to merge into"))?;
@@ -175,9 +168,11 @@ pub fn merge(
             dtype.get_or_insert(original);
             let delta = (b.to_dtype(DType::F32)?.matmul(&a.to_dtype(DType::F32)?)? * scale)?;
             let widened = base.to_dtype(DType::F32)?;
-            let updated = match rows {
+            let updated = match &placement.blocks {
                 None => widened + &delta,
-                Some(offset) => add_rows(&widened, offset, &delta),
+                Some(blocks) => blocks.iter().try_fold(widened, |sum, (row, from, rows)| {
+                    add_rows(&sum, *row, &delta.narrow(0, *from, *rows)?)
+                }),
             }
             .with_context(|| {
                 format!(
@@ -274,34 +269,6 @@ pub fn merge(
             .unwrap_or_else(|| "unknown".to_owned()),
         files,
     })
-}
-
-/// The fused tensor a projection lives in and the first of its rows, for a
-/// checkpoint that stores query, key and value as `qkv_proj` (Phi-3) or gate
-/// and up as `gate_up_proj` (Phi-3, GLM); `None` for a projection that has
-/// its own tensor.
-fn fused_rows(
-    target: lora::Target,
-    layer: usize,
-    config: &candle_transformers::models::llama::Config,
-    architecture: &crate::model::Architecture,
-) -> Option<(String, usize)> {
-    let query = architecture.attention_width(config.num_attention_heads);
-    let key_value = config.num_key_value_heads * architecture.head_dim;
-    let attention = format!("model.layers.{layer}.self_attn.qkv_proj.weight");
-    let feed_forward = format!("model.layers.{layer}.mlp.gate_up_proj.weight");
-    match target {
-        lora::Target::Query if architecture.fused_attention => Some((attention, 0)),
-        lora::Target::Key if architecture.fused_attention => Some((attention, query)),
-        lora::Target::Value if architecture.fused_attention => {
-            Some((attention, query + key_value))
-        }
-        lora::Target::Gate if architecture.fused_feed_forward => Some((feed_forward, 0)),
-        lora::Target::Up if architecture.fused_feed_forward => {
-            Some((feed_forward, config.intermediate_size))
-        }
-        _ => None,
-    }
 }
 
 /// `base` with `delta` added to its rows `offset..offset + delta.rows`.

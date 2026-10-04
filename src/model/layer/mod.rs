@@ -73,14 +73,19 @@ impl FeedForward {
         let (hidden, intermediate) = (config.hidden_size, config.intermediate_size);
         let bias = architecture.feed_forward_bias;
         let names = architecture.names;
-        // Phi-3 stores the gate and up projections as one `gate_up_proj`,
-        // gate rows first; each is a row slice of that mapped weight.
+        // Phi-3 and GLM store the gate and up projections as one matrix, gate
+        // rows first; each is a row slice of that mapped weight.
         let (gate, up) = if architecture.fused_feed_forward {
-            let fused = builder.get((2 * intermediate, hidden), "mlp.gate_up_proj.weight")?;
-            (
-                Some(Linear::new(fused.narrow(0, 0, intermediate)?, None)),
-                Linear::new(fused.narrow(0, intermediate, intermediate)?, None),
-            )
+            let fused = builder.pp(names.fused_gate_up);
+            let weight = fused.get((2 * intermediate, hidden), "weight")?;
+            let bias = if bias { Some(fused.get(2 * intermediate, "bias")?) } else { None };
+            let slice = |start: usize| -> candle_core::Result<Linear> {
+                Ok(Linear::new(
+                    weight.narrow(0, start, intermediate)?,
+                    bias.as_ref().map(|bias| bias.narrow(0, start, intermediate)).transpose()?,
+                ))
+            };
+            (Some(slice(0)?), slice(intermediate)?)
         } else {
             let gate = match (architecture.feed_forward, names.gate) {
                 (FeedForwardKind::Gated, Some(name)) => {
@@ -152,20 +157,30 @@ impl DecoderLayer {
         // called comes from the family's names (Llama's
         // `post_attention_layernorm` before the feed-forward, Gemma 2's
         // `pre_feedforward_layernorm`, GLM-4's `post_self_attn_layernorm`
-        // over attention's output). A parallel block (Cohere, Phi-2,
-        // StableLM's `use_parallel_residual`) has one `input_layernorm` that
-        // feeds both halves; OLMo 2 has no norm before either sublayer.
+        // over attention's output). A parallel block (Cohere, Phi-2, GPT-J,
+        // StableLM's `use_parallel_residual`) feeds one normalised input to
+        // both halves, unless the feed-forward has its own norm (GPT-NeoX);
+        // OLMo 2 has no norm before either sublayer.
         let (attention_norm, attention_output_norm, feed_forward_norm, feed_forward_output_norm) =
             match (architecture.parallel, architecture.pre_norms, architecture.output_norms) {
-                (true, _, _) => (Some(norm("input_layernorm")?), None, None, None),
+                (true, _, _) => (
+                    Some(norm(names.attention_norm)?),
+                    None,
+                    if architecture.parallel_norms {
+                        Some(norm(names.feed_forward_norm)?)
+                    } else {
+                        None
+                    },
+                    None,
+                ),
                 (false, true, false) => (
-                    Some(norm("input_layernorm")?),
+                    Some(norm(names.attention_norm)?),
                     None,
                     Some(norm(names.feed_forward_norm)?),
                     None,
                 ),
                 (false, true, true) => (
-                    Some(norm("input_layernorm")?),
+                    Some(norm(names.attention_norm)?),
                     Some(norm(names.attention_output_norm)?),
                     Some(norm(names.feed_forward_norm)?),
                     Some(norm(names.feed_forward_output_norm)?),
@@ -220,7 +235,13 @@ impl DecoderLayer {
             .forward(&normed, index_pos, layer, cache, mask, mode)?;
         let attention = optional_norm(self.attention_output_norm.as_ref(), &attention, mode.pass)?;
         if self.parallel {
-            let feed_forward = self.feed_forward.forward(&normed, mode.route)?;
+            // GPT-NeoX normalises the feed-forward's input on its own; the
+            // other parallel families reuse attention's.
+            let feed_forward_input = match &self.feed_forward_norm {
+                Some(norm) => norm.forward(hidden, mode.pass)?,
+                None => normed,
+            };
+            let feed_forward = self.feed_forward.forward(&feed_forward_input, mode.route)?;
             return (hidden + self.scaled(attention)?)? + self.scaled(feed_forward)?;
         }
         let hidden = (hidden + self.scaled(attention)?)?;
