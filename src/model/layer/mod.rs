@@ -4,6 +4,7 @@
 mod experts;
 pub(super) mod norm;
 mod recurrent;
+pub(super) mod shared;
 
 use candle_core::Tensor;
 use candle_nn::{Linear, VarBuilder, linear, linear_no_bias};
@@ -17,6 +18,7 @@ use super::{
 };
 use experts::Experts;
 use norm::{Norm, NormSpec};
+use shared::{SharedBlock, SharedInvocation};
 use recurrent::{
     delta::DeltaRule,
     lightning::Lightning,
@@ -176,6 +178,18 @@ enum Mixer {
     FeedForward(FeedForwardBlock),
     /// Falcon-H1: attention and a Mamba-2 scan side by side.
     Parallel(Box<ParallelMixers>),
+    /// Zamba2's hybrid layers: a shared block feeding a Mamba-2 scan.
+    Hybrid(Box<Hybrid>),
+}
+
+/// A Zamba2 hybrid layer's mixer: the shared block over the hidden state
+/// beside the embeddings, projected back and added to the hidden state,
+/// then the norm and the Mamba-2 scan.
+#[derive(Debug, Clone)]
+struct Hybrid {
+    shared: SharedInvocation,
+    norm: Norm,
+    scan: Structured,
 }
 
 /// Falcon-H1's two mixers on one normed input, each output scaled before
@@ -238,12 +252,15 @@ struct BlockScales {
 }
 
 impl DecoderLayer {
+    /// `shared` is, on a Zamba2 hybrid layer, the shared block it uses and
+    /// that block's builder (`model.layers.{owner}.shared_transformer`).
     pub(super) fn load(
         builder: VarBuilder<'_>,
         config: &Config,
         architecture: &Architecture,
         layer: usize,
         adapters: &Adapters,
+        shared: Option<(&SharedBlock, &VarBuilder<'_>)>,
     ) -> candle_core::Result<Self> {
         let spec = NormSpec::of(architecture);
         let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
@@ -310,6 +327,46 @@ impl DecoderLayer {
                 attention_output_norm: None,
                 feed_forward_norm: Some(norm(names.feed_forward_norm)?),
                 feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
+                feed_forward_output_norm: None,
+                residual_multiplier: architecture.residual_multiplier,
+                parallel: false,
+                scales: None,
+            });
+        }
+        // Zamba2's hybrid layers: the shared block's output, projected by the
+        // layer's `linear`, joins the hidden state before the Mamba-2 mixer's
+        // norm (`mamba_decoder.input_layernorm`), and the mixer's output is
+        // added to the hidden state.
+        if let (Some((block, block_builder)), Some(state_space)) = (shared, architecture.state_space.as_ref()) {
+            let Some(heads) = state_space.structured else {
+                candle_core::bail!("a Zamba2 hybrid layer runs Mamba-2 heads, and this architecture states none");
+            };
+            let Some(blocks) = architecture.shared_blocks else {
+                candle_core::bail!("a hybrid layer needs the architecture's shared blocks");
+            };
+            let decoder = builder.pp("mamba_decoder");
+            return Ok(Self {
+                attention_norm: None,
+                mixer: Mixer::Hybrid(Box::new(Hybrid {
+                    shared: SharedInvocation::load(
+                        block,
+                        block_builder,
+                        &builder,
+                        config.hidden_size,
+                        blocks.slot(layer),
+                    )?,
+                    norm: spec.load(config.hidden_size, decoder.pp(names.attention_norm))?,
+                    scan: Structured::load(
+                        decoder.pp(names.state_space),
+                        config.hidden_size,
+                        config.rms_norm_eps,
+                        state_space,
+                        heads,
+                    )?,
+                })),
+                attention_output_norm: None,
+                feed_forward_norm: None,
+                feed_forward: None,
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
@@ -488,6 +545,7 @@ impl DecoderLayer {
         match &self.mixer {
             Mixer::Attention(attention) => attention.window(),
             Mixer::Parallel(mixers) => mixers.attention.window(),
+            Mixer::Hybrid(_) => None,
             Mixer::StateSpace(_)
             | Mixer::Structured(_)
             | Mixer::ShortConv(_)
@@ -497,9 +555,12 @@ impl DecoderLayer {
         }
     }
 
+    /// `embedded` is the token embeddings before the first layer, which
+    /// Zamba2's hybrid layers read beside the hidden state.
     pub(super) fn forward(
         &self,
         hidden: &Tensor,
+        embedded: &Tensor,
         index_pos: usize,
         layer: usize,
         cache: &mut Cache,
@@ -518,6 +579,11 @@ impl DecoderLayer {
             Mixer::Lightning(lightning) => lightning.forward(&normed, layer, cache)?,
             Mixer::FeedForward(feed_forward) => feed_forward.forward(&normed, mode.route)?,
             Mixer::Parallel(mixers) => mixers.forward(&normed, index_pos, layer, cache, mask, mode)?,
+            Mixer::Hybrid(hybrid) => {
+                let shared = hybrid.shared.forward(&normed, embedded, index_pos, layer, cache, mask, mode)?;
+                let joined = hybrid.norm.forward(&(&normed + shared)?, mode.pass)?;
+                hybrid.scan.forward(&joined, layer, cache)?
+            }
         };
         let attention = optional_norm(self.attention_output_norm.as_ref(), &mixed, mode.pass)?;
         let Some(feed_forward_block) = &self.feed_forward else {

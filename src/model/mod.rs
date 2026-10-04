@@ -233,6 +233,8 @@ pub struct Architecture {
     /// MiniMax-Text-01's scaled residuals: each sublayer's output joins the
     /// residual as `residual · alpha + output · beta`.
     pub scaled_residuals: Option<ScaledResiduals>,
+    /// Zamba2's shared transformer blocks.
+    pub shared_blocks: Option<SharedBlocksSpec>,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -349,6 +351,38 @@ pub enum DeltaRuleForm {
     Kimi,
 }
 
+/// Zamba2's shared transformer blocks: on every layer in `hybrid_layers`, a
+/// block reads the hidden state beside the embeddings (`attention_input`
+/// wide), and its output, projected back by the layer's own `linear`, joins
+/// the input of the layer's Mamba-2 mixer. There are `blocks` distinct
+/// blocks, used in turn; the k-th hybrid layer adds its own rank-`rank`
+/// terms (slot k of the block's adapter lists) to the block's query, key
+/// and value when `attention_adapters`, and to its fused gate and up
+/// projection, `intermediate` wide each, when `feed_forward_adapters`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedBlocksSpec {
+    pub hybrid_layers: u128,
+    pub blocks: usize,
+    pub attention_input: usize,
+    pub intermediate: usize,
+    pub rank: usize,
+    pub attention_adapters: bool,
+    pub feed_forward_adapters: bool,
+}
+
+impl SharedBlocksSpec {
+    /// The hybrid layers, in order.
+    pub fn layers(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..u128::BITS as usize).filter(|layer| self.hybrid_layers & (1u128 << layer) != 0)
+    }
+
+    /// How many hybrid layers come before `layer`: its slot in the adapter
+    /// lists, and its block's position in the rotation.
+    pub fn slot(&self, layer: usize) -> usize {
+        self.layers().take_while(|hybrid| *hybrid < layer).count()
+    }
+}
+
 /// MiniMax-Text-01's lightning attention: `heads` heads of `head_dim`, on
 /// the layers in `layers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,6 +488,7 @@ impl Architecture {
             query_bottleneck: None,
             lightning: None,
             scaled_residuals: None,
+            shared_blocks: None,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,

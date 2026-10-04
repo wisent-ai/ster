@@ -64,6 +64,23 @@ pub(super) struct Attention {
     /// norm `inter_norm`, whose output the query projection (`wq`) reads in
     /// place of the hidden state.
     query_bottleneck: Option<(Linear, Norm)>,
+    /// Zamba2's per-invocation low-rank terms on query, key and value, set
+    /// by [`Attention::with_low_rank`] on each invocation's copy of the
+    /// shared block.
+    low_rank: Option<Box<[LowRank; 3]>>,
+}
+
+/// A low-rank term `up(down(x))` the base model adds to a projection.
+#[derive(Debug, Clone)]
+pub(super) struct LowRank {
+    pub down: Linear,
+    pub up: Linear,
+}
+
+impl LowRank {
+    pub(super) fn forward(&self, input: &Tensor) -> candle_core::Result<Tensor> {
+        self.up.forward(&self.down.forward(input)?)
+    }
 }
 
 /// Which rotation this layer rotates its query and key with.
@@ -86,9 +103,22 @@ impl Attention {
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
+        Self::load_reading(layer_builder, config, architecture, layer, adapters, config.hidden_size)
+    }
+
+    /// [`Attention::load`] for an attention that reads `input` components
+    /// rather than the model width (Zamba2's shared block reads the hidden
+    /// state beside the embeddings, twice the width).
+    pub(super) fn load_reading(
+        layer_builder: &VarBuilder<'_>,
+        config: &Config,
+        architecture: &Architecture,
+        layer: usize,
+        adapters: &Adapters,
+        input: usize,
+    ) -> candle_core::Result<Self> {
         let names = architecture.names;
         let builder = layer_builder.pp(names.attention);
-        let input = config.hidden_size;
         let heads = config.num_attention_heads;
         let key_value_heads = config.num_key_value_heads;
         let head_dim = architecture.head_dim;
@@ -266,7 +296,7 @@ impl Attention {
             projections,
             output: projection(
                 heads * architecture.value_dim(),
-                input,
+                config.hidden_size,
                 architecture.output_bias,
                 conv1d,
                 layer_builder.pp(architecture.names.output),
@@ -304,6 +334,7 @@ impl Attention {
             clip_qkv: architecture.clip_qkv,
             key_scale: architecture.key_scale,
             output_gate,
+            low_rank: None,
             query_bottleneck: match architecture.query_bottleneck {
                 Some(width) => Some((
                     projection(input, width, bias, conv1d, builder.pp("q_proj"))?,
@@ -323,6 +354,13 @@ impl Attention {
                 None
             },
         })
+    }
+
+    /// This attention with Zamba2's per-invocation low-rank terms on query,
+    /// key and value, in that order.
+    pub(super) fn with_low_rank(mut self, low_rank: [LowRank; 3]) -> Self {
+        self.low_rank = Some(Box::new(low_rank));
+        self
     }
 
     /// The window this layer attends through, if it is a sliding-window layer.
@@ -357,6 +395,15 @@ impl Attention {
                     None => project(query, self.query_adapter.as_ref(), hidden, mode.route)?,
                 };
                 let key = project(key, self.key_adapter.as_ref(), hidden, mode.route)?;
+                // Zamba2's per-invocation low-rank terms belong to the base
+                // model, so they apply on every route.
+                let (query, key) = match &self.low_rank {
+                    Some(low_rank) => (
+                        (query + low_rank[0].forward(hidden)?)?,
+                        (key + low_rank[1].forward(hidden)?)?,
+                    ),
+                    None => (query, key),
+                };
                 // Falcon-H1 multiplies every key by `key_multiplier`.
                 let key = match self.key_scale {
                     Some(scale) => (key * scale)?,
@@ -374,6 +421,10 @@ impl Attention {
                     (query, key)
                 };
                 let value = project(value, self.value_adapter.as_ref(), hidden, mode.route)?;
+                let value = match &self.low_rank {
+                    Some(low_rank) => (value + low_rank[2].forward(hidden)?)?,
+                    None => value,
+                };
                 // OLMo, OLMoE and DBRX clip every query, key and value
                 // component to `±clip_qkv` (after OLMoE's norms).
                 let clip = |projected: Tensor| match self.clip_qkv {

@@ -17,6 +17,7 @@ use super::{
         DecoderLayer,
         norm::{Norm, NormSpec},
         projection,
+        shared::SharedBlock,
     },
 };
 
@@ -116,14 +117,36 @@ impl SteeringLlama {
             )?
         };
         let final_norm = spec.load(config.hidden_size, builder.pp(names.final_norm))?;
+        // Zamba2's shared blocks are mapped once, from the first hybrid
+        // layers that use them, and every later use shares their tensors.
+        let shared = match architecture.shared_blocks {
+            Some(blocks) => {
+                let owners: Vec<usize> = blocks.layers().take(blocks.blocks).collect();
+                owners
+                    .iter()
+                    .map(|owner| {
+                        let block_builder = builder.pp(format!("{}.{owner}.shared_transformer", names.layers));
+                        let block = SharedBlock::load(&block_builder, &config, &architecture, *owner, blocks)?;
+                        Ok((block, block_builder))
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()?
+            }
+            None => Vec::new(),
+        };
         let layers = (0..config.num_hidden_layers)
             .map(|index| {
+                let block = architecture
+                    .shared_blocks
+                    .filter(|blocks| index < u128::BITS as usize && blocks.hybrid_layers & (1u128 << index) != 0)
+                    .and_then(|blocks| shared.get(blocks.slot(index) % blocks.blocks))
+                    .map(|(block, block_builder)| (block, block_builder));
                 DecoderLayer::load(
                     builder.pp(format!("{}.{index}", names.layers)),
                     &config,
                     &architecture,
                     index,
                     &adapters,
+                    block,
                 )
             })
             .collect::<candle_core::Result<Vec<_>>>()?;
@@ -301,6 +324,8 @@ impl SteeringLlama {
     ) -> candle_core::Result<ForwardOutput> {
         let (_, sequence) = tokens.dims2()?;
         let mut hidden = self.embeddings.forward(tokens)?;
+        // Zamba2's hybrid layers read the embeddings beside the hidden state.
+        let embedded = hidden.clone();
         if let Some((table, offset)) = &self.positions {
             let first = (index_pos + offset) as u32;
             let rows = Tensor::arange(first, first + sequence as u32, tokens.device())?;
@@ -318,7 +343,7 @@ impl SteeringLlama {
         let mut activations = BTreeMap::new();
         for (index, layer) in self.layers.iter().enumerate() {
             let mask = masks.map(|masks| masks.for_window(layer.window()));
-            hidden = layer.forward(&hidden, index_pos, index, cache, mask, mode)?;
+            hidden = layer.forward(&hidden, &embedded, index_pos, index, cache, mask, mode)?;
             if capture_layers.binary_search(&index).is_ok() {
                 let activation = hidden
                     .i((0, sequence - 1, ..))?

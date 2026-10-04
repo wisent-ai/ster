@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
     LatentAttention, LightningSpec, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm, Positions, QkvLayout,
-    QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec,
+    QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec, SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec,
     StructuredSpec,
 };
 
@@ -97,13 +97,14 @@ pub(super) enum Family {
     Step3Text,
     MinimaxText,
     Minimax,
+    Zamba2,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 73] = [
+    pub(super) const ALL: [Self; 74] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -174,6 +175,7 @@ impl Family {
         Self::Step3Text,
         Self::MinimaxText,
         Self::Minimax,
+        Self::Zamba2,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -257,6 +259,7 @@ impl Family {
             Self::Step3Text => "step3_text",
             Self::MinimaxText => "minimax_text_01",
             Self::Minimax => "minimax",
+            Self::Zamba2 => "zamba2",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -339,12 +342,21 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
             object.insert("intermediate_size".to_owned(), width);
         }
     }
+    // Zamba2 ties its head to the embeddings whatever `tie_word_embeddings`
+    // says (`Zamba2ForCausalLM._tied_weights_keys`), and its checkpoints
+    // ship no `lm_head`.
+    if model_type == "zamba2" {
+        if let Some(object) = raw.as_object_mut() {
+            object.insert("tie_word_embeddings".to_owned(), Value::Bool(true));
+        }
+    }
     let aliases: &[(&str, &[&str])] = &[
         ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]),
         ("hidden_size", &["n_embd", "n_embed", "d_model"]),
         ("num_hidden_layers", &["n_layer", "n_layers", "num_layers"]),
         ("num_attention_heads", &["n_head", "n_heads"]),
         ("num_key_value_heads", &["kv_n_heads", "num_attention_groups"]),
+        ("head_dim", &["attention_head_dim"]),
         ("max_position_embeddings", &["n_positions", "max_seq_len", "seq_length", "model_max_length"]),
         ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
         ("rope_theta", &["rotary_emb_base"]),
@@ -1777,6 +1789,92 @@ pub(super) fn family(
                     form: SharedForm::GateUpDown,
                 });
             architecture.experts = Some(routed);
+        }
+        "zamba2" => {
+            // Zamba2: Mamba-2 layers, and on the layers `layers_block_type`
+            // calls `hybrid` a shared transformer block (one of
+            // `num_mem_blocks`, used in turn) whose output joins the Mamba-2
+            // mixer's input. The block's attention reads the hidden state
+            // beside the embeddings, `attention_hidden_size` wide, divides
+            // its scores by `sqrt(attention_head_dim / 2)` and rotates only
+            // under `use_mem_rope`.
+            fits(layers, path)?;
+            let Some(kinds) = raw.get("layers_block_type").and_then(Value::as_array) else {
+                bail!("{} declares a Zamba2 model without layers_block_type", path.display());
+            };
+            if kinds.len() != layers {
+                bail!("{} lists {} layers_block_type entries for {layers} layers", path.display(), kinds.len());
+            }
+            let mut hybrid = 0u128;
+            for (layer, kind) in kinds.iter().enumerate() {
+                match kind.as_str() {
+                    Some("hybrid") => hybrid |= 1u128 << layer,
+                    Some("mamba") => {}
+                    other => bail!(
+                        "{} names layer {layer} {other:?}; a Zamba2 layer is mamba or hybrid",
+                        path.display()
+                    ),
+                }
+            }
+            let mut heads = structured(raw, "n_mamba_heads", "mamba_headdim", "mamba_ngroups", path)?;
+            // Transformers' `Zamba2MambaMixer` clamps the step to
+            // `(time_step_min, inf)`.
+            heads.step_limit = (number(raw, "time_step_min").unwrap_or(0.0), f64::INFINITY);
+            let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+            else {
+                bail!(
+                    "{} declares a Zamba2 model without mamba_d_state and mamba_d_conv",
+                    path.display()
+                );
+            };
+            let inner = (number(raw, "mamba_expand").unwrap_or(2.0) * llama.hidden_size as f64) as usize;
+            if inner != heads.heads * heads.head_dim {
+                bail!(
+                    "{} sizes its Mamba-2 mixer at mamba_expand times the width, {inner}, but {} heads of {} make {}",
+                    path.display(),
+                    heads.heads,
+                    heads.head_dim,
+                    heads.heads * heads.head_dim
+                );
+            }
+            let Some(blocks) = whole(raw, "num_mem_blocks").filter(|blocks| *blocks > 0) else {
+                bail!("{} declares a Zamba2 model without num_mem_blocks", path.display());
+            };
+            let attention_adapters = flag(raw, "use_shared_attention_adapter");
+            let feed_forward_adapters = flag(raw, "use_shared_mlp_adapter");
+            let rank = whole(raw, "adapter_rank").unwrap_or(0);
+            if (attention_adapters || feed_forward_adapters) && rank == 0 {
+                bail!(
+                    "{} turns on Zamba2's shared adapters without an adapter_rank",
+                    path.display()
+                );
+            }
+            architecture.names = Names::JAMBA;
+            architecture.score_divisor = (architecture.head_dim as f64 / 2.0).sqrt();
+            if !flag(raw, "use_mem_rope") {
+                architecture.positions = Positions::None;
+            }
+            architecture.shared_blocks = Some(SharedBlocksSpec {
+                hybrid_layers: hybrid,
+                blocks,
+                attention_input: whole(raw, "attention_hidden_size").unwrap_or(2 * llama.hidden_size),
+                intermediate: llama.intermediate_size,
+                rank,
+                attention_adapters,
+                feed_forward_adapters,
+            });
+            architecture.state_space = Some(StateSpaceSpec {
+                inner,
+                state,
+                kernel,
+                step_rank: 0,
+                projection_bias: flag(raw, "add_bias_linear"),
+                convolution_bias: raw.get("use_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                parameter_norm: ParameterNorm::None,
+                layers: every_layer(layers, path)? & !hybrid,
+                feed_forward: false,
+                structured: Some(heads),
+            });
         }
         "minimax_text_01" | "minimax" => {
             // MiniMax-Text-01 (its own release spells `minimax_text_01`,
