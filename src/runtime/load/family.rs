@@ -87,13 +87,14 @@ pub(super) enum Family {
     Lfm2Moe,
     GraniteMoeHybrid,
     NemotronH,
+    Jais2,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 63] = [
+    pub(super) const ALL: [Self; 64] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -154,6 +155,7 @@ impl Family {
         Self::Lfm2Moe,
         Self::GraniteMoeHybrid,
         Self::NemotronH,
+        Self::Jais2,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -227,6 +229,7 @@ impl Family {
             Self::Lfm2Moe => "lfm2_moe",
             Self::GraniteMoeHybrid => "granitemoehybrid",
             Self::NemotronH => "nemotron_h",
+            Self::Jais2 => "jais2",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -436,7 +439,24 @@ fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> 
 /// A `rope_scaling` Candle's Llama config cannot read (anything but Llama
 /// 3's), taken out of the config before it is parsed so Ster can apply it
 /// itself. Returns what was taken.
+///
+/// Configs written by Transformers 5 state the rotation in one
+/// `rope_parameters` object; its `rope_theta` is read as the base and, unless
+/// its `rope_type` is `default`, the object as the scaling, never over keys
+/// the config states at the top level.
 pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<Value>> {
+    if let Some(parameters) = raw.get("rope_parameters").filter(|value| value.is_object()).cloned() {
+        let scaled = !matches!(scaling_kind(&parameters), "default" | "");
+        if let Some(object) = raw.as_object_mut() {
+            if let Some(theta) = parameters.get("rope_theta").filter(|theta| theta.is_number()) {
+                object.entry("rope_theta").or_insert_with(|| theta.clone());
+            }
+            let unstated = object.get("rope_scaling").map_or(true, Value::is_null);
+            if scaled && unstated {
+                object.insert("rope_scaling".to_owned(), parameters);
+            }
+        }
+    }
     let Some(scaling) = raw.get("rope_scaling").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
@@ -960,6 +980,22 @@ pub(super) fn family(
             architecture.feed_forward_bias = flag(raw, "mlp_bias");
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.names = Names::UP_DOWN;
+        }
+        "jais2" => {
+            // Jais 2: Arcee's plain `up_proj`/`down_proj` feed-forward under
+            // LayerNorms with bias; `attention_bias` and `mlp_bias` default
+            // to true and `hidden_act` to squared ReLU, as Transformers'
+            // `Jais2Config` defines them.
+            let stated = |key: &str| raw.get(key).and_then(Value::as_bool).unwrap_or(true);
+            architecture.query_key_value_bias = stated("attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = stated("mlp_bias");
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.names = Names::UP_DOWN;
+            if text(raw, "hidden_act").is_none() {
+                architecture.activation = Activation::Relu2;
+            }
         }
         "ernie4_5" | "ernie4_5_moe" => {
             let bias = flag(raw, "use_bias");
