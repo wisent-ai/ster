@@ -100,6 +100,11 @@ pub(super) struct GenerateArgs {
     model: ModelArgs,
     #[arg(long)]
     prompt: String,
+    /// File whose text is the system turn the prompt is answered under. It is
+    /// rendered by the model's own chat template, so it needs one: with the
+    /// template absent or `--chat-template off` it is refused.
+    #[arg(long)]
+    system: Option<PathBuf>,
     #[arg(long)]
     vector: Option<PathBuf>,
     /// Frozen LoRA adapter artifact to load the model with. It must have
@@ -247,6 +252,7 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
     let GenerateArgs {
         model,
         prompt,
+        system,
         vector,
         adapter,
         chat_template,
@@ -265,6 +271,22 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
     // `Reward::parse` resolves its source ahead of the policy load for
     // this reason and says so.
     let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
+    // The system turn is read here for the same reason: an unreadable or
+    // empty file is refused before the checkpoint is paid for.
+    let system = match system.as_deref() {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("cannot read the system turn {}", path.display()))?;
+            if text.trim().is_empty() {
+                anyhow::bail!("the system turn {} is empty", path.display());
+            }
+            if prompt.trim().is_empty() {
+                anyhow::bail!("prompt must not be empty");
+            }
+            Some(text)
+        }
+        None => None,
+    };
     // An adapter rewrites the projections themselves, so it is
     // attached while the weights are mapped rather than applied per
     // token the way a steering vector is.
@@ -282,17 +304,31 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
     if let Some(vector) = vector.as_deref() {
         tune::warn_on_provenance(vector, "direction", &runtime);
     }
-    let generated = runtime.generate(
-        &prompt,
-        artifact.as_ref(),
-        GenerationOptions {
-            strength,
-            max_new_tokens,
-            temperature,
-            top_p,
-            seed,
-        },
-    )?;
+    let options = GenerationOptions {
+        strength,
+        max_new_tokens,
+        temperature,
+        top_p,
+        seed,
+    };
+    let generated = match system.as_deref() {
+        Some(system) => {
+            let context = runtime.encode_conversation(&[
+                ster::chat::Message {
+                    role: "system",
+                    content: system,
+                },
+                ster::chat::Message {
+                    role: "user",
+                    content: &prompt,
+                },
+            ])?;
+            runtime
+                .sample_tokens(context, artifact.as_ref(), options)?
+                .text
+        }
+        None => runtime.generate(&prompt, artifact.as_ref(), options)?,
+    };
     println!("{generated}");
     Ok(())
 }
