@@ -106,6 +106,48 @@ pub(super) struct FeedForward {
     /// Falcon-H1's `mlp_multipliers`: on the gate before its activation,
     /// and on the output.
     scales: Option<(f64, f64)>,
+    /// xIELU's parameters, when the activation is xIELU (Apertus).
+    xielu: Option<Xielu>,
+}
+
+/// xIELU's parameters from the feed-forward's `act_fn`, as Transformers'
+/// `XIELUActivation` uses them: `alpha_p` is the softplus of the stored
+/// one, `alpha_n` is `beta` plus the softplus of the stored one.
+#[derive(Debug, Clone, Copy)]
+struct Xielu {
+    alpha_p: f64,
+    alpha_n: f64,
+    beta: f64,
+    eps: f64,
+}
+
+impl Xielu {
+    fn load(builder: VarBuilder<'_>) -> candle_core::Result<Self> {
+        let scalar = |name: &str| -> candle_core::Result<f64> {
+            let values = builder.get_unchecked(name)?.flatten_all()?.to_dtype(candle_core::DType::F64)?.to_vec1::<f64>()?;
+            match values.as_slice() {
+                [value] => Ok(*value),
+                _ => candle_core::bail!("xIELU's {name} holds {} values, not one", values.len()),
+            }
+        };
+        let softplus = |value: f64| value.exp().ln_1p();
+        let beta = scalar("beta")?;
+        Ok(Self {
+            alpha_p: softplus(scalar("alpha_p")?),
+            alpha_n: beta + softplus(scalar("alpha_n")?),
+            beta,
+            eps: scalar("eps")?,
+        })
+    }
+
+    /// `alpha_p · x² + beta · x` above zero, and
+    /// `(expm1(min(x, eps)) − x) · alpha_n + beta · x` elsewhere.
+    fn apply(&self, input: &Tensor) -> candle_core::Result<Tensor> {
+        let linear = (input * self.beta)?;
+        let positive = ((input.sqr()? * self.alpha_p)? + &linear)?;
+        let negative = ((((input.minimum(self.eps)?.exp()? - 1.0)? - input)? * self.alpha_n)? + &linear)?;
+        input.gt(0.0)?.where_cond(&positive, &negative)
+    }
 }
 
 impl FeedForward {
@@ -159,6 +201,13 @@ impl FeedForward {
             down_adapter: adapters.get(layer, Target::Down).cloned(),
             activation: architecture.activation,
             scales: architecture.feed_forward_scales,
+            xielu: if architecture.activation == Activation::Xielu {
+                let parent = names.down.rsplit_once('.').map_or("", |(parent, _)| parent);
+                let block = if parent.is_empty() { builder.clone() } else { builder.pp(parent) };
+                Some(Xielu::load(block.pp("act_fn"))?)
+            } else {
+                None
+            },
         })
     }
 
@@ -175,14 +224,21 @@ impl FeedForward {
                     Some((gate_scale, _)) => (gate * gate_scale)?,
                     None => gate,
                 };
-                (self.activation.apply(&gate)? * up)?
+                (self.activate(&gate)? * up)?
             }
-            None => self.activation.apply(&up)?,
+            None => self.activate(&up)?,
         };
         let output = project(&self.down, self.down_adapter.as_ref(), &inner, route)?;
         match self.scales {
             Some((_, output_scale)) => output * output_scale,
             None => Ok(output),
+        }
+    }
+
+    fn activate(&self, input: &Tensor) -> candle_core::Result<Tensor> {
+        match &self.xielu {
+            Some(xielu) => xielu.apply(input),
+            None => self.activation.apply(input),
         }
     }
 }

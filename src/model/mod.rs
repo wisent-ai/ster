@@ -1187,6 +1187,14 @@ impl Names {
         gate: None,
         ..Self::LLAMA
     };
+    /// Apertus: `attention_layernorm` before attention and
+    /// `feedforward_layernorm` before its plain up-activation-down
+    /// feed-forward.
+    pub const APERTUS: Self = Self {
+        attention_norm: "attention_layernorm",
+        feed_forward_norm: "feedforward_layernorm",
+        ..Self::UP_DOWN
+    };
     /// Phi-2: `dense` for the attention output, `fc1`/`fc2`, and a
     /// `final_layernorm`.
     pub const PHI: Self = Self {
@@ -1522,6 +1530,9 @@ pub enum Activation {
     Relu2,
     /// Plain ReLU (OPT).
     Relu,
+    /// xIELU (Apertus), whose parameters are each feed-forward's own
+    /// (`mlp.act_fn`); the feed-forward that holds them applies it.
+    Xielu,
 }
 
 impl Activation {
@@ -1532,6 +1543,9 @@ impl Activation {
             Self::Gelu => input.gelu_erf(),
             Self::Relu2 => input.relu()?.sqr(),
             Self::Relu => input.relu(),
+            Self::Xielu => candle_core::bail!(
+                "xIELU takes its parameters from the feed-forward that holds them (mlp.act_fn), and this one holds none"
+            ),
         }
     }
 }

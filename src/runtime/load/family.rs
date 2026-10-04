@@ -113,10 +113,12 @@ pub(super) enum Family {
     IQuestCoder,
     HyperClovaX,
     VaultGemma,
+    Apertus,
+    ExaoneMoe,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 86] = [
+    pub(super) const ALL: [Self; 88] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -203,6 +205,8 @@ impl Family {
         Self::IQuestCoder,
         Self::HyperClovaX,
         Self::VaultGemma,
+        Self::Apertus,
+        Self::ExaoneMoe,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -299,6 +303,8 @@ impl Family {
             Self::IQuestCoder => "iquestcoder",
             Self::HyperClovaX => "hyperclovax",
             Self::VaultGemma => "vaultgemma",
+            Self::Apertus => "apertus",
+            Self::ExaoneMoe => "exaone_moe",
         }
     }
 
@@ -507,8 +513,9 @@ fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> 
         Some("gelu") => Ok(Activation::Gelu),
         Some("relu2") => Ok(Activation::Relu2),
         Some("relu") => Ok(Activation::Relu),
+        Some("xielu") => Ok(Activation::Xielu),
         Some(other) => bail!(
-            "{} declares hidden_act {other:?} for its {model_type} feed-forward; Ster implements silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast, relu and relu2",
+            "{} declares hidden_act {other:?} for its {model_type} feed-forward; Ster implements silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast, relu, relu2 and xielu",
             path.display()
         ),
     }
@@ -1173,6 +1180,27 @@ pub(super) fn family(
                     .filter(|layer| (layer + 1) % pattern != 0)
                     .fold(0, |set, layer| set | (1u128 << layer));
             }
+        }
+        "apertus" => {
+            // Apertus: per-head query and key norms, `attention_layernorm`
+            // and `feedforward_layernorm`, and a plain up-activation-down
+            // feed-forward whose xIELU keeps its parameters in `mlp.act_fn`.
+            architecture.query_key_norm = QueryKeyNorm::PerHead;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.names = Names::APERTUS;
+        }
+        "exaone_moe" => {
+            // K-EXAONE: EXAONE 4's attention (per-head query and key norms,
+            // and no rotation on its full-attention layers beside
+            // sliding-window ones) in a pre-norm block, with DeepSeek-V3's
+            // sigmoid router and `num_shared_experts` shared experts on the
+            // layers `mlp_layer_types` calls `sparse`.
+            architecture.query_key_norm = QueryKeyNorm::PerHead;
+            architecture.sliding_window = whole(raw, "sliding_window");
+            architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
         }
         "internlm3" => {
             architecture.query_key_value_bias = flag(raw, "qkv_bias");
@@ -2559,7 +2587,7 @@ pub(super) fn family(
     }
     // Cohere 2's global layers apply no rotary embedding; so do EXAONE 4's
     // when the model mixes local and global layers at all.
-    let hybrid_exaone = model_type == "exaone4" && architecture.sliding_window.is_some();
+    let hybrid_exaone = matches!(model_type, "exaone4" | "exaone_moe") && architecture.sliding_window.is_some();
     if model_type == "cohere2" || hybrid_exaone {
         architecture.unrotated_layers = every_layer(layers, path)? & !architecture.sliding_layers;
     }
@@ -2662,14 +2690,15 @@ fn deepseek_experts(
     let normalize = flag(raw, "norm_topk_prob");
     let mut routed = experts(
         raw,
-        "n_routed_experts",
+        // K-EXAONE spells the counts `num_experts` and `num_shared_experts`.
+        if model_type == "exaone_moe" { "num_experts" } else { "n_routed_experts" },
         "moe_intermediate_size",
         normalize,
         ExpertLayout::Qwen,
         dense_layers,
         path,
     )?;
-    routed.shared = whole(raw, "n_shared_experts")
+    routed.shared = whole(raw, if model_type == "exaone_moe" { "num_shared_experts" } else { "n_shared_experts" })
         .filter(|shared| *shared > 0)
         .map(|shared| SharedExpert {
             intermediate: shared * routed.intermediate,
@@ -2679,7 +2708,7 @@ fn deepseek_experts(
         });
     // GLM-4-MoE's and Nemotron-H's routers are DeepSeek-V3's and their
     // configs leave the method out: sigmoid scores, `noaux_tc` selection.
-    let v3_default = matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "nemotron_h");
+    let v3_default = matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "nemotron_h" | "exaone_moe");
     let v3_router = v3_default || model_type == "deepseek_v3";
     routed.scoring = match text(raw, "scoring_func") {
         None if v3_default => Scoring::Sigmoid,
@@ -2719,7 +2748,13 @@ fn deepseek_experts(
             path.display()
         ),
     };
-    routed.selection_bias = (method == "noaux_tc").then_some("mlp.gate.e_score_correction_bias");
+    // K-EXAONE keeps the selection bias beside the router rather than in it.
+    let bias = if model_type == "exaone_moe" {
+        "mlp.e_score_correction_bias"
+    } else {
+        "mlp.gate.e_score_correction_bias"
+    };
+    routed.selection_bias = (method == "noaux_tc").then_some(bias);
     let scale = number(raw, "routed_scaling_factor");
     routed.routed_scale = if v3_router || !(normalize && routed.top_k > 1) {
         scale
