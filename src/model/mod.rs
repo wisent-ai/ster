@@ -665,6 +665,10 @@ pub struct MixtureOfExperts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedExpert {
     pub intermediate: usize,
+    /// Its module under `mlp`: Qwen2-MoE's `shared_expert`, DeepSeek's and
+    /// ERNIE's `shared_experts`, HunYuan's `shared_mlp`.
+    pub module: &'static str,
+    /// Scaled by the sigmoid of `mlp.shared_expert_gate` (Qwen2-MoE).
     pub gated: bool,
 }
 
@@ -706,7 +710,8 @@ pub enum ExpertLayout {
     Granite,
     /// `feed_forward.router`, `feed_forward.experts.{e}.gate_proj|up_proj|down_proj`.
     Jamba,
-    /// `mlp.router` (with bias) and every expert stacked inputs-first in
+    /// `mlp.gate.wg`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`.
+    HunYuan,
     /// `mlp.experts.gate_up_proj` and `down_proj`, with biases.
     GptOss,
     /// `ffn.router.layer`, and every expert stacked in

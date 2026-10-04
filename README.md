@@ -42,8 +42,9 @@ Included now:
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
   `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
   `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `mamba2`, `bamba`,
-  `gpt_oss`, `lfm2`, `ernie4_5_moe`, `dbrx`, `phimoe`, `smollm3`, `gemma`,
-  `gemma2` or `gemma3_text`. OLMo, OLMoE and DBRX clamp every query, key and
+  `gpt_oss`, `lfm2`, `ernie4_5_moe`, `dbrx`, `phimoe`, `hunyuan_v1_moe`,
+  `smollm3`, `gemma`, `gemma2` or `gemma3_text`. OLMo, OLMoE and DBRX clamp
+  every query, key and
   value component to `clip_qkv`; PhiMoE routes two experts per token by
   SparseMixer. GPT-OSS
   adds a learned sink logit per head to every attention softmax and routes

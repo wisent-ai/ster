@@ -103,11 +103,11 @@ impl Experts {
                     .collect::<candle_core::Result<Vec<_>>>()?;
                 (linear_no_bias(hidden, count, block.pp("gate"))?, experts)
             }
-            ExpertLayout::Qwen | ExpertLayout::Jamba => {
-                let (block, router) = if spec.layout == ExpertLayout::Jamba {
-                    (builder.pp("feed_forward"), "router")
-                } else {
-                    (builder.pp("mlp"), "gate")
+            ExpertLayout::Qwen | ExpertLayout::Jamba | ExpertLayout::HunYuan => {
+                let (block, router) = match spec.layout {
+                    ExpertLayout::Jamba => (builder.pp("feed_forward"), "router"),
+                    ExpertLayout::HunYuan => (builder.pp("mlp"), "gate.wg"),
+                    _ => (builder.pp("mlp"), "gate"),
                 };
                 let experts = (0..count)
                     .map(|expert| {
@@ -198,9 +198,9 @@ impl Experts {
             }
         };
         let shared = match spec.shared {
-            Some(SharedExpert { intermediate, gated }) => {
+            Some(SharedExpert { intermediate, module, gated }) => {
                 let block = builder.pp("mlp");
-                let name = if gated { "shared_expert" } else { "shared_experts" };
+                let name = module;
                 Some((
                     Expert::load(
                         hidden,

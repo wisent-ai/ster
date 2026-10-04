@@ -82,13 +82,14 @@ pub(super) enum Family {
     Ernie45Moe,
     Dbrx,
     Phimoe,
+    HunYuanMoe,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 58] = [
+    pub(super) const ALL: [Self; 59] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -144,6 +145,7 @@ impl Family {
         Self::Ernie45Moe,
         Self::Dbrx,
         Self::Phimoe,
+        Self::HunYuanMoe,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -212,6 +214,7 @@ impl Family {
             Self::Ernie45Moe => "ernie4_5_moe",
             Self::Dbrx => "dbrx",
             Self::Phimoe => "phimoe",
+            Self::HunYuanMoe => "hunyuan_v1_moe",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -295,7 +298,7 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         ("max_position_embeddings", &["n_positions", "max_seq_len"]),
         ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
         ("rope_theta", &["rotary_emb_base"]),
-        ("num_experts_per_tok", &["moe_k", "moe_top_k"]),
+        ("num_experts_per_tok", &["moe_k", "moe_top_k", "moe_topk"]),
     ];
     for (llama, spellings) in aliases {
         if raw.get(*llama).is_some_and(|value| !value.is_null()) {
@@ -723,7 +726,11 @@ pub(super) fn family(
                 )?;
                 if model_type == "qwen2_moe" {
                     routed.shared = whole(raw, "shared_expert_intermediate_size")
-                        .map(|intermediate| SharedExpert { intermediate, gated: true });
+                        .map(|intermediate| SharedExpert {
+                            intermediate,
+                            module: "shared_expert",
+                            gated: true,
+                        });
                 }
                 architecture.experts = Some(routed);
             }
@@ -956,6 +963,7 @@ pub(super) fn family(
                     .filter(|shared| *shared > 0)
                     .map(|shared| SharedExpert {
                         intermediate: shared * routed.intermediate,
+                        module: "shared_experts",
                         gated: false,
                     });
                 routed.selection_bias = Some("mlp.moe_statics");
@@ -1209,7 +1217,7 @@ pub(super) fn family(
             routed.swiglu_limit = number(raw, "swiglu_limit");
             architecture.experts = Some(routed);
         }
-        "hunyuan_v1_dense" => {
+        "hunyuan_v1_dense" | "hunyuan_v1_moe" => {
             // HunYuan: per-head query and key norms named `query_layernorm`
             // and `key_layernorm`, applied after the rotation.
             architecture.names = Names::HUNYUAN;
@@ -1219,6 +1227,38 @@ pub(super) fn family(
             if flag(raw, "use_qk_norm") {
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
                 architecture.norm_after_rotary = true;
+            }
+            if model_type == "hunyuan_v1_moe" {
+                if flag(raw, "use_cla") || flag(raw, "use_mla") {
+                    bail!(
+                        "{} shares attention across layers (use_cla) or compresses it (use_mla); Ster implements HunYuan's own attention on every layer",
+                        path.display()
+                    );
+                }
+                // HunYuan-MoE: `num_experts` experts under `mlp.gate.wg`,
+                // the top `moe_topk` weighted by their renormalised softmax,
+                // beside `mlp.shared_mlp`, `num_shared_expert` times
+                // `intermediate_size` wide, unless `use_mixed_mlp_moe` is
+                // false; the first `moe_layer_num_skipped` layers stay dense.
+                let width = if raw.get("moe_intermediate_size").is_some() {
+                    "moe_intermediate_size"
+                } else {
+                    "intermediate_size"
+                };
+                fits(layers, path)?;
+                let skipped = whole(raw, "moe_layer_num_skipped").unwrap_or(0).min(layers);
+                let dense = (0..skipped).fold(0u128, |set, layer| set | (1u128 << layer));
+                let mut routed =
+                    experts(raw, "num_experts", width, true, ExpertLayout::HunYuan, dense, path)?;
+                if raw.get("use_mixed_mlp_moe").and_then(Value::as_bool) != Some(false) {
+                    let shared = uniform(raw, "num_shared_expert", path)?.unwrap_or(1);
+                    routed.shared = (shared > 0).then_some(SharedExpert {
+                        intermediate: shared * llama.intermediate_size,
+                        module: "shared_mlp",
+                        gated: false,
+                    });
+                }
+                architecture.experts = Some(routed);
             }
         }
         "exaone" => {
@@ -1483,7 +1523,7 @@ pub(super) fn family(
 
 /// The mixture of experts a config declares: how many under `count_key`, how
 /// many per token under `num_experts_per_tok`, each one's width under
-/// `width_key`.
+/// `width_key`, each stated once or once per layer.
 fn experts(
     raw: &Value,
     count_key: &str,
@@ -1494,9 +1534,9 @@ fn experts(
     path: &Path,
 ) -> Result<MixtureOfExperts> {
     let (Some(count), Some(top_k), Some(intermediate)) = (
-        whole(raw, count_key),
-        whole(raw, "num_experts_per_tok"),
-        whole(raw, width_key),
+        uniform(raw, count_key, path)?,
+        uniform(raw, "num_experts_per_tok", path)?,
+        uniform(raw, width_key, path)?,
     ) else {
         bail!(
             "{} declares a mixture of experts without {count_key}, num_experts_per_tok and {width_key}",
@@ -1523,6 +1563,25 @@ fn experts(
         routed_scale: None,
         swiglu_limit: None,
     })
+}
+
+/// A whole number a config states once, or once per layer as HunYuan's
+/// lists do. A per-layer list must hold one value throughout, because Ster
+/// builds every mixture-of-experts layer alike.
+fn uniform(raw: &Value, key: &str, path: &Path) -> Result<Option<usize>> {
+    let Some(Value::Array(values)) = raw.get(key) else {
+        return Ok(whole(raw, key));
+    };
+    let values: Option<Vec<u64>> = values.iter().map(Value::as_u64).collect();
+    match values.as_deref() {
+        Some([first, rest @ ..]) if rest.iter().all(|value| value == first) => {
+            Ok(Some(*first as usize))
+        }
+        _ => bail!(
+            "{} lists {key} values that differ between layers or are not whole numbers; Ster builds every mixture-of-experts layer alike",
+            path.display()
+        ),
+    }
 }
 
 /// DeepSeek's mixture of experts: `n_routed_experts` routed and
@@ -1559,6 +1618,7 @@ fn deepseek_experts(
         .filter(|shared| *shared > 0)
         .map(|shared| SharedExpert {
             intermediate: shared * routed.intermediate,
+            module: "shared_experts",
             gated: false,
         });
     // GLM-4-MoE's router is DeepSeek-V3's and its configs leave the method
