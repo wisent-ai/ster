@@ -8,6 +8,10 @@
 //! * **Kimi** — separate `q_proj`, `k_proj`, `v_proj` with their own
 //!   `q_conv1d`, `k_conv1d`, `v_conv1d`; `b_proj` yields `b`; the decay input
 //!   is `f_b(f_a(x))`, one per key channel; the gate is `g_b(g_a(x))`.
+//! * **OLMo Hybrid** — separate `q_proj`, `k_proj`, `v_proj` under one
+//!   `conv1d` (or OLMo-core's `q_conv1d`, `k_conv1d`, `v_conv1d`); `b_proj`
+//!   and `a_proj` yield `b` and the decay input, one per value head;
+//!   `g_proj` the gate.
 
 use candle_core::{DType, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
@@ -29,6 +33,14 @@ pub(super) enum Inputs {
         forget_up: Linear,
         gate_down: Linear,
         gate_up: Linear,
+    },
+    OlmoHybrid {
+        query: Linear,
+        key: Linear,
+        value: Linear,
+        strength: Linear,
+        decay: Linear,
+        gate: Linear,
     },
 }
 
@@ -83,6 +95,25 @@ impl Inputs {
                 Tensor::cat(&[&taps("q_conv1d", keys)?, &taps("k_conv1d", keys)?, &taps("v_conv1d", values)?], 0)?,
                 builder.get(keys, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, key_heads, key_dim))?,
             ),
+            DeltaRuleForm::OlmoHybrid => (
+                Self::OlmoHybrid {
+                    query: linear_no_bias(hidden, keys, builder.pp("q_proj"))?,
+                    key: linear_no_bias(hidden, keys, builder.pp("k_proj"))?,
+                    value: linear_no_bias(hidden, values, builder.pp("v_proj"))?,
+                    strength: linear_no_bias(hidden, value_heads, builder.pp("b_proj"))?,
+                    decay: linear_no_bias(hidden, value_heads, builder.pp("a_proj"))?,
+                    gate: linear_no_bias(hidden, values, builder.pp("g_proj"))?,
+                },
+                // OLMo-core's checkpoints keep one convolution per input
+                // (`q_conv1d`, `k_conv1d`, `v_conv1d`), which Transformers
+                // joins into its single `conv1d` in that order.
+                if builder.contains_tensor("conv1d.weight") {
+                    taps("conv1d", 2 * keys + values)?
+                } else {
+                    Tensor::cat(&[&taps("q_conv1d", keys)?, &taps("k_conv1d", keys)?, &taps("v_conv1d", values)?], 0)?
+                },
+                builder.get(value_heads, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, value_heads, 1))?,
+            ),
         })
     }
 
@@ -130,6 +161,15 @@ impl Inputs {
                 decay_input: forget_up
                     .forward(&forget_down.forward(hidden)?)?
                     .reshape((batch, sequence, key_heads, key_dim))?
+                    .to_dtype(DType::F32)?,
+            }),
+            Self::OlmoHybrid { query, key, value, strength, decay, gate } => Ok(Prepared {
+                mixed: Tensor::cat(&[&query.forward(hidden)?, &key.forward(hidden)?, &value.forward(hidden)?], 2)?,
+                gate: gate.forward(hidden)?.reshape((batch, sequence, value_heads, value_dim))?,
+                strength: strength.forward(hidden)?.to_dtype(DType::F32)?,
+                decay_input: decay
+                    .forward(hidden)?
+                    .reshape((batch, sequence, value_heads, 1))?
                     .to_dtype(DType::F32)?,
             }),
         }

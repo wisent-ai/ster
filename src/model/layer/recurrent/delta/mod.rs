@@ -29,6 +29,11 @@ use inputs::{Inputs, Prepared};
 /// `l2norm(..., eps=1e-6)`).
 const L2_NORM_EPS: f64 = 1e-6;
 
+/// The epsilon of OLMo Hybrid's gated output norm, which it fixes rather
+/// than reading `rms_norm_eps` (`modeling_olmo_hybrid.py`,
+/// `OlmoHybridRMSNormGated(self.head_v_dim, eps=1e-5)`).
+const OLMO_HYBRID_NORM_EPS: f64 = 1e-5;
+
 #[derive(Debug, Clone)]
 pub(in crate::model::layer) struct DeltaRule {
     inputs: Inputs,
@@ -64,8 +69,9 @@ impl DeltaRule {
         let (inputs, convolution, step_bias) = Inputs::load(&builder, hidden, spec)?;
         let (norm, output) = match form {
             DeltaRuleForm::Qwen3Next => ("norm", "out_proj"),
-            DeltaRuleForm::Kimi => ("o_norm", "o_proj"),
+            DeltaRuleForm::Kimi | DeltaRuleForm::OlmoHybrid => ("o_norm", "o_proj"),
         };
+        let eps = if form == DeltaRuleForm::OlmoHybrid { OLMO_HYBRID_NORM_EPS } else { eps };
         Ok(Self {
             inputs,
             convolution,
@@ -134,6 +140,7 @@ impl DeltaRule {
         // and log-decay `g`; Kimi's per-key-channel decay belongs to its key
         // head and is shared like the key.
         let strength = (strength.neg()?.exp()? + 1.0)?.recip()?;
+        let strength = if self.spec.negative_eigenvalues { (strength * 2.0)? } else { strength };
         let log_decay =
             softplus(&decay_input.broadcast_add(&self.step_bias)?)?.broadcast_mul(&self.decay)?;
         let decay_width = log_decay.dim(3)?;
@@ -169,7 +176,7 @@ impl DeltaRule {
             .broadcast_mul(&self.norm.to_dtype(DType::F32)?)?;
         let gate = gate.to_dtype(DType::F32)?;
         let gate = match form {
-            DeltaRuleForm::Qwen3Next => candle_nn::ops::silu(&gate)?,
+            DeltaRuleForm::Qwen3Next | DeltaRuleForm::OlmoHybrid => candle_nn::ops::silu(&gate)?,
             DeltaRuleForm::Kimi => (gate.neg()?.exp()? + 1.0)?.recip()?,
         };
         let gated = (normed * gate)?

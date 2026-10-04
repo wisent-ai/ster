@@ -119,10 +119,12 @@ pub(super) enum Family {
     Step1,
     TeleChat3,
     Param2Moe,
+    PanguEmbedded,
+    OlmoHybrid,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 92] = [
+    pub(super) const ALL: [Self; 94] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -215,6 +217,8 @@ impl Family {
         Self::Step1,
         Self::TeleChat3,
         Self::Param2Moe,
+        Self::PanguEmbedded,
+        Self::OlmoHybrid,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -317,6 +321,8 @@ impl Family {
             Self::Step1 => "step1",
             Self::TeleChat3 => "telechat3",
             Self::Param2Moe => "param2moe",
+            Self::PanguEmbedded => "PanguEmbedded",
+            Self::OlmoHybrid => "olmo_hybrid",
         }
     }
 
@@ -960,6 +966,7 @@ pub(super) fn family(
                     kernel: size("linear_conv_kernel_dim")?,
                     layers: linear,
                     form: DeltaRuleForm::Qwen3Next,
+                    negative_eigenvalues: false,
                 });
             }
             // Mellum is Qwen3-MoE with sliding-window layers, a rotation per
@@ -1120,6 +1127,68 @@ pub(super) fn family(
             architecture.lm_head_bias = true;
             architecture.names = Names::PHI;
         }
+        "olmo_hybrid" => {
+            // OLMo Hybrid: Gated DeltaNet (`linear_attn`) in a pre-norm block
+            // (`input_layernorm`, the mixer, `post_attention_layernorm`, the
+            // feed-forward) on the layers `layer_types` calls
+            // `linear_attention` — each fourth from the fourth attending
+            // when it lists none — and OLMo 3's post-norm attention block
+            // with whole-projection query and key norms on the rest, rotated
+            // only when `rope_parameters` states a `rope_theta`.
+            fits(layers, path)?;
+            let linear = match raw.get("layer_types").and_then(Value::as_array) {
+                Some(types) => {
+                    if types.len() != layers {
+                        bail!("{} lists {} layer_types for {layers} layers", path.display(), types.len());
+                    }
+                    let mut linear = 0u128;
+                    for (layer, kind) in types.iter().enumerate() {
+                        match kind.as_str() {
+                            Some("linear_attention") => linear |= 1u128 << layer,
+                            Some("full_attention") => {}
+                            other => bail!(
+                                "{} names layer {layer} {other:?}; an OLMo Hybrid layer is linear_attention or full_attention",
+                                path.display()
+                            ),
+                        }
+                    }
+                    linear
+                }
+                None => {
+                    let attending = |layer: usize| layer % OLMO_HYBRID_FULL_EVERY == OLMO_HYBRID_FULL_EVERY - 1;
+                    let mut linear =
+                        (0..layers).filter(|layer| !attending(*layer)).fold(0u128, |set, layer| set | (1u128 << layer));
+                    if layers > 0 && (0..layers).all(|layer| !attending(layer)) {
+                        linear &= !(1u128 << (layers - 1));
+                    }
+                    linear
+                }
+            };
+            let size = |key: &str| -> Result<usize> {
+                whole(raw, key)
+                    .filter(|size| *size > 0)
+                    .with_context(|| format!("{} declares an OLMo Hybrid model without {key}", path.display()))
+            };
+            architecture.query_key_norm = QueryKeyNorm::Full;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.pre_norms = false;
+            architecture.output_norms = true;
+            architecture.delta_rule = Some(DeltaRuleSpec {
+                key_heads: size("linear_num_key_heads")?,
+                value_heads: size("linear_num_value_heads")?,
+                key_dim: size("linear_key_head_dim")?,
+                value_dim: size("linear_value_head_dim")?,
+                kernel: size("linear_conv_kernel_dim")?,
+                layers: linear,
+                form: DeltaRuleForm::OlmoHybrid,
+                negative_eigenvalues: raw.get("linear_allow_neg_eigval").and_then(Value::as_bool).unwrap_or(true),
+            });
+            let stated_theta = |object: Option<&Value>| object.and_then(|value| value.get("rope_theta")).is_some_and(Value::is_number);
+            if !stated_theta(raw.get("rope_parameters")) && !stated_theta(Some(raw)) {
+                architecture.positions = Positions::None;
+            }
+        }
         "olmo2" | "olmo3" | "flex_olmo" => {
             architecture.query_key_norm = QueryKeyNorm::Full;
             architecture.query_key_value_bias = flag(raw, "attention_bias");
@@ -1279,6 +1348,20 @@ pub(super) fn family(
                 blend: [listed("bskcn_3")?, listed("bskcn_4")?],
                 weight: inference,
             });
+        }
+        "PanguEmbedded" => {
+            // openPangu-Embedded: Llama's block with `bias` on every
+            // attention projection (`qkv_bias`, when stated, for query, key
+            // and value), `mlp_bias`, and under `sandwich_norm` norms over
+            // each sublayer's output.
+            let bias = flag(raw, "attention_bias") || flag(raw, "bias");
+            architecture.output_bias = bias;
+            architecture.query_key_value_bias = raw.get("qkv_bias").and_then(Value::as_bool).unwrap_or(bias);
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            if flag(raw, "sandwich_norm") {
+                architecture.output_norms = true;
+                architecture.names = Names::PANGU_SANDWICH;
+            }
         }
         "telechat3" => {
             // TeleChat3: Llama's block with `attention_bias` on every
@@ -2281,6 +2364,7 @@ pub(super) fn family(
                 kernel: size("short_conv_kernel_size")?,
                 layers: kda,
                 form: DeltaRuleForm::Kimi,
+                negative_eigenvalues: false,
             });
             if flag(raw, "mla_use_nope") {
                 architecture.positions = Positions::None;
@@ -2643,9 +2727,16 @@ pub(super) fn family(
     if architecture.local_rope_theta.is_none() && architecture.sliding_window.is_some() {
         architecture.local_rope_theta = number(raw, "rope_local_base_freq").map(|theta| theta as f32);
     }
-    // LFM2's `layer_types` say which layers convolve, read above; every other
-    // family's say which layers attend through the window.
-    let windows = raw.get("layer_types").and_then(Value::as_array).filter(|_| model_type != "lfm2");
+    // A family with recurrent mixers (LFM2's convolutions, Qwen3-Next's,
+    // Kimi-Linear's and OLMo Hybrid's delta rule, MiniMax's lightning
+    // attention, Granite 4.0's Mamba-2) reads its `layer_types` as which
+    // layers run which mixer, above; every other family's say which layers
+    // attend through the window.
+    let mixers_listed = architecture.short_convolution.is_some()
+        || architecture.delta_rule.is_some()
+        || architecture.lightning.is_some()
+        || architecture.state_space.is_some();
+    let windows = raw.get("layer_types").and_then(Value::as_array).filter(|_| !mixers_listed);
     if let Some(types) = windows {
         architecture.sliding_layers = listed_layers(types, layers, path)?;
     }
@@ -2985,6 +3076,10 @@ fn qwen_dense_layers(raw: &Value, layers: usize, path: &Path) -> Result<u128> {
 /// How often GraniteSWA's default layout attends fully: every fourth layer
 /// from the first (`GraniteSWAConfig.__post_init__`, `i % 4 == 0`).
 const GRANITE_SWA_FULL_EVERY: usize = 4;
+
+/// How often OLMo Hybrid's default layout attends: each fourth layer from
+/// the fourth (`OlmoHybridConfig.__post_init__`, `i % 4 == 3`).
+const OLMO_HYBRID_FULL_EVERY: usize = 4;
 
 /// GraniteSWA's and GraniteMoeSWA's additions to Granite: a learned sink per
 /// head (`self_attn.sinks`), sliding-window layers as `layer_types` lists

@@ -420,6 +420,9 @@ pub struct DeltaRuleSpec {
     pub kernel: usize,
     pub layers: u128,
     pub form: DeltaRuleForm,
+    /// OLMo Hybrid's `linear_allow_neg_eigval`: the write strength is
+    /// `2 · sigmoid(b)`, so the state's update may reflect as well as shrink.
+    pub negative_eigenvalues: bool,
 }
 
 /// Which family's delta rule a layer runs.
@@ -433,6 +436,11 @@ pub enum DeltaRuleForm {
     /// the low-rank `f_a_proj`/`f_b_proj`, and a sigmoid output gate from
     /// `g_a_proj`/`g_b_proj`.
     Kimi,
+    /// OLMo Hybrid's Gated DeltaNet (`linear_attn`): separate `q_proj`,
+    /// `k_proj` and `v_proj` under one `conv1d`, `a_proj` and `b_proj` one
+    /// per value head, a SiLU output gate from `g_proj`, `o_norm` and
+    /// `o_proj`.
+    OlmoHybrid,
 }
 
 /// Zamba2's shared transformer blocks: on every layer in `hybrid_layers`, a
@@ -1229,6 +1237,14 @@ impl Names {
     /// Arcee).
     pub const UP_DOWN: Self = Self {
         gate: None,
+        ..Self::LLAMA
+    };
+    /// openPangu's sandwich norms: `post_attention_layernorm` over
+    /// attention's output, `pre_mlp_layernorm` before the feed-forward and
+    /// `post_mlp_layernorm` over its output.
+    pub const PANGU_SANDWICH: Self = Self {
+        feed_forward_norm: "pre_mlp_layernorm",
+        feed_forward_output_norm: "post_mlp_layernorm",
         ..Self::LLAMA
     };
     /// Apertus: `attention_layernorm` before attention and
