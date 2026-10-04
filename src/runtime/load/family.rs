@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::model::{
     Activation, Architecture, ExpertLayout, FeedForwardKind, MixtureOfExperts, Names, NormKind,
-    QkvLayout, QueryKeyNorm, RopeScaling,
+    Positions, QkvLayout, QueryKeyNorm, RopeScaling,
 };
 
 /// The `model_type` values the decoder implements.
@@ -49,6 +49,10 @@ pub(super) const FAMILIES: &[&str] = &[
     "gpt_neox",
     "gptj",
     "smollm3",
+    "gpt2",
+    "gpt_bigcode",
+    "opt",
+    "bloom",
     "gemma",
     "gemma2",
     "gemma3_text",
@@ -64,31 +68,42 @@ pub(super) const TIED_BY_DEFAULT: &[&str] = &[
     "cohere2",
     "starcoder2",
     "ernie4_5",
+    "gpt2",
+    "gpt_bigcode",
+    "opt",
+    "bloom",
 ];
+
+/// OPT's learned position table keeps this many rows before position zero;
+/// Transformers' `OPTLearnedPositionalEmbedding` reads `position + offset`.
+const OPT_POSITION_OFFSET: usize = 2;
 
 /// OLMo 1's configs state no norm epsilon; Transformers' `OlmoLayerNorm`
 /// passes this one to `F.layer_norm` itself.
 const OLMO_NORM_EPS: f64 = 1e-5;
 
-/// GPT-J's feed-forward is this many times the residual width when the config
-/// leaves `n_inner` null, as Transformers' `GPTJBlock` computes it.
-const GPTJ_INNER_PER_HIDDEN: u64 = 4;
+/// GPT-J, GPT-2, GPT-BigCode and BLOOM make the feed-forward this many times
+/// the residual width when the config states none, as their Transformers
+/// blocks compute it.
+const GPT_INNER_PER_HIDDEN: u64 = 4;
 
 /// Candle's Llama config reads Llama's key names. Other families spell the
-/// same dimension otherwise (GPT-J's `n_embd`, `n_layer`, `n_head`,
-/// `n_positions`, `n_inner`; GPT-NeoX's `rotary_emb_base`; the LayerNorm
-/// families' epsilon). Before the config is parsed, the first spelling
-/// present is copied under Llama's name; a key Llama's name already holds is
-/// left alone. OLMo 1, which states no epsilon, gets the one its norm is
-/// defined with, and GPT-J without `n_inner` gets its four-times-hidden width.
+/// same dimension otherwise (GPT-2's and GPT-J's `n_embd`, `n_layer`,
+/// `n_head`, `n_positions`, `n_inner`; BLOOM's `n_embed`; OPT's `ffn_dim`;
+/// GPT-NeoX's `rotary_emb_base`; the LayerNorm families' epsilon). Before the
+/// config is parsed, the first spelling present is copied under Llama's name;
+/// a key Llama's name already holds is left alone. OLMo 1, which states no
+/// epsilon, gets the one its norm is defined with; the GPT families without
+/// an inner width get four times the residual; GPT-BigCode's `multi_query`
+/// becomes one key-value head.
 pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     let aliases: &[(&str, &[&str])] = &[
         ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]),
-        ("hidden_size", &["n_embd"]),
+        ("hidden_size", &["n_embd", "n_embed"]),
         ("num_hidden_layers", &["n_layer"]),
         ("num_attention_heads", &["n_head"]),
         ("max_position_embeddings", &["n_positions"]),
-        ("intermediate_size", &["n_inner"]),
+        ("intermediate_size", &["n_inner", "ffn_dim"]),
         ("rope_theta", &["rotary_emb_base"]),
     ];
     for (llama, spellings) in aliases {
@@ -103,32 +118,40 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         }
     }
     let missing = |raw: &Value, key: &str| raw.get(key).map_or(true, Value::is_null);
-    let default = match model_type {
-        "olmo" if missing(raw, "rms_norm_eps") => {
-            Some(("rms_norm_eps", Value::from(OLMO_NORM_EPS)))
+    let mut defaults: Vec<(&str, Value)> = Vec::new();
+    if model_type == "olmo" && missing(raw, "rms_norm_eps") {
+        defaults.push(("rms_norm_eps", Value::from(OLMO_NORM_EPS)));
+    }
+    let four_times = matches!(model_type, "gptj" | "gpt2" | "gpt_bigcode" | "bloom");
+    if four_times && missing(raw, "intermediate_size") {
+        if let Some(hidden) = raw.get("hidden_size").and_then(Value::as_u64) {
+            defaults.push(("intermediate_size", Value::from(GPT_INNER_PER_HIDDEN * hidden)));
         }
-        "gptj" if missing(raw, "intermediate_size") => raw
-            .get("hidden_size")
-            .and_then(Value::as_u64)
-            .map(|hidden| ("intermediate_size", Value::from(GPTJ_INNER_PER_HIDDEN * hidden))),
-        _ => None,
-    };
-    if let (Some((key, value)), Some(object)) = (default, raw.as_object_mut()) {
-        object.insert(key.to_owned(), value);
+    }
+    if model_type == "gpt_bigcode" && flag(raw, "multi_query") {
+        defaults.push(("num_key_value_heads", Value::from(1u64)));
+    }
+    if let Some(object) = raw.as_object_mut() {
+        for (key, value) in defaults {
+            object.insert(key.to_owned(), value);
+        }
     }
 }
 
-/// The feed-forward non-linearity the config names, as `hidden_act` or
-/// `hidden_activation`; SiLU when it names none.
+/// The feed-forward non-linearity the config names, as `hidden_act`,
+/// `hidden_activation` or `activation_function`; SiLU when it names none.
 fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> {
-    let name = text(raw, "hidden_act").or_else(|| text(raw, "hidden_activation"));
+    let name = text(raw, "hidden_act")
+        .or_else(|| text(raw, "hidden_activation"))
+        .or_else(|| text(raw, "activation_function"));
     match name {
         None | Some("silu") | Some("swish") => Ok(Activation::Silu),
         Some("gelu_pytorch_tanh") | Some("gelu_new") | Some("gelu_fast") => Ok(Activation::GeluTanh),
         Some("gelu") => Ok(Activation::Gelu),
         Some("relu2") => Ok(Activation::Relu2),
+        Some("relu") => Ok(Activation::Relu),
         Some(other) => bail!(
-            "{} declares hidden_act {other:?} for its {model_type} feed-forward; Ster implements silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast and relu2",
+            "{} declares hidden_act {other:?} for its {model_type} feed-forward; Ster implements silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast, relu and relu2",
             path.display()
         ),
     }
@@ -257,7 +280,7 @@ pub(super) fn family(
     architecture.rope_scaling = rope_scaling(scaling, architecture.rotary_dim, raw, llama, path)?;
     // Gemma's configs name `gelu` but Transformers runs the tanh
     // approximation for every Gemma, so the family decides, not the key.
-    if !model_type.starts_with("gemma") {
+    if !model_type.starts_with("gemma") && model_type != "bloom" {
         architecture.activation = activation(raw, model_type, path)?;
     }
     match model_type {
@@ -540,6 +563,74 @@ pub(super) fn family(
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.lm_head_bias = true;
             architecture.interleaved_rotary = true;
+        }
+        "gpt2" | "gpt_bigcode" => {
+            // GPT-2 and GPT-BigCode: a learned position table, LayerNorm with
+            // bias, one biased `c_attn` holding query, key and value (one
+            // key-value head when GPT-BigCode's `multi_query`), and a biased
+            // plain feed-forward. GPT-2 stores every projection `[inputs,
+            // outputs]`.
+            if flag(raw, "scale_attn_by_inverse_layer_idx") {
+                bail!(
+                    "{} declares scale_attn_by_inverse_layer_idx; Ster scales every layer's attention by the head width alone",
+                    path.display()
+                );
+            }
+            architecture.names = Names::GPT2;
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.positions = Positions::Learned { offset: 0 };
+            architecture.conv1d = model_type == "gpt2";
+            architecture.qkv_layout = QkvLayout::Stacked;
+            architecture.query_key_value_bias = true;
+            architecture.output_bias = true;
+            architecture.feed_forward_bias = true;
+            architecture.feed_forward = FeedForwardKind::Plain;
+        }
+        "opt" => {
+            // OPT: a learned position table read two rows in, pre-norm
+            // blocks with biased projections and a plain ReLU feed-forward.
+            if raw.get("do_layer_norm_before").and_then(Value::as_bool) == Some(false) {
+                bail!(
+                    "{} declares do_layer_norm_before false; Ster implements OPT's pre-norm blocks",
+                    path.display()
+                );
+            }
+            if let Some(width) = whole(raw, "word_embed_proj_dim").filter(|w| *w != llama.hidden_size) {
+                bail!(
+                    "{} projects {width}-wide word embeddings into a {}-wide model (word_embed_proj_dim); Ster implements OPT with embeddings as wide as the model",
+                    path.display(),
+                    llama.hidden_size
+                );
+            }
+            let bias = raw.get("enable_bias").and_then(Value::as_bool).unwrap_or(true);
+            architecture.names = Names::OPT;
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.positions = Positions::Learned { offset: OPT_POSITION_OFFSET };
+            architecture.query_key_value_bias = bias;
+            architecture.output_bias = bias;
+            architecture.feed_forward_bias = bias;
+            architecture.feed_forward = FeedForwardKind::Plain;
+        }
+        "bloom" => {
+            // BLOOM: ALiBi instead of positions, a norm after the embedding,
+            // a head-interleaved biased `query_key_value`, and a biased plain
+            // feed-forward with the tanh GELU.
+            if flag(raw, "apply_residual_connection_post_layernorm") {
+                bail!(
+                    "{} declares apply_residual_connection_post_layernorm; Ster implements BLOOM with the residual taken before each norm",
+                    path.display()
+                );
+            }
+            architecture.names = Names::BLOOM;
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.embedding_norm = true;
+            architecture.positions = Positions::Alibi;
+            architecture.qkv_layout = QkvLayout::HeadInterleaved;
+            architecture.query_key_value_bias = true;
+            architecture.output_bias = true;
+            architecture.feed_forward_bias = true;
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.activation = Activation::GeluTanh;
         }
         "glm" | "glm4" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");

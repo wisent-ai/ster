@@ -177,6 +177,13 @@ pub struct Architecture {
     /// config instead.
     pub rope_scaling: RopeScaling,
     pub qkv_layout: QkvLayout,
+    /// How a token's position enters the model.
+    pub positions: Positions,
+    /// Projection weights stored `[inputs, outputs]`, as GPT-2's `Conv1D`
+    /// stores them, rather than `[outputs, inputs]`.
+    pub conv1d: bool,
+    /// A norm straight after the embedding (BLOOM).
+    pub embedding_norm: bool,
     /// Gate and up stored as one `gate_up_proj`, gate rows first (Phi-3,
     /// GLM).
     pub fused_feed_forward: bool,
@@ -230,6 +237,9 @@ impl Architecture {
             local_rope_theta: None,
             rope_scaling: RopeScaling::None,
             qkv_layout: QkvLayout::Separate,
+            positions: Positions::Rotary,
+            conv1d: false,
+            embedding_norm: false,
             fused_feed_forward: false,
             norm_offset: false,
             embedding_multiplier: None,
@@ -251,9 +261,11 @@ impl Architecture {
         self.sliding_window.filter(|_| sliding)
     }
 
-    /// Whether layer `layer` applies the rotary embedding.
+    /// Whether layer `layer` applies the rotary embedding: never for a family
+    /// whose positions are learned or ALiBi.
     pub fn rotates(&self, layer: usize) -> bool {
-        layer >= 128 || self.unrotated_layers & (1u128 << layer) == 0
+        self.positions == Positions::Rotary
+            && (layer >= 128 || self.unrotated_layers & (1u128 << layer) == 0)
     }
 
     /// Width of the query projection and of the attention output.
@@ -293,42 +305,45 @@ impl Architecture {
             Target::Value => Some(2),
             _ => None,
         };
-        if let Some(slot) = attention_offset {
-            return Some(match self.qkv_layout {
-                QkvLayout::Separate => Placement::whole(in_attention(match target {
-                    Target::Query => names.query,
-                    Target::Key => names.key,
-                    _ => names.value,
-                })),
-                QkvLayout::Stacked => {
-                    let (start, rows) = match slot {
-                        0 => (0, query),
-                        1 => (query, key_value),
-                        _ => (query + key_value, key_value),
-                    };
-                    Placement::blocks(in_attention(names.fused_qkv), vec![(start, 0, rows)])
-                }
-                QkvLayout::HeadInterleaved => Placement::blocks(
-                    in_attention(names.fused_qkv),
-                    (0..config.num_attention_heads)
-                        .map(|head| (head * 3 * head_dim + slot * head_dim, head * head_dim, head_dim))
-                        .collect(),
-                ),
-            });
-        }
         let intermediate = config.intermediate_size;
-        Some(match target {
-            Target::Output => Placement::whole(in_layer(names.output)),
-            Target::Gate if self.fused_feed_forward => {
-                Placement::blocks(in_layer(names.fused_gate_up), vec![(0, 0, intermediate)])
+        let placement = match (attention_offset, self.qkv_layout) {
+            (Some(slot), QkvLayout::Separate) => Placement::whole(in_attention(match slot {
+                0 => names.query,
+                1 => names.key,
+                _ => names.value,
+            })),
+            (Some(slot), QkvLayout::Stacked) => {
+                let (start, rows) = match slot {
+                    0 => (0, query),
+                    1 => (query, key_value),
+                    _ => (query + key_value, key_value),
+                };
+                Placement::blocks(in_attention(names.fused_qkv), vec![(start, 0, rows)])
             }
-            Target::Up if self.fused_feed_forward => Placement::blocks(
-                in_layer(names.fused_gate_up),
-                vec![(intermediate, 0, intermediate)],
+            (Some(slot), QkvLayout::HeadInterleaved) => Placement::blocks(
+                in_attention(names.fused_qkv),
+                (0..config.num_attention_heads)
+                    .map(|head| (head * 3 * head_dim + slot * head_dim, head * head_dim, head_dim))
+                    .collect(),
             ),
-            Target::Gate => Placement::whole(in_layer(names.gate?)),
-            Target::Up => Placement::whole(in_layer(names.up)),
-            _ => Placement::whole(in_layer(names.down)),
+            (None, _) => match target {
+                Target::Output => Placement::whole(in_layer(names.output)),
+                Target::Gate if self.fused_feed_forward => {
+                    Placement::blocks(in_layer(names.fused_gate_up), vec![(0, 0, intermediate)])
+                }
+                Target::Up if self.fused_feed_forward => Placement::blocks(
+                    in_layer(names.fused_gate_up),
+                    vec![(intermediate, 0, intermediate)],
+                ),
+                Target::Gate => Placement::whole(in_layer(names.gate?)),
+                Target::Up => Placement::whole(in_layer(names.up)),
+                _ => Placement::whole(in_layer(names.down)),
+            },
+        };
+        Some(Placement {
+            transposed: self.conv1d,
+            root: names.root,
+            ..placement
         })
     }
 
@@ -359,20 +374,42 @@ pub struct Placement {
     pub tensor: String,
     /// `None` when the projection is the whole tensor; otherwise the row
     /// blocks it owns, as `(row in the tensor, row in the projection,
-    /// rows)`.
+    /// rows)`, rows counted in `[outputs, inputs]` orientation.
     pub blocks: Option<Vec<(usize, usize, usize)>>,
+    /// The tensor is stored `[inputs, outputs]` (GPT-2's `Conv1D`).
+    pub transposed: bool,
+    /// The family's root prefix, which a checkpoint saved from the base
+    /// model leaves off every name.
+    pub root: &'static str,
 }
 
 impl Placement {
     fn whole(tensor: String) -> Self {
-        Self { tensor, blocks: None }
+        Self {
+            tensor,
+            blocks: None,
+            transposed: false,
+            root: "",
+        }
     }
 
     fn blocks(tensor: String, blocks: Vec<(usize, usize, usize)>) -> Self {
         Self {
-            tensor,
             blocks: Some(blocks),
+            ..Self::whole(tensor)
         }
+    }
+
+    /// The tensor's name in a checkpoint saved without the root prefix, when
+    /// the family has one.
+    pub fn without_root(&self) -> Option<String> {
+        if self.root.is_empty() {
+            return None;
+        }
+        self.tensor
+            .strip_prefix(self.root)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .map(str::to_owned)
     }
 }
 
@@ -386,6 +423,18 @@ pub enum QkvLayout {
     /// One tensor, head by head: each head's query, key and value rows in
     /// turn (GPT-NeoX).
     HeadInterleaved,
+}
+
+/// How a token's position enters the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Positions {
+    /// Query and key rotated by position.
+    Rotary,
+    /// A learned table added to the embedding, read `offset` rows in (OPT
+    /// keeps two rows before position zero).
+    Learned { offset: usize },
+    /// A per-head linear bias on the attention scores (BLOOM, MPT).
+    Alibi,
 }
 
 /// A routed feed-forward: how many experts, how many run per token, and
@@ -418,12 +467,21 @@ pub enum ExpertLayout {
     Granite,
 }
 
-/// Where a family keeps its tensors. Paths without a dot prefix are below
-/// one layer (`{layers}.{i}`); `embeddings`, `layers`, `final_norm` and
-/// `lm_head` are from the checkpoint root.
+/// Where a family keeps its tensors. `embeddings`, `positions`,
+/// `embedding_norm`, `layers` and `final_norm` are full paths below `root`;
+/// `lm_head` is from the checkpoint root; every other path is below one layer
+/// (`{layers}.{i}`). Some checkpoints are saved from the base model and drop
+/// `root` (GPT-2's `wte` rather than `transformer.wte`);
+/// [`Names::without_root`] is the same layout for those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Names {
+    pub root: &'static str,
     pub embeddings: &'static str,
+    /// The learned position table, for a family that has one.
+    pub positions: &'static str,
+    /// The norm straight after the embedding, for a family that has one
+    /// (BLOOM).
+    pub embedding_norm: &'static str,
     pub layers: &'static str,
     pub final_norm: &'static str,
     pub lm_head: &'static str,
@@ -453,10 +511,32 @@ pub struct Names {
 }
 
 impl Names {
+    /// The same layout in a checkpoint saved without the `root` prefix.
+    pub fn without_root(self) -> Self {
+        let prefix = self.root;
+        let strip = |path: &'static str| -> &'static str {
+            path.strip_prefix(prefix)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .unwrap_or(path)
+        };
+        Self {
+            root: "",
+            embeddings: strip(self.embeddings),
+            positions: strip(self.positions),
+            embedding_norm: strip(self.embedding_norm),
+            layers: strip(self.layers),
+            final_norm: strip(self.final_norm),
+            ..self
+        }
+    }
+
     /// Llama's names; OLMo 2's post-norm block reuses
     /// `post_attention_layernorm` for the norm over attention's output.
     pub const LLAMA: Self = Self {
+        root: "model",
         embeddings: "model.embed_tokens",
+        positions: "model.embed_positions",
+        embedding_norm: "model.embed_layernorm",
         layers: "model.layers",
         final_norm: "model.norm",
         lm_head: "lm_head",
@@ -514,6 +594,7 @@ impl Names {
     /// GPT-NeoX and Pythia: everything below `gpt_neox`, one head-interleaved
     /// `query_key_value`, `dense_h_to_4h`/`dense_4h_to_h`, and `embed_out`.
     pub const GPT_NEOX: Self = Self {
+        root: "gpt_neox",
         embeddings: "gpt_neox.embed_in",
         layers: "gpt_neox.layers",
         final_norm: "gpt_neox.final_layer_norm",
@@ -529,6 +610,7 @@ impl Names {
     /// GPT-J: everything below `transformer`, `h.{i}`, `ln_1`, `attn`,
     /// `out_proj`, `fc_in`/`fc_out`, and `ln_f`.
     pub const GPT_J: Self = Self {
+        root: "transformer",
         embeddings: "transformer.wte",
         layers: "transformer.h",
         final_norm: "transformer.ln_f",
@@ -538,6 +620,58 @@ impl Names {
         up: "mlp.fc_in",
         down: "mlp.fc_out",
         attention_norm: "ln_1",
+        ..Self::LLAMA
+    };
+    /// GPT-2 and GPT-BigCode: `wte` and the learned `wpe`, `h.{i}`, `ln_1`
+    /// and `ln_2`, one `c_attn` holding query, key and value, `c_proj`,
+    /// `mlp.c_fc`/`mlp.c_proj`, and `ln_f`.
+    pub const GPT2: Self = Self {
+        root: "transformer",
+        embeddings: "transformer.wte",
+        positions: "transformer.wpe",
+        layers: "transformer.h",
+        final_norm: "transformer.ln_f",
+        attention: "attn",
+        fused_qkv: "c_attn",
+        output: "attn.c_proj",
+        gate: None,
+        up: "mlp.c_fc",
+        down: "mlp.c_proj",
+        attention_norm: "ln_1",
+        feed_forward_norm: "ln_2",
+        ..Self::LLAMA
+    };
+    /// OPT: everything below `model.decoder`, a learned `embed_positions`,
+    /// `self_attn_layer_norm` and `final_layer_norm` in each layer,
+    /// `out_proj`, `fc1`/`fc2`, and a `final_layer_norm` after the stack.
+    pub const OPT: Self = Self {
+        embeddings: "model.decoder.embed_tokens",
+        positions: "model.decoder.embed_positions",
+        layers: "model.decoder.layers",
+        final_norm: "model.decoder.final_layer_norm",
+        output: "self_attn.out_proj",
+        gate: None,
+        up: "fc1",
+        down: "fc2",
+        attention_norm: "self_attn_layer_norm",
+        feed_forward_norm: "final_layer_norm",
+        ..Self::LLAMA
+    };
+    /// BLOOM: `word_embeddings` and its `word_embeddings_layernorm`, `h.{i}`,
+    /// a head-interleaved `self_attention.query_key_value`, `dense`,
+    /// `dense_h_to_4h`/`dense_4h_to_h`, and `ln_f`.
+    pub const BLOOM: Self = Self {
+        root: "transformer",
+        embeddings: "transformer.word_embeddings",
+        embedding_norm: "transformer.word_embeddings_layernorm",
+        layers: "transformer.h",
+        final_norm: "transformer.ln_f",
+        attention: "self_attention",
+        fused_qkv: "query_key_value",
+        output: "self_attention.dense",
+        gate: None,
+        up: "mlp.dense_h_to_4h",
+        down: "mlp.dense_4h_to_h",
         ..Self::LLAMA
     };
 }
@@ -607,6 +741,8 @@ pub enum Activation {
     Gelu,
     /// Squared ReLU (Nemotron's `relu2`).
     Relu2,
+    /// Plain ReLU (OPT).
+    Relu,
 }
 
 impl Activation {
@@ -616,6 +752,7 @@ impl Activation {
             Self::GeluTanh => input.gelu(),
             Self::Gelu => input.gelu_erf(),
             Self::Relu2 => input.relu()?.sqr(),
+            Self::Relu => input.relu(),
         }
     }
 }

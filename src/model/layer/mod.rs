@@ -35,12 +35,20 @@ impl FeedForwardBlock {
 }
 
 /// A projection, with a bias when the architecture says it carries one.
+/// `conv1d` reads a weight stored `[inputs, outputs]`, as GPT-2's `Conv1D`
+/// stores it, and lays it out `[outputs, inputs]` once at load.
 pub(super) fn projection(
     inputs: usize,
     outputs: usize,
     bias: bool,
+    conv1d: bool,
     builder: VarBuilder<'_>,
 ) -> candle_core::Result<Linear> {
+    if conv1d {
+        let weight = builder.get((inputs, outputs), "weight")?.t()?.contiguous()?;
+        let bias = if bias { Some(builder.get(outputs, "bias")?) } else { None };
+        return Ok(Linear::new(weight, bias));
+    }
     if bias {
         linear(inputs, outputs, builder)
     } else {
@@ -73,6 +81,7 @@ impl FeedForward {
         let (hidden, intermediate) = (config.hidden_size, config.intermediate_size);
         let bias = architecture.feed_forward_bias;
         let names = architecture.names;
+        let conv1d = architecture.conv1d;
         // Phi-3 and GLM store the gate and up projections as one matrix, gate
         // rows first; each is a row slice of that mapped weight.
         let (gate, up) = if architecture.fused_feed_forward {
@@ -89,16 +98,16 @@ impl FeedForward {
         } else {
             let gate = match (architecture.feed_forward, names.gate) {
                 (FeedForwardKind::Gated, Some(name)) => {
-                    Some(projection(hidden, intermediate, bias, builder.pp(name))?)
+                    Some(projection(hidden, intermediate, bias, conv1d, builder.pp(name))?)
                 }
                 _ => None,
             };
-            (gate, projection(hidden, intermediate, bias, builder.pp(names.up))?)
+            (gate, projection(hidden, intermediate, bias, conv1d, builder.pp(names.up))?)
         };
         Ok(Self {
             gate,
             up,
-            down: projection(intermediate, hidden, bias, builder.pp(names.down))?,
+            down: projection(intermediate, hidden, bias, conv1d, builder.pp(names.down))?,
             gate_adapter: adapters.get(layer, Target::Gate).cloned(),
             up_adapter: adapters.get(layer, Target::Up).cloned(),
             down_adapter: adapters.get(layer, Target::Down).cloned(),

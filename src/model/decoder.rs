@@ -11,7 +11,7 @@ use candle_transformers::models::llama::Config;
 use crate::lora::Adapters;
 
 use super::{
-    Architecture, Cache, ForwardOutput, Mode, Readout, SteeringPlan,
+    Architecture, Cache, ForwardOutput, Mode, Positions, Readout, SteeringPlan,
     attention::padded_causal_mask,
     layer::{
         DecoderLayer,
@@ -23,6 +23,11 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct SteeringLlama {
     embeddings: Embedding,
+    /// The learned position table and how many rows it keeps before
+    /// position zero (GPT-2, OPT, GPT-BigCode).
+    positions: Option<(Embedding, usize)>,
+    /// BLOOM's norm straight after the embedding.
+    embedding_norm: Option<Norm>,
     layers: Vec<DecoderLayer>,
     final_norm: Norm,
     lm_head: Linear,
@@ -54,15 +59,38 @@ impl SteeringLlama {
     pub fn load_with_adapters(
         builder: VarBuilder<'_>,
         config: Config,
-        architecture: Architecture,
+        mut architecture: Architecture,
         adapters: crate::lora::Adapters,
     ) -> candle_core::Result<Self> {
+        // A checkpoint saved from the base model drops the family's root
+        // (`wte` rather than `transformer.wte`); which one this is shows in
+        // whether the embedding is where the root says.
+        if !builder.contains_tensor(&format!("{}.weight", architecture.names.embeddings)) {
+            architecture.names = architecture.names.without_root();
+        }
         let names = architecture.names;
         let embeddings = embedding(
             config.vocab_size,
             config.hidden_size,
             builder.pp(names.embeddings),
         )?;
+        let positions = match architecture.positions {
+            Positions::Learned { offset } => Some((
+                embedding(
+                    config.max_position_embeddings + offset,
+                    config.hidden_size,
+                    builder.pp(names.positions),
+                )?,
+                offset,
+            )),
+            _ => None,
+        };
+        let spec = NormSpec::of(&architecture);
+        let embedding_norm = if architecture.embedding_norm {
+            Some(spec.load(config.hidden_size, builder.pp(names.embedding_norm))?)
+        } else {
+            None
+        };
         let lm_head = if config.tie_word_embeddings {
             let bias = if architecture.lm_head_bias {
                 Some(builder.pp(names.lm_head).get(config.vocab_size, "bias")?)
@@ -75,11 +103,11 @@ impl SteeringLlama {
                 config.hidden_size,
                 config.vocab_size,
                 architecture.lm_head_bias,
+                false,
                 builder.pp(names.lm_head),
             )?
         };
-        let final_norm =
-            NormSpec::of(&architecture).load(config.hidden_size, builder.pp(names.final_norm))?;
+        let final_norm = spec.load(config.hidden_size, builder.pp(names.final_norm))?;
         let layers = (0..config.num_hidden_layers)
             .map(|index| {
                 DecoderLayer::load(
@@ -93,6 +121,8 @@ impl SteeringLlama {
             .collect::<candle_core::Result<Vec<_>>>()?;
         Ok(Self {
             embeddings,
+            positions,
+            embedding_norm,
             layers,
             final_norm,
             lm_head,
@@ -263,6 +293,14 @@ impl SteeringLlama {
     ) -> candle_core::Result<ForwardOutput> {
         let (_, sequence) = tokens.dims2()?;
         let mut hidden = self.embeddings.forward(tokens)?;
+        if let Some((table, offset)) = &self.positions {
+            let first = (index_pos + offset) as u32;
+            let rows = Tensor::arange(first, first + sequence as u32, tokens.device())?;
+            hidden = hidden.broadcast_add(&table.forward(&rows)?.unsqueeze(0)?)?;
+        }
+        if let Some(norm) = &self.embedding_norm {
+            hidden = norm.forward(&hidden, mode.pass)?;
+        }
         if let Some(multiplier) = self.architecture.embedding_multiplier {
             // Gemma multiplies the embedding by `sqrt(hidden_size)` and Granite
             // by its `embedding_multiplier`, in the embedding's own dtype,

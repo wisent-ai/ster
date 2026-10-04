@@ -9,7 +9,7 @@ use candle_transformers::models::llama::Config;
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Architecture, Cache, Mode, NormKind, Pass, QkvLayout, QueryKeyNorm, Route,
+    Architecture, Cache, Mode, NormKind, Pass, Positions, QkvLayout, QueryKeyNorm, Route,
     layer::{
         norm::{Norm, NormSpec},
         projection,
@@ -42,6 +42,9 @@ pub(super) struct Attention {
     interleaved: bool,
     score_divisor: f64,
     softcap: Option<f64>,
+    /// ALiBi's slope per head, `[1, heads, 1, 1]`, for a family whose
+    /// positions are a linear bias on the scores (BLOOM, MPT).
+    alibi: Option<Tensor>,
 }
 
 /// Which rotary table this layer rotates its query and key with.
@@ -73,6 +76,7 @@ impl Attention {
         let query_width = architecture.attention_width(heads);
         let key_value_width = head_dim * key_value_heads;
         let bias = architecture.query_key_value_bias;
+        let conv1d = architecture.conv1d;
         // A LayerNorm family's query and key norms carry no bias; the others
         // are RMS norms like the rest of the block.
         let spec = NormSpec {
@@ -111,18 +115,23 @@ impl Attention {
         };
         let (query, key, value) = match architecture.qkv_layout {
             QkvLayout::Separate => (
-                projection(input, query_width, bias, builder.pp(names.query))?,
-                projection(input, key_value_width, bias, builder.pp(names.key))?,
-                projection(input, key_value_width, bias, builder.pp(names.value))?,
+                projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
+                projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
+                projection(input, key_value_width, bias, conv1d, builder.pp(names.value))?,
             ),
-            // Phi-3 stores query, key and value as one matrix, rows in that
-            // order. Each projection is a row slice of it — a view of the
-            // mapped weight, not a copy — so every adapter site stays
-            // separate.
+            // Phi-3, GPT-2 and GPT-BigCode store query, key and value as one
+            // matrix, rows in that order. Each projection is a row slice of it
+            // — a view of the mapped weight, not a copy — so every adapter
+            // site stays separate. GPT-2's `Conv1D` stores it transposed, so
+            // that one is laid out once at load.
             QkvLayout::Stacked => {
                 let rows = query_width + 2 * key_value_width;
                 let fused = builder.pp(names.fused_qkv);
-                let weight = fused.get((rows, input), "weight")?;
+                let weight = if conv1d {
+                    fused.get((input, rows), "weight")?.t()?.contiguous()?
+                } else {
+                    fused.get((rows, input), "weight")?
+                };
                 let bias = if bias { Some(fused.get(rows, "bias")?) } else { None };
                 let slice = |start: usize, width: usize| -> candle_core::Result<Linear> {
                     Ok(Linear::new(
@@ -168,6 +177,7 @@ impl Attention {
                 query_width,
                 input,
                 architecture.output_bias,
+                conv1d,
                 layer_builder.pp(architecture.names.output),
             )?,
             query_adapter: adapters.get(layer, Target::Query).cloned(),
@@ -185,6 +195,13 @@ impl Attention {
             interleaved: architecture.interleaved_rotary,
             score_divisor: architecture.score_divisor,
             softcap: architecture.attention_softcap,
+            alibi: match architecture.positions {
+                Positions::Alibi => Some(
+                    Tensor::new(alibi_slopes(heads), layer_builder.device())?
+                        .reshape((1, heads, 1, 1))?,
+                ),
+                _ => None,
+            },
         })
     }
 
@@ -273,6 +290,19 @@ impl Attention {
         let key = key.to_dtype(DType::F32)?;
         let value = value.to_dtype(DType::F32)?;
         let attention = (query.matmul(&key.t()?)? / self.score_divisor)?;
+        // ALiBi adds `slope * key_position` to every score; within one query's
+        // row that is the published `-slope * distance` plus a constant the
+        // softmax ignores, and it is what BLOOM computes.
+        let attention = match &self.alibi {
+            Some(slopes) => {
+                let keys = attention.dim(candle_core::D::Minus1)?;
+                let positions = Tensor::arange(0u32, keys as u32, attention.device())?
+                    .to_dtype(DType::F32)?
+                    .reshape((1, 1, 1, keys))?;
+                attention.broadcast_add(&slopes.broadcast_mul(&positions)?)?
+            }
+            None => attention,
+        };
         // Gemma 2 bounds every score to `(-cap, cap)` with a tanh before the
         // mask, so no single key can take the whole softmax.
         let attention = match self.softcap {
@@ -472,6 +502,26 @@ fn rope_composed(input: &Tensor, cos: &Tensor, sin: &Tensor) -> candle_core::Res
     let rotated_first = (first.broadcast_mul(&cos)? - second.broadcast_mul(&sin)?)?;
     let rotated_second = (first.broadcast_mul(&sin)? + second.broadcast_mul(&cos)?)?;
     Tensor::cat(&[&rotated_first, &rotated_second], candle_core::D::Minus1)
+}
+
+/// The exponent range of ALiBi's geometric slopes: for `n` heads (a power of
+/// two) the slopes are `2^(-span/n)` raised to `1..=n` (Press et al., 2022,
+/// and Transformers' `build_alibi_tensor`).
+const ALIBI_SPAN: f64 = 8.0;
+
+/// ALiBi's slope for each of `heads` heads. A head count that is not a power
+/// of two takes the slopes of the nearest power below, then every other slope
+/// of twice that many, as BLOOM does.
+fn alibi_slopes(heads: usize) -> Vec<f32> {
+    let closest = 1usize << heads.ilog2();
+    let base = (-ALIBI_SPAN / closest as f64).exp2();
+    let mut slopes: Vec<f32> = (1..=closest).map(|power| base.powi(power as i32) as f32).collect();
+    if closest != heads {
+        let extra = (-ALIBI_SPAN / (2 * closest) as f64).exp2();
+        let remaining = closest.min(heads - closest);
+        slopes.extend((0..remaining).map(|index| extra.powi((2 * index + 1) as i32) as f32));
+    }
+    slopes
 }
 
 fn repeat_key_value(input: Tensor, repeats: usize) -> candle_core::Result<Tensor> {

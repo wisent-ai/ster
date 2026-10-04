@@ -29,7 +29,7 @@ use command::Command;
     name = "ster",
     version,
     about = "Understand, measure, and control model representations",
-    long_about = "Ster reads hidden representations from open-weight decoder models — Llama, Mistral, Mixtral, Qwen2, Qwen2-MoE, Qwen3, Qwen3-MoE, Phi-2, Phi-3, Granite, GraniteMoE, StableLM, Starcoder2, Command R, Nemotron, OLMo, OLMo 2, OLMo 3, OLMoE, EXAONE 4, InternLM3, Seed-OSS, Arcee, ERNIE 4.5, MiniCPM, Orion, GLM-4, GPT-NeoX, Pythia, GPT-J, SmolLM3, Gemma, Gemma 2 and Gemma 3 — trains steering directions from contrastive pairs, evaluates those directions, and applies them during generation."
+    long_about = "Ster reads hidden representations from open-weight decoder models — Llama, Mistral, Mixtral, Qwen2, Qwen2-MoE, Qwen3, Qwen3-MoE, Phi-2, Phi-3, Granite, GraniteMoE, StableLM, Starcoder2, Command R, Nemotron, OLMo, OLMo 2, OLMo 3, OLMoE, EXAONE 4, InternLM3, Seed-OSS, Arcee, ERNIE 4.5, MiniCPM, Orion, GLM-4, GPT-NeoX, Pythia, GPT-J, GPT-2, StarCoder, OPT, BLOOM, SmolLM3, Gemma, Gemma 2 and Gemma 3 — trains steering directions from contrastive pairs, evaluates those directions, and applies them during generation."
 )]
 struct Cli {
     /// Print every answer as `path: value` lines for a person instead of

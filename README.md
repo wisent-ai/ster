@@ -38,8 +38,9 @@ Included now:
   `qwen3`, `qwen3_moe`, `phi`, `phi3`, `granite`, `granitemoe`, `stablelm`,
   `starcoder2`, `cohere`, `cohere2`, `nemotron`, `olmo`, `olmo2`, `olmo3`,
   `olmoe`, `exaone4`, `internlm3`, `seed_oss`, `arcee`, `ernie4_5`,
-  `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `smollm3`, `gemma`,
-  `gemma2` or `gemma3_text`. Coverage is measured
+  `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `gpt2`,
+  `gpt_bigcode`, `opt`, `bloom`, `smollm3`, `gemma`, `gemma2` or
+  `gemma3_text`. Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Each family is the same rotary, grouped-query decoder with what its config
@@ -60,11 +61,15 @@ Included now:
   StableLM's `use_parallel_residual`),
   sliding-window attention on the layers `sliding_window`,
   `max_window_layers`, `sliding_window_pattern` or `layer_types` name,
-  Phi-3's fused `qkv_proj` and `gate_up_proj`, GLM's fused `gate_up_proj` and
-  GPT-NeoX's head-interleaved `query_key_value` (split at load, and merged
-  back row by row by `ster tune merge`), each family's own tensor paths
-  (GPT-NeoX's `gpt_neox.layers` and `embed_out`, GPT-J's `transformer.h`,
-  `ln_1` and `ln_f`), parallel blocks with one norm or two, OLMo 2's
+  Phi-3's fused `qkv_proj` and `gate_up_proj`, GLM's fused `gate_up_proj`,
+  GPT-2's and GPT-BigCode's `c_attn` and GPT-NeoX's and BLOOM's
+  head-interleaved `query_key_value` (split at load, and merged back row by
+  row by `ster tune merge`), GPT-2's `Conv1D` weights stored inputs-first,
+  positions as rotation, a learned table (GPT-2, GPT-BigCode, OPT) or ALiBi
+  (BLOOM), BLOOM's norm after the embedding, each family's own tensor paths
+  (GPT-NeoX's `gpt_neox.layers` and `embed_out`, GPT-J's and GPT-2's
+  `transformer.h`, OPT's `model.decoder.layers`, checkpoints saved without
+  that root), parallel blocks with one norm or two, OLMo 2's
   and EXAONE 4's norms after each sublayer instead of before it, GLM-4's
   `post_self_attn_layernorm` and `post_mlp_layernorm`, Granite's and
   MiniCPM's embedding, residual and logit multipliers, Granite's attention
@@ -81,12 +86,16 @@ Included now:
   and Gemma 3's separate `rope_local_base_freq` on sliding-window layers. A
   quantized checkpoint (one that declares `quantization_config`, such as
   GPTQ) is refused with the sentence that names it, as is a config whose
-  `hidden_act` is not silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast or
-  relu2, that rotates an odd or empty share of each head, or whose
-  `rope_scaling` is not `llama3`,
-  `linear` or Phi-3's `longrope`. Adapter targets a family has no projection
-  for (the gate of a plain feed-forward, every feed-forward projection of a
-  mixture of experts) are refused before any adapter is built;
+  `hidden_act` (or `activation_function`) is not silu, gelu,
+  gelu_pytorch_tanh, gelu_new, gelu_fast, relu or relu2, that rotates an odd
+  or empty share of each head, whose `rope_scaling` is not `llama3`,
+  `linear` or Phi-3's `longrope`, or that asks for a variant the decoder
+  does not implement (GPT-2's `scale_attn_by_inverse_layer_idx`, OPT's
+  post-norm `do_layer_norm_before: false` or `word_embed_proj_dim`, BLOOM's
+  `apply_residual_connection_post_layernorm`). Adapter targets a family has
+  no projection for (the gate of a plain feed-forward, every feed-forward
+  projection of a mixture of experts) are refused before any adapter is
+  built;
 - CPU execution, with compile-time Metal and CUDA backends;
 - pair-set authoring and inspection for duplicates, refusals, length balance,
   and diversity, with no model loaded;

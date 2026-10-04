@@ -147,7 +147,12 @@ pub fn merge(
             let placement = architecture
                 .placement(target, layer, &config)
                 .with_context(|| format!("this model has no {} projection to merge into", target.name()))?;
-            let name = placement.tensor;
+            // A checkpoint saved from the base model (GPT-2's `h.0…` rather
+            // than `transformer.h.0…`) carries every name without the root.
+            let name = match placement.without_root() {
+                Some(rootless) if !tensors.contains_key(&placement.tensor) => rootless,
+                _ => placement.tensor.clone(),
+            };
             let base = tensors
                 .get(&name)
                 .with_context(|| format!("checkpoint has no tensor {name} to merge into"))?;
@@ -167,13 +172,23 @@ pub fn merge(
             let original = base.dtype();
             dtype.get_or_insert(original);
             let delta = (b.to_dtype(DType::F32)?.matmul(&a.to_dtype(DType::F32)?)? * scale)?;
+            // GPT-2's `Conv1D` stores `[inputs, outputs]`; the update is laid
+            // out `[outputs, inputs]`, so the base is turned to match and back.
             let widened = base.to_dtype(DType::F32)?;
+            let widened = if placement.transposed { widened.t()? } else { widened };
             let updated = match &placement.blocks {
                 None => widened + &delta,
                 Some(blocks) => blocks.iter().try_fold(widened, |sum, (row, from, rows)| {
                     add_rows(&sum, *row, &delta.narrow(0, *from, *rows)?)
                 }),
             }
+            .and_then(|updated| {
+                if placement.transposed {
+                    updated.t()?.contiguous()
+                } else {
+                    Ok(updated)
+                }
+            })
             .with_context(|| {
                 format!(
                     "adapter for layer {layer} {} does not fit {name}",
