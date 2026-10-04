@@ -12,7 +12,7 @@ use candle_transformers::models::llama::Config;
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Activation, Architecture, Cache, FeedForwardKind, Mode, ParallelScan, Pass, Route,
+    Activation, Architecture, Cache, DeltaRuleForm, FeedForwardKind, Mode, ParallelScan, Pass, Route,
     attention::{Attention, project},
 };
 use experts::Experts;
@@ -239,7 +239,10 @@ impl DecoderLayer {
             return Ok(Self {
                 attention_norm: Some(norm(names.attention_norm)?),
                 mixer: Mixer::DeltaRule(DeltaRule::load(
-                    builder.pp("linear_attn"),
+                    builder.pp(match spec.form {
+                        DeltaRuleForm::Qwen3Next => "linear_attn",
+                        DeltaRuleForm::Kimi => "self_attn",
+                    }),
                     config.hidden_size,
                     config.rms_norm_eps,
                     spec,

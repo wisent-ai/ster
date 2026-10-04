@@ -312,11 +312,10 @@ pub struct StructuredSpec {
     pub gated_norm: bool,
 }
 
-/// Qwen3-Next's gated delta-rule linear attention (`linear_attn`): `key_heads`
-/// query and key heads of `key_dim`, `value_heads` value heads of
-/// `value_dim` (each key head serving `value_heads / key_heads` of them), a
-/// causal depthwise convolution of `kernel` positions over query, key and
-/// value, on the layers in `layers`.
+/// A gated delta-rule linear attention: `key_heads` query and key heads of
+/// `key_dim`, `value_heads` value heads of `value_dim` (each key head serving
+/// `value_heads / key_heads` of them), a causal depthwise convolution of
+/// `kernel` positions over query, key and value, on the layers in `layers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeltaRuleSpec {
     pub key_heads: usize,
@@ -325,6 +324,20 @@ pub struct DeltaRuleSpec {
     pub value_dim: usize,
     pub kernel: usize,
     pub layers: u128,
+    pub form: DeltaRuleForm,
+}
+
+/// Which family's delta rule a layer runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaRuleForm {
+    /// Qwen3-Next's Gated DeltaNet (`linear_attn`): fused `in_proj_qkvz` and
+    /// `in_proj_ba`, one decay per value head, a SiLU output gate.
+    Qwen3Next,
+    /// Kimi Delta Attention (`self_attn`): separate `q_proj`, `k_proj` and
+    /// `v_proj` with their own convolutions, a decay per key channel from
+    /// the low-rank `f_a_proj`/`f_b_proj`, and a sigmoid output gate from
+    /// `g_a_proj`/`g_b_proj`.
+    Kimi,
 }
 
 /// Falcon-H1's parallel block: attention reads its input times
@@ -606,7 +619,7 @@ impl Architecture {
         }
         if self.delta_rule.is_some() && !targets.is_empty() {
             bail!(
-                "this model's blocks include gated delta-rule mixers (Qwen3-Next's linear attention) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
+                "this model's blocks include gated delta-rule mixers (Qwen3-Next's and Kimi-Linear's linear attention) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
             );
         }
         if self.state_space.is_some() && !targets.is_empty() {
