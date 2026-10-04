@@ -186,6 +186,35 @@ impl Attention {
                 };
                 (part(0, per_group)?, part(per_group, 1)?, part(per_group + 1, 1)?)
             }
+            // TeleChat2 keeps the query apart and stacks each key-value
+            // head's key rows, then its value rows, in one `key_value`
+            // matrix. Gathering the key and value rows is a copy, made once
+            // at load.
+            QkvLayout::PairedKeyValue => {
+                let fused = builder.pp(names.fused_qkv);
+                let paired = fused
+                    .get((2 * key_value_width, input), "weight")?
+                    .reshape((key_value_heads, 2, head_dim, input))?;
+                let paired_bias = if bias {
+                    Some(fused.get(2 * key_value_width, "bias")?.reshape((key_value_heads, 2, head_dim))?)
+                } else {
+                    None
+                };
+                let part = |slot: usize| -> candle_core::Result<Linear> {
+                    Ok(Linear::new(
+                        paired.narrow(1, slot, 1)?.contiguous()?.reshape((key_value_width, input))?,
+                        paired_bias
+                            .as_ref()
+                            .map(|bias| bias.narrow(1, slot, 1)?.contiguous()?.reshape(key_value_width))
+                            .transpose()?,
+                    ))
+                };
+                (
+                    projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
+                    part(0)?,
+                    part(1)?,
+                )
+            }
         };
             Projections::Standard { query, key, value }
         };

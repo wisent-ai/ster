@@ -83,13 +83,14 @@ pub(super) enum Family {
     Dbrx,
     Phimoe,
     HunYuanMoe,
+    Telechat,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 59] = [
+    pub(super) const ALL: [Self; 60] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -146,6 +147,7 @@ impl Family {
         Self::Dbrx,
         Self::Phimoe,
         Self::HunYuanMoe,
+        Self::Telechat,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -215,6 +217,7 @@ impl Family {
             Self::Dbrx => "dbrx",
             Self::Phimoe => "phimoe",
             Self::HunYuanMoe => "hunyuan_v1_moe",
+            Self::Telechat => "telechat",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -295,7 +298,7 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         ("num_hidden_layers", &["n_layer", "n_layers", "num_layers"]),
         ("num_attention_heads", &["n_head", "n_heads"]),
         ("num_key_value_heads", &["kv_n_heads"]),
-        ("max_position_embeddings", &["n_positions", "max_seq_len"]),
+        ("max_position_embeddings", &["n_positions", "max_seq_len", "seq_length"]),
         ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
         ("rope_theta", &["rotary_emb_base"]),
         ("num_experts_per_tok", &["moe_k", "moe_top_k", "moe_topk"]),
@@ -445,8 +448,17 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
             }
             Ok(None)
         }
+        // Without an alpha, dynamic NTK scaling changes the rotary base only
+        // once a sequence outgrows `max_position_embeddings`, which Ster's
+        // rotary tables never do; within them it is the plain rotation.
+        "dynamic" => {
+            if let Some(object) = raw.as_object_mut() {
+                object.remove("rope_scaling");
+            }
+            Ok(None)
+        }
         other => bail!(
-            "{} declares rope_scaling {other:?}; Ster implements llama3, linear, longrope, yarn and HunYuan's alpha-scaled dynamic rotary scaling",
+            "{} declares rope_scaling {other:?}; Ster implements llama3, linear, longrope, yarn and dynamic rotary scaling",
             path.display()
         ),
     }
@@ -1264,6 +1276,21 @@ pub(super) fn family(
         "exaone" => {
             // EXAONE 3 and 3.5: Llama's block under GPT-2-style names.
             architecture.names = Names::EXAONE;
+        }
+        "telechat" => {
+            // TeleChat2: Llama's block below `transformer`, a separate
+            // `query` beside a `key_value` matrix paired per head, biases on
+            // the attention output and the down projection only.
+            if flag(raw, "apply_residual_connection_post_layernorm") || flag(raw, "embed_layernorm") {
+                bail!(
+                    "{} adds its residual after the norm (apply_residual_connection_post_layernorm) or normalises the embeddings (embed_layernorm); Ster implements TeleChat2's pre-norm block without an embedding norm",
+                    path.display()
+                );
+            }
+            architecture.names = Names::TELECHAT;
+            architecture.qkv_layout = QkvLayout::PairedKeyValue;
+            architecture.output_bias = true;
+            architecture.down_bias = true;
         }
         "deepseek_v2" | "deepseek_v3" | "minicpm3" => {
             if architecture.latent.is_none() {

@@ -111,7 +111,13 @@ impl FeedForward {
         Ok(Self {
             gate,
             up,
-            down: projection(intermediate, hidden, bias, conv1d, builder.pp(names.down))?,
+            down: projection(
+                intermediate,
+                hidden,
+                bias || architecture.down_bias,
+                conv1d,
+                builder.pp(names.down),
+            )?,
             gate_adapter: adapters.get(layer, Target::Gate).cloned(),
             up_adapter: adapters.get(layer, Target::Up).cloned(),
             down_adapter: adapters.get(layer, Target::Down).cloned(),

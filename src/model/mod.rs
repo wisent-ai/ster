@@ -163,6 +163,9 @@ pub struct Architecture {
     /// Bias on the feed-forward projections (Starcoder2, Phi-2, Nemotron's
     /// `mlp_bias`).
     pub feed_forward_bias: bool,
+    /// A bias on the down projection even where the gate and up have none
+    /// (TeleChat2).
+    pub down_bias: bool,
     pub feed_forward: FeedForwardKind,
     pub norm: NormKind,
     /// The norm epsilon, read from whichever key the family spells it with.
@@ -325,6 +328,7 @@ impl Architecture {
             query_key_value_bias: false,
             output_bias: false,
             feed_forward_bias: false,
+            down_bias: false,
             feed_forward: FeedForwardKind::Gated,
             norm: NormKind::Rms,
             norm_eps,
@@ -481,6 +485,15 @@ impl Architecture {
                     .collect();
                 Placement::blocks(in_attention(names.fused_qkv), blocks)
             }
+            (Some(0), QkvLayout::PairedKeyValue) => Placement::whole(in_attention(names.query)),
+            (Some(slot), QkvLayout::PairedKeyValue) => {
+                // Each key-value head holds its key rows, then its value rows.
+                let first = if slot == 1 { 0 } else { head_dim };
+                let blocks = (0..config.num_key_value_heads)
+                    .map(|head| (head * 2 * head_dim + first, head * head_dim, head_dim))
+                    .collect();
+                Placement::blocks(in_attention(names.fused_qkv), blocks)
+            }
             (None, _) => match target {
                 Target::Output => Placement::whole(in_layer(names.output)),
                 Target::Gate if self.fused_feed_forward => {
@@ -609,6 +622,9 @@ pub enum QkvLayout {
     /// head, then its value head (Falcon); with a group per head, each head's
     /// query, key and value in turn (GPT-NeoX, BLOOM).
     Grouped,
+    /// The query its own tensor, key and value one tensor whose rows hold
+    /// each key-value head's key, then its value (TeleChat2's `key_value`).
+    PairedKeyValue,
 }
 
 /// How a token's position enters the model.
@@ -824,6 +840,20 @@ impl Names {
     /// so the norm before the feed-forward is `pre_feedforward_layernorm`.
     pub const GEMMA2: Self = Self {
         feed_forward_norm: "pre_feedforward_layernorm",
+        ..Self::LLAMA
+    };
+    /// TeleChat2: everything below `transformer` (`word_embeddings`, `h`,
+    /// `ln_f`), `self_attention.query` beside one `key_value` matrix, and
+    /// `self_attention.dense` as the output.
+    pub const TELECHAT: Self = Self {
+        root: "transformer",
+        embeddings: "transformer.word_embeddings",
+        layers: "transformer.h",
+        final_norm: "transformer.ln_f",
+        attention: "self_attention",
+        query: "query",
+        fused_qkv: "key_value",
+        output: "self_attention.dense",
         ..Self::LLAMA
     };
     /// GLM-4-0414: `post_self_attn_layernorm` over attention's output and
