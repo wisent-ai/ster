@@ -3,12 +3,15 @@
 //! may not see.
 
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear, linear_no_bias, rms_norm};
+use candle_nn::{Linear, Module, RmsNorm, VarBuilder, linear, linear_no_bias};
 use candle_transformers::models::llama::Config;
 
 use crate::lora::{Adapter, Adapters, Target};
 
-use super::{Architecture, Cache, Mode, Pass, Route, layer::normalize};
+use super::{
+    Architecture, Cache, Mode, Pass, QueryKeyNorm, Route,
+    layer::{load_norm, normalize},
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct Attention {
@@ -20,17 +23,30 @@ pub(super) struct Attention {
     key_adapter: Option<Adapter>,
     value_adapter: Option<Adapter>,
     output_adapter: Option<Adapter>,
-    /// Qwen3's per-head RMS norms on query and key, applied before the
-    /// rotary embedding. `None` on a Llama checkpoint, which has neither.
+    /// Query and key norms, applied before the rotary embedding: per head
+    /// (Qwen3, Gemma 3) or over the whole projection (OLMo 2). `None` on a
+    /// family that has neither.
     query_norm: Option<RmsNorm>,
     key_norm: Option<RmsNorm>,
+    query_key_norm: QueryKeyNorm,
     heads: usize,
     key_value_heads: usize,
     head_dim: usize,
     /// How many keys behind it a query may see, on a sliding-window layer.
     window: Option<usize>,
+    rotary: Rotary,
     score_divisor: f64,
     softcap: Option<f64>,
+}
+
+/// Which rotary table this layer rotates its query and key with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rotary {
+    Global,
+    /// The sliding-window table (Gemma 3's `rope_local_base_freq`).
+    Local,
+    /// No rotation at all (SmolLM3's NoPE layers).
+    None,
 }
 
 /// A projection, with the bias the architecture says this one carries.
@@ -60,21 +76,24 @@ impl Attention {
         let query_width = architecture.attention_width(config.num_attention_heads);
         let key_value_width = head_dim * config.num_key_value_heads;
         let bias = architecture.query_key_value_bias;
-        let (query_norm, key_norm) = if architecture.query_key_norm {
-            (
-                Some(rms_norm(
-                    head_dim,
-                    config.rms_norm_eps,
-                    builder.pp("q_norm"),
-                )?),
-                Some(rms_norm(
-                    head_dim,
-                    config.rms_norm_eps,
-                    builder.pp("k_norm"),
-                )?),
-            )
+        let norm = |width: usize, name: &str| {
+            load_norm(width, config.rms_norm_eps, architecture.norm_offset, builder.pp(name))
+        };
+        let (query_norm, key_norm) = match architecture.query_key_norm {
+            QueryKeyNorm::None => (None, None),
+            QueryKeyNorm::PerHead => (Some(norm(head_dim, "q_norm")?), Some(norm(head_dim, "k_norm")?)),
+            QueryKeyNorm::Full => (
+                Some(norm(query_width, "q_norm")?),
+                Some(norm(key_value_width, "k_norm")?),
+            ),
+        };
+        let window = architecture.window(layer);
+        let rotary = if !architecture.rotates(layer) {
+            Rotary::None
+        } else if window.is_some() && architecture.local_rope_theta.is_some() {
+            Rotary::Local
         } else {
-            (None, None)
+            Rotary::Global
         };
         // Phi-3 stores query, key and value as one `qkv_proj` matrix, rows in
         // that order. Each projection is a row slice of it — a view of the
@@ -115,10 +134,12 @@ impl Attention {
             output_adapter: adapters.get(layer, Target::Output).cloned(),
             query_norm,
             key_norm,
+            query_key_norm: architecture.query_key_norm,
             heads: config.num_attention_heads,
             key_value_heads: config.num_key_value_heads,
             head_dim,
-            window: architecture.window(layer),
+            window,
+            rotary,
             score_divisor: architecture.score_divisor,
             softcap: architecture.attention_softcap,
         })
@@ -146,40 +167,46 @@ impl Attention {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, _) = hidden.dims3()?;
-        let query = project(&self.query, self.query_adapter.as_ref(), hidden, mode.route)?
-            .reshape((batch, sequence, self.heads, self.head_dim))?;
-        let query = per_head_norm(self.query_norm.as_ref(), query, mode.pass)?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let key = project(&self.key, self.key_adapter.as_ref(), hidden, mode.route)?.reshape((
-            batch,
-            sequence,
-            self.key_value_heads,
-            self.head_dim,
-        ))?;
-        let mut key = per_head_norm(self.key_norm.as_ref(), key, mode.pass)?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let query = project(&self.query, self.query_adapter.as_ref(), hidden, mode.route)?;
+        let key = project(&self.key, self.key_adapter.as_ref(), hidden, mode.route)?;
+        // OLMo 2 normalises the whole projection before it is split into
+        // heads; Qwen3 and Gemma 3 normalise each head after the split.
+        let (query, key) = if self.query_key_norm == QueryKeyNorm::Full {
+            (
+                per_head_norm(self.query_norm.as_ref(), query, mode.pass)?,
+                per_head_norm(self.key_norm.as_ref(), key, mode.pass)?,
+            )
+        } else {
+            (query, key)
+        };
+        let query = query.reshape((batch, sequence, self.heads, self.head_dim))?;
+        let key = key.reshape((batch, sequence, self.key_value_heads, self.head_dim))?;
+        let (query, key) = if self.query_key_norm == QueryKeyNorm::PerHead {
+            (
+                per_head_norm(self.query_norm.as_ref(), query, mode.pass)?,
+                per_head_norm(self.key_norm.as_ref(), key, mode.pass)?,
+            )
+        } else {
+            (query, key)
+        };
+        let query = query.transpose(1, 2)?.contiguous()?;
+        let mut key = key.transpose(1, 2)?.contiguous()?;
         let mut value = project(&self.value, self.value_adapter.as_ref(), hidden, mode.route)?
             .reshape((batch, sequence, self.key_value_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let query = apply_rotary(
-            &query,
-            index_pos,
-            &cache.cos,
-            &cache.sin,
-            cache.weights,
-            mode.pass,
-        )?;
-        key = apply_rotary(
-            &key,
-            index_pos,
-            &cache.cos,
-            &cache.sin,
-            cache.weights,
-            mode.pass,
-        )?;
+        let tables = match self.rotary {
+            Rotary::Global => Some((&cache.cos, &cache.sin)),
+            Rotary::Local => cache.local.as_ref().map(|(cos, sin)| (cos, sin)),
+            Rotary::None => None,
+        };
+        let query = match tables {
+            Some((cos, sin)) => apply_rotary(&query, index_pos, cos, sin, cache.weights, mode.pass)?,
+            None => query,
+        };
+        if let Some((cos, sin)) = tables {
+            key = apply_rotary(&key, index_pos, cos, sin, cache.weights, mode.pass)?;
+        }
         if cache.use_kv_cache {
             if let Some((cached_key, cached_value)) = &cache.kvs[layer] {
                 key = Tensor::cat(&[cached_key, &key], 2)?.contiguous()?;
@@ -245,10 +272,10 @@ impl Attention {
     }
 }
 
-/// Normalizes each head over its own `head_dim` when the architecture has the
-/// norm, before the heads move to the second axis and before the rotary
-/// embedding, which is where Qwen3 applies it. A Llama checkpoint passes the
-/// projection through untouched.
+/// Normalizes the last axis when the architecture has the norm: one head's
+/// `head_dim` after the split (Qwen3, Gemma 3), or the whole projection before
+/// it (OLMo 2). Either way it happens before the rotary embedding. A family
+/// without the norm passes the projection through untouched.
 fn per_head_norm(norm: Option<&RmsNorm>, heads: Tensor, pass: Pass) -> candle_core::Result<Tensor> {
     match norm {
         Some(norm) => normalize(norm, &heads, pass),

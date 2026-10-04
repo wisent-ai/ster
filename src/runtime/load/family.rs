@@ -10,11 +10,53 @@ use anyhow::{Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
-use crate::model::{Activation, Architecture};
+use crate::model::{Activation, Architecture, QueryKeyNorm};
 
 /// The `model_type` values the decoder implements.
-pub(super) const FAMILIES: &[&str] =
-    &["llama", "mistral", "qwen2", "qwen3", "phi3", "gemma", "gemma2"];
+pub(super) const FAMILIES: &[&str] = &[
+    "llama",
+    "mistral",
+    "qwen2",
+    "qwen3",
+    "phi3",
+    "granite",
+    "olmo2",
+    "olmo3",
+    "smollm3",
+    "gemma",
+    "gemma2",
+    "gemma3_text",
+];
+
+/// A `rope_scaling` Candle's Llama config cannot read, taken out of the
+/// config before it is parsed and applied by Ster itself: the factor of a
+/// `linear` scaling, which divides every rotary angle.
+pub(super) fn linear_rope_factor(raw: &mut Value, path: &Path) -> Result<Option<f32>> {
+    let Some(scaling) = raw.get("rope_scaling").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let kind = scaling
+        .get("rope_type")
+        .or_else(|| scaling.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match kind {
+        "llama3" | "default" => Ok(None),
+        "linear" => {
+            let Some(factor) = scaling.get("factor").and_then(Value::as_f64) else {
+                bail!("{} declares linear rope_scaling with no factor", path.display());
+            };
+            if let Some(object) = raw.as_object_mut() {
+                object.remove("rope_scaling");
+            }
+            Ok(Some(factor as f32))
+        }
+        other => bail!(
+            "{} declares rope_scaling {other:?}; Ster implements llama3 and linear rotary scaling",
+            path.display()
+        ),
+    }
+}
 
 /// What `model_type` adds to the Llama block, from the config's own keys.
 pub(super) fn family(
@@ -63,7 +105,7 @@ pub(super) fn family(
             if model_type == "qwen2" {
                 architecture.query_key_value_bias = true;
             } else {
-                architecture.query_key_norm = true;
+                architecture.query_key_norm = QueryKeyNorm::PerHead;
                 architecture.query_key_value_bias = flag(raw, "attention_bias");
                 architecture.output_bias = architecture.query_key_value_bias;
             }
@@ -73,19 +115,66 @@ pub(super) fn family(
                 architecture.sliding_layers = every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
             }
         }
-        "gemma" | "gemma2" => {
-            architecture.norm_offset = true;
-            architecture.embedding_scale = true;
-            architecture.activation = Activation::GeluTanh;
-            if model_type == "gemma2" {
-                architecture.sandwich_norms = true;
+        "granite" => {
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.embedding_multiplier = number(raw, "embedding_multiplier");
+            architecture.residual_multiplier = number(raw, "residual_multiplier");
+            if let Some(multiplier) = number(raw, "attention_multiplier") {
+                architecture.score_divisor = 1.0 / multiplier;
+            }
+            architecture.logits_divisor = number(raw, "logits_scaling");
+        }
+        "olmo2" | "olmo3" => {
+            architecture.query_key_norm = QueryKeyNorm::Full;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.pre_norms = false;
+            architecture.output_norms = true;
+            if model_type == "olmo3" {
                 architecture.sliding_window = whole(raw, "sliding_window");
-                architecture.sliding_layers = even_layers(layers, path)?;
+            }
+        }
+        "smollm3" => {
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            if let Some(flags) = raw.get("no_rope_layers").and_then(Value::as_array) {
+                architecture.unrotated_layers = unrotated(flags, layers, path)?;
+            }
+            if flag(raw, "use_sliding_window") {
+                architecture.sliding_window = whole(raw, "sliding_window");
+                architecture.sliding_layers = every_layer(layers, path)?;
+            }
+        }
+        "gemma" | "gemma2" | "gemma3_text" => {
+            architecture.norm_offset = true;
+            architecture.embedding_multiplier = Some((llama.hidden_size as f64).sqrt());
+            architecture.activation = Activation::GeluTanh;
+            if model_type != "gemma" {
+                architecture.output_norms = true;
+                architecture.sliding_window = whole(raw, "sliding_window");
                 if let Some(scalar) = number(raw, "query_pre_attn_scalar") {
                     architecture.score_divisor = scalar.sqrt();
                 }
                 architecture.attention_softcap = number(raw, "attn_logit_softcapping");
                 architecture.final_softcap = number(raw, "final_logit_softcapping");
+            }
+            if model_type == "gemma2" {
+                architecture.sliding_layers = even_layers(layers, path)?;
+            }
+            if model_type == "gemma3_text" {
+                architecture.query_key_norm = QueryKeyNorm::PerHead;
+                architecture.local_rope_theta =
+                    number(raw, "rope_local_base_freq").map(|theta| theta as f32);
+                // Older Gemma 3 configs state the pattern instead of
+                // `layer_types`: every `sliding_window_pattern`-th layer is
+                // global, the rest local.
+                if let Some(pattern) = whole(raw, "sliding_window_pattern").filter(|p| *p > 0) {
+                    fits(layers, path)?;
+                    architecture.sliding_layers = (0..layers)
+                        .filter(|layer| (layer + 1) % pattern != 0)
+                        .fold(0, |set, layer| set | (1u128 << layer));
+                }
             }
         }
         other => bail!("model architecture {other:?} has no decoder in this Ster build"),
@@ -122,12 +211,37 @@ fn text<'a>(raw: &'a Value, key: &str) -> Option<&'a str> {
 fn fits(layers: usize, path: &Path) -> Result<()> {
     if layers > u128::BITS as usize {
         bail!(
-            "{} has {layers} layers with sliding-window attention; Ster tracks the window per layer for at most {} layers",
+            "{} has {layers} layers with per-layer attention settings; Ster tracks them per layer for at most {} layers",
             path.display(),
             u128::BITS
         );
     }
     Ok(())
+}
+
+/// SmolLM3's `no_rope_layers`: one entry per layer, `1` where the layer
+/// rotates and `0` where it does not. Returns the layers that do not.
+fn unrotated(flags: &[Value], layers: usize, path: &Path) -> Result<u128> {
+    if flags.len() != layers {
+        bail!(
+            "{} lists {} no_rope_layers for {layers} layers",
+            path.display(),
+            flags.len()
+        );
+    }
+    fits(layers, path)?;
+    let mut set = 0u128;
+    for (layer, flag) in flags.iter().enumerate() {
+        match flag.as_u64() {
+            Some(0) => set |= 1u128 << layer,
+            Some(1) => {}
+            _ => bail!(
+                "{} marks layer {layer} in no_rope_layers as {flag}; expected 0 or 1",
+                path.display()
+            ),
+        }
+    }
+    Ok(set)
 }
 
 fn every_layer(layers: usize, path: &Path) -> Result<u128> {

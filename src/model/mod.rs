@@ -94,9 +94,10 @@ pub use decoder::SteeringLlama;
 /// * **Head width** — `head_dim` when the config states it (Qwen3, Gemma),
 ///   otherwise `hidden_size / num_attention_heads`. Attention may then be
 ///   wider or narrower than the residual stream.
-/// * **Per-head query and key norms** — Qwen3's `self_attn.q_norm` and
-///   `self_attn.k_norm`, applied after the projection and before the rotary
-///   embedding.
+/// * **Query and key norms** — Qwen3 and Gemma 3 normalise each head of the
+///   query and key (`self_attn.q_norm`, `self_attn.k_norm` over `head_dim`);
+///   OLMo 2 normalises the whole query and key projection at once. Both come
+///   after the projection and before the rotary embedding.
 /// * **Projection bias** — Qwen2 adds a bias to query, key and value; a Llama
 ///   or Mistral config with `attention_bias` adds one to the output too.
 /// * **Sliding-window attention** — a query on a local layer sees only the
@@ -113,25 +114,53 @@ pub use decoder::SteeringLlama;
 /// * **Gemma 2's additions** — a norm after attention and another after the
 ///   feed-forward, scores scaled by `query_pre_attn_scalar` instead of the head
 ///   width, and `tanh` soft-capping of attention scores and final logits.
+/// * **Post-norm blocks** — OLMo 2 has no norm before attention or the
+///   feed-forward; it normalises each sublayer's output before the residual
+///   add instead.
+/// * **Granite's scales** — `embedding_multiplier` on the embedding,
+///   `residual_multiplier` on each sublayer's output, `attention_multiplier`
+///   in place of `1 / sqrt(head_dim)`, and final logits divided by
+///   `logits_scaling`.
+/// * **Rotary per layer** — SmolLM3 skips the rotary embedding on the layers
+///   its `no_rope_layers` marks; Gemma 3 rotates local layers with
+///   `rope_local_base_freq` and global ones with `rope_theta`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Architecture {
     pub head_dim: usize,
-    pub query_key_norm: bool,
+    pub query_key_norm: QueryKeyNorm,
     pub query_key_value_bias: bool,
     pub output_bias: bool,
     pub sliding_window: Option<usize>,
     /// Bit `i` set means layer `i` attends through the sliding window.
     pub sliding_layers: u128,
+    /// Bit `i` set means layer `i` applies no rotary embedding.
+    pub unrotated_layers: u128,
+    /// The rotary base sliding-window layers use, when it differs from
+    /// `rope_theta` (Gemma 3).
+    pub local_rope_theta: Option<f32>,
+    /// Linear position scaling on the global rotary table: every angle is
+    /// divided by it (`rope_scaling` of type `linear`).
+    pub rope_linear_factor: Option<f32>,
     pub fused_projections: bool,
     pub norm_offset: bool,
-    pub embedding_scale: bool,
+    /// What the embedding is multiplied by before the first block.
+    pub embedding_multiplier: Option<f64>,
+    /// What each sublayer's output is multiplied by before the residual add.
+    pub residual_multiplier: Option<f64>,
     pub activation: Activation,
-    pub sandwich_norms: bool,
-    /// What attention scores are divided by: `sqrt(head_dim)`, or Gemma 2's
-    /// `sqrt(query_pre_attn_scalar)`.
+    /// A norm before attention and before the feed-forward (every family but
+    /// OLMo 2).
+    pub pre_norms: bool,
+    /// A norm over attention's and the feed-forward's outputs (Gemma 2 and 3,
+    /// OLMo 2).
+    pub output_norms: bool,
+    /// What attention scores are divided by: `sqrt(head_dim)`, Gemma 2's
+    /// `sqrt(query_pre_attn_scalar)`, or Granite's `1 / attention_multiplier`.
     pub score_divisor: f64,
     pub attention_softcap: Option<f64>,
     pub final_softcap: Option<f64>,
+    /// What final logits are divided by (Granite's `logits_scaling`).
+    pub logits_divisor: Option<f64>,
 }
 
 impl Architecture {
@@ -140,19 +169,25 @@ impl Architecture {
         let head_dim = hidden_size / heads;
         Self {
             head_dim,
-            query_key_norm: false,
+            query_key_norm: QueryKeyNorm::None,
             query_key_value_bias: false,
             output_bias: false,
             sliding_window: None,
             sliding_layers: 0,
+            unrotated_layers: 0,
+            local_rope_theta: None,
+            rope_linear_factor: None,
             fused_projections: false,
             norm_offset: false,
-            embedding_scale: false,
+            embedding_multiplier: None,
+            residual_multiplier: None,
             activation: Activation::Silu,
-            sandwich_norms: false,
+            pre_norms: true,
+            output_norms: false,
             score_divisor: (head_dim as f64).sqrt(),
             attention_softcap: None,
             final_softcap: None,
+            logits_divisor: None,
         }
     }
 
@@ -162,10 +197,25 @@ impl Architecture {
         self.sliding_window.filter(|_| sliding)
     }
 
+    /// Whether layer `layer` applies the rotary embedding.
+    pub fn rotates(&self, layer: usize) -> bool {
+        layer >= 128 || self.unrotated_layers & (1u128 << layer) == 0
+    }
+
     /// Width of the query projection and of the attention output.
     pub fn attention_width(&self, heads: usize) -> usize {
         heads * self.head_dim
     }
+}
+
+/// Where a query and key norm sits, if the family has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryKeyNorm {
+    None,
+    /// One norm over each head's `head_dim` (Qwen3, Gemma 3).
+    PerHead,
+    /// One norm over the whole projection (OLMo 2).
+    Full,
 }
 
 /// The non-linearity on the feed-forward gate.

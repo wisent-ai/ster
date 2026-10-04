@@ -15,6 +15,9 @@ pub struct Cache {
     /// Rotary tables, held in F32 whatever the weights are. See [`Cache::new`].
     pub(super) cos: Tensor,
     pub(super) sin: Tensor,
+    /// The tables sliding-window layers rotate with, when the family gives
+    /// them their own base (Gemma 3's `rope_local_base_freq`).
+    pub(super) local: Option<(Tensor, Tensor)>,
     /// The dtype the base weights were mapped at. [`apply_rotary`] casts each
     /// rotated query and key back to it, so a half-precision checkpoint keeps
     /// a half-precision key-value cache and residual stream.
@@ -35,27 +38,40 @@ impl Cache {
     /// query and key back to the weights' dtype afterwards so the key-value
     /// cache still stores half-precision keys.
     ///
-    /// `head_dim` is the architecture's head width, which a config may state
-    /// apart from `hidden_size / num_attention_heads`; the rotation spans it.
+    /// The architecture supplies the head width the rotation spans (a config
+    /// may state it apart from `hidden_size / num_attention_heads`), a linear
+    /// position scaling for the global table, and a second base for
+    /// sliding-window layers when the family has one.
     pub fn new(
         use_kv_cache: bool,
         dtype: DType,
         config: &Config,
-        head_dim: usize,
+        architecture: &super::Architecture,
         device: &Device,
     ) -> Result<Self> {
-        let inv_freq = rotary_frequencies(config, head_dim);
-        let theta = Tensor::new(inv_freq, device)?;
-        let positions = Tensor::arange(0, config.max_position_embeddings as u32, device)?
-            .to_dtype(DType::F32)?
-            .reshape((config.max_position_embeddings, 1))?;
-        let angles = positions.matmul(&theta.reshape((1, theta.elem_count()))?)?;
+        let head_dim = architecture.head_dim;
+        let mut global = rotary_frequencies(config, head_dim, config.rope_theta);
+        if let Some(factor) = architecture.rope_linear_factor {
+            for frequency in &mut global {
+                *frequency /= factor;
+            }
+        }
+        let (cos, sin) = angle_tables(global, config.max_position_embeddings, device)?;
+        let local = match architecture.local_rope_theta {
+            Some(theta) => Some(angle_tables(
+                base_frequencies(head_dim, theta),
+                config.max_position_embeddings,
+                device,
+            )?),
+            None => None,
+        };
         Ok(Self {
             masks: HashMap::new(),
             use_kv_cache,
             kvs: vec![None; config.num_hidden_layers],
-            cos: angles.cos()?,
-            sin: angles.sin()?,
+            cos,
+            sin,
+            local,
             weights: dtype,
             device: device.clone(),
         })
@@ -96,11 +112,30 @@ pub(super) fn hidden_key(query: usize, key: usize, window: Option<usize>) -> boo
     key > query || window.is_some_and(|window| query - key >= window)
 }
 
-fn rotary_frequencies(config: &Config, head_dim: usize) -> Vec<f32> {
-    let base: Vec<f32> = (0..head_dim)
+/// `cos` and `sin` of every position times every frequency, `[positions,
+/// head_dim / 2]`, in F32.
+fn angle_tables(
+    frequencies: Vec<f32>,
+    positions: usize,
+    device: &Device,
+) -> Result<(Tensor, Tensor)> {
+    let theta = Tensor::new(frequencies, device)?;
+    let positions = Tensor::arange(0, positions as u32, device)?
+        .to_dtype(DType::F32)?
+        .reshape((positions, 1))?;
+    let angles = positions.matmul(&theta.reshape((1, theta.elem_count()))?)?;
+    Ok((angles.cos()?, angles.sin()?))
+}
+
+fn base_frequencies(head_dim: usize, theta: f32) -> Vec<f32> {
+    (0..head_dim)
         .step_by(2)
-        .map(|index| 1f32 / config.rope_theta.powf(index as f32 / head_dim as f32))
-        .collect();
+        .map(|index| 1f32 / theta.powf(index as f32 / head_dim as f32))
+        .collect()
+}
+
+fn rotary_frequencies(config: &Config, head_dim: usize, theta: f32) -> Vec<f32> {
+    let base = base_frequencies(head_dim, theta);
     match &config.rope_scaling {
         None
         | Some(Llama3RopeConfig {

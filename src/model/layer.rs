@@ -77,14 +77,19 @@ impl FeedForward {
 
 #[derive(Debug, Clone)]
 pub(super) struct DecoderLayer {
-    attention_norm: RmsNorm,
+    /// The norm before attention; OLMo 2 has none.
+    attention_norm: Option<RmsNorm>,
     attention: Attention,
-    /// Gemma 2's norm over the attention output, before the residual add.
+    /// The norm over attention's output before the residual add (Gemma 2 and
+    /// 3, OLMo 2).
     attention_output_norm: Option<RmsNorm>,
-    feed_forward_norm: RmsNorm,
+    /// The norm before the feed-forward; OLMo 2 has none.
+    feed_forward_norm: Option<RmsNorm>,
     feed_forward: FeedForward,
-    /// Gemma 2's norm over the feed-forward output, before the residual add.
+    /// The norm over the feed-forward's output before the residual add.
     feed_forward_output_norm: Option<RmsNorm>,
+    /// Granite's `residual_multiplier` on each sublayer's output.
+    residual_multiplier: Option<f64>,
 }
 
 impl DecoderLayer {
@@ -103,22 +108,39 @@ impl DecoderLayer {
                 builder.pp(name),
             )
         };
-        // Llama names the norm before the feed-forward
-        // `post_attention_layernorm`; Gemma 2 uses that name for the norm
-        // after attention and calls the one before the feed-forward
-        // `pre_feedforward_layernorm`.
-        let (attention_output_norm, feed_forward_norm, feed_forward_output_norm) =
-            if architecture.sandwich_norms {
-                (
+        // The checkpoints name the same position differently:
+        //
+        // * Llama: `input_layernorm` before attention and
+        //   `post_attention_layernorm` before the feed-forward.
+        // * Gemma 2 and 3: those plus `post_attention_layernorm` over the
+        //   attention output, so the norm before the feed-forward is
+        //   `pre_feedforward_layernorm`, and `post_feedforward_layernorm`
+        //   closes the block.
+        // * OLMo 2: no norm before either sublayer; `post_attention_layernorm`
+        //   and `post_feedforward_layernorm` sit over their outputs.
+        let (attention_norm, attention_output_norm, feed_forward_norm, feed_forward_output_norm) =
+            match (architecture.pre_norms, architecture.output_norms) {
+                (true, false) => (
+                    Some(norm("input_layernorm")?),
+                    None,
                     Some(norm("post_attention_layernorm")?),
-                    norm("pre_feedforward_layernorm")?,
+                    None,
+                ),
+                (true, true) => (
+                    Some(norm("input_layernorm")?),
+                    Some(norm("post_attention_layernorm")?),
+                    Some(norm("pre_feedforward_layernorm")?),
                     Some(norm("post_feedforward_layernorm")?),
-                )
-            } else {
-                (None, norm("post_attention_layernorm")?, None)
+                ),
+                (false, _) => (
+                    None,
+                    Some(norm("post_attention_layernorm")?),
+                    None,
+                    Some(norm("post_feedforward_layernorm")?),
+                ),
             };
         Ok(Self {
-            attention_norm: norm("input_layernorm")?,
+            attention_norm,
             attention: Attention::load(
                 builder.pp("self_attn"),
                 config,
@@ -136,6 +158,7 @@ impl DecoderLayer {
                 adapters,
             )?,
             feed_forward_output_norm,
+            residual_multiplier: architecture.residual_multiplier,
         })
     }
 
@@ -154,27 +177,42 @@ impl DecoderLayer {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let attention = self.attention.forward(
-            &normalize(&self.attention_norm, hidden, mode.pass)?,
+            &optional_norm(self.attention_norm.as_ref(), hidden, mode.pass)?,
             index_pos,
             layer,
             cache,
             mask,
             mode,
         )?;
-        let attention = match &self.attention_output_norm {
-            Some(norm) => normalize(norm, &attention, mode.pass)?,
-            None => attention,
-        };
-        let hidden = (hidden + attention)?;
+        let attention = optional_norm(self.attention_output_norm.as_ref(), &attention, mode.pass)?;
+        let hidden = (hidden + self.scaled(attention)?)?;
         let feed_forward = self.feed_forward.forward(
-            &normalize(&self.feed_forward_norm, &hidden, mode.pass)?,
+            &optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?,
             mode.route,
         )?;
-        let feed_forward = match &self.feed_forward_output_norm {
-            Some(norm) => normalize(norm, &feed_forward, mode.pass)?,
-            None => feed_forward,
-        };
-        hidden + feed_forward
+        let feed_forward =
+            optional_norm(self.feed_forward_output_norm.as_ref(), &feed_forward, mode.pass)?;
+        hidden + self.scaled(feed_forward)?
+    }
+
+    /// A sublayer's output as it joins the residual stream.
+    fn scaled(&self, output: Tensor) -> candle_core::Result<Tensor> {
+        match self.residual_multiplier {
+            Some(multiplier) => output * multiplier,
+            None => Ok(output),
+        }
+    }
+}
+
+/// `hidden` through `norm` when the block has one at this position.
+fn optional_norm(
+    norm: Option<&RmsNorm>,
+    hidden: &Tensor,
+    pass: Pass,
+) -> candle_core::Result<Tensor> {
+    match norm {
+        Some(norm) => normalize(norm, hidden, pass),
+        None => Ok(hidden.clone()),
     }
 }
 

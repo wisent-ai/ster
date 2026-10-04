@@ -13,7 +13,7 @@ use hf_hub::{Repo, RepoType, api::sync::Api};
 
 use crate::{chat, model::Architecture};
 
-use super::family::{FAMILIES, family};
+use super::family::{FAMILIES, family, linear_rope_factor};
 
 /// A checkpoint's three files, resolved but not mapped.
 ///
@@ -124,12 +124,14 @@ impl Checkpoint {
     pub fn decoder_config(&self) -> Result<(Config, Architecture, BTreeSet<u32>)> {
         let bytes = fs::read(&self.config)
             .with_context(|| format!("failed to read {}", self.config.display()))?;
-        let raw: serde_json::Value = serde_json::from_slice(&bytes)
+        let mut raw: serde_json::Value = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid model config {}", self.config.display()))?;
         let model_type = raw
             .get("model_type")
             .and_then(|value| value.as_str())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_owned();
+        let model_type = model_type.as_str();
         if !FAMILIES.contains(&model_type) {
             bail!(
                 "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face checkpoint whose model_type is one of {}",
@@ -142,7 +144,8 @@ impl Checkpoint {
                 self.config.display()
             );
         }
-        let mut llama: LlamaConfig = serde_json::from_slice(&bytes)
+        let linear_factor = linear_rope_factor(&mut raw, &self.config)?;
+        let mut llama: LlamaConfig = serde_json::from_value(raw.clone())
             .with_context(|| format!("invalid {model_type} config {}", self.config.display()))?;
         let gemma = model_type.starts_with("gemma");
         if gemma && llama.tie_word_embeddings.is_none() {
@@ -150,7 +153,8 @@ impl Checkpoint {
             // usually leave the key out.
             llama.tie_word_embeddings = Some(true);
         }
-        let architecture = family(model_type, &raw, &llama, &self.config)?;
+        let mut architecture = family(model_type, &raw, &llama, &self.config)?;
+        architecture.rope_linear_factor = linear_factor;
         let tokens = eos_tokens(&llama);
         Ok((llama.into_config(false), architecture, tokens))
     }

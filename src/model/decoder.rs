@@ -252,10 +252,11 @@ impl SteeringLlama {
     ) -> candle_core::Result<ForwardOutput> {
         let (_, sequence) = tokens.dims2()?;
         let mut hidden = self.embeddings.forward(tokens)?;
-        if self.architecture.embedding_scale {
-            // Gemma multiplies the embedding by `sqrt(hidden_size)`, in the
-            // embedding's own dtype, before the first block.
-            hidden = (hidden * (self.config.hidden_size as f64).sqrt())?;
+        if let Some(multiplier) = self.architecture.embedding_multiplier {
+            // Gemma multiplies the embedding by `sqrt(hidden_size)` and Granite
+            // by its `embedding_multiplier`, in the embedding's own dtype,
+            // before the first block.
+            hidden = (hidden * multiplier)?;
         }
         let mut activations = BTreeMap::new();
         for (index, layer) in self.layers.iter().enumerate() {
@@ -303,8 +304,13 @@ impl SteeringLlama {
 }
 
 impl SteeringLlama {
-    /// Gemma 2 bounds its final logits to `(-cap, cap)` with a tanh.
+    /// Granite divides its final logits by `logits_scaling`; Gemma 2 and 3
+    /// bound them to `(-cap, cap)` with a tanh.
     fn soft_cap(&self, logits: Tensor) -> candle_core::Result<Tensor> {
+        let logits = match self.architecture.logits_divisor {
+            Some(divisor) => (logits / divisor)?,
+            None => logits,
+        };
         match self.architecture.final_softcap {
             Some(cap) => (logits / cap)?.tanh()? * cap,
             None => Ok(logits),
