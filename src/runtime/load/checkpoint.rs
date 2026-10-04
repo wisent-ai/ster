@@ -124,7 +124,7 @@ impl Checkpoint {
     pub fn decoder_config(&self) -> Result<(Config, Architecture, BTreeSet<u32>)> {
         let bytes = fs::read(&self.config)
             .with_context(|| format!("failed to read {}", self.config.display()))?;
-        let mut raw: serde_json::Value = serde_json::from_slice(&bytes)
+        let mut raw: serde_json::Value = serde_json::from_slice(&finite_literals(&bytes))
             .with_context(|| format!("invalid model config {}", self.config.display()))?;
         let model_type = raw
             .get("model_type")
@@ -213,5 +213,47 @@ fn eos_tokens(config: &LlamaConfig) -> BTreeSet<u32> {
         Some(LlamaEosToks::Single(token)) => [*token].into_iter().collect(),
         Some(LlamaEosToks::Multiple(tokens)) => tokens.iter().copied().collect(),
         None => BTreeSet::new(),
+    }
+}
+
+/// The config with Python's non-finite float literals replaced by `null`.
+///
+/// Transformers writes configs with Python's `json`, which emits `Infinity`,
+/// `-Infinity` and `NaN` for non-finite floats (Mamba-2's unbounded
+/// `time_step_limit` is `[0.0, Infinity]`). JSON has no such tokens, so they
+/// are rewritten — outside strings only — to `null`, which every reader of
+/// such a key takes as "not stated". Bytes without them are returned as they
+/// are.
+fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    const LITERALS: [&[u8]; 3] = [b"-Infinity", b"Infinity", b"NaN"];
+    let mut output: Option<Vec<u8>> = None;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            match (escaped, byte) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if let Some(literal) = LITERALS.iter().find(|literal| bytes[index..].starts_with(literal)) {
+            let written = output.get_or_insert_with(|| bytes[..index].to_vec());
+            written.extend_from_slice(b"null");
+            index += literal.len();
+            continue;
+        }
+        if let Some(written) = output.as_mut() {
+            written.push(byte);
+        }
+        index += 1;
+    }
+    match output {
+        Some(written) => std::borrow::Cow::Owned(written),
+        None => std::borrow::Cow::Borrowed(bytes),
     }
 }

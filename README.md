@@ -41,8 +41,8 @@ Included now:
   `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `gpt2`,
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
   `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
-  `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `smollm3`, `gemma`,
-  `gemma2` or `gemma3_text`. Coverage is measured
+  `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `mamba2`, `bamba`,
+  `smollm3`, `gemma`, `gemma2` or `gemma3_text`. Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Mamba and Falcon-Mamba replace attention with a selective state-space
@@ -50,7 +50,13 @@ Included now:
   `A_log`, `D`, `out_proj`, scanned token by token and carried between
   decode steps); Jamba interleaves that mixer, with weighted norms on its
   step and matrices, with position-free attention, and gives every layer a
-  feed-forward, routed on its expert layers. These are steered like any
+  feed-forward, routed on its expert layers. Mamba-2 uses the structured
+  multi-head mixer (`in_proj` to gate, stream, `B`, `C` and a step per head,
+  `conv1d`, `dt_bias`, `A_log`, `D`, a gated RMS `norm` per group,
+  `out_proj`), and Bamba interleaves it with attention on
+  `attn_layer_indices` and a feed-forward after every layer. Configs written
+  with Python's `Infinity`, `-Infinity` or `NaN` are read with those as
+  unstated. These are steered like any
   other model, and adapter training on them is refused because their
   state-space layers have no attention or feed-forward projection. Every
   other family is a rotary, grouped-query decoder with what its config

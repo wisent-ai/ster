@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, ExpertGroups, ExpertLayout, FeedForwardKind,
     LatentAttention, MixtureOfExperts, Names, NormKind, ParameterNorm, Positions, QkvLayout,
-    QueryKeyNorm, RopeScaling, Scoring, SharedExpert, StateSpaceSpec,
+    QueryKeyNorm, RopeScaling, Scoring, SharedExpert, StateSpaceSpec, StructuredSpec,
 };
 
 /// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
@@ -74,13 +74,15 @@ pub(super) enum Family {
     Exaone,
     Jamba,
     HunYuanDense,
+    Mamba2,
+    Bamba,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 51] = [
+    pub(super) const ALL: [Self; 53] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -129,6 +131,8 @@ impl Family {
         Self::Exaone,
         Self::Jamba,
         Self::HunYuanDense,
+        Self::Mamba2,
+        Self::Bamba,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -190,6 +194,8 @@ impl Family {
             Self::Exaone => "exaone",
             Self::Jamba => "jamba",
             Self::HunYuanDense => "hunyuan_v1_dense",
+            Self::Mamba2 => "mamba2",
+            Self::Bamba => "bamba",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -285,17 +291,23 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     }
     // Mamba states its inner width as `expand` times the model width when it
     // leaves `intermediate_size` out.
-    if matches!(model_type, "mamba" | "falcon_mamba") && missing(raw, "intermediate_size") {
+    let state_space_only = matches!(model_type, "mamba" | "falcon_mamba" | "mamba2");
+    if state_space_only && missing(raw, "intermediate_size") {
         let width = raw.get("hidden_size").and_then(Value::as_u64);
         let expand = raw.get("expand").and_then(Value::as_u64);
         if let (Some(width), Some(expand)) = (width, expand) {
             defaults.push(("intermediate_size", Value::from(width * expand)));
         }
     }
-    // A state-space model has no attention heads; Candle's config needs a
-    // count, and one stands in, read by nothing.
-    if matches!(model_type, "mamba" | "falcon_mamba") && missing(raw, "num_attention_heads") {
-        defaults.push(("num_attention_heads", Value::from(1u64)));
+    // A state-space model has no attention heads and no position table;
+    // Candle's config needs both counts, and these stand in, read by nothing.
+    if state_space_only {
+        if missing(raw, "num_attention_heads") {
+            defaults.push(("num_attention_heads", Value::from(1u64)));
+        }
+        if missing(raw, "max_position_embeddings") {
+            defaults.push(("max_position_embeddings", Value::from(1u64)));
+        }
     }
     if model_type == "gpt_bigcode" && flag(raw, "multi_query") {
         defaults.push(("num_key_value_heads", Value::from(1u64)));
@@ -851,6 +863,7 @@ pub(super) fn family(
                 },
                 layers: every_layer(layers, path)?,
                 feed_forward: false,
+                structured: None,
             });
         }
         "jamba" => {
@@ -895,6 +908,7 @@ pub(super) fn family(
                 parameter_norm: ParameterNorm::Weighted(llama.rms_norm_eps),
                 layers: every_layer(layers, path)? & !attention,
                 feed_forward: true,
+                structured: None,
             });
             if whole(raw, "num_experts").is_some_and(|count| count > 1) {
                 architecture.experts = Some(experts(
@@ -907,6 +921,72 @@ pub(super) fn family(
                     path,
                 )?);
             }
+        }
+        "mamba2" => {
+            // Mamba-2: every block is a norm and the structured mixer.
+            let heads = structured(raw, "num_heads", "head_dim", "n_groups", path)?;
+            let inner = heads.heads * heads.head_dim;
+            let (Some(state), Some(kernel)) = (whole(raw, "state_size"), whole(raw, "conv_kernel"))
+            else {
+                bail!(
+                    "{} declares a Mamba-2 model without state_size and conv_kernel",
+                    path.display()
+                );
+            };
+            architecture.names = Names::MAMBA;
+            architecture.positions = Positions::None;
+            architecture.state_space = Some(StateSpaceSpec {
+                inner,
+                state,
+                kernel,
+                step_rank: 0,
+                projection_bias: flag(raw, "use_bias"),
+                convolution_bias: raw.get("use_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                parameter_norm: ParameterNorm::None,
+                layers: every_layer(layers, path)?,
+                feed_forward: false,
+                structured: Some(heads),
+            });
+        }
+        "bamba" => {
+            // Bamba: Mamba-2 mixers with attention on the layers
+            // `attn_layer_indices` lists, a feed-forward after every mixer,
+            // and rotation over `attn_rotary_emb` components of each head.
+            fits(layers, path)?;
+            let attention = raw
+                .get("attn_layer_indices")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_u64)
+                        .filter(|layer| (*layer as usize) < layers)
+                        .fold(0u128, |set, layer| set | (1u128 << layer))
+                })
+                .unwrap_or(0);
+            let heads = structured(raw, "mamba_n_heads", "mamba_d_head", "mamba_n_groups", path)?;
+            let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+            else {
+                bail!(
+                    "{} declares a Bamba model without mamba_d_state and mamba_d_conv",
+                    path.display()
+                );
+            };
+            if let Some(width) = whole(raw, "attn_rotary_emb") {
+                architecture.rotary_dim = width.min(architecture.head_dim);
+            }
+            architecture.names = Names::JAMBA;
+            architecture.state_space = Some(StateSpaceSpec {
+                inner: heads.heads * heads.head_dim,
+                state,
+                kernel,
+                step_rank: 0,
+                projection_bias: flag(raw, "mamba_proj_bias"),
+                convolution_bias: raw.get("mamba_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                parameter_norm: ParameterNorm::None,
+                layers: every_layer(layers, path)? & !attention,
+                feed_forward: true,
+                structured: Some(heads),
+            });
         }
         "glm4_moe" => {
             // GLM-4.5's MoE: biased query, key and value, optional per-head
@@ -1325,6 +1405,44 @@ fn deepseek_experts(
         None
     };
     Ok(routed)
+}
+
+/// Mamba-2's head layout from the keys a family spells it with: the head
+/// count, the head width and the group count (one when unstated), and
+/// `time_step_limit` (unbounded when unstated or stated as non-finite).
+fn structured(
+    raw: &Value,
+    heads_key: &str,
+    width_key: &str,
+    groups_key: &str,
+    path: &Path,
+) -> Result<StructuredSpec> {
+    let (Some(heads), Some(head_dim)) = (whole(raw, heads_key), whole(raw, width_key)) else {
+        bail!(
+            "{} declares a Mamba-2 mixer without {heads_key} and {width_key}",
+            path.display()
+        );
+    };
+    let groups = whole(raw, groups_key).unwrap_or(1);
+    if groups == 0 || heads % groups != 0 {
+        bail!(
+            "{} splits {heads} Mamba-2 heads into {groups} groups; the groups must divide the heads evenly",
+            path.display()
+        );
+    }
+    let limit = raw.get("time_step_limit").and_then(Value::as_array);
+    let bound = |index: usize, unstated: f64| {
+        limit
+            .and_then(|limit| limit.get(index))
+            .and_then(Value::as_f64)
+            .unwrap_or(unstated)
+    };
+    Ok(StructuredSpec {
+        heads,
+        head_dim,
+        groups,
+        step_limit: (bound(0, 0.0), bound(1, f64::INFINITY)),
+    })
 }
 
 /// Qwen MoE's dense layers: those in `mlp_only_layers`, and those whose

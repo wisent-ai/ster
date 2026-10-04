@@ -184,7 +184,7 @@ impl StateSpace {
 
 /// `log(1 + exp(x))`, written as `max(x, 0) + log(1 + exp(-|x|))` so a large
 /// step logit neither overflows nor loses its gradient.
-fn softplus(input: &Tensor) -> candle_core::Result<Tensor> {
+pub(super) fn softplus(input: &Tensor) -> candle_core::Result<Tensor> {
     input.relu()? + (input.abs()?.neg()?.exp()? + 1.0)?.log()?
 }
 

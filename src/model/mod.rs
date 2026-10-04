@@ -243,6 +243,21 @@ pub struct StateSpaceSpec {
     /// A feed-forward follows the mixer (Jamba); Mamba's block is the mixer
     /// alone.
     pub feed_forward: bool,
+    /// Mamba-2's structured mixer in place of Mamba-1's selective one.
+    pub structured: Option<StructuredSpec>,
+}
+
+/// Mamba-2's multi-head structured state-space mixer (the SSD layer): the
+/// inner width splits into `heads` heads of `head_dim`, each with one scalar
+/// decay, and the input and output matrices are shared within `groups`
+/// groups of heads.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StructuredSpec {
+    pub heads: usize,
+    pub head_dim: usize,
+    pub groups: usize,
+    /// `time_step_limit`: the step is clamped to this range after softplus.
+    pub step_limit: (f64, f64),
 }
 
 /// The norm on a state-space mixer's step and input and output matrices.
