@@ -39,8 +39,8 @@ Included now:
   `starcoder2`, `cohere`, `cohere2`, `nemotron`, `olmo`, `olmo2`, `olmo3`,
   `olmoe`, `exaone4`, `internlm3`, `seed_oss`, `arcee`, `ernie4_5`,
   `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `gpt2`,
-  `gpt_bigcode`, `opt`, `bloom`, `smollm3`, `gemma`, `gemma2` or
-  `gemma3_text`. Coverage is measured
+  `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `smollm3`, `gemma`,
+  `gemma2` or `gemma3_text`. Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Each family is the same rotary, grouped-query decoder with what its config
@@ -62,11 +62,14 @@ Included now:
   sliding-window attention on the layers `sliding_window`,
   `max_window_layers`, `sliding_window_pattern` or `layer_types` name,
   Phi-3's fused `qkv_proj` and `gate_up_proj`, GLM's fused `gate_up_proj`,
-  GPT-2's and GPT-BigCode's `c_attn` and GPT-NeoX's and BLOOM's
-  head-interleaved `query_key_value` (split at load, and merged back row by
+  GPT-2's, GPT-BigCode's and MPT's stacked `c_attn`/`Wqkv` and GPT-NeoX's,
+  BLOOM's and Falcon's `query_key_value` grouped by key-value head (split at
+  load, and merged back row by
   row by `ster tune merge`), GPT-2's `Conv1D` weights stored inputs-first,
-  positions as rotation, a learned table (GPT-2, GPT-BigCode, OPT) or ALiBi
-  (BLOOM), BLOOM's norm after the embedding, each family's own tensor paths
+  positions as rotation, a learned table (GPT-2, GPT-BigCode, OPT, MPT
+  without ALiBi) or ALiBi (BLOOM, MPT, Falcon's `alibi`), BLOOM's norm after
+  the embedding, Falcon's new decoder architecture with `ln_attn` and
+  `ln_mlp`, each family's own tensor paths
   (GPT-NeoX's `gpt_neox.layers` and `embed_out`, GPT-J's and GPT-2's
   `transformer.h`, OPT's `model.decoder.layers`, checkpoints saved without
   that root), parallel blocks with one norm or two, OLMo 2's

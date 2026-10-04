@@ -145,28 +145,33 @@ impl Attention {
                     slice(query_width + key_value_width, key_value_width)?,
                 )
             }
-            // GPT-NeoX lays the rows out head by head — each head's query,
-            // key and value in turn — so a projection is every third block
-            // of `head_dim` rows. Gathering them is a copy, made once at load.
-            QkvLayout::HeadInterleaved => {
+            // GPT-NeoX, BLOOM and Falcon lay the rows out by key-value group:
+            // each group's query heads, then its key head, then its value
+            // head. With as many groups as heads (GPT-NeoX, BLOOM) that is
+            // each head's query, key and value in turn. Gathering a
+            // projection's rows is a copy, made once at load.
+            QkvLayout::Grouped => {
+                let per_group = heads / key_value_heads;
+                let rows = query_width + 2 * key_value_width;
                 let fused = builder.pp(names.fused_qkv);
                 let weight = fused
-                    .get((3 * query_width, input), "weight")?
-                    .reshape((heads, 3, head_dim, input))?;
+                    .get((rows, input), "weight")?
+                    .reshape((key_value_heads, per_group + 2, head_dim, input))?;
                 let bias = if bias {
-                    Some(fused.get(3 * query_width, "bias")?.reshape((heads, 3, head_dim))?)
+                    Some(fused.get(rows, "bias")?.reshape((key_value_heads, per_group + 2, head_dim))?)
                 } else {
                     None
                 };
-                let part = |slot: usize| -> candle_core::Result<Linear> {
+                let part = |start: usize, count: usize| -> candle_core::Result<Linear> {
+                    let width = key_value_heads * count * head_dim;
                     Ok(Linear::new(
-                        weight.narrow(1, slot, 1)?.contiguous()?.reshape((query_width, input))?,
+                        weight.narrow(1, start, count)?.contiguous()?.reshape((width, input))?,
                         bias.as_ref()
-                            .map(|bias| bias.narrow(1, slot, 1)?.contiguous()?.reshape(query_width))
+                            .map(|bias| bias.narrow(1, start, count)?.contiguous()?.reshape(width))
                             .transpose()?,
                     ))
                 };
-                (part(0)?, part(1)?, part(2)?)
+                (part(0, per_group)?, part(per_group, 1)?, part(per_group + 1, 1)?)
             }
         };
         Ok(Self {
@@ -196,10 +201,16 @@ impl Attention {
             score_divisor: architecture.score_divisor,
             softcap: architecture.attention_softcap,
             alibi: match architecture.positions {
-                Positions::Alibi => Some(
-                    Tensor::new(alibi_slopes(heads), layer_builder.device())?
-                        .reshape((1, heads, 1, 1))?,
-                ),
+                // Falcon adds the bias before dividing the scores, so its
+                // slopes are divided too.
+                Positions::Alibi { inside_scale } => {
+                    let scale = if inside_scale { 1.0 / architecture.score_divisor } else { 1.0 };
+                    Some(
+                        (Tensor::new(alibi_slopes(heads), layer_builder.device())?
+                            .reshape((1, heads, 1, 1))?
+                            * scale)?,
+                    )
+                }
                 _ => None,
             },
         })
@@ -507,7 +518,7 @@ fn rope_composed(input: &Tensor, cos: &Tensor, sin: &Tensor) -> candle_core::Res
 /// The exponent range of ALiBi's geometric slopes: for `n` heads (a power of
 /// two) the slopes are `2^(-span/n)` raised to `1..=n` (Press et al., 2022,
 /// and Transformers' `build_alibi_tensor`).
-const ALIBI_SPAN: f64 = 8.0;
+pub(crate) const ALIBI_SPAN: f64 = 8.0;
 
 /// ALiBi's slope for each of `heads` heads. A head count that is not a power
 /// of two takes the slopes of the nearest power below, then every other slope

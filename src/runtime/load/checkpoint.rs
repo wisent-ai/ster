@@ -13,7 +13,7 @@ use hf_hub::{Repo, RepoType, api::sync::Api};
 
 use crate::{chat, model::Architecture};
 
-use super::family::{FAMILIES, TIED_BY_DEFAULT, family, fill_llama_keys, take_rope_scaling};
+use super::family::{Family, family, fill_llama_keys, take_rope_scaling};
 
 /// A checkpoint's three files, resolved but not mapped.
 ///
@@ -132,12 +132,13 @@ impl Checkpoint {
             .unwrap_or("")
             .to_owned();
         let model_type = model_type.as_str();
-        if !FAMILIES.contains(&model_type) {
+        let Some(found) = Family::of(model_type) else {
+            let families: Vec<&str> = Family::ALL.iter().map(|family| family.model_type()).collect();
             bail!(
                 "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face checkpoint whose model_type is one of {}",
-                FAMILIES.join(", ")
+                families.join(", ")
             );
-        }
+        };
         if raw.get("quantization_config").is_some() {
             bail!(
                 "{} is a quantized checkpoint (it declares quantization_config); Ster maps unquantized safetensors only, so use the checkpoint it was quantized from",
@@ -148,7 +149,7 @@ impl Checkpoint {
         fill_llama_keys(&mut raw, model_type);
         let mut llama: LlamaConfig = serde_json::from_value(raw.clone())
             .with_context(|| format!("invalid {model_type} config {}", self.config.display()))?;
-        if TIED_BY_DEFAULT.contains(&model_type) && llama.tie_word_embeddings.is_none() {
+        if found.tied_by_default() && llama.tie_word_embeddings.is_none() {
             // These families tie their word embeddings by default and their
             // configs often leave the key out.
             llama.tie_word_embeddings = Some(true);

@@ -11,68 +11,178 @@ use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
 use crate::model::{
-    Activation, Architecture, ExpertLayout, FeedForwardKind, MixtureOfExperts, Names, NormKind,
-    Positions, QkvLayout, QueryKeyNorm, RopeScaling,
+    ALIBI_SPAN, Activation, Architecture, ExpertLayout, FeedForwardKind, MixtureOfExperts, Names,
+    NormKind, Positions, QkvLayout, QueryKeyNorm, RopeScaling,
 };
 
-/// The `model_type` values the decoder implements.
-pub(super) const FAMILIES: &[&str] = &[
-    "llama",
-    "mistral",
-    "mixtral",
-    "qwen2",
-    "qwen2_moe",
-    "qwen3",
-    "qwen3_moe",
-    "phi",
-    "phi3",
-    "granite",
-    "granitemoe",
-    "stablelm",
-    "starcoder2",
-    "cohere",
-    "cohere2",
-    "nemotron",
-    "olmo",
-    "olmo2",
-    "olmo3",
-    "olmoe",
-    "exaone4",
-    "internlm3",
-    "seed_oss",
-    "arcee",
-    "ernie4_5",
-    "minicpm",
-    "orion",
-    "glm",
-    "glm4",
-    "gpt_neox",
-    "gptj",
-    "smollm3",
-    "gpt2",
-    "gpt_bigcode",
-    "opt",
-    "bloom",
-    "gemma",
-    "gemma2",
-    "gemma3_text",
-];
+/// A decoder layout Ster implements, one per Transformers `model_type`.
+///
+/// The config's `model_type` field names the layout; [`Family::of`] reads it
+/// and [`Family::ALL`] is what the refusal of any other value lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Family {
+    Llama,
+    Mistral,
+    Mixtral,
+    Qwen2,
+    Qwen2Moe,
+    Qwen3,
+    Qwen3Moe,
+    Phi,
+    Phi3,
+    Granite,
+    GraniteMoe,
+    StableLm,
+    Starcoder2,
+    Cohere,
+    Cohere2,
+    Nemotron,
+    Olmo,
+    Olmo2,
+    Olmo3,
+    Olmoe,
+    Exaone4,
+    InternLm3,
+    SeedOss,
+    Arcee,
+    Ernie45,
+    MiniCpm,
+    Orion,
+    Glm,
+    Glm4,
+    GptNeox,
+    GptJ,
+    SmolLm3,
+    Gpt2,
+    GptBigCode,
+    Opt,
+    Bloom,
+    Falcon,
+    Mpt,
+    Gemma,
+    Gemma2,
+    Gemma3Text,
+}
 
-/// Families whose Transformers config class leaves `tie_word_embeddings` at
-/// the library default, true, so their configs often omit it.
-pub(super) const TIED_BY_DEFAULT: &[&str] = &[
-    "gemma",
-    "gemma2",
-    "gemma3_text",
-    "cohere",
-    "cohere2",
-    "starcoder2",
-    "ernie4_5",
-    "gpt2",
-    "gpt_bigcode",
-    "opt",
-    "bloom",
-];
+impl Family {
+    pub(super) const ALL: [Self; 41] = [
+        Self::Llama,
+        Self::Mistral,
+        Self::Mixtral,
+        Self::Qwen2,
+        Self::Qwen2Moe,
+        Self::Qwen3,
+        Self::Qwen3Moe,
+        Self::Phi,
+        Self::Phi3,
+        Self::Granite,
+        Self::GraniteMoe,
+        Self::StableLm,
+        Self::Starcoder2,
+        Self::Cohere,
+        Self::Cohere2,
+        Self::Nemotron,
+        Self::Olmo,
+        Self::Olmo2,
+        Self::Olmo3,
+        Self::Olmoe,
+        Self::Exaone4,
+        Self::InternLm3,
+        Self::SeedOss,
+        Self::Arcee,
+        Self::Ernie45,
+        Self::MiniCpm,
+        Self::Orion,
+        Self::Glm,
+        Self::Glm4,
+        Self::GptNeox,
+        Self::GptJ,
+        Self::SmolLm3,
+        Self::Gpt2,
+        Self::GptBigCode,
+        Self::Opt,
+        Self::Bloom,
+        Self::Falcon,
+        Self::Mpt,
+        Self::Gemma,
+        Self::Gemma2,
+        Self::Gemma3Text,
+    ];
+
+    /// The family a config's `model_type` names, if Ster implements it.
+    pub(super) fn of(model_type: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|family| family.model_type() == model_type)
+    }
+
+    /// The `model_type` value Transformers writes for this family.
+    pub(super) fn model_type(self) -> &'static str {
+        match self {
+            Self::Llama => "llama",
+            Self::Mistral => "mistral",
+            Self::Mixtral => "mixtral",
+            Self::Qwen2 => "qwen2",
+            Self::Qwen2Moe => "qwen2_moe",
+            Self::Qwen3 => "qwen3",
+            Self::Qwen3Moe => "qwen3_moe",
+            Self::Phi => "phi",
+            Self::Phi3 => "phi3",
+            Self::Granite => "granite",
+            Self::GraniteMoe => "granitemoe",
+            Self::StableLm => "stablelm",
+            Self::Starcoder2 => "starcoder2",
+            Self::Cohere => "cohere",
+            Self::Cohere2 => "cohere2",
+            Self::Nemotron => "nemotron",
+            Self::Olmo => "olmo",
+            Self::Olmo2 => "olmo2",
+            Self::Olmo3 => "olmo3",
+            Self::Olmoe => "olmoe",
+            Self::Exaone4 => "exaone4",
+            Self::InternLm3 => "internlm3",
+            Self::SeedOss => "seed_oss",
+            Self::Arcee => "arcee",
+            Self::Ernie45 => "ernie4_5",
+            Self::MiniCpm => "minicpm",
+            Self::Orion => "orion",
+            Self::Glm => "glm",
+            Self::Glm4 => "glm4",
+            Self::GptNeox => "gpt_neox",
+            Self::GptJ => "gptj",
+            Self::SmolLm3 => "smollm3",
+            Self::Gpt2 => "gpt2",
+            Self::GptBigCode => "gpt_bigcode",
+            Self::Opt => "opt",
+            Self::Bloom => "bloom",
+            Self::Falcon => "falcon",
+            Self::Mpt => "mpt",
+            Self::Gemma => "gemma",
+            Self::Gemma2 => "gemma2",
+            Self::Gemma3Text => "gemma3_text",
+        }
+    }
+
+    /// Whether the family's Transformers config class leaves
+    /// `tie_word_embeddings` at the library default, true, so its configs
+    /// often omit the key.
+    pub(super) fn tied_by_default(self) -> bool {
+        matches!(
+            self,
+            Self::Gemma
+                | Self::Gemma2
+                | Self::Gemma3Text
+                | Self::Cohere
+                | Self::Cohere2
+                | Self::Starcoder2
+                | Self::Ernie45
+                | Self::Gpt2
+                | Self::GptBigCode
+                | Self::Opt
+                | Self::Bloom
+                | Self::Falcon
+                | Self::Mpt
+        )
+    }
+}
 
 /// OPT's learned position table keeps this many rows before position zero;
 /// Transformers' `OPTLearnedPositionalEmbedding` reads `position + offset`.
@@ -99,11 +209,11 @@ const GPT_INNER_PER_HIDDEN: u64 = 4;
 pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     let aliases: &[(&str, &[&str])] = &[
         ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]),
-        ("hidden_size", &["n_embd", "n_embed"]),
-        ("num_hidden_layers", &["n_layer"]),
-        ("num_attention_heads", &["n_head"]),
-        ("max_position_embeddings", &["n_positions"]),
-        ("intermediate_size", &["n_inner", "ffn_dim"]),
+        ("hidden_size", &["n_embd", "n_embed", "d_model"]),
+        ("num_hidden_layers", &["n_layer", "n_layers"]),
+        ("num_attention_heads", &["n_head", "n_heads"]),
+        ("max_position_embeddings", &["n_positions", "max_seq_len"]),
+        ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
         ("rope_theta", &["rotary_emb_base"]),
     ];
     for (llama, spellings) in aliases {
@@ -122,14 +232,33 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     if model_type == "olmo" && missing(raw, "rms_norm_eps") {
         defaults.push(("rms_norm_eps", Value::from(OLMO_NORM_EPS)));
     }
-    let four_times = matches!(model_type, "gptj" | "gpt2" | "gpt_bigcode" | "bloom");
+    let four_times = matches!(model_type, "gptj" | "gpt2" | "gpt_bigcode" | "bloom" | "falcon");
     if four_times && missing(raw, "intermediate_size") {
         if let Some(hidden) = raw.get("hidden_size").and_then(Value::as_u64) {
             defaults.push(("intermediate_size", Value::from(GPT_INNER_PER_HIDDEN * hidden)));
         }
     }
+    // MPT states its feed-forward as a multiple of the model width.
+    if model_type == "mpt" && missing(raw, "intermediate_size") {
+        let width = raw.get("hidden_size").and_then(Value::as_u64);
+        let ratio = raw.get("expansion_ratio").and_then(Value::as_u64);
+        if let (Some(width), Some(ratio)) = (width, ratio) {
+            defaults.push(("intermediate_size", Value::from(width * ratio)));
+        }
+    }
     if model_type == "gpt_bigcode" && flag(raw, "multi_query") {
         defaults.push(("num_key_value_heads", Value::from(1u64)));
+    }
+    // Falcon's new decoder architecture groups query heads under
+    // `num_kv_heads`; the older multi-query models have one key-value head.
+    if model_type == "falcon" {
+        if flag(raw, "new_decoder_architecture") {
+            if let Some(groups) = raw.get("num_kv_heads").cloned() {
+                defaults.push(("num_key_value_heads", groups));
+            }
+        } else if flag(raw, "multi_query") {
+            defaults.push(("num_key_value_heads", Value::from(1u64)));
+        }
     }
     if let Some(object) = raw.as_object_mut() {
         for (key, value) in defaults {
@@ -542,7 +671,7 @@ pub(super) fn family(
             // norm.
             architecture.names = Names::GPT_NEOX;
             architecture.norm = NormKind::Layer { bias: true };
-            architecture.qkv_layout = QkvLayout::HeadInterleaved;
+            architecture.qkv_layout = QkvLayout::Grouped;
             let bias = raw.get("attention_bias").and_then(Value::as_bool).unwrap_or(true);
             architecture.query_key_value_bias = bias;
             architecture.output_bias = bias;
@@ -624,13 +753,83 @@ pub(super) fn family(
             architecture.names = Names::BLOOM;
             architecture.norm = NormKind::Layer { bias: true };
             architecture.embedding_norm = true;
-            architecture.positions = Positions::Alibi;
-            architecture.qkv_layout = QkvLayout::HeadInterleaved;
+            architecture.positions = Positions::Alibi { inside_scale: false };
+            architecture.qkv_layout = QkvLayout::Grouped;
             architecture.query_key_value_bias = true;
             architecture.output_bias = true;
             architecture.feed_forward_bias = true;
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.activation = Activation::GeluTanh;
+        }
+        "falcon" => {
+            // Falcon: BLOOM's tensor names, rows grouped by key-value head
+            // (one group for the multi-query models, `num_kv_heads` for the
+            // new decoder architecture, one per head otherwise), a parallel
+            // block with one norm or, in the new architecture, `ln_attn` and
+            // `ln_mlp`, the exact GELU, and rotation or ALiBi.
+            let new = flag(raw, "new_decoder_architecture");
+            let two_norms = new && whole(raw, "num_ln_in_parallel_attn") != Some(1);
+            architecture.names = if two_norms { Names::FALCON_TWO_NORMS } else { Names::FALCON };
+            architecture.parallel = new || flag(raw, "parallel_attn");
+            architecture.parallel_norms = two_norms;
+            architecture.norm = NormKind::Layer { bias: true };
+            architecture.qkv_layout = QkvLayout::Grouped;
+            let bias = flag(raw, "bias");
+            architecture.query_key_value_bias = bias;
+            architecture.output_bias = bias;
+            architecture.feed_forward_bias = bias;
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.activation = Activation::Gelu;
+            if flag(raw, "alibi") {
+                architecture.positions = Positions::Alibi { inside_scale: true };
+            }
+        }
+        "mpt" => {
+            // MPT: `transformer.blocks`, LayerNorm and projections without
+            // bias under `no_bias`, one `Wqkv`, the exact GELU, and ALiBi or a
+            // learned `wpe` as `attn_config` says.
+            let attention = raw.get("attn_config").cloned().unwrap_or(Value::Null);
+            let unsupported = [
+                ("qk_ln", flag(&attention, "qk_ln")),
+                ("clip_qkv", attention.get("clip_qkv").is_some_and(|v| !v.is_null())),
+                ("softmax_scale", attention.get("softmax_scale").is_some_and(|v| !v.is_null())),
+                (
+                    "attn_type",
+                    text(&attention, "attn_type").is_some_and(|kind| kind != "multihead_attention"),
+                ),
+                (
+                    "alibi_bias_max",
+                    number(&attention, "alibi_bias_max").is_some_and(|max| max != ALIBI_SPAN),
+                ),
+            ];
+            if let Some((key, _)) = unsupported.iter().find(|(_, set)| *set) {
+                bail!(
+                    "{} declares attn_config.{key} other than MPT's defaults; Ster implements MPT's plain multi-head attention with ALiBi's standard slopes",
+                    path.display()
+                );
+            }
+            let alibi = flag(&attention, "alibi");
+            if alibi && !llama.num_attention_heads.is_power_of_two() {
+                bail!(
+                    "{} uses ALiBi over {} heads; Ster implements MPT's slopes for a power-of-two head count",
+                    path.display(),
+                    llama.num_attention_heads
+                );
+            }
+            let bias = !raw.get("no_bias").and_then(Value::as_bool).unwrap_or(true);
+            architecture.names = Names::MPT;
+            architecture.norm = NormKind::Layer { bias };
+            architecture.positions = if alibi {
+                Positions::Alibi { inside_scale: false }
+            } else {
+                Positions::Learned { offset: 0 }
+            };
+            architecture.qkv_layout = QkvLayout::Stacked;
+            architecture.query_key_value_bias = bias;
+            architecture.output_bias = bias;
+            architecture.feed_forward_bias = bias;
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.activation = Activation::Gelu;
         }
         "glm" | "glm4" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");

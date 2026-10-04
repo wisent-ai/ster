@@ -85,6 +85,7 @@ mod layer;
 pub use cache::Cache;
 pub use decoder::SteeringLlama;
 
+pub(crate) use attention::ALIBI_SPAN;
 use crate::lora::Target;
 
 /// How a checkpoint's decoder differs from the plain Llama block.
@@ -320,12 +321,26 @@ impl Architecture {
                 };
                 Placement::blocks(in_attention(names.fused_qkv), vec![(start, 0, rows)])
             }
-            (Some(slot), QkvLayout::HeadInterleaved) => Placement::blocks(
-                in_attention(names.fused_qkv),
-                (0..config.num_attention_heads)
-                    .map(|head| (head * 3 * head_dim + slot * head_dim, head * head_dim, head_dim))
-                    .collect(),
-            ),
+            (Some(slot), QkvLayout::Grouped) => {
+                // Each key-value group holds its query heads, then its key
+                // head, then its value head.
+                let groups = config.num_key_value_heads;
+                let per_group = config.num_attention_heads / groups;
+                let stride = (per_group + 2) * head_dim;
+                let blocks = (0..groups)
+                    .flat_map(|group| {
+                        let (first, count, own) = match slot {
+                            0 => (0, per_group, group * per_group),
+                            1 => (per_group, 1, group),
+                            _ => (per_group + 1, 1, group),
+                        };
+                        (0..count).map(move |head| {
+                            (group * stride + (first + head) * head_dim, (own + head) * head_dim, head_dim)
+                        })
+                    })
+                    .collect();
+                Placement::blocks(in_attention(names.fused_qkv), blocks)
+            }
             (None, _) => match target {
                 Target::Output => Placement::whole(in_layer(names.output)),
                 Target::Gate if self.fused_feed_forward => {
@@ -420,9 +435,10 @@ pub enum QkvLayout {
     Separate,
     /// One tensor, all query rows, then key, then value (Phi-3).
     Stacked,
-    /// One tensor, head by head: each head's query, key and value rows in
-    /// turn (GPT-NeoX).
-    HeadInterleaved,
+    /// One tensor by key-value group: each group's query heads, then its key
+    /// head, then its value head (Falcon); with a group per head, each head's
+    /// query, key and value in turn (GPT-NeoX, BLOOM).
+    Grouped,
 }
 
 /// How a token's position enters the model.
@@ -433,8 +449,10 @@ pub enum Positions {
     /// A learned table added to the embedding, read `offset` rows in (OPT
     /// keeps two rows before position zero).
     Learned { offset: usize },
-    /// A per-head linear bias on the attention scores (BLOOM, MPT).
-    Alibi,
+    /// A per-head linear bias on the attention scores (BLOOM, MPT, Falcon's
+    /// `alibi`); `inside_scale` adds it before the scores are divided by the
+    /// head width, as Falcon does, rather than after.
+    Alibi { inside_scale: bool },
 }
 
 /// A routed feed-forward: how many experts, how many run per token, and
@@ -672,6 +690,38 @@ impl Names {
         gate: None,
         up: "mlp.dense_h_to_4h",
         down: "mlp.dense_4h_to_h",
+        ..Self::LLAMA
+    };
+    /// Falcon: BLOOM's tensor names without the embedding norm; the parallel
+    /// block's one norm is `input_layernorm`.
+    pub const FALCON: Self = Self {
+        embedding_norm: "transformer.embedding_norm",
+        ..Self::BLOOM
+    };
+    /// Falcon's new decoder architecture: a parallel block with `ln_attn`
+    /// before attention and `ln_mlp` before the feed-forward.
+    pub const FALCON_TWO_NORMS: Self = Self {
+        attention_norm: "ln_attn",
+        feed_forward_norm: "ln_mlp",
+        ..Self::FALCON
+    };
+    /// MPT: `wte` (and a learned `wpe` without ALiBi), `blocks.{i}` with
+    /// `norm_1` and `norm_2`, one `attn.Wqkv`, `out_proj`,
+    /// `ffn.up_proj`/`ffn.down_proj`, and `norm_f`.
+    pub const MPT: Self = Self {
+        root: "transformer",
+        embeddings: "transformer.wte",
+        positions: "transformer.wpe",
+        layers: "transformer.blocks",
+        final_norm: "transformer.norm_f",
+        attention: "attn",
+        fused_qkv: "Wqkv",
+        output: "attn.out_proj",
+        gate: None,
+        up: "ffn.up_proj",
+        down: "ffn.down_proj",
+        attention_norm: "norm_1",
+        feed_forward_norm: "norm_2",
         ..Self::LLAMA
     };
 }
