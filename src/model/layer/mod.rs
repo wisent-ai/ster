@@ -19,6 +19,7 @@ use experts::Experts;
 use norm::{Norm, NormSpec};
 use recurrent::{
     delta::DeltaRule,
+    lightning::Lightning,
     state_space::{ShortConv, StateSpace},
     structured::Structured,
 };
@@ -168,6 +169,8 @@ enum Mixer {
     ShortConv(ShortConv),
     /// Qwen3-Next's gated delta-rule linear attention.
     DeltaRule(DeltaRule),
+    /// MiniMax-Text-01's lightning attention.
+    Lightning(Lightning),
     /// Nemotron-H's feed-forward layers: the feed-forward is the block's
     /// one sublayer.
     FeedForward(FeedForwardBlock),
@@ -220,6 +223,18 @@ pub(super) struct DecoderLayer {
     /// Granite's `residual_multiplier` on each sublayer's output.
     residual_multiplier: Option<f64>,
     parallel: bool,
+    /// MiniMax-Text-01's scaled residuals for this block, if any.
+    scales: Option<BlockScales>,
+}
+
+/// How a MiniMax-Text-01 block's sublayers join the residual stream:
+/// `residual · alpha + output · beta`, the residual being the normed input
+/// under `from_normed`.
+#[derive(Debug, Clone, Copy)]
+struct BlockScales {
+    from_normed: bool,
+    mixer: (f64, f64),
+    feed_forward: (f64, f64),
 }
 
 impl DecoderLayer {
@@ -233,6 +248,32 @@ impl DecoderLayer {
         let spec = NormSpec::of(architecture);
         let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
         let names = architecture.names;
+        // MiniMax-Text-01's lightning-attention layers: a norm, the
+        // lightning mixer, a norm and the feed-forward, each joining the
+        // residual by the layer type's scales.
+        if let Some(&lightning) = architecture.lightning_at(layer) {
+            return Ok(Self {
+                attention_norm: Some(norm(names.attention_norm)?),
+                mixer: Mixer::Lightning(Lightning::load(
+                    builder.pp(names.attention),
+                    config.hidden_size,
+                    layer,
+                    config.num_hidden_layers,
+                    lightning,
+                )?),
+                attention_output_norm: None,
+                feed_forward_norm: Some(norm(names.feed_forward_norm)?),
+                feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
+                feed_forward_output_norm: None,
+                residual_multiplier: architecture.residual_multiplier,
+                parallel: false,
+                scales: architecture.scaled_residuals.map(|scales| BlockScales {
+                    from_normed: scales.from_normed,
+                    mixer: scales.linear_attention,
+                    feed_forward: scales.feed_forward,
+                }),
+            });
+        }
         // Qwen3-Next's linear-attention layers: a norm, the delta-rule
         // mixer, a norm and the feed-forward, as in its attention layers.
         if let Some(&spec) = architecture.delta_rule_at(layer) {
@@ -253,6 +294,7 @@ impl DecoderLayer {
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
+                scales: None,
             });
         }
         // LFM2's convolution layers: a norm, the convolution, a norm and the
@@ -271,6 +313,7 @@ impl DecoderLayer {
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
+                scales: None,
             });
         }
         // A state-space block is one norm, the mixer and the residual add —
@@ -309,6 +352,7 @@ impl DecoderLayer {
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
+                scales: None,
             });
         }
         // Falcon-H1: attention and a Mamba-2 scan side by side on one normed
@@ -338,6 +382,7 @@ impl DecoderLayer {
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
+                scales: None,
             });
         }
         // Nemotron-H: one norm and one sublayer per block — the feed-forward
@@ -357,6 +402,7 @@ impl DecoderLayer {
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
+                scales: None,
             });
         }
         // Which norms a block has comes from the architecture; what each is
@@ -407,6 +453,11 @@ impl DecoderLayer {
             feed_forward_output_norm,
             residual_multiplier: architecture.residual_multiplier,
             parallel: architecture.parallel,
+            scales: architecture.scaled_residuals.map(|scales| BlockScales {
+                from_normed: scales.from_normed,
+                mixer: scales.full_attention,
+                feed_forward: scales.feed_forward,
+            }),
         })
     }
 }
@@ -441,6 +492,7 @@ impl DecoderLayer {
             | Mixer::Structured(_)
             | Mixer::ShortConv(_)
             | Mixer::DeltaRule(_)
+            | Mixer::Lightning(_)
             | Mixer::FeedForward(_) => None,
         }
     }
@@ -463,6 +515,7 @@ impl DecoderLayer {
             Mixer::Structured(structured) => structured.forward(&normed, layer, cache)?,
             Mixer::ShortConv(convolution) => convolution.forward(&normed, layer, cache)?,
             Mixer::DeltaRule(delta) => delta.forward(&normed, layer, cache)?,
+            Mixer::Lightning(lightning) => lightning.forward(&normed, layer, cache)?,
             Mixer::FeedForward(feed_forward) => feed_forward.forward(&normed, mode.route)?,
             Mixer::Parallel(mixers) => mixers.forward(&normed, index_pos, layer, cache, mask, mode)?,
         };
@@ -470,6 +523,18 @@ impl DecoderLayer {
         let Some(feed_forward_block) = &self.feed_forward else {
             return hidden + self.scaled(attention)?;
         };
+        // MiniMax-Text-01: `residual · alpha + output · beta` after each
+        // sublayer, the residual being the sublayer's normed input under
+        // `postnorm`.
+        if let Some(BlockScales { from_normed, mixer, feed_forward }) = self.scales {
+            let join = |residual: &Tensor, output: Tensor, (alpha, beta): (f64, f64)| {
+                (residual * alpha)? + (output * beta)?
+            };
+            let hidden = join(if from_normed { &normed } else { hidden }, attention, mixer)?;
+            let normed = optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?;
+            let output = feed_forward_block.forward(&normed, mode.route)?;
+            return join(if from_normed { &normed } else { &hidden }, output, feed_forward);
+        }
         if self.parallel {
             // GPT-NeoX normalises the feed-forward's input on its own; the
             // other parallel families reuse attention's.

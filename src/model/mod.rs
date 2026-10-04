@@ -227,6 +227,12 @@ pub struct Architecture {
     /// Step3's query bottleneck width (`share_q_dim`): the query is
     /// `wq(inter_norm(q_proj(x)))`.
     pub query_bottleneck: Option<usize>,
+    /// MiniMax-Text-01's lightning attention, in place of attention on the
+    /// layers it names.
+    pub lightning: Option<LightningSpec>,
+    /// MiniMax-Text-01's scaled residuals: each sublayer's output joins the
+    /// residual as `residual · alpha + output · beta`.
+    pub scaled_residuals: Option<ScaledResiduals>,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -343,6 +349,27 @@ pub enum DeltaRuleForm {
     Kimi,
 }
 
+/// MiniMax-Text-01's lightning attention: `heads` heads of `head_dim`, on
+/// the layers in `layers`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LightningSpec {
+    pub heads: usize,
+    pub head_dim: usize,
+    pub layers: u128,
+}
+
+/// MiniMax-Text-01's residual scaling: `(alpha, beta)` for the lightning
+/// attention layers, the full attention layers and the feed-forward. With
+/// `from_normed` (`postnorm`), the residual each sublayer joins is its
+/// normed input rather than the stream before the norm.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScaledResiduals {
+    pub from_normed: bool,
+    pub linear_attention: (f64, f64),
+    pub full_attention: (f64, f64),
+    pub feed_forward: (f64, f64),
+}
+
 /// Falcon-H1's parallel block: attention reads its input times
 /// `attention_in`, and the attention and scan outputs are multiplied by
 /// `attention_out` and `scan_out` before they join the residual stream.
@@ -425,6 +452,8 @@ impl Architecture {
             delta_rule: None,
             output_gate: false,
             query_bottleneck: None,
+            lightning: None,
+            scaled_residuals: None,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
@@ -473,6 +502,14 @@ impl Architecture {
             .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
     }
 
+    /// The lightning attention layer `layer` uses in place of attention, if
+    /// any.
+    pub fn lightning_at(&self, layer: usize) -> Option<&LightningSpec> {
+        self.lightning
+            .as_ref()
+            .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
+    }
+
     /// The gated delta-rule mixer layer `layer` uses in place of attention,
     /// if any.
     pub fn delta_rule_at(&self, layer: usize) -> Option<&DeltaRuleSpec> {
@@ -512,7 +549,7 @@ impl Architecture {
         let in_layer = |leaf: &str| format!("{}.{layer}.{leaf}.weight", names.layers);
         let in_attention = |leaf: &str| in_layer(&format!("{}.{leaf}", names.attention));
         // A Mamba block has no attention or feed-forward projection.
-        if self.state_space.is_some() || self.delta_rule.is_some() {
+        if self.state_space.is_some() || self.delta_rule.is_some() || self.lightning.is_some() {
             return None;
         }
         // Step3's query passes a bottleneck and a norm before `wq`, so `wq`
@@ -624,6 +661,11 @@ impl Architecture {
         if self.short_convolution.is_some() && !targets.is_empty() {
             bail!(
                 "this model's blocks include short-convolution mixers (LFM2) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
+            );
+        }
+        if self.lightning.is_some() && !targets.is_empty() {
+            bail!(
+                "this model's blocks include lightning-attention mixers (MiniMax-Text-01's linear attention) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
             );
         }
         if self.delta_rule.is_some() && !targets.is_empty() {

@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
-    LatentAttention, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm, Positions, QkvLayout,
-    QueryKeyNorm, RopeScaling, Scoring, SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec,
+    LatentAttention, LightningSpec, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm, Positions, QkvLayout,
+    QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec,
     StructuredSpec,
 };
 
@@ -95,13 +95,15 @@ pub(super) enum Family {
     KimiLinear,
     MinimaxM2,
     Step3Text,
+    MinimaxText,
+    Minimax,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 71] = [
+    pub(super) const ALL: [Self; 73] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -170,6 +172,8 @@ impl Family {
         Self::KimiLinear,
         Self::MinimaxM2,
         Self::Step3Text,
+        Self::MinimaxText,
+        Self::Minimax,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -251,6 +255,8 @@ impl Family {
             Self::KimiLinear => "kimi_linear",
             Self::MinimaxM2 => "minimax_m2",
             Self::Step3Text => "step3_text",
+            Self::MinimaxText => "minimax_text_01",
+            Self::Minimax => "minimax",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -1771,6 +1777,92 @@ pub(super) fn family(
                     form: SharedForm::GateUpDown,
                 });
             architecture.experts = Some(routed);
+        }
+        "minimax_text_01" | "minimax" => {
+            // MiniMax-Text-01 (its own release spells `minimax_text_01`,
+            // Transformers `minimax`): lightning attention on the layers
+            // `attn_type_list` marks 0 (or `layer_types` calls
+            // `linear_attention`), full attention over `rotary_dim` of each
+            // head on the rest, Mixtral-named experts after every mixer, and
+            // every sublayer joining the residual as `residual · alpha +
+            // output · beta`, the residual being the normed input under
+            // `postnorm`.
+            fits(layers, path)?;
+            let mut lightning = 0u128;
+            if let Some(kinds) = raw.get("attn_type_list").and_then(Value::as_array) {
+                if kinds.len() != layers {
+                    bail!("{} lists {} attn_type_list entries for {layers} layers", path.display(), kinds.len());
+                }
+                for (layer, kind) in kinds.iter().enumerate() {
+                    match kind.as_u64() {
+                        Some(0) => lightning |= 1u128 << layer,
+                        Some(1) => {}
+                        _ => bail!(
+                            "{} marks layer {layer} {kind} in attn_type_list; MiniMax layers are 0 (lightning) or 1 (full attention)",
+                            path.display()
+                        ),
+                    }
+                }
+            } else if let Some(types) = raw.get("layer_types").and_then(Value::as_array) {
+                if types.len() != layers {
+                    bail!("{} lists {} layer_types for {layers} layers", path.display(), types.len());
+                }
+                for (layer, kind) in types.iter().enumerate() {
+                    match kind.as_str() {
+                        Some("linear_attention") => lightning |= 1u128 << layer,
+                        Some("full_attention") => {}
+                        other => bail!(
+                            "{} names layer {layer} {other:?}; a MiniMax layer is linear_attention or full_attention",
+                            path.display()
+                        ),
+                    }
+                }
+            } else {
+                bail!(
+                    "{} declares a MiniMax model with neither attn_type_list nor layer_types",
+                    path.display()
+                );
+            }
+            if whole(raw, "shared_intermediate_size").unwrap_or(0) > 0 {
+                bail!(
+                    "{} declares shared experts (shared_intermediate_size); Ster implements MiniMax-Text-01 with routed experts only",
+                    path.display()
+                );
+            }
+            // The release's keys first, Transformers' after; one when unstated.
+            let pair = |alpha: [&str; 2], beta: [&str; 2]| -> (f64, f64) {
+                let read = |keys: [&str; 2]| keys.iter().find_map(|key| number(raw, key)).unwrap_or(1.0);
+                (read(alpha), read(beta))
+            };
+            architecture.lightning = Some(LightningSpec {
+                heads: llama.num_attention_heads,
+                head_dim: architecture.head_dim,
+                layers: lightning,
+            });
+            architecture.scaled_residuals = Some(ScaledResiduals {
+                from_normed: raw.get("postnorm").and_then(Value::as_bool).unwrap_or(true),
+                linear_attention: pair(
+                    ["layernorm_linear_attention_alpha", "linear_attn_alpha_factor"],
+                    ["layernorm_linear_attention_beta", "linear_attn_beta_factor"],
+                ),
+                full_attention: pair(
+                    ["layernorm_full_attention_alpha", "full_attn_alpha_factor"],
+                    ["layernorm_full_attention_beta", "full_attn_beta_factor"],
+                ),
+                feed_forward: pair(
+                    ["layernorm_mlp_alpha", "mlp_alpha_factor"],
+                    ["layernorm_mlp_beta", "mlp_beta_factor"],
+                ),
+            });
+            architecture.experts = Some(experts(
+                raw,
+                "num_local_experts",
+                "intermediate_size",
+                true,
+                ExpertLayout::Mixtral,
+                0,
+                path,
+            )?);
         }
         "minimax_m2" => {
             // MiniMax-M2: full attention on every layer with query and key
