@@ -13,8 +13,12 @@ use serde_json::Value;
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, ExpertGroups, ExpertLayout, FeedForwardKind,
     LatentAttention, MixtureOfExperts, Names, NormKind, Positions, QkvLayout, QueryKeyNorm,
-    RopeScaling, Scoring, SharedExpert,
+    RopeScaling, Scoring, SharedExpert, StateSpaceSpec,
 };
+
+/// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
+/// as Transformers' `MambaConfig` computes it.
+const MAMBA_WIDTH_PER_STEP_RANK: usize = 16;
 
 /// A decoder layout Ster implements, one per Transformers `model_type`.
 ///
@@ -63,13 +67,15 @@ pub(super) enum Family {
     DeepseekV2,
     DeepseekV3,
     MiniCpm3,
+    Mamba,
+    FalconMamba,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 44] = [
+    pub(super) const ALL: [Self; 46] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -111,6 +117,8 @@ impl Family {
         Self::DeepseekV2,
         Self::DeepseekV3,
         Self::MiniCpm3,
+        Self::Mamba,
+        Self::FalconMamba,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -165,6 +173,8 @@ impl Family {
             Self::DeepseekV2 => "deepseek_v2",
             Self::DeepseekV3 => "deepseek_v3",
             Self::MiniCpm3 => "minicpm3",
+            Self::Mamba => "mamba",
+            Self::FalconMamba => "falcon_mamba",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -190,6 +200,8 @@ impl Family {
                 | Self::Bloom
                 | Self::Falcon
                 | Self::Mpt
+                | Self::Mamba
+                | Self::FalconMamba
         )
     }
 }
@@ -255,6 +267,20 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         if let (Some(width), Some(ratio)) = (width, ratio) {
             defaults.push(("intermediate_size", Value::from(width * ratio)));
         }
+    }
+    // Mamba states its inner width as `expand` times the model width when it
+    // leaves `intermediate_size` out.
+    if matches!(model_type, "mamba" | "falcon_mamba") && missing(raw, "intermediate_size") {
+        let width = raw.get("hidden_size").and_then(Value::as_u64);
+        let expand = raw.get("expand").and_then(Value::as_u64);
+        if let (Some(width), Some(expand)) = (width, expand) {
+            defaults.push(("intermediate_size", Value::from(width * expand)));
+        }
+    }
+    // A state-space model has no attention heads; Candle's config needs a
+    // count, and one stands in, read by nothing.
+    if matches!(model_type, "mamba" | "falcon_mamba") && missing(raw, "num_attention_heads") {
+        defaults.push(("num_attention_heads", Value::from(1u64)));
     }
     if model_type == "gpt_bigcode" && flag(raw, "multi_query") {
         defaults.push(("num_key_value_heads", Value::from(1u64)));
@@ -748,6 +774,41 @@ pub(super) fn family(
         }
         "orion" => {
             architecture.norm = NormKind::Layer { bias: true };
+        }
+        "mamba" | "falcon_mamba" => {
+            // Mamba: every block is a norm and a selective state-space
+            // mixer; Falcon-Mamba adds a scale-free RMS norm on the step and
+            // the input and output matrices.
+            let hidden = llama.hidden_size;
+            let inner = whole(raw, "intermediate_size")
+                .or_else(|| whole(raw, "expand").map(|expand| expand * hidden));
+            let (Some(inner), Some(state), Some(kernel)) =
+                (inner, whole(raw, "state_size"), whole(raw, "conv_kernel"))
+            else {
+                bail!(
+                    "{} declares a state-space model without intermediate_size (or expand), state_size and conv_kernel",
+                    path.display()
+                );
+            };
+            let step_rank = match raw.get("time_step_rank") {
+                Some(Value::String(rule)) if rule == "auto" => hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK),
+                _ => whole(raw, "time_step_rank").unwrap_or(hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)),
+            };
+            architecture.names = Names::MAMBA;
+            architecture.positions = Positions::None;
+            architecture.state_space = Some(StateSpaceSpec {
+                inner,
+                state,
+                kernel,
+                step_rank,
+                projection_bias: flag(raw, "use_bias"),
+                convolution_bias: raw.get("use_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                parameter_norm: if model_type == "falcon_mamba" {
+                    Some(number(raw, "mixer_rms_eps").unwrap_or(llama.rms_norm_eps))
+                } else {
+                    None
+                },
+            });
         }
         "deepseek_v2" | "deepseek_v3" | "minicpm3" => {
             if architecture.latent.is_none() {

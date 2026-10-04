@@ -3,6 +3,7 @@
 
 mod experts;
 pub(super) mod norm;
+mod state_space;
 
 use candle_core::Tensor;
 use candle_nn::{Linear, VarBuilder, linear, linear_no_bias};
@@ -16,6 +17,7 @@ use super::{
 };
 use experts::Experts;
 use norm::{Norm, NormSpec};
+use state_space::StateSpace;
 
 /// The feed-forward half of a block: one dense feed-forward, or a router
 /// over experts.
@@ -132,18 +134,27 @@ impl FeedForward {
     }
 }
 
+/// What mixes information across positions in a block.
+#[derive(Debug, Clone)]
+enum Mixer {
+    Attention(Attention),
+    /// Mamba's selective state-space scan.
+    StateSpace(StateSpace),
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct DecoderLayer {
-    /// The norm before attention (before both halves in a parallel block);
+    /// The norm before the mixer (before both halves in a parallel block);
     /// OLMo 2 has none.
     attention_norm: Option<Norm>,
-    attention: Attention,
+    mixer: Mixer,
     /// The norm over attention's output before the residual add (Gemma 2 and
     /// 3, OLMo 2).
     attention_output_norm: Option<Norm>,
     /// The norm before the feed-forward; OLMo 2 and parallel blocks have none.
     feed_forward_norm: Option<Norm>,
-    feed_forward: FeedForwardBlock,
+    /// `None` in a state-space block, which is its mixer alone.
+    feed_forward: Option<FeedForwardBlock>,
     /// The norm over the feed-forward's output before the residual add.
     feed_forward_output_norm: Option<Norm>,
     /// Granite's `residual_multiplier` on each sublayer's output.
@@ -162,6 +173,23 @@ impl DecoderLayer {
         let spec = NormSpec::of(architecture);
         let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
         let names = architecture.names;
+        // A Mamba block is one norm, the mixer, and the residual add.
+        if let Some(state_space) = &architecture.state_space {
+            return Ok(Self {
+                attention_norm: Some(norm(names.attention_norm)?),
+                mixer: Mixer::StateSpace(StateSpace::load(
+                    builder.pp(names.attention),
+                    config.hidden_size,
+                    state_space,
+                )?),
+                attention_output_norm: None,
+                feed_forward_norm: None,
+                feed_forward: None,
+                feed_forward_output_norm: None,
+                residual_multiplier: architecture.residual_multiplier,
+                parallel: false,
+            });
+        }
         // Which norms a block has comes from the architecture; what each is
         // called comes from the family's names (Llama's
         // `post_attention_layernorm` before the feed-forward, Gemma 2's
@@ -203,10 +231,10 @@ impl DecoderLayer {
             };
         Ok(Self {
             attention_norm,
-            attention: Attention::load(&builder, config, architecture, layer, adapters)?,
+            mixer: Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
             attention_output_norm,
             feed_forward_norm,
-            feed_forward: match &architecture.experts {
+            feed_forward: Some(match &architecture.experts {
                 Some(experts) if architecture.routed(layer) => FeedForwardBlock::Routed(
                     Experts::load(&builder, config.hidden_size, experts, architecture.activation)?,
                 ),
@@ -217,7 +245,7 @@ impl DecoderLayer {
                     layer,
                     adapters,
                 )?),
-            },
+            }),
             feed_forward_output_norm,
             residual_multiplier: architecture.residual_multiplier,
             parallel: architecture.parallel,
@@ -226,7 +254,10 @@ impl DecoderLayer {
 
     /// The window this layer's attention looks through, if any.
     pub(super) fn window(&self) -> Option<usize> {
-        self.attention.window()
+        match &self.mixer {
+            Mixer::Attention(attention) => attention.window(),
+            Mixer::StateSpace(_) => None,
+        }
     }
 
     pub(super) fn forward(
@@ -239,10 +270,16 @@ impl DecoderLayer {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let normed = optional_norm(self.attention_norm.as_ref(), hidden, mode.pass)?;
-        let attention = self
-            .attention
-            .forward(&normed, index_pos, layer, cache, mask, mode)?;
-        let attention = optional_norm(self.attention_output_norm.as_ref(), &attention, mode.pass)?;
+        let mixed = match &self.mixer {
+            Mixer::Attention(attention) => {
+                attention.forward(&normed, index_pos, layer, cache, mask, mode)?
+            }
+            Mixer::StateSpace(state_space) => state_space.forward(&normed, layer, cache)?,
+        };
+        let attention = optional_norm(self.attention_output_norm.as_ref(), &mixed, mode.pass)?;
+        let Some(feed_forward_block) = &self.feed_forward else {
+            return hidden + self.scaled(attention)?;
+        };
         if self.parallel {
             // GPT-NeoX normalises the feed-forward's input on its own; the
             // other parallel families reuse attention's.
@@ -250,11 +287,11 @@ impl DecoderLayer {
                 Some(norm) => norm.forward(hidden, mode.pass)?,
                 None => normed,
             };
-            let feed_forward = self.feed_forward.forward(&feed_forward_input, mode.route)?;
+            let feed_forward = feed_forward_block.forward(&feed_forward_input, mode.route)?;
             return (hidden + self.scaled(attention)?)? + self.scaled(feed_forward)?;
         }
         let hidden = (hidden + self.scaled(attention)?)?;
-        let feed_forward = self.feed_forward.forward(
+        let feed_forward = feed_forward_block.forward(
             &optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?,
             mode.route,
         )?;

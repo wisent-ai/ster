@@ -40,11 +40,16 @@ Included now:
   `olmoe`, `exaone4`, `internlm3`, `seed_oss`, `arcee`, `ernie4_5`,
   `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `gpt2`,
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
-  `deepseek_v3`, `minicpm3`, `smollm3`, `gemma`, `gemma2` or
-  `gemma3_text`. Coverage is measured
+  `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `smollm3`, `gemma`,
+  `gemma2` or `gemma3_text`. Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
-  Each family is the same rotary, grouped-query decoder with what its config
+  Mamba and Falcon-Mamba replace attention with a selective state-space
+  mixer (`in_proj`, a causal depthwise `conv1d`, `x_proj`, `dt_proj`,
+  `A_log`, `D`, `out_proj`, scanned token by token and carried between
+  decode steps); they are steered like any other model, and adapter training
+  on them is refused because they have no attention or feed-forward
+  projection. Every other family is a rotary, grouped-query decoder with what its config
   adds read from the config itself: a stated `head_dim` (attention wider or
   narrower than the residual stream), RMS or LayerNorm norms (with a bias
   for StableLM, Starcoder2, Phi-2, Nemotron and Orion, without for Cohere,
@@ -104,8 +109,9 @@ Included now:
   post-norm `do_layer_norm_before: false` or `word_embed_proj_dim`, BLOOM's
   `apply_residual_connection_post_layernorm`). Adapter targets a family has
   no projection for (the gate of a plain feed-forward, every feed-forward
-  projection of a mixture of experts) are refused before any adapter is
-  built;
+  projection of a mixture of experts, the key, value and bottlenecked query
+  of latent attention, anything on a state-space model) are refused before
+  any adapter is built;
 - CPU execution, with compile-time Metal and CUDA backends;
 - pair-set authoring and inspection for duplicates, refusals, length balance,
   and diversity, with no model loaded;

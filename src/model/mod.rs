@@ -214,6 +214,26 @@ pub struct Architecture {
     /// DeepSeek's multi-head latent attention in place of separate query,
     /// key and value projections.
     pub latent: Option<LatentAttention>,
+    /// Mamba's selective state-space mixer in place of attention, with no
+    /// feed-forward beside it.
+    pub state_space: Option<StateSpaceSpec>,
+}
+
+/// Mamba's mixer dimensions, from `intermediate_size` (or `expand` times the
+/// width), `state_size`, `conv_kernel` and `time_step_rank`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StateSpaceSpec {
+    pub inner: usize,
+    pub state: usize,
+    pub kernel: usize,
+    pub step_rank: usize,
+    /// `use_bias`: bias on `in_proj` and `out_proj`.
+    pub projection_bias: bool,
+    /// `use_conv_bias`.
+    pub convolution_bias: bool,
+    /// Falcon-Mamba's `mixer_rms_eps`: a scale-free RMS norm on the step and
+    /// the input and output matrices.
+    pub parameter_norm: Option<f64>,
 }
 
 /// Multi-head latent attention (DeepSeek-V2 and V3, MiniCPM3): query and key
@@ -275,6 +295,7 @@ impl Architecture {
             logits_multiplier: None,
             experts: None,
             latent: None,
+            state_space: None,
         }
     }
 
@@ -326,6 +347,10 @@ impl Architecture {
         let names = self.names;
         let in_layer = |leaf: &str| format!("{}.{layer}.{leaf}.weight", names.layers);
         let in_attention = |leaf: &str| in_layer(&format!("{}.{leaf}", names.attention));
+        // A Mamba block has no attention or feed-forward projection.
+        if self.state_space.is_some() {
+            return None;
+        }
         if let Some(latent) = self.latent {
             match target {
                 Target::Query if latent.query_rank.is_none() => {
@@ -403,6 +428,11 @@ impl Architecture {
     /// Refuses adapter targets this family has no single projection for, so
     /// an adapter is not created and then never trained.
     pub fn check_targets(&self, targets: &[Target], config: &Config) -> Result<()> {
+        if self.state_space.is_some() && !targets.is_empty() {
+            bail!(
+                "this model's blocks are state-space mixers (Mamba) with no attention or feed-forward projection to adapt; Ster steers it but trains no adapters on it"
+            );
+        }
         if let Some(target) = targets
             .iter()
             .find(|target| self.placement(**target, 0, config).is_none())
@@ -503,6 +533,8 @@ pub enum Positions {
     /// `alibi`); `inside_scale` adds it before the scores are divided by the
     /// head width, as Falcon does, rather than after.
     Alibi { inside_scale: bool },
+    /// No position signal: the recurrence carries order (Mamba).
+    None,
 }
 
 /// A routed feed-forward: how many experts, how many run per token, and
@@ -813,6 +845,17 @@ impl Names {
         down: "ffn.down_proj",
         attention_norm: "norm_1",
         feed_forward_norm: "norm_2",
+        ..Self::LLAMA
+    };
+    /// Mamba and Falcon-Mamba: everything below `backbone`, `embeddings`,
+    /// `layers.{i}` with one `norm` and its `mixer`, and `norm_f`.
+    pub const MAMBA: Self = Self {
+        root: "backbone",
+        embeddings: "backbone.embeddings",
+        layers: "backbone.layers",
+        final_norm: "backbone.norm_f",
+        attention: "mixer",
+        attention_norm: "norm",
         ..Self::LLAMA
     };
 }

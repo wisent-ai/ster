@@ -55,7 +55,14 @@ impl Cache {
         device: &Device,
     ) -> Result<Self> {
         let rotary_dim = architecture.rotary_dim;
-        let positions = config.max_position_embeddings;
+        // A family whose positions are learned, ALiBi or absent rotates
+        // nothing; its tables keep the one row for position zero rather than
+        // a row for every position.
+        let positions = if architecture.positions == super::Positions::Rotary {
+            config.max_position_embeddings
+        } else {
+            1
+        };
         let global = rotary_frequencies(config, rotary_dim, config.rope_theta);
         let ((cos, sin), long) = match &architecture.rope_scaling {
             RopeScaling::None => (angle_tables(global, positions, 1.0, device)?, None),
