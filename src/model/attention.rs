@@ -57,6 +57,9 @@ pub(super) struct Attention {
     clip_qkv: Option<f64>,
     /// Falcon-H1's `key_multiplier` on every key.
     key_scale: Option<f64>,
+    /// Qwen3-Next's gate rows of `q_proj`: attention's output is multiplied
+    /// by their sigmoid before the output projection.
+    output_gate: Option<Linear>,
 }
 
 /// Which rotary table this layer rotates its query and key with.
@@ -125,10 +128,39 @@ impl Attention {
         } else {
             Rotary::Global
         };
+        let mut output_gate = None;
         let projections = if let Some(spec) = architecture.latent {
             Projections::Latent(Latent::load(&builder, input, heads, spec, bias, NormSpec::of(architecture))?)
         } else {
         let (query, key, value) = match architecture.qkv_layout {
+            // Qwen3-Next's `q_proj` holds each head's query rows and then its
+            // gate rows; both are gathered once at load.
+            QkvLayout::Separate if architecture.output_gate => {
+                let rows = builder.pp(names.query);
+                let weight = rows
+                    .get((2 * query_width, input), "weight")?
+                    .reshape((heads, 2, head_dim, input))?;
+                let paired_bias = if bias {
+                    Some(rows.get(2 * query_width, "bias")?.reshape((heads, 2, head_dim))?)
+                } else {
+                    None
+                };
+                let part = |slot: usize| -> candle_core::Result<Linear> {
+                    Ok(Linear::new(
+                        weight.narrow(1, slot, 1)?.contiguous()?.reshape((query_width, input))?,
+                        paired_bias
+                            .as_ref()
+                            .map(|bias| bias.narrow(1, slot, 1)?.contiguous()?.reshape(query_width))
+                            .transpose()?,
+                    ))
+                };
+                output_gate = Some(part(1)?);
+                (
+                    part(0)?,
+                    projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
+                    projection(input, key_value_width, bias, conv1d, builder.pp(names.value))?,
+                )
+            }
             QkvLayout::Separate => (
                 projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
                 projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
@@ -261,6 +293,7 @@ impl Attention {
             },
             clip_qkv: architecture.clip_qkv,
             key_scale: architecture.key_scale,
+            output_gate,
             sinks: if architecture.attention_sinks {
                 Some(
                     layer_builder
@@ -456,6 +489,11 @@ impl Attention {
         let output = output
             .transpose(1, 2)?
             .reshape((batch, sequence, self.heads * self.value_dim))?;
+        // sigmoid, composed so it has a backward pass.
+        let output = match &self.output_gate {
+            Some(gate) => output.broadcast_mul(&(gate.forward(hidden)?.neg()?.exp()? + 1.0)?.recip()?)?,
+            None => output,
+        };
         project(
             &self.output,
             self.output_adapter.as_ref(),

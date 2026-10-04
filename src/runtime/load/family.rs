@@ -11,7 +11,7 @@ use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
 use crate::model::{
-    ALIBI_SPAN, Activation, Architecture, ExpertGroups, ExpertLayout, FeedForwardKind,
+    ALIBI_SPAN, Activation, Architecture, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
     LatentAttention, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm, Positions, QkvLayout,
     QueryKeyNorm, RopeScaling, Scoring, SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec,
     StructuredSpec,
@@ -91,13 +91,14 @@ pub(super) enum Family {
     BailingMoe,
     TeleFlm,
     FalconH1,
+    Qwen3Next,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 67] = [
+    pub(super) const ALL: [Self; 68] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -162,6 +163,7 @@ impl Family {
         Self::BailingMoe,
         Self::TeleFlm,
         Self::FalconH1,
+        Self::Qwen3Next,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -239,6 +241,7 @@ impl Family {
             Self::BailingMoe => "bailing_moe",
             Self::TeleFlm => "TeleFLM",
             Self::FalconH1 => "falcon_h1",
+            Self::Qwen3Next => "qwen3_next",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -761,7 +764,7 @@ pub(super) fn family(
                 architecture.experts = Some(routed);
             }
         }
-        "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" => {
+        "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" | "qwen3_next" => {
             if model_type.starts_with("qwen2") {
                 architecture.query_key_value_bias = true;
             } else {
@@ -774,7 +777,60 @@ pub(super) fn family(
                 let from = whole(raw, "max_window_layers").unwrap_or(0);
                 architecture.sliding_layers = every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
             }
-            if model_type.ends_with("_moe") {
+            if model_type == "qwen3_next" {
+                // Qwen3-Next: norms that store their scale as an offset from
+                // one, a sigmoid gate on attention's output from `q_proj`,
+                // and gated delta-rule linear attention on every layer
+                // `layer_types` calls `linear_attention` (without it, on
+                // every layer but each `full_attention_interval`-th).
+                fits(layers, path)?;
+                let linear = match raw.get("layer_types").and_then(Value::as_array) {
+                    Some(types) => {
+                        if types.len() != layers {
+                            bail!("{} lists {} layer_types for {layers} layers", path.display(), types.len());
+                        }
+                        let mut linear = 0u128;
+                        for (layer, kind) in types.iter().enumerate() {
+                            match kind.as_str() {
+                                Some("linear_attention") => linear |= 1u128 << layer,
+                                Some("full_attention") => {}
+                                other => bail!(
+                                    "{} names layer {layer} {other:?}; a Qwen3-Next layer is linear_attention or full_attention",
+                                    path.display()
+                                ),
+                            }
+                        }
+                        linear
+                    }
+                    None => {
+                        let Some(interval) = whole(raw, "full_attention_interval").filter(|n| *n > 0) else {
+                            bail!(
+                                "{} declares a Qwen3-Next model with neither layer_types nor full_attention_interval",
+                                path.display()
+                            );
+                        };
+                        (0..layers)
+                            .filter(|layer| (layer + 1) % interval != 0)
+                            .fold(0u128, |set, layer| set | (1u128 << layer))
+                    }
+                };
+                let size = |key: &str| -> Result<usize> {
+                    whole(raw, key)
+                        .filter(|size| *size > 0)
+                        .with_context(|| format!("{} declares a Qwen3-Next model without {key}", path.display()))
+                };
+                architecture.norm_offset = true;
+                architecture.output_gate = true;
+                architecture.delta_rule = Some(DeltaRuleSpec {
+                    key_heads: size("linear_num_key_heads")?,
+                    value_heads: size("linear_num_value_heads")?,
+                    key_dim: size("linear_key_head_dim")?,
+                    value_dim: size("linear_value_head_dim")?,
+                    kernel: size("linear_conv_kernel_dim")?,
+                    layers: linear,
+                });
+            }
+            if model_type.ends_with("_moe") || model_type == "qwen3_next" {
                 let mut routed = experts(
                     raw,
                     "num_experts",
@@ -784,7 +840,7 @@ pub(super) fn family(
                     qwen_dense_layers(raw, layers, path)?,
                     path,
                 )?;
-                if model_type == "qwen2_moe" {
+                if model_type != "qwen3_moe" {
                     routed.shared = whole(raw, "shared_expert_intermediate_size")
                         .map(|intermediate| SharedExpert {
                             intermediate,

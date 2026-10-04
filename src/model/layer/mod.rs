@@ -3,8 +3,7 @@
 
 mod experts;
 pub(super) mod norm;
-mod state_space;
-mod structured;
+mod recurrent;
 
 use candle_core::Tensor;
 use candle_nn::{Linear, VarBuilder, linear, linear_no_bias};
@@ -18,8 +17,11 @@ use super::{
 };
 use experts::Experts;
 use norm::{Norm, NormSpec};
-use state_space::{ShortConv, StateSpace};
-use structured::Structured;
+use recurrent::{
+    delta::DeltaRule,
+    state_space::{ShortConv, StateSpace},
+    structured::Structured,
+};
 
 /// The feed-forward half of a block: one dense feed-forward, or a router
 /// over experts.
@@ -164,6 +166,8 @@ enum Mixer {
     Structured(Structured),
     /// LFM2's gated short convolution.
     ShortConv(ShortConv),
+    /// Qwen3-Next's gated delta-rule linear attention.
+    DeltaRule(DeltaRule),
     /// Nemotron-H's feed-forward layers: the feed-forward is the block's
     /// one sublayer.
     FeedForward(FeedForwardBlock),
@@ -229,6 +233,25 @@ impl DecoderLayer {
         let spec = NormSpec::of(architecture);
         let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
         let names = architecture.names;
+        // Qwen3-Next's linear-attention layers: a norm, the delta-rule
+        // mixer, a norm and the feed-forward, as in its attention layers.
+        if let Some(&spec) = architecture.delta_rule_at(layer) {
+            return Ok(Self {
+                attention_norm: Some(norm(names.attention_norm)?),
+                mixer: Mixer::DeltaRule(DeltaRule::load(
+                    builder.pp("linear_attn"),
+                    config.hidden_size,
+                    config.rms_norm_eps,
+                    spec,
+                )?),
+                attention_output_norm: None,
+                feed_forward_norm: Some(norm(names.feed_forward_norm)?),
+                feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
+                feed_forward_output_norm: None,
+                residual_multiplier: architecture.residual_multiplier,
+                parallel: false,
+            });
+        }
         // LFM2's convolution layers: a norm, the convolution, a norm and the
         // feed-forward, each half added to the residual.
         if let Some(convolution) = architecture.short_convolution_at(layer) {
@@ -411,7 +434,11 @@ impl DecoderLayer {
         match &self.mixer {
             Mixer::Attention(attention) => attention.window(),
             Mixer::Parallel(mixers) => mixers.attention.window(),
-            Mixer::StateSpace(_) | Mixer::Structured(_) | Mixer::ShortConv(_) | Mixer::FeedForward(_) => None,
+            Mixer::StateSpace(_)
+            | Mixer::Structured(_)
+            | Mixer::ShortConv(_)
+            | Mixer::DeltaRule(_)
+            | Mixer::FeedForward(_) => None,
         }
     }
 
@@ -432,6 +459,7 @@ impl DecoderLayer {
             Mixer::StateSpace(state_space) => state_space.forward(&normed, layer, cache)?,
             Mixer::Structured(structured) => structured.forward(&normed, layer, cache)?,
             Mixer::ShortConv(convolution) => convolution.forward(&normed, layer, cache)?,
+            Mixer::DeltaRule(delta) => delta.forward(&normed, layer, cache)?,
             Mixer::FeedForward(feed_forward) => feed_forward.forward(&normed, mode.route)?,
             Mixer::Parallel(mixers) => mixers.forward(&normed, index_pos, layer, cache, mask, mode)?,
         };

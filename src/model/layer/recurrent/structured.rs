@@ -18,13 +18,12 @@ use candle_nn::{Linear, Module, VarBuilder};
 
 use crate::model::{Cache, StateSpaceSpec, StructuredSpec};
 
-use super::{
-    projection,
-    state_space::{causal_convolution, softplus},
-};
+use crate::model::layer::projection;
+
+use super::state_space::{causal_convolution, softplus};
 
 #[derive(Debug, Clone)]
-pub(super) struct Structured {
+pub(in crate::model::layer) struct Structured {
     input: Linear,
     /// The depthwise convolution over `x`, `B` and `C`, `[channels, kernel]`.
     convolution: Tensor,
@@ -50,7 +49,7 @@ pub(super) struct Structured {
 impl Structured {
     /// `builder` is the mixer's (`backbone.layers.{i}.mixer`, or Bamba's
     /// `model.layers.{i}.mamba`).
-    pub(super) fn load(
+    pub(in crate::model::layer) fn load(
         builder: VarBuilder<'_>,
         hidden: usize,
         eps: f64,
@@ -116,7 +115,7 @@ impl Structured {
     /// Mixes `hidden` `[batch, sequence, width]`, continuing from the
     /// layer's saved state when the cache keeps one. Every op has a backward
     /// pass, so the same code serves inference and training.
-    pub(super) fn forward(
+    pub(in crate::model::layer) fn forward(
         &self,
         hidden: &Tensor,
         layer: usize,

@@ -18,13 +18,13 @@ use candle_nn::{Linear, Module, VarBuilder};
 
 use crate::model::{Cache, NormKind, ParameterNorm, Pass, ShortConvolution, StateSpaceSpec};
 
-use super::{
+use crate::model::layer::{
     norm::{Norm, NormSpec},
     projection,
 };
 
 #[derive(Debug, Clone)]
-pub(super) struct StateSpace {
+pub(in crate::model::layer) struct StateSpace {
     input: Linear,
     /// The depthwise convolution's taps, `[inner, kernel]`, and its bias.
     convolution: Tensor,
@@ -44,7 +44,7 @@ pub(super) struct StateSpace {
 impl StateSpace {
     /// `builder` is the mixer's (`backbone.layers.{i}.mixer`, or Jamba's
     /// `model.layers.{i}.mamba`).
-    pub(super) fn load(
+    pub(in crate::model::layer) fn load(
         builder: VarBuilder<'_>,
         hidden: usize,
         eps: f64,
@@ -97,7 +97,7 @@ impl StateSpace {
     ///
     /// Every step is composed of ops with a backward pass, so the same code
     /// serves inference and training.
-    pub(super) fn forward(
+    pub(in crate::model::layer) fn forward(
         &self,
         hidden: &Tensor,
         layer: usize,
@@ -213,7 +213,7 @@ pub(super) fn causal_convolution(
 /// `out_proj`. Tensor names follow Transformers' `Lfm2ShortConv`:
 /// `in_proj`, `conv` and `out_proj`.
 #[derive(Debug, Clone)]
-pub(super) struct ShortConv {
+pub(in crate::model::layer) struct ShortConv {
     input: Linear,
     /// `[hidden, kernel]`.
     convolution: Tensor,
@@ -224,7 +224,7 @@ pub(super) struct ShortConv {
 
 impl ShortConv {
     /// `builder` is the mixer's (`model.layers.{i}.conv`).
-    pub(super) fn load(
+    pub(in crate::model::layer) fn load(
         builder: VarBuilder<'_>,
         hidden: usize,
         spec: &ShortConvolution,
@@ -247,7 +247,7 @@ impl ShortConv {
 
     /// Mixes `hidden` `[batch, sequence, width]`, continuing from the
     /// layer's saved convolution inputs when the cache keeps them.
-    pub(super) fn forward(
+    pub(in crate::model::layer) fn forward(
         &self,
         hidden: &Tensor,
         layer: usize,

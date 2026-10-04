@@ -217,6 +217,13 @@ pub struct Architecture {
     /// Falcon-H1's `mlp_multipliers`: the gate's pre-activation and the
     /// feed-forward's output are multiplied by these.
     pub feed_forward_scales: Option<(f64, f64)>,
+    /// Qwen3-Next's gated delta-rule mixers, in place of attention on the
+    /// layers they name.
+    pub delta_rule: Option<DeltaRuleSpec>,
+    /// Qwen3-Next's attention gate: `q_proj` yields each head's query rows
+    /// and then as many gate rows, and attention's output is multiplied by
+    /// the gate's sigmoid before `o_proj`.
+    pub output_gate: bool,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -305,6 +312,21 @@ pub struct StructuredSpec {
     pub gated_norm: bool,
 }
 
+/// Qwen3-Next's gated delta-rule linear attention (`linear_attn`): `key_heads`
+/// query and key heads of `key_dim`, `value_heads` value heads of
+/// `value_dim` (each key head serving `value_heads / key_heads` of them), a
+/// causal depthwise convolution of `kernel` positions over query, key and
+/// value, on the layers in `layers`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeltaRuleSpec {
+    pub key_heads: usize,
+    pub value_heads: usize,
+    pub key_dim: usize,
+    pub value_dim: usize,
+    pub kernel: usize,
+    pub layers: u128,
+}
+
 /// Falcon-H1's parallel block: attention reads its input times
 /// `attention_in`, and the attention and scan outputs are multiplied by
 /// `attention_out` and `scan_out` before they join the residual stream.
@@ -384,6 +406,8 @@ impl Architecture {
             parallel_scan: None,
             key_scale: None,
             feed_forward_scales: None,
+            delta_rule: None,
+            output_gate: false,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
@@ -432,6 +456,14 @@ impl Architecture {
             .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
     }
 
+    /// The gated delta-rule mixer layer `layer` uses in place of attention,
+    /// if any.
+    pub fn delta_rule_at(&self, layer: usize) -> Option<&DeltaRuleSpec> {
+        self.delta_rule
+            .as_ref()
+            .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
+    }
+
     /// Whether layer `layer`'s feed-forward is the mixture of experts.
     pub fn routed(&self, layer: usize) -> bool {
         self.experts.as_ref().is_some_and(|experts| {
@@ -463,7 +495,7 @@ impl Architecture {
         let in_layer = |leaf: &str| format!("{}.{layer}.{leaf}.weight", names.layers);
         let in_attention = |leaf: &str| in_layer(&format!("{}.{leaf}", names.attention));
         // A Mamba block has no attention or feed-forward projection.
-        if self.state_space.is_some() {
+        if self.state_space.is_some() || self.delta_rule.is_some() {
             return None;
         }
         if let Some(latent) = self.latent {
@@ -486,6 +518,13 @@ impl Architecture {
         };
         let intermediate = config.intermediate_size;
         let placement = match (attention_offset, self.qkv_layout) {
+            // Each head's query rows sit before its gate rows.
+            (Some(0), QkvLayout::Separate) if self.output_gate => {
+                let blocks = (0..config.num_attention_heads)
+                    .map(|head| (head * 2 * head_dim, head * head_dim, head_dim))
+                    .collect();
+                Placement::blocks(in_attention(names.query), blocks)
+            }
             (Some(slot), QkvLayout::Separate) => Placement::whole(in_attention(match slot {
                 0 => names.query,
                 1 => names.key,
@@ -563,6 +602,11 @@ impl Architecture {
         if self.short_convolution.is_some() && !targets.is_empty() {
             bail!(
                 "this model's blocks include short-convolution mixers (LFM2) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
+            );
+        }
+        if self.delta_rule.is_some() && !targets.is_empty() {
+            bail!(
+                "this model's blocks include gated delta-rule mixers (Qwen3-Next's linear attention) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
             );
         }
         if self.state_space.is_some() && !targets.is_empty() {
