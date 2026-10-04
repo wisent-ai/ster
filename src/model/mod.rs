@@ -193,6 +193,9 @@ pub struct Architecture {
     /// What final logits are multiplied by: Cohere's `logit_scale`, or one
     /// over Granite's `logits_scaling`.
     pub logits_multiplier: Option<f64>,
+    /// A routed feed-forward in place of the dense one, on the layers it
+    /// covers.
+    pub experts: Option<MixtureOfExperts>,
 }
 
 impl Architecture {
@@ -229,6 +232,7 @@ impl Architecture {
             attention_softcap: None,
             final_softcap: None,
             logits_multiplier: None,
+            experts: None,
         }
     }
 
@@ -248,9 +252,21 @@ impl Architecture {
         heads * self.head_dim
     }
 
+    /// Whether layer `layer`'s feed-forward is the mixture of experts.
+    pub fn routed(&self, layer: usize) -> bool {
+        self.experts.as_ref().is_some_and(|experts| {
+            layer >= 128 || experts.dense_layers & (1u128 << layer) == 0
+        })
+    }
+
     /// The checkpoint tensor `target` adapts at `layer`, or `None` when this
-    /// family has no such projection (the gate of a plain feed-forward).
+    /// family has no single such projection: the gate of a plain feed-forward,
+    /// or any feed-forward projection of a mixture of experts.
     pub fn checkpoint_tensor(&self, target: Target, layer: usize) -> Option<String> {
+        let feed_forward = matches!(target, Target::Gate | Target::Up | Target::Down);
+        if feed_forward && self.experts.is_some() {
+            return None;
+        }
         let leaf = match target {
             Target::Query => "self_attn.q_proj",
             Target::Key => "self_attn.k_proj",
@@ -263,20 +279,55 @@ impl Architecture {
         Some(format!("model.layers.{layer}.{leaf}.weight"))
     }
 
-    /// Refuses adapter targets this family has no projection for, so a gate
-    /// adapter on a plain feed-forward is not created and then never trained.
+    /// Refuses adapter targets this family has no single projection for, so
+    /// an adapter is not created and then never trained.
     pub fn check_targets(&self, targets: &[Target]) -> Result<()> {
         if let Some(target) = targets
             .iter()
             .find(|target| self.checkpoint_tensor(**target, 0).is_none())
         {
+            let (why, choices) = if self.experts.is_some() {
+                ("its feed-forward is a mixture of experts", "query, key, value, output")
+            } else {
+                ("its feed-forward has no gate", "query, key, value, output, up, down")
+            };
             bail!(
-                "this model's feed-forward has no {} projection; choose adapter targets among query, key, value, output, up, down",
+                "this model has no single {} projection to adapt because {why}; choose adapter targets among {choices}",
                 target.name()
             );
         }
         Ok(())
     }
+}
+
+/// A routed feed-forward: how many experts, how many run per token, and
+/// where the checkpoint keeps them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MixtureOfExperts {
+    pub count: usize,
+    pub top_k: usize,
+    /// Each expert's inner width.
+    pub intermediate: usize,
+    /// Rescale the chosen experts' weights to sum to one.
+    pub normalize: bool,
+    /// Qwen2-MoE's shared expert, by its inner width.
+    pub shared_intermediate: Option<usize>,
+    pub layout: ExpertLayout,
+    /// Bit `i` set means layer `i` keeps a dense feed-forward (Qwen's
+    /// `mlp_only_layers` and `decoder_sparse_step`).
+    pub dense_layers: u128,
+}
+
+/// Where a checkpoint keeps its router and experts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpertLayout {
+    /// `block_sparse_moe.gate`, `block_sparse_moe.experts.{e}.w1|w3|w2`.
+    Mixtral,
+    /// `mlp.gate`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`.
+    Qwen,
+    /// `block_sparse_moe.router.layer`, and every expert stacked in
+    /// `block_sparse_moe.input_linear` and `output_linear`.
+    Granite,
 }
 
 /// Where a family keeps the tensors whose names differ from Llama's, below

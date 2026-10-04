@@ -1,6 +1,7 @@
 //! One decoder block: the feed-forward half, the norms around both halves,
 //! and how their outputs join the residual stream.
 
+mod experts;
 pub(super) mod norm;
 
 use candle_core::Tensor;
@@ -13,7 +14,25 @@ use super::{
     Activation, Architecture, Cache, FeedForwardKind, Mode, Pass, Route,
     attention::{Attention, project},
 };
+use experts::Experts;
 use norm::{Norm, NormSpec};
+
+/// The feed-forward half of a block: one dense feed-forward, or a router
+/// over experts.
+#[derive(Debug, Clone)]
+enum FeedForwardBlock {
+    Dense(FeedForward),
+    Routed(Experts),
+}
+
+impl FeedForwardBlock {
+    fn forward(&self, hidden: &Tensor, route: Route) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Dense(dense) => dense.forward(hidden, route),
+            Self::Routed(experts) => experts.forward(hidden),
+        }
+    }
+}
 
 /// A projection, with a bias when the architecture says it carries one.
 pub(super) fn projection(
@@ -110,7 +129,7 @@ pub(super) struct DecoderLayer {
     attention_output_norm: Option<Norm>,
     /// The norm before the feed-forward; OLMo 2 and parallel blocks have none.
     feed_forward_norm: Option<Norm>,
-    feed_forward: FeedForward,
+    feed_forward: FeedForwardBlock,
     /// The norm over the feed-forward's output before the residual add.
     feed_forward_output_norm: Option<Norm>,
     /// Granite's `residual_multiplier` on each sublayer's output.
@@ -167,7 +186,18 @@ impl DecoderLayer {
             attention: Attention::load(&builder, config, architecture, layer, adapters)?,
             attention_output_norm,
             feed_forward_norm,
-            feed_forward: FeedForward::load(&builder, config, architecture, layer, adapters)?,
+            feed_forward: match &architecture.experts {
+                Some(experts) if architecture.routed(layer) => FeedForwardBlock::Routed(
+                    Experts::load(&builder, config.hidden_size, experts, architecture.activation)?,
+                ),
+                _ => FeedForwardBlock::Dense(FeedForward::load(
+                    &builder,
+                    config,
+                    architecture,
+                    layer,
+                    adapters,
+                )?),
+            },
             feed_forward_output_norm,
             residual_multiplier: architecture.residual_multiplier,
             parallel: architecture.parallel,

@@ -11,18 +11,23 @@ use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
 use crate::model::{
-    Activation, Architecture, FeedForwardKind, Names, NormKind, QueryKeyNorm, RopeScaling,
+    Activation, Architecture, ExpertLayout, FeedForwardKind, MixtureOfExperts, Names, NormKind,
+    QueryKeyNorm, RopeScaling,
 };
 
 /// The `model_type` values the decoder implements.
 pub(super) const FAMILIES: &[&str] = &[
     "llama",
     "mistral",
+    "mixtral",
     "qwen2",
+    "qwen2_moe",
     "qwen3",
+    "qwen3_moe",
     "phi",
     "phi3",
     "granite",
+    "granitemoe",
     "stablelm",
     "starcoder2",
     "cohere",
@@ -30,6 +35,7 @@ pub(super) const FAMILIES: &[&str] = &[
     "nemotron",
     "olmo2",
     "olmo3",
+    "olmoe",
     "smollm3",
     "gemma",
     "gemma2",
@@ -195,7 +201,7 @@ pub(super) fn family(
         architecture.activation = activation(raw, model_type, path)?;
     }
     match model_type {
-        "llama" | "mistral" | "phi3" => {
+        "llama" | "mistral" | "mixtral" | "phi3" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.fused_projections = model_type == "phi3";
@@ -208,9 +214,20 @@ pub(super) fn family(
                     architecture.sliding_layers = every_layer(layers, path)?;
                 }
             }
+            if model_type == "mixtral" {
+                architecture.experts = Some(experts(
+                    raw,
+                    "num_local_experts",
+                    "intermediate_size",
+                    true,
+                    ExpertLayout::Mixtral,
+                    0,
+                    path,
+                )?);
+            }
         }
-        "qwen2" | "qwen3" => {
-            if model_type == "qwen2" {
+        "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" => {
+            if model_type.starts_with("qwen2") {
                 architecture.query_key_value_bias = true;
             } else {
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
@@ -222,8 +239,23 @@ pub(super) fn family(
                 let from = whole(raw, "max_window_layers").unwrap_or(0);
                 architecture.sliding_layers = every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
             }
+            if model_type.ends_with("_moe") {
+                let mut routed = experts(
+                    raw,
+                    "num_experts",
+                    "moe_intermediate_size",
+                    flag(raw, "norm_topk_prob"),
+                    ExpertLayout::Qwen,
+                    qwen_dense_layers(raw, layers, path)?,
+                    path,
+                )?;
+                if model_type == "qwen2_moe" {
+                    routed.shared_intermediate = whole(raw, "shared_expert_intermediate_size");
+                }
+                architecture.experts = Some(routed);
+            }
         }
-        "granite" => {
+        "granite" | "granitemoe" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.embedding_multiplier = number(raw, "embedding_multiplier");
@@ -232,6 +264,39 @@ pub(super) fn family(
                 architecture.score_divisor = 1.0 / multiplier;
             }
             architecture.logits_multiplier = number(raw, "logits_scaling").map(|scale| 1.0 / scale);
+            if model_type == "granitemoe" {
+                // GraniteMoE takes the softmax over the top-k logits, which is
+                // the full softmax renormalised over the chosen experts.
+                architecture.experts = Some(experts(
+                    raw,
+                    "num_local_experts",
+                    "intermediate_size",
+                    true,
+                    ExpertLayout::Granite,
+                    0,
+                    path,
+                )?);
+            }
+        }
+        "olmoe" => {
+            if raw.get("clip_qkv").is_some_and(|clip| !clip.is_null()) {
+                bail!(
+                    "{} declares clip_qkv; Ster implements OLMoE without clipping query, key and value",
+                    path.display()
+                );
+            }
+            architecture.query_key_norm = QueryKeyNorm::Full;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.experts = Some(experts(
+                raw,
+                "num_experts",
+                "intermediate_size",
+                flag(raw, "norm_topk_prob"),
+                ExpertLayout::Qwen,
+                0,
+                path,
+            )?);
         }
         "stablelm" => {
             architecture.norm = NormKind::Layer { bias: true };
@@ -369,6 +434,60 @@ pub(super) fn family(
         );
     }
     Ok(architecture)
+}
+
+/// The mixture of experts a config declares: how many under `count_key`, how
+/// many per token under `num_experts_per_tok`, each one's width under
+/// `width_key`.
+fn experts(
+    raw: &Value,
+    count_key: &str,
+    width_key: &str,
+    normalize: bool,
+    layout: ExpertLayout,
+    dense_layers: u128,
+    path: &Path,
+) -> Result<MixtureOfExperts> {
+    let (Some(count), Some(top_k), Some(intermediate)) = (
+        whole(raw, count_key),
+        whole(raw, "num_experts_per_tok"),
+        whole(raw, width_key),
+    ) else {
+        bail!(
+            "{} declares a mixture of experts without {count_key}, num_experts_per_tok and {width_key}",
+            path.display()
+        );
+    };
+    if top_k == 0 || top_k > count {
+        bail!(
+            "{} routes each token to {top_k} of {count} experts; it must be at least one and at most all of them",
+            path.display()
+        );
+    }
+    Ok(MixtureOfExperts {
+        count,
+        top_k,
+        intermediate,
+        normalize,
+        shared_intermediate: None,
+        layout,
+        dense_layers,
+    })
+}
+
+/// Qwen MoE's dense layers: those in `mlp_only_layers`, and those whose
+/// position is not a multiple of `decoder_sparse_step`.
+fn qwen_dense_layers(raw: &Value, layers: usize, path: &Path) -> Result<u128> {
+    fits(layers, path)?;
+    let step = whole(raw, "decoder_sparse_step").unwrap_or(1).max(1);
+    let listed: Vec<usize> = raw
+        .get("mlp_only_layers")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(|v| v.as_u64().map(|v| v as usize)).collect())
+        .unwrap_or_default();
+    Ok((0..layers)
+        .filter(|layer| listed.contains(layer) || (layer + 1) % step != 0)
+        .fold(0, |set, layer| set | (1u128 << layer)))
 }
 
 fn flag(raw: &Value, key: &str) -> bool {

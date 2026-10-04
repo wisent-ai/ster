@@ -99,6 +99,7 @@ pub fn merge(
 
     let source = Checkpoint::resolve(model, revision)?;
     let (config, architecture, _) = source.decoder_config()?;
+    architecture.check_targets(&artifact.targets)?;
     if artifact.hidden_size != config.hidden_size {
         bail!(
             "adapter width {} does not match model width {}",

@@ -34,22 +34,27 @@ JSON artifacts and native Candle runtime.
 Included now:
 
 - local and Hugging Face checkpoints published as unquantized Safetensors
-  whose `model_type` is `llama`, `mistral`, `qwen2`, `qwen3`, `phi`, `phi3`,
-  `granite`, `stablelm`, `starcoder2`, `cohere`, `cohere2`, `nemotron`,
-  `olmo2`, `olmo3`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`. Coverage
-  is measured against vLLM's list of text-only architectures; every
-  architecture on it that Ster does not load is tracked with what the decoder
-  lacks for it. Each family is the same rotary, grouped-query decoder with
-  what its config adds read from the config itself: a stated `head_dim`
-  (attention wider or narrower than the residual stream), RMS or LayerNorm
-  norms (with a bias for StableLM, Starcoder2, Phi-2 and Nemotron, without
-  for Cohere, offset from one for Gemma and Nemotron), query and key norms
-  per head (Qwen3, Gemma 3, Cohere's `use_qk_norm`, StableLM's
-  `qk_layernorm`) or over the whole projection (OLMo 2 and 3), projection
-  bias (`attention_bias`, `use_qkv_bias`, `use_bias`, `mlp_bias`, Phi-2's
-  biased head), a gated feed-forward or a plain one (Starcoder2's `c_fc` and
-  `c_proj`, Phi-2's `fc1` and `fc2`, Nemotron's squared ReLU), sequential or
-  parallel blocks (Cohere, Phi-2, StableLM's `use_parallel_residual`),
+  whose `model_type` is `llama`, `mistral`, `mixtral`, `qwen2`, `qwen2_moe`,
+  `qwen3`, `qwen3_moe`, `phi`, `phi3`, `granite`, `granitemoe`, `stablelm`,
+  `starcoder2`, `cohere`, `cohere2`, `nemotron`, `olmo2`, `olmo3`, `olmoe`,
+  `smollm3`, `gemma`, `gemma2` or `gemma3_text`. Coverage is measured
+  against vLLM's list of text-only architectures; every architecture on it
+  that Ster does not load is tracked with what the decoder lacks for it.
+  Each family is the same rotary, grouped-query decoder with what its config
+  adds read from the config itself: a stated `head_dim` (attention wider or
+  narrower than the residual stream), RMS or LayerNorm norms (with a bias
+  for StableLM, Starcoder2, Phi-2 and Nemotron, without for Cohere, offset
+  from one for Gemma and Nemotron), query and key norms per head (Qwen3,
+  Gemma 3, Cohere's `use_qk_norm`, StableLM's `qk_layernorm`) or over the
+  whole projection (OLMo 2 and 3, OLMoE), projection bias (`attention_bias`,
+  `use_qkv_bias`, `use_bias`, `mlp_bias`, Phi-2's biased head), a gated
+  feed-forward, a plain one (Starcoder2's `c_fc` and `c_proj`, Phi-2's `fc1`
+  and `fc2`, Nemotron's squared ReLU) or a mixture of experts (Mixtral,
+  Qwen2-MoE with its shared expert, Qwen3-MoE, OLMoE, GraniteMoE: a router
+  picks `num_experts_per_tok` experts per token, renormalised when the
+  family does, with Qwen's `mlp_only_layers` and `decoder_sparse_step`
+  layers kept dense), sequential or parallel blocks (Cohere, Phi-2,
+  StableLM's `use_parallel_residual`),
   sliding-window attention on the layers `sliding_window`,
   `max_window_layers`, `sliding_window_pattern` or `layer_types` name,
   Phi-3's fused `qkv_proj` and `gate_up_proj` (split at load, and merged back
@@ -69,8 +74,8 @@ Included now:
   relu2, that rotates an odd or empty share of each head
   (`partial_rotary_factor`), or whose `rope_scaling` is not `llama3`,
   `linear` or Phi-3's `longrope`. Adapter targets a family has no projection
-  for (the gate of a plain feed-forward) are refused before any adapter is
-  built;
+  for (the gate of a plain feed-forward, every feed-forward projection of a
+  mixture of experts) are refused before any adapter is built;
 - CPU execution, with compile-time Metal and CUDA backends;
 - pair-set authoring and inspection for duplicates, refusals, length balance,
   and diversity, with no model loaded;
