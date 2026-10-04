@@ -223,6 +223,22 @@ pub struct Architecture {
     /// Mamba's selective state-space mixer in place of attention, with no
     /// feed-forward beside it.
     pub state_space: Option<StateSpaceSpec>,
+    /// LFM2's gated short convolution in place of attention on the layers it
+    /// covers.
+    pub short_convolution: Option<ShortConvolution>,
+}
+
+/// LFM2's gated short convolution: `in_proj` to `B`, `C` and `x`, a causal
+/// depthwise convolution of `B·x` over `kernel` positions, `C` times its
+/// output, and `out_proj`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortConvolution {
+    /// `conv_L_cache`: how many positions the convolution spans.
+    pub kernel: usize,
+    /// `conv_bias`: bias on both projections and the convolution.
+    pub bias: bool,
+    /// Bit `i` set means layer `i` convolves rather than attends.
+    pub layers: u128,
 }
 
 /// Mamba's mixer dimensions, from `intermediate_size` (or `expand` times the
@@ -336,6 +352,7 @@ impl Architecture {
             experts: None,
             latent: None,
             state_space: None,
+            short_convolution: None,
         }
     }
 
@@ -355,6 +372,14 @@ impl Architecture {
     /// Width of the query projection and of the attention output.
     pub fn attention_width(&self, heads: usize) -> usize {
         heads * self.head_dim
+    }
+
+    /// The short convolution layer `layer` uses in place of attention, if
+    /// any.
+    pub fn short_convolution_at(&self, layer: usize) -> Option<&ShortConvolution> {
+        self.short_convolution
+            .as_ref()
+            .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
     }
 
     /// The state-space mixer layer `layer` uses in place of attention, if
@@ -484,6 +509,11 @@ impl Architecture {
     /// Refuses adapter targets this family has no single projection for, so
     /// an adapter is not created and then never trained.
     pub fn check_targets(&self, targets: &[Target], config: &Config) -> Result<()> {
+        if self.short_convolution.is_some() && !targets.is_empty() {
+            bail!(
+                "this model's blocks include short-convolution mixers (LFM2) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
+            );
+        }
         if self.state_space.is_some() && !targets.is_empty() {
             bail!(
                 "this model's blocks are state-space mixers (Mamba) with no attention or feed-forward projection to adapt; Ster steers it but trains no adapters on it"
@@ -982,6 +1012,23 @@ impl Names {
     pub const HUNYUAN: Self = Self {
         query_norm: "query_layernorm",
         key_norm: "key_layernorm",
+        ..Self::LLAMA
+    };
+    /// LFM2: `operator_norm` before the convolution or attention (whose
+    /// output projection is `out_proj` and whose head norms are
+    /// `q_layernorm` and `k_layernorm`), `ffn_norm` before
+    /// `feed_forward.w1`/`w3`/`w2`, and `embedding_norm` after the last block.
+    pub const LFM2: Self = Self {
+        final_norm: "model.embedding_norm",
+        output: "self_attn.out_proj",
+        gate: Some("feed_forward.w1"),
+        up: "feed_forward.w3",
+        down: "feed_forward.w2",
+        attention_norm: "operator_norm",
+        feed_forward_norm: "ffn_norm",
+        query_norm: "q_layernorm",
+        key_norm: "k_layernorm",
+        state_space: "conv",
         ..Self::LLAMA
     };
 }

@@ -13,7 +13,8 @@ use serde_json::Value;
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, ExpertGroups, ExpertLayout, FeedForwardKind,
     LatentAttention, MixtureOfExperts, Names, NormKind, ParameterNorm, Positions, QkvLayout,
-    QueryKeyNorm, RopeScaling, Scoring, SharedExpert, StateSpaceSpec, StructuredSpec,
+    QueryKeyNorm, RopeScaling, Scoring, SharedExpert, ShortConvolution, StateSpaceSpec,
+    StructuredSpec,
 };
 
 /// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
@@ -77,13 +78,14 @@ pub(super) enum Family {
     Mamba2,
     Bamba,
     GptOss,
+    Lfm2,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 54] = [
+    pub(super) const ALL: [Self; 55] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -135,6 +137,7 @@ impl Family {
         Self::Mamba2,
         Self::Bamba,
         Self::GptOss,
+        Self::Lfm2,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -199,6 +202,7 @@ impl Family {
             Self::Mamba2 => "mamba2",
             Self::Bamba => "bamba",
             Self::GptOss => "gpt_oss",
+            Self::Lfm2 => "lfm2",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -290,6 +294,26 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         let ratio = raw.get("expansion_ratio").and_then(Value::as_u64);
         if let (Some(width), Some(ratio)) = (width, ratio) {
             defaults.push(("intermediate_size", Value::from(width * ratio)));
+        }
+    }
+    // LFM2 states its feed-forward as `block_ff_dim`, which Transformers
+    // shrinks to two thirds, scales by `block_ffn_dim_multiplier` and rounds
+    // up to `block_multiple_of` when `block_auto_adjust_ff_dim` is set.
+    if model_type == "lfm2" && missing(raw, "intermediate_size") {
+        if let Some(width) = raw.get("block_ff_dim").and_then(Value::as_f64) {
+            let width = if flag(raw, "block_auto_adjust_ff_dim") {
+                const SWIGLU_SHARE: f64 = 2.0 / 3.0;
+                let shrunk = (width * SWIGLU_SHARE).trunc();
+                let scaled = match raw.get("block_ffn_dim_multiplier").and_then(Value::as_f64) {
+                    Some(multiplier) => (shrunk * multiplier).trunc(),
+                    None => shrunk,
+                };
+                let multiple = raw.get("block_multiple_of").and_then(Value::as_f64).unwrap_or(1.0);
+                (scaled / multiple).ceil() * multiple
+            } else {
+                width
+            };
+            defaults.push(("intermediate_size", Value::from(width as u64)));
         }
     }
     // Mamba states its inner width as `expand` times the model width when it
@@ -1010,6 +1034,39 @@ pub(super) fn family(
             architecture.query_key_value_bias = flag(raw, "bias");
             architecture.output_bias = architecture.query_key_value_bias;
         }
+        "lfm2" => {
+            // LFM2: gated short convolutions on every layer but those
+            // `full_attn_idxs` (or `layer_types`' `full_attention`) names,
+            // per-head query and key norms on the attention layers.
+            fits(layers, path)?;
+            let attention: u128 = match raw.get("layer_types").and_then(Value::as_array) {
+                Some(types) => types
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, kind)| kind.as_str() == Some("full_attention"))
+                    .fold(0, |set, (layer, _)| set | (1u128 << layer)),
+                None => raw
+                    .get("full_attn_idxs")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Value::as_u64)
+                            .filter(|layer| (*layer as usize) < layers)
+                            .fold(0u128, |set, layer| set | (1u128 << layer))
+                    })
+                    .unwrap_or(0),
+            };
+            let Some(kernel) = whole(raw, "conv_L_cache") else {
+                bail!("{} declares an LFM2 model without conv_L_cache", path.display());
+            };
+            architecture.names = Names::LFM2;
+            architecture.query_key_norm = QueryKeyNorm::PerHead;
+            architecture.short_convolution = Some(ShortConvolution {
+                kernel,
+                bias: flag(raw, "conv_bias"),
+                layers: every_layer(layers, path)? & !attention,
+            });
+        }
         "gpt_oss" => {
             // GPT-OSS: biased attention projections with a learned sink per
             // head, sliding-window layers from `layer_types`, and a mixture
@@ -1283,7 +1340,10 @@ pub(super) fn family(
         }
         other => bail!("model architecture {other:?} has no decoder in this Ster build"),
     }
-    if let Some(types) = raw.get("layer_types").and_then(Value::as_array) {
+    // LFM2's `layer_types` say which layers convolve, read above; every other
+    // family's say which layers attend through the window.
+    let windows = raw.get("layer_types").and_then(Value::as_array).filter(|_| model_type != "lfm2");
+    if let Some(types) = windows {
         architecture.sliding_layers = listed_layers(types, layers, path)?;
     }
     // Cohere 2's global layers apply no rotary embedding; so do EXAONE 4's

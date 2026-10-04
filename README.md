@@ -42,10 +42,15 @@ Included now:
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
   `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
   `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `mamba2`, `bamba`,
-  `gpt_oss`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`. GPT-OSS adds a
-  learned sink logit per head to every attention softmax and routes over
-  biased experts with a clamped gate (`swiglu_limit`); OpenAI's own
+  `gpt_oss`, `lfm2`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`. GPT-OSS
+  adds a learned sink logit per head to every attention softmax and routes
+  over biased experts with a clamped gate (`swiglu_limit`); OpenAI's own
   checkpoints are MXFP4-quantized and refused, their BF16 exports load.
+  LFM2 replaces attention on most layers with a gated short convolution
+  (`conv.in_proj` to `B`, `C`, `x`; a causal depthwise `conv` over `B·x`
+  spanning `conv_L_cache` positions; `C` times its output; `conv.out_proj`)
+  and keeps attention with per-head norms on `full_attn_idxs`; adapter
+  training on it is refused.
   Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.

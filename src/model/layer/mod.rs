@@ -18,7 +18,7 @@ use super::{
 };
 use experts::Experts;
 use norm::{Norm, NormSpec};
-use state_space::StateSpace;
+use state_space::{ShortConv, StateSpace};
 use structured::Structured;
 
 /// The feed-forward half of a block: one dense feed-forward, or a router
@@ -144,6 +144,8 @@ enum Mixer {
     StateSpace(StateSpace),
     /// Mamba-2's multi-head structured scan.
     Structured(Structured),
+    /// LFM2's gated short convolution.
+    ShortConv(ShortConv),
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +179,24 @@ impl DecoderLayer {
         let spec = NormSpec::of(architecture);
         let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
         let names = architecture.names;
+        // LFM2's convolution layers: a norm, the convolution, a norm and the
+        // feed-forward, each half added to the residual.
+        if let Some(convolution) = architecture.short_convolution_at(layer) {
+            return Ok(Self {
+                attention_norm: Some(norm(names.attention_norm)?),
+                mixer: Mixer::ShortConv(ShortConv::load(
+                    builder.pp(names.state_space),
+                    config.hidden_size,
+                    convolution,
+                )?),
+                attention_output_norm: None,
+                feed_forward_norm: Some(norm(names.feed_forward_norm)?),
+                feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
+                feed_forward_output_norm: None,
+                residual_multiplier: architecture.residual_multiplier,
+                parallel: false,
+            });
+        }
         // A state-space block is one norm, the mixer and the residual add —
         // the whole block in Mamba; in Jamba a norm and a feed-forward follow
         // as in any other block.
@@ -292,7 +312,7 @@ impl DecoderLayer {
     pub(super) fn window(&self) -> Option<usize> {
         match &self.mixer {
             Mixer::Attention(attention) => attention.window(),
-            Mixer::StateSpace(_) | Mixer::Structured(_) => None,
+            Mixer::StateSpace(_) | Mixer::Structured(_) | Mixer::ShortConv(_) => None,
         }
     }
 
@@ -312,6 +332,7 @@ impl DecoderLayer {
             }
             Mixer::StateSpace(state_space) => state_space.forward(&normed, layer, cache)?,
             Mixer::Structured(structured) => structured.forward(&normed, layer, cache)?,
+            Mixer::ShortConv(convolution) => convolution.forward(&normed, layer, cache)?,
         };
         let attention = optional_norm(self.attention_output_norm.as_ref(), &mixed, mode.pass)?;
         let Some(feed_forward_block) = &self.feed_forward else {

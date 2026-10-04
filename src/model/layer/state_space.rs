@@ -1,20 +1,22 @@
-//! Mamba's selective state-space mixer, in place of attention.
+//! The recurrent mixers that replace attention: Mamba's selective
+//! state-space scan, and LFM2's gated short convolution; Mamba-2's is in
+//! `structured`. All three share one causal depthwise convolution.
 //!
-//! The block projects the normalised input to an inner width twice — a
-//! stream and a gate — runs the stream through a short causal depthwise
-//! convolution and SiLU, derives a step size and the input and output
-//! matrices of a diagonal state-space model from it, scans it token by token,
-//! and gates the result with SiLU of the gate before projecting back. Tensor
-//! names follow Transformers' `MambaMixer`: `in_proj`, `conv1d`, `x_proj`,
-//! `dt_proj`, `A_log`, `D` and `out_proj`.
+//! Mamba projects the normalised input to an inner width twice — a stream
+//! and a gate — runs the stream through the convolution and SiLU, derives a
+//! step size and the input and output matrices of a diagonal state-space
+//! model from it, scans it token by token, and gates the result with SiLU of
+//! the gate before projecting back. Tensor names follow Transformers'
+//! `MambaMixer`: `in_proj`, `conv1d`, `x_proj`, `dt_proj`, `A_log`, `D` and
+//! `out_proj`.
 //!
-//! The decode state is the convolution's last `conv_kernel - 1` inputs and
-//! the scan state, kept in the cache's key-value slot for the layer.
+//! The decode state is the convolution's last `kernel - 1` inputs and, for
+//! a scan, the scan state, kept in the cache's key-value slot for the layer.
 
 use candle_core::{D, DType, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 
-use crate::model::{Cache, NormKind, ParameterNorm, Pass, StateSpaceSpec};
+use crate::model::{Cache, NormKind, ParameterNorm, Pass, ShortConvolution, StateSpaceSpec};
 
 use super::{
     norm::{Norm, NormSpec},
@@ -117,26 +119,18 @@ impl StateSpace {
 
         // The causal depthwise convolution, continued from the inputs the
         // previous call ended on.
-        let stream = stream.transpose(1, 2)?.to_dtype(DType::F32)?;
         let saved = if cache.use_kv_cache { cache.kvs[layer].clone() } else { None };
         let (history, scan) = match saved {
-            Some((history, scan)) => (history, scan),
-            None => (
-                Tensor::zeros((batch, inner, kernel - 1), DType::F32, hidden.device())?,
-                Tensor::zeros((batch, inner, state), DType::F32, hidden.device())?,
-            ),
+            Some((history, scan)) => (Some(history), scan),
+            None => (None, Tensor::zeros((batch, inner, state), DType::F32, hidden.device())?),
         };
-        let padded = Tensor::cat(&[&history, &stream], 2)?;
-        let taps = self.convolution.to_dtype(DType::F32)?;
-        let mut convolved = Tensor::zeros((batch, inner, sequence), DType::F32, hidden.device())?;
-        for tap in 0..kernel {
-            let weight = taps.narrow(1, tap, 1)?.reshape((1, inner, 1))?;
-            convolved = (convolved + padded.narrow(2, tap, sequence)?.broadcast_mul(&weight)?)?;
-        }
-        if let Some(bias) = &self.convolution_bias {
-            convolved = convolved.broadcast_add(&bias.to_dtype(DType::F32)?.reshape((1, inner, 1))?)?;
-        }
-        let next_history = padded.narrow(2, sequence, kernel - 1)?.contiguous()?;
+        let (convolved, next_history) = causal_convolution(
+            &stream.transpose(1, 2)?,
+            history,
+            &self.convolution,
+            self.convolution_bias.as_ref(),
+            kernel,
+        )?;
         let stream = candle_nn::ops::silu(&convolved)?.transpose(1, 2)?.contiguous()?;
 
         // The step size and the input and output matrices, per token.
@@ -178,6 +172,107 @@ impl StateSpace {
             cache.kvs[layer] = Some((next_history, scan));
         }
         let gated = (scanned * candle_nn::ops::silu(&gate.to_dtype(DType::F32)?)?)?;
+        self.output.forward(&gated.to_dtype(dtype)?)
+    }
+}
+
+/// A causal depthwise convolution over `input` `[batch, channels,
+/// sequence]` with `taps` `[channels, kernel]`, continued from `history`, the
+/// last `kernel - 1` inputs of the previous call (zeros on the first). Runs
+/// in F32 and returns the output with the history the next call continues
+/// from.
+pub(super) fn causal_convolution(
+    input: &Tensor,
+    history: Option<Tensor>,
+    taps: &Tensor,
+    bias: Option<&Tensor>,
+    kernel: usize,
+) -> candle_core::Result<(Tensor, Tensor)> {
+    let (batch, channels, sequence) = input.dims3()?;
+    let input = input.to_dtype(DType::F32)?;
+    let history = match history {
+        Some(history) => history,
+        None => Tensor::zeros((batch, channels, kernel - 1), DType::F32, input.device())?,
+    };
+    let padded = Tensor::cat(&[&history, &input], 2)?;
+    let taps = taps.to_dtype(DType::F32)?;
+    let mut convolved = Tensor::zeros((batch, channels, sequence), DType::F32, input.device())?;
+    for tap in 0..kernel {
+        let weight = taps.narrow(1, tap, 1)?.reshape((1, channels, 1))?;
+        convolved = (convolved + padded.narrow(2, tap, sequence)?.broadcast_mul(&weight)?)?;
+    }
+    if let Some(bias) = bias {
+        convolved = convolved.broadcast_add(&bias.to_dtype(DType::F32)?.reshape((1, channels, 1))?)?;
+    }
+    let next = padded.narrow(2, sequence, kernel - 1)?.contiguous()?;
+    Ok((convolved, next))
+}
+
+/// LFM2's gated short convolution: `in_proj` yields `B`, `C` and `x`, the
+/// causal convolution runs over `B·x`, and `C` times its output goes through
+/// `out_proj`. Tensor names follow Transformers' `Lfm2ShortConv`:
+/// `in_proj`, `conv` and `out_proj`.
+#[derive(Debug, Clone)]
+pub(super) struct ShortConv {
+    input: Linear,
+    /// `[hidden, kernel]`.
+    convolution: Tensor,
+    convolution_bias: Option<Tensor>,
+    output: Linear,
+    kernel: usize,
+}
+
+impl ShortConv {
+    /// `builder` is the mixer's (`model.layers.{i}.conv`).
+    pub(super) fn load(
+        builder: VarBuilder<'_>,
+        hidden: usize,
+        spec: &ShortConvolution,
+    ) -> candle_core::Result<Self> {
+        let convolution = builder.pp("conv");
+        Ok(Self {
+            input: projection(hidden, 3 * hidden, spec.bias, false, builder.pp("in_proj"))?,
+            convolution: convolution
+                .get((hidden, 1, spec.kernel), "weight")?
+                .reshape((hidden, spec.kernel))?,
+            convolution_bias: if spec.bias {
+                Some(convolution.get(hidden, "bias")?)
+            } else {
+                None
+            },
+            output: projection(hidden, hidden, spec.bias, false, builder.pp("out_proj"))?,
+            kernel: spec.kernel,
+        })
+    }
+
+    /// Mixes `hidden` `[batch, sequence, width]`, continuing from the
+    /// layer's saved convolution inputs when the cache keeps them.
+    pub(super) fn forward(
+        &self,
+        hidden: &Tensor,
+        layer: usize,
+        cache: &mut Cache,
+    ) -> candle_core::Result<Tensor> {
+        let (_, _, width) = hidden.dims3()?;
+        let dtype = hidden.dtype();
+        let projected = self.input.forward(hidden)?;
+        let gate_in = projected.narrow(2, 0, width)?;
+        let gate_out = projected.narrow(2, width, width)?;
+        let stream = projected.narrow(2, 2 * width, width)?;
+        let saved = if cache.use_kv_cache { cache.kvs[layer].clone() } else { None };
+        let (convolved, next_history) = causal_convolution(
+            &(gate_in * stream)?.transpose(1, 2)?,
+            saved.map(|(history, _)| history),
+            &self.convolution,
+            self.convolution_bias.as_ref(),
+            self.kernel,
+        )?;
+        if cache.use_kv_cache {
+            // The slot holds a pair; a convolution has nothing to scan, so
+            // the second is the same history handle.
+            cache.kvs[layer] = Some((next_history.clone(), next_history));
+        }
+        let gated = (gate_out.to_dtype(DType::F32)? * convolved.transpose(1, 2)?)?;
         self.output.forward(&gated.to_dtype(dtype)?)
     }
 }

@@ -18,7 +18,10 @@ use candle_nn::{Linear, Module, VarBuilder};
 
 use crate::model::{Cache, StateSpaceSpec, StructuredSpec};
 
-use super::{projection, state_space::softplus};
+use super::{
+    projection,
+    state_space::{causal_convolution, softplus},
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct Structured {
@@ -117,27 +120,21 @@ impl Structured {
 
         // The causal depthwise convolution over `x`, `B` and `C`, continued
         // from the inputs the previous call ended on.
-        let mixed = mixed.transpose(1, 2)?.to_dtype(DType::F32)?;
         let saved = if cache.use_kv_cache { cache.kvs[layer].clone() } else { None };
         let (history, scan) = match saved {
-            Some((history, scan)) => (history, scan),
+            Some((history, scan)) => (Some(history), scan),
             None => (
-                Tensor::zeros((batch, channels, kernel - 1), DType::F32, device)?,
+                None,
                 Tensor::zeros((batch, heads, head_dim, state), DType::F32, device)?,
             ),
         };
-        let padded = Tensor::cat(&[&history, &mixed], 2)?;
-        let taps = self.convolution.to_dtype(DType::F32)?;
-        let mut convolved = Tensor::zeros((batch, channels, sequence), DType::F32, device)?;
-        for tap in 0..kernel {
-            let weight = taps.narrow(1, tap, 1)?.reshape((1, channels, 1))?;
-            convolved = (convolved + padded.narrow(2, tap, sequence)?.broadcast_mul(&weight)?)?;
-        }
-        if let Some(bias) = &self.convolution_bias {
-            convolved =
-                convolved.broadcast_add(&bias.to_dtype(DType::F32)?.reshape((1, channels, 1))?)?;
-        }
-        let next_history = padded.narrow(2, sequence, kernel - 1)?.contiguous()?;
+        let (convolved, next_history) = causal_convolution(
+            &mixed.transpose(1, 2)?,
+            history,
+            &self.convolution,
+            self.convolution_bias.as_ref(),
+            kernel,
+        )?;
         let mixed = candle_nn::ops::silu(&convolved)?.transpose(1, 2)?.contiguous()?;
         let stream = mixed.narrow(2, 0, inner)?;
         let input_matrix = mixed.narrow(2, inner, groups * state)?;
