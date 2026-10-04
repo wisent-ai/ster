@@ -93,13 +93,14 @@ pub(super) enum Family {
     FalconH1,
     Qwen3Next,
     KimiLinear,
+    MinimaxM2,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 69] = [
+    pub(super) const ALL: [Self; 70] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -166,6 +167,7 @@ impl Family {
         Self::FalconH1,
         Self::Qwen3Next,
         Self::KimiLinear,
+        Self::MinimaxM2,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -245,6 +247,7 @@ impl Family {
             Self::FalconH1 => "falcon_h1",
             Self::Qwen3Next => "qwen3_next",
             Self::KimiLinear => "kimi_linear",
+            Self::MinimaxM2 => "minimax_m2",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -1715,6 +1718,54 @@ pub(super) fn family(
             if raw.get("n_routed_experts").is_some_and(|count| !count.is_null()) {
                 architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
             }
+        }
+        "minimax_m2" => {
+            // MiniMax-M2: full attention on every layer with query and key
+            // norms over the whole projection (`qk_norm_type` per_layer) or
+            // per head, rotation over `rotary_dim` of each head, and a
+            // mixture of `num_local_experts` Mixtral-named experts scored by
+            // sigmoid, chosen with `block_sparse_moe.e_score_correction_bias`
+            // added (`use_routing_bias`) and renormalised.
+            let linear_layers = raw
+                .get("attn_type_list")
+                .and_then(Value::as_array)
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_u64() == Some(0)));
+            if linear_layers || whole(raw, "shared_intermediate_size").unwrap_or(0) > 0 {
+                bail!(
+                    "{} declares lightning-attention layers (attn_type_list 0) or shared experts (shared_intermediate_size); Ster implements MiniMax-M2 with full attention everywhere and routed experts only",
+                    path.display()
+                );
+            }
+            if flag(raw, "use_qk_norm") {
+                architecture.query_key_norm = match text(raw, "qk_norm_type") {
+                    None | Some("per_layer") => QueryKeyNorm::Full,
+                    Some("per_head") => QueryKeyNorm::PerHead,
+                    Some(other) => bail!(
+                        "{} declares qk_norm_type {other:?}; Ster implements per_layer and per_head",
+                        path.display()
+                    ),
+                };
+            }
+            let mut routed = experts(
+                raw,
+                "num_local_experts",
+                "intermediate_size",
+                true,
+                ExpertLayout::Mixtral,
+                0,
+                path,
+            )?;
+            routed.scoring = match text(raw, "scoring_func") {
+                None | Some("sigmoid") => Scoring::Sigmoid,
+                Some("softmax") => Scoring::Softmax,
+                Some(other) => bail!(
+                    "{} declares scoring_func {other:?}; Ster implements softmax and sigmoid expert scores",
+                    path.display()
+                ),
+            };
+            routed.selection_bias = (raw.get("use_routing_bias").and_then(Value::as_bool) != Some(false))
+                .then_some("block_sparse_moe.e_score_correction_bias");
+            architecture.experts = Some(routed);
         }
         "kimi_linear" => {
             // Kimi-Linear: Kimi Delta Attention on the layers

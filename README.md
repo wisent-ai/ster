@@ -44,7 +44,7 @@ Included now:
   `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `mamba2`, `bamba`,
   `gpt_oss`, `lfm2`, `ernie4_5_moe`, `dbrx`, `phimoe`, `hunyuan_v1_moe`,
   `telechat`, `lfm2_moe`, `granitemoehybrid`, `nemotron_h`, `jais2`,
-  `bailing_moe`, `TeleFLM`, `falcon_h1`, `qwen3_next`, `kimi_linear`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`, with the
+  `bailing_moe`, `TeleFLM`, `falcon_h1`, `qwen3_next`, `kimi_linear`, `minimax_m2`, `smollm3`, `gemma`, `gemma2` or `gemma3_text`, with the
   rotation read from
   `rope_theta` and `rope_scaling` or from Transformers 5's `rope_parameters`.
   OLMo, OLMoE and DBRX clamp
