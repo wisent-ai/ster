@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, ExpertGroups, ExpertLayout, FeedForwardKind,
     LatentAttention, MixtureOfExperts, Names, NormKind, ParameterNorm, Positions, QkvLayout,
-    QueryKeyNorm, RopeScaling, Scoring, SharedExpert, ShortConvolution, StateSpaceSpec,
+    QueryKeyNorm, RopeScaling, Scoring, SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec,
     StructuredSpec,
 };
 
@@ -781,7 +781,7 @@ pub(super) fn family(
                             intermediate,
                             module: "mlp.shared_expert",
                             gated: true,
-                            stacked: false,
+                            form: SharedForm::GateUpDown,
                         });
                 }
                 architecture.experts = Some(routed);
@@ -1036,7 +1036,7 @@ pub(super) fn family(
                         intermediate: shared * routed.intermediate,
                         module: "mlp.shared_experts",
                         gated: false,
-                        stacked: false,
+                        form: SharedForm::GateUpDown,
                     });
                 routed.selection_bias = Some("mlp.moe_statics.e_score_correction_bias");
                 architecture.experts = Some(routed);
@@ -1219,7 +1219,8 @@ pub(super) fn family(
             // Nemotron-H: one norm and one sublayer per layer, its kind the
             // layer's letter in `hybrid_override_pattern` — `M` a Mamba-2
             // scan, `*` attention without rotation, `-` a squared-ReLU
-            // `up_proj`/`down_proj` feed-forward.
+            // `up_proj`/`down_proj` feed-forward, `E` a mixture of such
+            // feed-forwards behind DeepSeek-V3's router.
             fits(layers, path)?;
             let Some(pattern) = text(raw, "hybrid_override_pattern") else {
                 bail!("{} declares a Nemotron-H model without hybrid_override_pattern", path.display());
@@ -1231,17 +1232,45 @@ pub(super) fn family(
                     pattern.chars().count()
                 );
             }
-            let (mut mamba, mut feed_forward) = (0u128, 0u128);
+            let (mut mamba, mut feed_forward, mut routed_layers) = (0u128, 0u128, 0u128);
             for (layer, kind) in pattern.chars().enumerate() {
                 match kind {
                     'M' => mamba |= 1u128 << layer,
                     '-' => feed_forward |= 1u128 << layer,
+                    'E' => routed_layers |= 1u128 << layer,
                     '*' => {}
                     other => bail!(
-                        "{} marks layer {layer} {other:?} in hybrid_override_pattern; Ster implements Nemotron-H's M (Mamba-2), * (attention) and - (feed-forward) layers",
+                        "{} marks layer {layer} {other:?} in hybrid_override_pattern; Ster implements Nemotron-H's M (Mamba-2), * (attention), - (feed-forward) and E (mixture-of-experts) layers",
                         path.display()
                     ),
                 }
+            }
+            if routed_layers != 0 {
+                // `E` layers: `n_routed_experts` experts under `mixer.gate`
+                // (sigmoid scores, `mixer.gate.e_score_correction_bias` added
+                // to choose, `n_group`/`topk_group` limits, renormalised under
+                // `norm_topk_prob`, scaled by `routed_scaling_factor`) beside
+                // `mixer.shared_experts`, `moe_shared_expert_intermediate_size`
+                // wide; every projection is `up_proj`/`down_proj`.
+                if raw.get("moe_latent_size").is_some_and(|size| !size.is_null()) {
+                    bail!(
+                        "{} projects its experts' input into moe_latent_size; Ster implements Nemotron-H experts on the full hidden width",
+                        path.display()
+                    );
+                }
+                let mut routed = deepseek_experts(raw, model_type, layers, path)?;
+                routed.layout = ExpertLayout::NemotronH;
+                routed.dense_layers = every_layer(layers, path)? & !routed_layers;
+                routed.selection_bias = Some("mixer.gate.e_score_correction_bias");
+                routed.shared = whole(raw, "moe_shared_expert_intermediate_size")
+                    .filter(|width| *width > 0)
+                    .map(|intermediate| SharedExpert {
+                        intermediate,
+                        module: "mixer.shared_experts",
+                        gated: false,
+                        form: SharedForm::UpDown,
+                    });
+                architecture.experts = Some(routed);
             }
             let heads = structured(raw, "mamba_num_heads", "mamba_head_dim", "n_groups", path)?;
             let (Some(state), Some(kernel)) = (whole(raw, "ssm_state_size"), whole(raw, "conv_kernel"))
@@ -1257,7 +1286,7 @@ pub(super) fn family(
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.feed_forward_bias = flag(raw, "mlp_bias");
-            architecture.lone_sublayers = Some(feed_forward);
+            architecture.lone_sublayers = Some(feed_forward | routed_layers);
             architecture.state_space = Some(StateSpaceSpec {
                 inner: heads.heads * heads.head_dim,
                 state,
@@ -1408,7 +1437,7 @@ pub(super) fn family(
                         intermediate: shared * llama.intermediate_size,
                         module: "mlp.shared_mlp",
                         gated: false,
-                        stacked: false,
+                        form: SharedForm::GateUpDown,
                     });
                 }
                 architecture.experts = Some(routed);
@@ -1788,13 +1817,14 @@ fn deepseek_experts(
             intermediate: shared * routed.intermediate,
             module: "mlp.shared_experts",
             gated: false,
-            stacked: false,
+            form: SharedForm::GateUpDown,
         });
-    // GLM-4-MoE's router is DeepSeek-V3's and its configs leave the method
-    // out: sigmoid scores, `noaux_tc` selection.
-    let v3_router = matches!(model_type, "deepseek_v3" | "glm4_moe");
+    // GLM-4-MoE's and Nemotron-H's routers are DeepSeek-V3's and their
+    // configs leave the method out: sigmoid scores, `noaux_tc` selection.
+    let v3_default = matches!(model_type, "glm4_moe" | "nemotron_h");
+    let v3_router = v3_default || model_type == "deepseek_v3";
     routed.scoring = match text(raw, "scoring_func") {
-        None if model_type == "glm4_moe" => Scoring::Sigmoid,
+        None if v3_default => Scoring::Sigmoid,
         None | Some("softmax") => Scoring::Softmax,
         Some("sigmoid") => Scoring::Sigmoid,
         Some(other) => bail!(
@@ -1802,8 +1832,7 @@ fn deepseek_experts(
             path.display()
         ),
     };
-    let method = text(raw, "topk_method")
-        .unwrap_or(if model_type == "glm4_moe" { "noaux_tc" } else { "greedy" });
+    let method = text(raw, "topk_method").unwrap_or(if v3_default { "noaux_tc" } else { "greedy" });
     routed.groups = match method {
         "greedy" => None,
         "group_limited_greedy" | "noaux_tc" => {
@@ -1915,7 +1944,7 @@ fn granite_hybrid(
             intermediate: shared,
             module: "shared_mlp",
             gated: false,
-            stacked: true,
+            form: SharedForm::Stacked,
         });
         architecture.experts = Some(routed);
     }

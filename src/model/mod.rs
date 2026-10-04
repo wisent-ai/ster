@@ -689,13 +689,24 @@ pub struct SharedExpert {
     pub intermediate: usize,
     /// Its module below the layer: Qwen2-MoE's `mlp.shared_expert`,
     /// DeepSeek's and ERNIE's `mlp.shared_experts`, HunYuan's
-    /// `mlp.shared_mlp`, Granite 4.0's `shared_mlp`.
+    /// `mlp.shared_mlp`, Granite 4.0's `shared_mlp`, Nemotron-H's
+    /// `mixer.shared_experts`.
     pub module: &'static str,
     /// Scaled by the sigmoid of `mlp.shared_expert_gate` (Qwen2-MoE).
     pub gated: bool,
+    pub form: SharedForm,
+}
+
+/// The projections a shared expert stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedForm {
+    /// `gate_proj`, `up_proj` and `down_proj`.
+    GateUpDown,
+    /// `up_proj` and `down_proj`, no gate (Nemotron-H).
+    UpDown,
     /// Gate and up stacked in `input_linear`, down in `output_linear`
-    /// (Granite 4.0), rather than `gate_proj`, `up_proj` and `down_proj`.
-    pub stacked: bool,
+    /// (Granite 4.0).
+    Stacked,
 }
 
 /// How expert scores come from the router's logits.
@@ -740,6 +751,9 @@ pub enum ExpertLayout {
     HunYuan,
     /// `feed_forward.gate`, `feed_forward.experts.{e}.w1|w3|w2` (LFM2-MoE).
     Lfm2,
+    /// `mixer.gate`, `mixer.experts.{e}.up_proj|down_proj`, no gate
+    /// projection (Nemotron-H).
+    NemotronH,
     /// `mlp.experts.gate_up_proj` and `down_proj`, with biases.
     GptOss,
     /// `ffn.router.layer`, and every expert stacked in

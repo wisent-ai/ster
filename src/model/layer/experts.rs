@@ -11,12 +11,13 @@ use candle_core::{D, DType, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 
 use crate::model::{
-    Activation, ExpertGroups, ExpertLayout, MixtureOfExperts, Scoring, SharedExpert,
+    Activation, ExpertGroups, ExpertLayout, MixtureOfExperts, Scoring, SharedExpert, SharedForm,
 };
 
 #[derive(Debug, Clone)]
 struct Expert {
-    gate: Linear,
+    /// `None` in Nemotron-H's experts, which are `down(act(up))`.
+    gate: Option<Linear>,
     up: Linear,
     down: Linear,
 }
@@ -26,7 +27,8 @@ struct Expert {
 const GPT_OSS_GATE_SHARPNESS: f64 = 1.702;
 
 impl Expert {
-    /// `down(act(gate) · up)`; with a `limit`, GPT-OSS's clamped form,
+    /// `down(act(gate) · up)`, or `down(act(up))` without a gate; with a
+    /// `limit`, GPT-OSS's clamped form,
     /// `down((clamp(up, -limit, limit) + 1) · g · sigmoid(1.702 g))` where
     /// `g = min(gate, limit)`.
     fn forward(
@@ -35,29 +37,33 @@ impl Expert {
         activation: Activation,
         limit: Option<f64>,
     ) -> candle_core::Result<Tensor> {
-        let gate = self.gate.forward(input)?;
         let up = self.up.forward(input)?;
-        let gated = match limit {
-            Some(limit) => {
-                let gate = gate.minimum(limit)?;
+        let gated = match (&self.gate, limit) {
+            (Some(gate), Some(limit)) => {
+                let gate = gate.forward(input)?.minimum(limit)?;
                 let up = (up.clamp(-limit, limit)? + 1.0)?;
                 let sigmoid = ((gate.clone() * -GPT_OSS_GATE_SHARPNESS)?.exp()? + 1.0)?.recip()?;
                 ((gate * sigmoid)? * up)?
             }
-            None => (activation.apply(&gate)? * up)?,
+            (Some(gate), None) => (activation.apply(&gate.forward(input)?)? * up)?,
+            (None, _) => activation.apply(&up)?,
         };
         self.down.forward(&gated)
     }
 
+    /// An expert of three unbiased projections named `[gate, up, down]`, or
+    /// of `[up, down]` alone when `gate` is `None`.
     fn load(
         hidden: usize,
         intermediate: usize,
-        names: [&str; 3],
+        gate: Option<&str>,
+        [up, down]: [&str; 2],
         builder: VarBuilder<'_>,
     ) -> candle_core::Result<Self> {
-        let [gate, up, down] = names;
         Ok(Self {
-            gate: linear_no_bias(hidden, intermediate, builder.pp(gate))?,
+            gate: gate
+                .map(|gate| linear_no_bias(hidden, intermediate, builder.pp(gate)))
+                .transpose()?,
             up: linear_no_bias(hidden, intermediate, builder.pp(up))?,
             down: linear_no_bias(intermediate, hidden, builder.pp(down))?,
         })
@@ -100,25 +106,30 @@ impl Experts {
                         Expert::load(
                             hidden,
                             intermediate,
-                            ["w1", "w3", "w2"],
+                            Some("w1"),
+                            ["w3", "w2"],
                             block.pp("experts").pp(expert.to_string()),
                         )
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
                 (linear_no_bias(hidden, count, block.pp("gate"))?, experts)
             }
-            ExpertLayout::Qwen | ExpertLayout::Jamba | ExpertLayout::HunYuan => {
+            ExpertLayout::Qwen | ExpertLayout::Jamba | ExpertLayout::HunYuan | ExpertLayout::NemotronH => {
                 let (block, router) = match spec.layout {
                     ExpertLayout::Jamba => (builder.pp("feed_forward"), "router"),
                     ExpertLayout::HunYuan => (builder.pp("mlp"), "gate.wg"),
+                    ExpertLayout::NemotronH => (builder.pp("mixer"), "gate"),
                     _ => (builder.pp("mlp"), "gate"),
                 };
+                // Nemotron-H's experts have no gate projection.
+                let gate = (spec.layout != ExpertLayout::NemotronH).then_some("gate_proj");
                 let experts = (0..count)
                     .map(|expert| {
                         Expert::load(
                             hidden,
                             intermediate,
-                            ["gate_proj", "up_proj", "down_proj"],
+                            gate,
+                            ["up_proj", "down_proj"],
                             block.pp("experts").pp(expert.to_string()),
                         )
                     })
@@ -137,7 +148,7 @@ impl Experts {
                     .map(|expert| -> candle_core::Result<Expert> {
                         let rows = input.get(expert)?;
                         Ok(Expert {
-                            gate: Linear::new(rows.narrow(0, 0, intermediate)?, None),
+                            gate: Some(Linear::new(rows.narrow(0, 0, intermediate)?, None)),
                             up: Linear::new(rows.narrow(0, intermediate, intermediate)?, None),
                             down: Linear::new(output.get(expert)?, None),
                         })
@@ -168,7 +179,7 @@ impl Experts {
                             ))
                         };
                         Ok(Expert {
-                            gate: column(0)?,
+                            gate: Some(column(0)?),
                             up: column(1)?,
                             down: Linear::new(
                                 down.get(expert)?.t()?.contiguous()?,
@@ -192,7 +203,7 @@ impl Experts {
                     .map(|expert| -> candle_core::Result<Expert> {
                         let rows = |tensor: &Tensor| tensor.narrow(0, expert * intermediate, intermediate);
                         Ok(Expert {
-                            gate: Linear::new(rows(&gate)?, None),
+                            gate: Some(Linear::new(rows(&gate)?, None)),
                             up: Linear::new(rows(&up)?, None),
                             down: Linear::new(rows(&down)?.t()?.contiguous()?, None),
                         })
@@ -202,19 +213,32 @@ impl Experts {
             }
         };
         let shared = match spec.shared {
-            Some(SharedExpert { intermediate, module, gated, stacked }) => {
+            Some(SharedExpert { intermediate, module, gated, form }) => {
                 let block = builder.pp(module);
-                let expert = if stacked {
+                let expert = match form {
                     // Granite 4.0's `shared_mlp`: gate rows then up rows in
                     // `input_linear`, the down projection in `output_linear`.
-                    let input = block.get((2 * intermediate, hidden), "input_linear.weight")?;
-                    Expert {
-                        gate: Linear::new(input.narrow(0, 0, intermediate)?, None),
-                        up: Linear::new(input.narrow(0, intermediate, intermediate)?, None),
-                        down: Linear::new(block.get((hidden, intermediate), "output_linear.weight")?, None),
+                    SharedForm::Stacked => {
+                        let input = block.get((2 * intermediate, hidden), "input_linear.weight")?;
+                        Expert {
+                            gate: Some(Linear::new(input.narrow(0, 0, intermediate)?, None)),
+                            up: Linear::new(input.narrow(0, intermediate, intermediate)?, None),
+                            down: Linear::new(
+                                block.get((hidden, intermediate), "output_linear.weight")?,
+                                None,
+                            ),
+                        }
                     }
-                } else {
-                    Expert::load(hidden, intermediate, ["gate_proj", "up_proj", "down_proj"], block)?
+                    SharedForm::GateUpDown => Expert::load(
+                        hidden,
+                        intermediate,
+                        Some("gate_proj"),
+                        ["up_proj", "down_proj"],
+                        block,
+                    )?,
+                    SharedForm::UpDown => {
+                        Expert::load(hidden, intermediate, None, ["up_proj", "down_proj"], block)?
+                    }
                 };
                 let gate = if gated {
                     Some(linear_no_bias(hidden, 1, builder.pp("mlp").pp("shared_expert_gate"))?)
