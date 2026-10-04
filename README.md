@@ -39,8 +39,9 @@ Included now:
   `starcoder2`, `cohere`, `cohere2`, `nemotron`, `olmo`, `olmo2`, `olmo3`,
   `olmoe`, `exaone4`, `internlm3`, `seed_oss`, `arcee`, `ernie4_5`,
   `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `gpt2`,
-  `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `smollm3`, `gemma`,
-  `gemma2` or `gemma3_text`. Coverage is measured
+  `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
+  `deepseek_v3`, `minicpm3`, `smollm3`, `gemma`, `gemma2` or
+  `gemma3_text`. Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Each family is the same rotary, grouped-query decoder with what its config
@@ -54,10 +55,15 @@ Included now:
   `use_qkv_bias`, `use_bias`, `mlp_bias`, Phi-2's biased head), a gated
   feed-forward, a plain one (Starcoder2's `c_fc` and `c_proj`, Phi-2's `fc1`
   and `fc2`, Nemotron's squared ReLU) or a mixture of experts (Mixtral,
-  Qwen2-MoE with its shared expert, Qwen3-MoE, OLMoE, GraniteMoE: a router
-  picks `num_experts_per_tok` experts per token, renormalised when the
-  family does, with Qwen's `mlp_only_layers` and `decoder_sparse_step`
-  layers kept dense), sequential or parallel blocks (Cohere, Phi-2,
+  Qwen2-MoE with its gated shared expert, Qwen3-MoE, OLMoE, GraniteMoE,
+  DeepSeek with its shared experts, sigmoid scores, group-limited routing
+  and `e_score_correction_bias`: a router picks `num_experts_per_tok`
+  experts per token, renormalised when the family does, with Qwen's
+  `mlp_only_layers` and `decoder_sparse_step` and DeepSeek's
+  `first_k_dense_replace` layers kept dense), DeepSeek's and MiniCPM3's
+  multi-head latent attention (low-rank query and key-value bottlenecks, a
+  rotated key part shared by every head, values narrower than queries),
+  sequential or parallel blocks (Cohere, Phi-2,
   StableLM's `use_parallel_residual`),
   sliding-window attention on the layers `sliding_window`,
   `max_window_layers`, `sliding_window_pattern` or `layer_types` name,
@@ -83,7 +89,8 @@ Included now:
   GPT-J's `rotary_dim`), GPT-style key names (`n_embd`, `n_layer`, `n_head`,
   `n_positions`, `n_inner`, `rotary_emb_base`), `linear` rotary
   scaling and Phi-3's `longrope` (short factors within the original context,
-  long ones past it), and Gemma's `1 + weight` norms, scaled embedding, tanh
+  long ones past it), YaRN (`rope_scaling` of type `yarn`, with DeepSeek's
+  `mscale_all_dim` sharpening the scores), and Gemma's `1 + weight` norms, scaled embedding, tanh
   GELU gate and tied embeddings, plus Gemma 2's and 3's post-attention and
   post-feed-forward norms, `query_pre_attn_scalar` and logit soft-capping,
   and Gemma 3's separate `rope_local_base_freq` on sliding-window layers. A
@@ -92,7 +99,7 @@ Included now:
   `hidden_act` (or `activation_function`) is not silu, gelu,
   gelu_pytorch_tanh, gelu_new, gelu_fast, relu or relu2, that rotates an odd
   or empty share of each head, whose `rope_scaling` is not `llama3`,
-  `linear` or Phi-3's `longrope`, or that asks for a variant the decoder
+  `linear`, Phi-3's `longrope` or `yarn`, or that asks for a variant the decoder
   does not implement (GPT-2's `scale_attn_by_inverse_layer_idx`, OPT's
   post-norm `do_layer_norm_before: false` or `word_embed_proj_dim`, BLOOM's
   `apply_residual_connection_post_layernorm`). Adapter targets a family has

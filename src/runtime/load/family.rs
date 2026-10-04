@@ -6,13 +6,14 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
 use crate::model::{
-    ALIBI_SPAN, Activation, Architecture, ExpertLayout, FeedForwardKind, MixtureOfExperts, Names,
-    NormKind, Positions, QkvLayout, QueryKeyNorm, RopeScaling,
+    ALIBI_SPAN, Activation, Architecture, ExpertGroups, ExpertLayout, FeedForwardKind,
+    LatentAttention, MixtureOfExperts, Names, NormKind, Positions, QkvLayout, QueryKeyNorm,
+    RopeScaling, Scoring, SharedExpert,
 };
 
 /// A decoder layout Ster implements, one per Transformers `model_type`.
@@ -59,13 +60,16 @@ pub(super) enum Family {
     Bloom,
     Falcon,
     Mpt,
+    DeepseekV2,
+    DeepseekV3,
+    MiniCpm3,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 41] = [
+    pub(super) const ALL: [Self; 44] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -104,6 +108,9 @@ impl Family {
         Self::Bloom,
         Self::Falcon,
         Self::Mpt,
+        Self::DeepseekV2,
+        Self::DeepseekV3,
+        Self::MiniCpm3,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -155,6 +162,9 @@ impl Family {
             Self::Bloom => "bloom",
             Self::Falcon => "falcon",
             Self::Mpt => "mpt",
+            Self::DeepseekV2 => "deepseek_v2",
+            Self::DeepseekV3 => "deepseek_v3",
+            Self::MiniCpm3 => "minicpm3",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -295,11 +305,11 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
     };
     match scaling_kind(scaling) {
         "llama3" => Ok(None),
-        "default" | "linear" | "longrope" => Ok(raw
+        "default" | "linear" | "longrope" | "yarn" => Ok(raw
             .as_object_mut()
             .and_then(|object| object.remove("rope_scaling"))),
         other => bail!(
-            "{} declares rope_scaling {other:?}; Ster implements llama3, linear and longrope rotary scaling",
+            "{} declares rope_scaling {other:?}; Ster implements llama3, linear, longrope and yarn rotary scaling",
             path.display()
         ),
     }
@@ -366,7 +376,48 @@ fn rope_scaling(
                 attention: attention as f32,
             })
         }
+        "yarn" => {
+            let Some(factor) = scaling.get("factor").and_then(Value::as_f64) else {
+                bail!("{} declares yarn rope_scaling with no factor", path.display());
+            };
+            let original = scaling
+                .get("original_max_position_embeddings")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(llama.max_position_embeddings);
+            let stated = |key: &str| scaling.get(key).and_then(Value::as_f64).filter(|v| *v != 0.0);
+            // Transformers' `_compute_yarn_parameters`: the cos and sin
+            // magnitude is `mscale / mscale_all_dim` when both are stated,
+            // otherwise the stated `attention_factor`, otherwise YaRN's own.
+            let attention = match (stated("mscale"), stated("mscale_all_dim")) {
+                (Some(mscale), Some(all)) => yarn_mscale(factor, mscale) / yarn_mscale(factor, all),
+                _ => stated("attention_factor").unwrap_or_else(|| yarn_mscale(factor, 1.0)),
+            };
+            Ok(RopeScaling::Yarn {
+                factor: factor as f32,
+                original,
+                beta_fast: stated("beta_fast").unwrap_or(YARN_BETA_FAST) as f32,
+                beta_slow: stated("beta_slow").unwrap_or(YARN_BETA_SLOW) as f32,
+                attention: attention as f32,
+            })
+        }
         _ => Ok(RopeScaling::None),
+    }
+}
+
+/// YaRN's default rotation counts bounding the interpolated band (Peng et
+/// al., 2023; Transformers' `beta_fast` and `beta_slow`).
+const YARN_BETA_FAST: f64 = 32.0;
+const YARN_BETA_SLOW: f64 = 1.0;
+
+/// YaRN's attention temperature for a context stretched by `factor`:
+/// `0.1 * mscale * ln(factor) + 1`, or one when nothing is stretched.
+fn yarn_mscale(factor: f64, mscale: f64) -> f64 {
+    const SLOPE: f64 = 0.1;
+    if factor <= 1.0 {
+        1.0
+    } else {
+        SLOPE * mscale * factor.ln() + 1.0
     }
 }
 
@@ -389,15 +440,36 @@ pub(super) fn family(
         architecture.head_dim = head_dim;
         architecture.score_divisor = (head_dim as f64).sqrt();
     }
+    // Multi-head latent attention (DeepSeek-V2 and V3, MiniCPM3) states its
+    // bottlenecks and head parts; a head is its position-free part plus its
+    // rotated part, and only the rotated part rotates.
+    if let Some(key_value_rank) = whole(raw, "kv_lora_rank") {
+        let part = |key: &str| -> Result<usize> {
+            whole(raw, key).with_context(|| {
+                format!("{} declares kv_lora_rank without {key}", path.display())
+            })
+        };
+        let latent = LatentAttention {
+            query_rank: whole(raw, "q_lora_rank"),
+            key_value_rank,
+            unrotated: part("qk_nope_head_dim")?,
+            rotated: part("qk_rope_head_dim")?,
+            value: part("v_head_dim")?,
+        };
+        architecture.head_dim = latent.unrotated + latent.rotated;
+        architecture.score_divisor = (architecture.head_dim as f64).sqrt();
+        architecture.latent = Some(latent);
+    }
     // The rotated share of each head: `partial_rotary_factor` (or GPT-NeoX's
-    // `rotary_pct`) as a fraction, which Transformers truncates, or GPT-J's
-    // `rotary_dim` as a width.
+    // `rotary_pct`) as a fraction, which Transformers truncates, GPT-J's
+    // `rotary_dim` as a width, or latent attention's rotated part.
     let head_dim = architecture.head_dim;
     let fraction = number(raw, "partial_rotary_factor").or_else(|| number(raw, "rotary_pct"));
-    architecture.rotary_dim = match (fraction, whole(raw, "rotary_dim")) {
-        (Some(factor), _) => (head_dim as f64 * factor) as usize,
-        (None, Some(width)) => width,
-        (None, None) => head_dim,
+    architecture.rotary_dim = match (architecture.latent, fraction, whole(raw, "rotary_dim")) {
+        (Some(latent), _, _) => latent.rotated,
+        (None, Some(factor), _) => (head_dim as f64 * factor) as usize,
+        (None, None, Some(width)) => width,
+        (None, None, None) => head_dim,
     };
     let rotary_dim = architecture.rotary_dim;
     if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
@@ -407,6 +479,18 @@ pub(super) fn family(
         );
     }
     architecture.rope_scaling = rope_scaling(scaling, architecture.rotary_dim, raw, llama, path)?;
+    // DeepSeek sharpens the scores of a YaRN-stretched model by the square
+    // of the temperature `mscale_all_dim` gives.
+    if architecture.latent.is_some() {
+        let all = scaling
+            .and_then(|scaling| scaling.get("mscale_all_dim"))
+            .and_then(Value::as_f64)
+            .filter(|value| *value != 0.0);
+        if let (RopeScaling::Yarn { factor, .. }, Some(all)) = (&architecture.rope_scaling, all) {
+            let temperature = yarn_mscale(f64::from(*factor), all);
+            architecture.score_divisor /= temperature * temperature;
+        }
+    }
     // Gemma's configs name `gelu` but Transformers runs the tanh
     // approximation for every Gemma, so the family decides, not the key.
     if !model_type.starts_with("gemma") && model_type != "bloom" {
@@ -465,7 +549,8 @@ pub(super) fn family(
                     path,
                 )?;
                 if model_type == "qwen2_moe" {
-                    routed.shared_intermediate = whole(raw, "shared_expert_intermediate_size");
+                    routed.shared = whole(raw, "shared_expert_intermediate_size")
+                        .map(|intermediate| SharedExpert { intermediate, gated: true });
                 }
                 architecture.experts = Some(routed);
             }
@@ -663,6 +748,31 @@ pub(super) fn family(
         }
         "orion" => {
             architecture.norm = NormKind::Layer { bias: true };
+        }
+        "deepseek_v2" | "deepseek_v3" | "minicpm3" => {
+            if architecture.latent.is_none() {
+                bail!(
+                    "{} declares no kv_lora_rank; Ster implements {model_type} with its latent attention",
+                    path.display()
+                );
+            }
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            if model_type == "minicpm3" {
+                // MiniCPM's muP scales; its rotation is by halves.
+                architecture.embedding_multiplier = number(raw, "scale_emb");
+                architecture.residual_multiplier =
+                    number(raw, "scale_depth").map(|depth| depth / (layers as f64).sqrt());
+                architecture.logits_multiplier = number(raw, "dim_model_base")
+                    .map(|base| base / llama.hidden_size as f64);
+            } else {
+                // DeepSeek rotates adjacent pairs (`rope_interleave`, on by
+                // default).
+                architecture.interleaved_rotary =
+                    raw.get("rope_interleave").and_then(Value::as_bool).unwrap_or(true);
+            }
+            if raw.get("n_routed_experts").is_some_and(|count| !count.is_null()) {
+                architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
+            }
         }
         "gpt_neox" => {
             // Pythia and GPT-NeoX: LayerNorm with bias, a head-interleaved
@@ -925,10 +1035,97 @@ fn experts(
         top_k,
         intermediate,
         normalize,
-        shared_intermediate: None,
+        shared: None,
         layout,
         dense_layers,
+        scoring: Scoring::Softmax,
+        groups: None,
+        selection_bias: false,
+        routed_scale: None,
     })
+}
+
+/// DeepSeek's mixture of experts: `n_routed_experts` routed and
+/// `n_shared_experts` shared experts of `moe_intermediate_size` each, dense
+/// layers before `first_k_dense_replace` and off `moe_layer_freq`, scores by
+/// `scoring_func`, chosen by `topk_method` (`greedy`, or group-limited over
+/// `n_group` groups keeping `topk_group`; `noaux_tc` ranks groups by their
+/// best two and adds `e_score_correction_bias` to choose), and weights scaled
+/// by `routed_scaling_factor` — always on V3, on V2 only when they are not
+/// renormalised.
+fn deepseek_experts(
+    raw: &Value,
+    model_type: &str,
+    layers: usize,
+    path: &Path,
+) -> Result<MixtureOfExperts> {
+    fits(layers, path)?;
+    let first_dense = whole(raw, "first_k_dense_replace").unwrap_or(0);
+    let frequency = whole(raw, "moe_layer_freq").unwrap_or(1).max(1);
+    let dense_layers = (0..layers)
+        .filter(|layer| *layer < first_dense || layer % frequency != 0)
+        .fold(0, |set, layer| set | (1u128 << layer));
+    let normalize = flag(raw, "norm_topk_prob");
+    let mut routed = experts(
+        raw,
+        "n_routed_experts",
+        "moe_intermediate_size",
+        normalize,
+        ExpertLayout::Qwen,
+        dense_layers,
+        path,
+    )?;
+    routed.shared = whole(raw, "n_shared_experts")
+        .filter(|shared| *shared > 0)
+        .map(|shared| SharedExpert {
+            intermediate: shared * routed.intermediate,
+            gated: false,
+        });
+    routed.scoring = match text(raw, "scoring_func") {
+        None | Some("softmax") => Scoring::Softmax,
+        Some("sigmoid") => Scoring::Sigmoid,
+        Some(other) => bail!(
+            "{} declares scoring_func {other:?}; Ster implements softmax and sigmoid expert scores",
+            path.display()
+        ),
+    };
+    let method = text(raw, "topk_method").unwrap_or("greedy");
+    routed.groups = match method {
+        "greedy" => None,
+        "group_limited_greedy" | "noaux_tc" => {
+            let (Some(groups), Some(chosen_groups)) = (whole(raw, "n_group"), whole(raw, "topk_group"))
+            else {
+                bail!(
+                    "{} routes by {method} without n_group and topk_group",
+                    path.display()
+                );
+            };
+            if groups == 0 || routed.count % groups != 0 || chosen_groups > groups {
+                bail!(
+                    "{} splits {} experts into {groups} groups and keeps {chosen_groups}; the groups must divide the experts evenly and at least as many must exist as are kept",
+                    path.display(),
+                    routed.count
+                );
+            }
+            Some(ExpertGroups {
+                groups,
+                chosen_groups,
+                rank_by_top_two: method == "noaux_tc",
+            })
+        }
+        other => bail!(
+            "{} declares topk_method {other:?}; Ster implements greedy, group_limited_greedy and noaux_tc",
+            path.display()
+        ),
+    };
+    routed.selection_bias = method == "noaux_tc";
+    let scale = number(raw, "routed_scaling_factor");
+    routed.routed_scale = if model_type == "deepseek_v3" || !(normalize && routed.top_k > 1) {
+        scale
+    } else {
+        None
+    };
+    Ok(routed)
 }
 
 /// Qwen MoE's dense layers: those in `mlp_only_layers`, and those whose

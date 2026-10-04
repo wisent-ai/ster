@@ -21,12 +21,15 @@ pub use adapter::{Adapter, Adapters};
 pub use artifact::{Artifact, Kind, ARTIFACT_SCHEMA_VERSION, REWARD_HEAD_TENSOR};
 
 /// The widths a model's projections have, which an adapter's factors must
-/// match: the residual stream, the attention (query and output projection),
-/// one key or value projection, and the feed-forward.
+/// match: the residual stream, the query projection, the attention output
+/// (narrower than the query when a head's value is narrower than its query,
+/// as in DeepSeek's latent attention), one key or value projection, and the
+/// feed-forward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Widths {
     pub hidden: usize,
     pub attention: usize,
+    pub attention_output: usize,
     pub key_value: usize,
     pub intermediate: usize,
 }
@@ -104,7 +107,7 @@ impl Target {
     fn widths(self, widths: Widths) -> (usize, usize) {
         match self {
             Self::Query => (widths.attention, widths.hidden),
-            Self::Output => (widths.hidden, widths.attention),
+            Self::Output => (widths.hidden, widths.attention_output),
             Self::Key | Self::Value => (widths.key_value, widths.hidden),
             Self::Gate | Self::Up => (widths.intermediate, widths.hidden),
             Self::Down => (widths.hidden, widths.intermediate),

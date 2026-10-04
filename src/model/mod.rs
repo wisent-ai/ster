@@ -211,6 +211,27 @@ pub struct Architecture {
     /// A routed feed-forward in place of the dense one, on the layers it
     /// covers.
     pub experts: Option<MixtureOfExperts>,
+    /// DeepSeek's multi-head latent attention in place of separate query,
+    /// key and value projections.
+    pub latent: Option<LatentAttention>,
+}
+
+/// Multi-head latent attention (DeepSeek-V2 and V3, MiniCPM3): query and key
+/// value pass through low-rank bottlenecks, each head's key is a
+/// position-free part from the key-value bottleneck plus one rotated part
+/// shared by every head, and a head's value may be narrower than its query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatentAttention {
+    /// `q_lora_rank`: the query bottleneck, or `None` for a direct `q_proj`.
+    pub query_rank: Option<usize>,
+    /// `kv_lora_rank`: the key-value bottleneck.
+    pub key_value_rank: usize,
+    /// `qk_nope_head_dim`: each head's position-free query and key part.
+    pub unrotated: usize,
+    /// `qk_rope_head_dim`: each head's rotated part.
+    pub rotated: usize,
+    /// `v_head_dim`.
+    pub value: usize,
 }
 
 impl Architecture {
@@ -253,6 +274,7 @@ impl Architecture {
             final_softcap: None,
             logits_multiplier: None,
             experts: None,
+            latent: None,
         }
     }
 
@@ -281,9 +303,16 @@ impl Architecture {
         })
     }
 
+    /// Width of one head's value: narrower than the query in latent
+    /// attention, the head width otherwise.
+    pub fn value_dim(&self) -> usize {
+        self.latent.map_or(self.head_dim, |latent| latent.value)
+    }
+
     /// Where `target`'s weight lives at `layer`, or `None` when this family
-    /// has no single such projection: the gate of a plain feed-forward, or
-    /// any feed-forward projection of a mixture of experts.
+    /// has no single such projection: the gate of a plain feed-forward, any
+    /// feed-forward projection of a mixture of experts, or the key, value and
+    /// bottlenecked query of latent attention.
     ///
     /// A fused tensor holds several projections; the placement then names the
     /// row blocks this projection owns, so merging adds the update to those
@@ -297,6 +326,15 @@ impl Architecture {
         let names = self.names;
         let in_layer = |leaf: &str| format!("{}.{layer}.{leaf}.weight", names.layers);
         let in_attention = |leaf: &str| in_layer(&format!("{}.{leaf}", names.attention));
+        if let Some(latent) = self.latent {
+            match target {
+                Target::Query if latent.query_rank.is_none() => {
+                    return Some(Placement::whole(in_attention(names.query)));
+                }
+                Target::Query | Target::Key | Target::Value => return None,
+                _ => {}
+            }
+        }
         let head_dim = self.head_dim;
         let query = self.attention_width(config.num_attention_heads);
         let key_value = config.num_key_value_heads * head_dim;
@@ -369,10 +407,18 @@ impl Architecture {
             .iter()
             .find(|target| self.placement(**target, 0, config).is_none())
         {
-            let (why, choices) = if self.experts.is_some() {
-                ("its feed-forward is a mixture of experts", "query, key, value, output")
+            let choices: Vec<&str> = Target::ALL
+                .into_iter()
+                .filter(|choice| self.placement(*choice, 0, config).is_some())
+                .map(Target::name)
+                .collect();
+            let choices = choices.join(", ");
+            let why = if self.latent.is_some() && !feed_forward_target(*target) {
+                "its attention is latent (DeepSeek's low-rank query and key-value)"
+            } else if self.experts.is_some() {
+                "its feed-forward is a mixture of experts"
             } else {
-                ("its feed-forward has no gate", "query, key, value, output, up, down")
+                "its feed-forward has no gate"
             };
             bail!(
                 "this model has no single {} projection to adapt because {why}; choose adapter targets among {choices}",
@@ -381,6 +427,10 @@ impl Architecture {
         }
         Ok(())
     }
+}
+
+fn feed_forward_target(target: Target) -> bool {
+    matches!(target, Target::Gate | Target::Up | Target::Down)
 }
 
 /// Where one projection's weight sits in the checkpoint.
@@ -465,12 +515,51 @@ pub struct MixtureOfExperts {
     pub intermediate: usize,
     /// Rescale the chosen experts' weights to sum to one.
     pub normalize: bool,
-    /// Qwen2-MoE's shared expert, by its inner width.
-    pub shared_intermediate: Option<usize>,
+    /// The shared expert every token goes through beside the routed ones:
+    /// Qwen2-MoE's, scaled by a sigmoid gate, or DeepSeek's, added as is.
+    pub shared: Option<SharedExpert>,
     pub layout: ExpertLayout,
     /// Bit `i` set means layer `i` keeps a dense feed-forward (Qwen's
-    /// `mlp_only_layers` and `decoder_sparse_step`).
+    /// `mlp_only_layers` and `decoder_sparse_step`, DeepSeek's
+    /// `first_k_dense_replace` and `moe_layer_freq`).
     pub dense_layers: u128,
+    /// How the router's logits become expert scores.
+    pub scoring: Scoring,
+    /// DeepSeek's group-limited routing: the experts fall into `groups`
+    /// equal groups, and a token picks among the experts of its best
+    /// `chosen_groups` groups only.
+    pub groups: Option<ExpertGroups>,
+    /// DeepSeek-V3's `e_score_correction_bias`: added to the scores to choose
+    /// experts, never to weigh them.
+    pub selection_bias: bool,
+    /// `routed_scaling_factor`, multiplying the routed experts' weights.
+    pub routed_scale: Option<f64>,
+}
+
+/// A shared expert's inner width and whether a sigmoid gate scales it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedExpert {
+    pub intermediate: usize,
+    pub gated: bool,
+}
+
+/// How expert scores come from the router's logits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scoring {
+    Softmax,
+    /// DeepSeek-V3's independent sigmoid per expert.
+    Sigmoid,
+}
+
+/// Group-limited routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpertGroups {
+    pub groups: usize,
+    pub chosen_groups: usize,
+    /// How a group is ranked: by its best expert (DeepSeek-V2's
+    /// `group_limited_greedy`) or by the sum of its best two (DeepSeek-V3's
+    /// `noaux_tc`).
+    pub rank_by_top_two: bool,
 }
 
 /// Where a checkpoint keeps its router and experts.
@@ -478,7 +567,9 @@ pub struct MixtureOfExperts {
 pub enum ExpertLayout {
     /// `block_sparse_moe.gate`, `block_sparse_moe.experts.{e}.w1|w3|w2`.
     Mixtral,
-    /// `mlp.gate`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`.
+    /// `mlp.gate`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`; a shared
+    /// expert is Qwen2-MoE's `mlp.shared_expert` or DeepSeek's
+    /// `mlp.shared_experts`.
     Qwen,
     /// `block_sparse_moe.router.layer`, and every expert stacked in
     /// `block_sparse_moe.input_linear` and `output_linear`.
@@ -760,6 +851,17 @@ pub enum RopeScaling {
         short: Vec<f32>,
         long: Vec<f32>,
         original: usize,
+        attention: f32,
+    },
+    /// YaRN: frequencies whose wavelength fits `original` positions more
+    /// than `beta_fast` times keep their value, those fitting fewer than
+    /// `beta_slow` times are divided by `factor`, a linear ramp blends the
+    /// band between, and both tables are multiplied by `attention`.
+    Yarn {
+        factor: f32,
+        original: usize,
+        beta_fast: f32,
+        beta_slow: f32,
         attention: f32,
     },
 }

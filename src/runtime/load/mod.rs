@@ -309,6 +309,7 @@ pub(super) fn projection_widths(config: &Config, architecture: &Architecture) ->
     lora::Widths {
         hidden: config.hidden_size,
         attention: architecture.attention_width(config.num_attention_heads),
+        attention_output: config.num_attention_heads * architecture.value_dim(),
         key_value: config.num_key_value_heads * architecture.head_dim,
         intermediate: config.intermediate_size,
     }

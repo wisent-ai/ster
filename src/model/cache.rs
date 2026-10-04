@@ -82,6 +82,28 @@ impl Cache {
                     angle_tables(rescaled(long), positions, *attention, device)?;
                 (short, Some((long_cos, long_sin, *original)))
             }
+            RopeScaling::Yarn {
+                factor,
+                original,
+                beta_fast,
+                beta_slow,
+                attention,
+            } => (
+                angle_tables(
+                    yarn_frequencies(
+                        &global,
+                        rotary_dim,
+                        config.rope_theta,
+                        *factor,
+                        *original,
+                        (*beta_fast, *beta_slow),
+                    ),
+                    positions,
+                    *attention,
+                    device,
+                )?,
+                None,
+            ),
         };
         let local = match architecture.local_rope_theta {
             Some(theta) => Some(angle_tables(
@@ -165,6 +187,40 @@ fn base_frequencies(head_dim: usize, theta: f32) -> Vec<f32> {
     (0..head_dim)
         .step_by(2)
         .map(|index| 1f32 / theta.powf(index as f32 / head_dim as f32))
+        .collect()
+}
+
+/// How far Transformers widens an empty YaRN band so its ramp does not
+/// divide by zero.
+const YARN_RAMP_WIDENING: f32 = 0.001;
+
+/// YaRN's frequencies, as Transformers' `_compute_yarn_parameters` computes
+/// them: the dimension pair where a frequency completes `beta_fast` turns
+/// over `original` positions and the one where it completes `beta_slow`
+/// bound a linear ramp; above the band a frequency keeps its value
+/// (extrapolation), below it is divided by `factor` (interpolation), and in
+/// the band the two are blended along the ramp.
+fn yarn_frequencies(
+    base: &[f32],
+    rotary_dim: usize,
+    theta: f32,
+    factor: f32,
+    original: usize,
+    (beta_fast, beta_slow): (f32, f32),
+) -> Vec<f32> {
+    let correction = |turns: f32| -> f32 {
+        rotary_dim as f32 * (original as f32 / (turns * 2.0 * PI)).ln() / (2.0 * theta.ln())
+    };
+    let low = correction(beta_fast).floor().max(0.0);
+    let high = correction(beta_slow).ceil().min(rotary_dim as f32 - 1.0);
+    let high = if high == low { high + YARN_RAMP_WIDENING } else { high };
+    base.iter()
+        .enumerate()
+        .map(|(index, frequency)| {
+            let ramp = ((index as f32 - low) / (high - low)).clamp(0.0, 1.0);
+            let extrapolation = 1.0 - ramp;
+            frequency / factor * (1.0 - extrapolation) + frequency * extrapolation
+        })
         .collect()
 }
 

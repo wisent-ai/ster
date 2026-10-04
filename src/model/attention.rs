@@ -9,7 +9,8 @@ use candle_transformers::models::llama::Config;
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Architecture, Cache, Mode, NormKind, Pass, Positions, QkvLayout, QueryKeyNorm, Route,
+    Architecture, Cache, LatentAttention, Mode, NormKind, Pass, Positions, QkvLayout,
+    QueryKeyNorm, Route,
     layer::{
         norm::{Norm, NormSpec},
         projection,
@@ -18,9 +19,7 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub(super) struct Attention {
-    query: Linear,
-    key: Linear,
-    value: Linear,
+    projections: Projections,
     output: Linear,
     query_adapter: Option<Adapter>,
     key_adapter: Option<Adapter>,
@@ -35,6 +34,9 @@ pub(super) struct Attention {
     heads: usize,
     key_value_heads: usize,
     head_dim: usize,
+    /// Width of one head's value, which latent attention makes narrower than
+    /// the query.
+    value_dim: usize,
     /// How many keys behind it a query may see, on a sliding-window layer.
     window: Option<usize>,
     rotary: Rotary,
@@ -113,6 +115,9 @@ impl Attention {
         } else {
             Rotary::Global
         };
+        let projections = if let Some(spec) = architecture.latent {
+            Projections::Latent(Latent::load(&builder, input, heads, spec, bias, NormSpec::of(architecture))?)
+        } else {
         let (query, key, value) = match architecture.qkv_layout {
             QkvLayout::Separate => (
                 projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
@@ -174,12 +179,12 @@ impl Attention {
                 (part(0, per_group)?, part(per_group, 1)?, part(per_group + 1, 1)?)
             }
         };
+            Projections::Standard { query, key, value }
+        };
         Ok(Self {
-            query,
-            key,
-            value,
+            projections,
             output: projection(
-                query_width,
+                heads * architecture.value_dim(),
                 input,
                 architecture.output_bias,
                 conv1d,
@@ -193,8 +198,9 @@ impl Attention {
             key_norm,
             query_key_norm: architecture.query_key_norm,
             heads,
-            key_value_heads,
+            key_value_heads: if architecture.latent.is_some() { heads } else { key_value_heads },
             head_dim,
+            value_dim: architecture.value_dim(),
             window,
             rotary,
             interleaved: architecture.interleaved_rotary,
@@ -238,20 +244,32 @@ impl Attention {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, _) = hidden.dims3()?;
-        let query = project(&self.query, self.query_adapter.as_ref(), hidden, mode.route)?;
-        let key = project(&self.key, self.key_adapter.as_ref(), hidden, mode.route)?;
-        // OLMo 2 normalises the whole projection before it is split into
-        // heads; every other query and key norm works per head after it.
-        let (query, key) = if self.query_key_norm == QueryKeyNorm::Full {
-            (
-                optional_norm(self.query_norm.as_ref(), query, mode.pass)?,
-                optional_norm(self.key_norm.as_ref(), key, mode.pass)?,
-            )
-        } else {
-            (query, key)
+        let (query, key, value) = match &self.projections {
+            Projections::Standard { query, key, value } => {
+                let query = project(query, self.query_adapter.as_ref(), hidden, mode.route)?;
+                let key = project(key, self.key_adapter.as_ref(), hidden, mode.route)?;
+                // OLMo 2 normalises the whole projection before it is split
+                // into heads; every other query and key norm works per head
+                // after it.
+                let (query, key) = if self.query_key_norm == QueryKeyNorm::Full {
+                    (
+                        optional_norm(self.query_norm.as_ref(), query, mode.pass)?,
+                        optional_norm(self.key_norm.as_ref(), key, mode.pass)?,
+                    )
+                } else {
+                    (query, key)
+                };
+                let value = project(value, self.value_adapter.as_ref(), hidden, mode.route)?;
+                (
+                    query.reshape((batch, sequence, self.heads, self.head_dim))?,
+                    key.reshape((batch, sequence, self.key_value_heads, self.head_dim))?,
+                    value.reshape((batch, sequence, self.key_value_heads, self.value_dim))?,
+                )
+            }
+            Projections::Latent(latent) => {
+                latent.forward(hidden, self.heads, self.query_adapter.as_ref(), mode)?
+            }
         };
-        let query = query.reshape((batch, sequence, self.heads, self.head_dim))?;
-        let key = key.reshape((batch, sequence, self.key_value_heads, self.head_dim))?;
         let (query, key) = if self.query_key_norm == QueryKeyNorm::Full {
             (query, key)
         } else {
@@ -262,10 +280,7 @@ impl Attention {
         };
         let query = query.transpose(1, 2)?.contiguous()?;
         let mut key = key.transpose(1, 2)?.contiguous()?;
-        let mut value = project(&self.value, self.value_adapter.as_ref(), hidden, mode.route)?
-            .reshape((batch, sequence, self.key_value_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let mut value = value.transpose(1, 2)?.contiguous()?;
         let tables = match self.rotary {
             // LongRoPE switches every position to the long factors once the
             // sequence runs past the original context, as Phi-3 does.
@@ -354,13 +369,132 @@ impl Attention {
             .to_dtype(input_dtype)?;
         let output = output
             .transpose(1, 2)?
-            .reshape((batch, sequence, self.heads * self.head_dim))?;
+            .reshape((batch, sequence, self.heads * self.value_dim))?;
         project(
             &self.output,
             self.output_adapter.as_ref(),
             &output,
             mode.route,
         )
+    }
+}
+
+/// Where a layer's query, key and value come from.
+#[derive(Debug, Clone)]
+enum Projections {
+    /// One projection each (possibly row views of one fused tensor).
+    Standard {
+        query: Linear,
+        key: Linear,
+        value: Linear,
+    },
+    /// DeepSeek's low-rank bottlenecks.
+    Latent(Latent),
+}
+
+/// Multi-head latent attention's projections, by DeepSeek's names below the
+/// attention block: `q_proj`, or `q_a_proj`, `q_a_layernorm` and `q_b_proj`;
+/// `kv_a_proj_with_mqa`, `kv_a_layernorm` and `kv_b_proj`.
+#[derive(Debug, Clone)]
+struct Latent {
+    query_down: Option<(Linear, Norm)>,
+    query_up: Linear,
+    key_value_down: Linear,
+    key_value_norm: Norm,
+    key_value_up: Linear,
+    spec: LatentAttention,
+}
+
+impl Latent {
+    fn load(
+        builder: &VarBuilder<'_>,
+        input: usize,
+        heads: usize,
+        spec: LatentAttention,
+        bias: bool,
+        norms: NormSpec,
+    ) -> candle_core::Result<Self> {
+        let query_width = heads * (spec.unrotated + spec.rotated);
+        let (query_down, query_up) = match spec.query_rank {
+            Some(rank) => (
+                Some((
+                    projection(input, rank, bias, false, builder.pp("q_a_proj"))?,
+                    norms.load(rank, builder.pp("q_a_layernorm"))?,
+                )),
+                projection(rank, query_width, false, false, builder.pp("q_b_proj"))?,
+            ),
+            None => (None, projection(input, query_width, false, false, builder.pp("q_proj"))?),
+        };
+        Ok(Self {
+            query_down,
+            query_up,
+            key_value_down: projection(
+                input,
+                spec.key_value_rank + spec.rotated,
+                bias,
+                false,
+                builder.pp("kv_a_proj_with_mqa"),
+            )?,
+            key_value_norm: norms.load(spec.key_value_rank, builder.pp("kv_a_layernorm"))?,
+            key_value_up: projection(
+                spec.key_value_rank,
+                heads * (spec.unrotated + spec.value),
+                false,
+                false,
+                builder.pp("kv_b_proj"),
+            )?,
+            spec,
+        })
+    }
+
+    /// Query, key and value as `[batch, sequence, heads, width]`.
+    ///
+    /// Each head's query and key are laid out rotated part first, then the
+    /// position-free part: DeepSeek concatenates them the other way round,
+    /// but a dot product does not see a permutation applied to both sides,
+    /// and rotated-first is the layout the shared rotation code rotates (the
+    /// first `rotary_dim` components). The rotated key part comes from the
+    /// key-value bottleneck once and is shared by every head.
+    fn forward(
+        &self,
+        hidden: &Tensor,
+        heads: usize,
+        query_adapter: Option<&Adapter>,
+        mode: Mode,
+    ) -> candle_core::Result<(Tensor, Tensor, Tensor)> {
+        let (batch, sequence, _) = hidden.dims3()?;
+        let LatentAttention {
+            key_value_rank,
+            unrotated,
+            rotated,
+            value,
+            ..
+        } = self.spec;
+        let query = match &self.query_down {
+            Some((down, norm)) => {
+                self.query_up.forward(&norm.forward(&down.forward(hidden)?, mode.pass)?)?
+            }
+            None => project(&self.query_up, query_adapter, hidden, mode.route)?,
+        }
+        .reshape((batch, sequence, heads, unrotated + rotated))?;
+        let query = Tensor::cat(
+            &[&query.narrow(3, unrotated, rotated)?, &query.narrow(3, 0, unrotated)?],
+            3,
+        )?;
+        let compressed = self.key_value_down.forward(hidden)?;
+        let latent = compressed.narrow(2, 0, key_value_rank)?.contiguous()?;
+        let shared = compressed
+            .narrow(2, key_value_rank, rotated)?
+            .unsqueeze(2)?
+            .broadcast_as((batch, sequence, heads, rotated))?
+            .contiguous()?;
+        let expanded = self
+            .key_value_up
+            .forward(&self.key_value_norm.forward(&latent, mode.pass)?)?
+            .reshape((batch, sequence, heads, unrotated + value))?;
+        let key = Tensor::cat(&[&shared, &expanded.narrow(3, 0, unrotated)?], 3)?;
+        let value = expanded.narrow(3, unrotated, value)?.contiguous()?;
+        Ok((query, key, value))
     }
 }
 
