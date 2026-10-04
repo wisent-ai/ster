@@ -3,7 +3,7 @@
 //! generator the caller picked. Steering needs hidden states and stays local;
 //! writing pair text does not, so the writer may be a hosted route.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use super::generator::Generator;
@@ -14,11 +14,6 @@ use crate::{
     runtime::GenerationOptions,
     workflow,
 };
-
-/// Trait-name fallback length. Long descriptions make unusable artifact
-/// labels, so an unnamed set borrows the first 64 characters of its
-/// description.
-const TRAIT_NAME_LIMIT: usize = 64;
 
 /// Used when the model returns nothing for the opposite-trait question —
 /// verbatim from the Python generator's `"neutral and plain"` fallback.
@@ -93,7 +88,9 @@ pub fn synthesize(
     // the same answers forever and the whole run would dedupe to one pair.
     // The reason is the loop's, so the refusal holds for every route.
     if options.generation.temperature <= 0.0 {
-        bail!("synthesis requires a temperature above zero; argmax generation repeats a single prompt");
+        bail!(
+            "synthesis requires a temperature above zero; argmax generation repeats a single prompt"
+        );
     }
     options.dedupe.validate()?;
 
@@ -117,7 +114,11 @@ pub fn synthesize(
                 "What is the OPPOSITE personality trait of: {}?\n\nDescribe the opposite in one sentence, be specific about what words/style/tone to use.",
                 options.trait_description
             ))?;
-            if answer.is_empty() { DEFAULT_OPPOSITE.to_owned() } else { answer }
+            if answer.is_empty() {
+                DEFAULT_OPPOSITE.to_owned()
+            } else {
+                answer
+            }
         }
     };
 
@@ -209,8 +210,11 @@ pub fn synthesize(
 
     // Diversity is measured over the questions, matching the Python report:
     // the answers inherit their variety from the prompt that produced them.
-    let diversity =
-        diversity::compute(&questions, options.diversity_seed, options.diversity_max_sample);
+    let diversity = diversity::compute(
+        &questions,
+        options.diversity_seed,
+        options.diversity_max_sample,
+    );
 
     let report = SynthesisReport {
         generator: generator.label(),
@@ -226,7 +230,13 @@ pub fn synthesize(
         refusal_retries,
         diversity,
     };
-    Ok((PairSet { trait_name, pairs: kept }, report))
+    Ok((
+        PairSet {
+            trait_name,
+            pairs: kept,
+        },
+        report,
+    ))
 }
 
 /// Verbatim from the Python generator; the same shape produces both sides,
@@ -237,14 +247,11 @@ fn persona_prompt(question: &str, personality: &str) -> String {
     )
 }
 
+/// The set's trait name: the one given, else the trait's description itself.
 fn resolve_trait_name(options: &SynthesisOptions) -> String {
     let name = options.trait_name.trim();
     if !name.is_empty() {
         return name.to_owned();
     }
-    let description = options.trait_description.trim();
-    match description.char_indices().nth(TRAIT_NAME_LIMIT) {
-        Some((offset, _)) => description[..offset].to_owned(),
-        None => description.to_owned(),
-    }
+    options.trait_description.trim().to_owned()
 }

@@ -4,13 +4,13 @@
 
 use std::{fs, path::Path};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use blake2::{Blake2b512, Digest};
 use serde::Serialize;
 
 use crate::PairSet;
 
-use super::state::{load_state, save_state, workspace_root, PairSetEntry};
+use super::state::{PairSetEntry, load_state, save_state, workspace_root};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportReport {
@@ -76,7 +76,12 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
     let digest = pair_set_digest(&pair_set)?;
     let mut state = load_state()?;
 
-    if let Some(existing) = state.pair_sets.iter().find(|entry| entry.digest == digest).cloned() {
+    if let Some(existing) = state
+        .pair_sets
+        .iter()
+        .find(|entry| entry.digest == digest)
+        .cloned()
+    {
         state.active_pair_set = Some(existing.id.clone());
         save_state(&state)?;
         return Ok(ImportReport {
@@ -105,8 +110,12 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
 
     let root = workspace_root()?;
     let pairs_dir = root.join("pairs");
-    fs::create_dir_all(&pairs_dir)
-        .with_context(|| format!("failed to create Ster pair-set directory {}", pairs_dir.display()))?;
+    fs::create_dir_all(&pairs_dir).with_context(|| {
+        format!(
+            "failed to create Ster pair-set directory {}",
+            pairs_dir.display()
+        )
+    })?;
     let destination = pairs_dir.join(format!("{id}.json"));
     if destination.exists() {
         return Ok(ImportReport {
@@ -121,7 +130,10 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
 
     let temporary = pairs_dir.join(format!(".{id}.{}.incoming", std::process::id()));
     if temporary.exists() {
-        bail!("Ster import staging path already exists: {}", temporary.display());
+        bail!(
+            "Ster import staging path already exists: {}",
+            temporary.display()
+        );
     }
     pair_set.save(&temporary)?;
     if let Err(error) = fs::hard_link(&temporary, &destination) {
@@ -145,8 +157,12 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
     }
     if let Err(error) = fs::remove_file(&temporary) {
         let _ = fs::remove_file(&destination);
-        return Err(error)
-            .with_context(|| format!("failed to remove import staging file {}", temporary.display()));
+        return Err(error).with_context(|| {
+            format!(
+                "failed to remove import staging file {}",
+                temporary.display()
+            )
+        });
     }
 
     state.pair_sets.push(PairSetEntry {
@@ -175,15 +191,17 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
 fn pair_set_digest(pair_set: &PairSet) -> Result<String> {
     let bytes = serde_json::to_vec(pair_set)?;
     let digest = Blake2b512::digest(bytes);
-    Ok(digest[..16].iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
-/// A workspace name is at most this many bytes, so it fits a file name on every filesystem.
-const MAX_NAME_LENGTH: usize = 64;
-
+/// A workspace name is a file name: it starts with an ASCII letter or digit and
+/// holds only letters, digits, dots, underscores and hyphens. How long it may be
+/// is the filesystem's to say, and it says so when the set is written.
 fn validate_name(name: &str) -> std::result::Result<(), String> {
     let valid = !name.is_empty()
-        && name.len() <= MAX_NAME_LENGTH
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -191,7 +209,7 @@ fn validate_name(name: &str) -> std::result::Result<(), String> {
     if valid {
         Ok(())
     } else {
-        Err("pair-set name must start with an ASCII letter or digit and contain at most 64 letters, digits, dots, underscores, or hyphens".to_owned())
+        Err("pair-set name must start with an ASCII letter or digit and contain only letters, digits, dots, underscores, or hyphens".to_owned())
     }
 }
 
@@ -211,9 +229,6 @@ fn derived_name(source: &Path) -> String {
             name.push(character.to_ascii_lowercase());
         } else {
             separator = true;
-        }
-        if name.len() == MAX_NAME_LENGTH {
-            break;
         }
     }
     let name = name.trim_end_matches('-');
