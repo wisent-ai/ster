@@ -28,7 +28,7 @@
       "evidence": "README.md#Current product contract"
     },
     {
-      "claim": "The current runtime supports local and Hugging Face Llama-family Safetensors checkpoints on CPU, with compile-time Metal and CUDA backends.",
+      "claim": "The current runtime supports local and Hugging Face Llama and Qwen3 Safetensors checkpoints on CPU, with compile-time Metal and CUDA backends.",
       "evidence": "README.md#Current product contract"
     },
     {

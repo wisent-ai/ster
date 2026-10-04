@@ -73,8 +73,9 @@ Included now:
 
 Explicit boundaries:
 
-- The current native runtime accepts `model_type: "llama"`. Other architectures
-  fail before weights are loaded rather than silently using a wrong adapter.
+- The current native runtime accepts `model_type: "llama"` and
+  `model_type: "qwen3"`. Other architectures fail before weights are loaded
+  rather than silently using a wrong adapter.
 - Ster controls local open-weight models. Hosted model routing belongs to Brama.
 - Steering reads hidden states, so it always runs on a local open-weight model.
   Writing pair text needs no activations, so `ster pairs synthesize` may take
