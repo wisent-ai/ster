@@ -54,7 +54,7 @@ pub(crate) struct Trainable {
     pub tensors: usize,
     pub parameters: usize,
     /// The longest sequence this run will score: the operator's limit, clamped
-    /// to what the rotary tables actually cover.
+    /// to the context the model was configured for.
     pub limit: usize,
 }
 

@@ -515,8 +515,8 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
             Ok(None)
         }
         // Without an alpha, dynamic NTK scaling changes the rotary base only
-        // once a sequence outgrows `max_position_embeddings`, which Ster's
-        // rotary tables never do; within them it is the plain rotation.
+        // once a sequence outgrows `max_position_embeddings`, which Ster
+        // never runs; within it this is the plain rotation.
         "dynamic" => {
             if let Some(object) = raw.as_object_mut() {
                 object.remove("rope_scaling");

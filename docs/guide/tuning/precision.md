@@ -28,7 +28,7 @@ half-precision forward without anything being arranged.
 Three things in the forward pass are held at F32 regardless, because they are
 the places where half precision is wrong rather than merely cheaper: attention
 promotes queries, keys and values before the score matmul and casts only the
-output back; the rotary tables and the rotation itself run in F32, because a
+output back; the rotary angles and the rotation itself run in F32, because a
 position is an absolute index rather than a weight and a half mantissa there
 makes neighbouring late positions round to the same angle — a phase error that
 reads as a slightly different sentence and never as a numerical fault; and every

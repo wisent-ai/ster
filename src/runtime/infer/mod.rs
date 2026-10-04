@@ -125,8 +125,8 @@ impl Runtime {
             .collect()
     }
 
-    /// A fresh decode state: this model's rotary tables, one key-value slot
-    /// per layer.
+    /// A fresh decode state: this model's rotary frequencies, one key-value
+    /// slot and one recurrent-state slot per layer.
     pub(super) fn cache(&self, use_kv_cache: bool) -> candle_core::Result<Cache> {
         Cache::new(
             use_kv_cache,

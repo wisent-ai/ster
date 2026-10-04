@@ -30,9 +30,9 @@
 //!   key axis, which is the longest reduction in the pass and the one that
 //!   grows with context; in F16 its accumulator saturates while the true value
 //!   is still finite.
-//! * **Rotary is F32 in and F32 through, and casts back.** The tables are held
-//!   F32 whatever the weights are, because they are indexed by absolute
-//!   position rather than derived from a weight: in F16 two neighbouring late
+//! * **Rotary is F32 in and F32 through, and casts back.** The angles are
+//!   computed F32 whatever the weights are, because they come from absolute
+//!   position rather than from a weight: in F16 two neighbouring late
 //!   positions round to the same angle, which rotates two different tokens
 //!   identically. [`apply_rotary`] returns the rotated query and key at the
 //!   weights' dtype, so the key-value cache still stores half-precision keys

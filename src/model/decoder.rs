@@ -203,8 +203,8 @@ impl SteeringLlama {
     /// **Padding sits on the right**, and both consequences are load-bearing.
     /// The first is positional: with no key-value cache every column `j` is
     /// absolute position `j`, so right padding leaves every real token at the
-    /// position it would have held alone, and the one shared rotary window
-    /// `cos[0..sequence]` is correct for all rows at once. Left padding would
+    /// position it would have held alone, and the one shared rotation of
+    /// positions `0..sequence` is correct for all rows at once. Left padding would
     /// shift each row's real tokens by its own pad count, which no scalar
     /// `index_pos` can express and which this decoder has no per-row position
     /// argument to carry. The second is what the caller must then do: a row's
@@ -218,7 +218,7 @@ impl SteeringLlama {
     /// Refusals, rather than a plausible-looking loss over filler: a batch
     /// with no rows or no columns, a `lengths` that does not describe every
     /// row, a row claiming more tokens than the batch is wide, a row claiming
-    /// none at all, a batch wider than the rotary tables, a readout of one
+    /// none at all, a batch wider than the positions the model was built for, a readout of one
     /// last position, and a key-value cache.
     ///
     /// Activations are not captured here. Capture is defined as row zero's

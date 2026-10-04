@@ -1,5 +1,6 @@
-//! What a decode carries between steps: the rotary tables, the causal masks
-//! it has already built, and the keys and values of the tokens behind it.
+//! What a decode carries between steps: the rotary frequencies, the causal
+//! masks it has already built, and the keys and values of the tokens behind
+//! it.
 
 use std::{collections::HashMap, f32::consts::PI};
 
@@ -20,15 +21,15 @@ pub struct Cache {
     /// layer that runs attention and a scan side by side (Falcon-H1) keeps
     /// both.
     pub(super) states: Vec<Option<(Tensor, Tensor)>>,
-    /// Rotary tables, held in F32 whatever the weights are. See [`Cache::new`].
-    pub(super) cos: Tensor,
-    pub(super) sin: Tensor,
-    /// The tables sliding-window layers rotate with, when the family gives
-    /// them their own base (Gemma 3's `rope_local_base_freq`).
-    pub(super) local: Option<(Tensor, Tensor)>,
-    /// LongRoPE's tables for a sequence that runs past the original context,
-    /// and that context's length.
-    pub(super) long: Option<(Tensor, Tensor, usize)>,
+    /// The global rotation, held in F32 whatever the weights are. See
+    /// [`Cache::new`].
+    pub(super) global: RotaryTable,
+    /// The rotation sliding-window layers use, when the family gives them
+    /// their own base (Gemma 3's `rope_local_base_freq`).
+    pub(super) local: Option<RotaryTable>,
+    /// LongRoPE's rotation for a sequence that runs past the original
+    /// context, and that context's length.
+    pub(super) long: Option<(RotaryTable, usize)>,
     /// The dtype the base weights were mapped at. [`apply_rotary`] casts each
     /// rotated query and key back to it, so a half-precision checkpoint keeps
     /// a half-precision key-value cache and residual stream.
@@ -38,20 +39,22 @@ pub struct Cache {
 
 impl Cache {
     /// `dtype` is the dtype the base weights were mapped at, and it is
-    /// deliberately *not* the dtype of the rotary tables. Position angles are
-    /// held in F32 whatever the weights are: `cos` and `sin` are indexed by
-    /// absolute position, and in F16 the mantissa runs out long before
-    /// `max_position_embeddings` does — two neighbouring positions late in the
-    /// context round to the same angle, which rotates two different tokens
-    /// identically and is invisible in the loss. The tables are one
-    /// `[positions, rotary_dim / 2]` matrix, so holding them wide costs a few
-    /// megabytes once rather than per forward, and [`apply_rotary`] casts each
-    /// query and key back to the weights' dtype afterwards so the key-value
-    /// cache still stores half-precision keys.
+    /// deliberately *not* the dtype of the rotation. Position angles are
+    /// computed in F32 whatever the weights are: in F16 the mantissa runs out
+    /// long before `max_position_embeddings` does — two neighbouring
+    /// positions late in the context round to the same angle, which rotates
+    /// two different tokens identically and is invisible in the loss.
+    /// [`apply_rotary`] casts each query and key back to the weights' dtype
+    /// afterwards so the key-value cache still stores half-precision keys.
+    ///
+    /// Each rotation keeps only its `rotary_dim / 2` frequencies; the angles
+    /// of the positions one call rotates are computed for that call, so the
+    /// cache does not grow with `max_position_embeddings` (ten million for
+    /// MiniMax-Text-01).
     ///
     /// The architecture supplies the width the rotation spans (`rotary_dim`,
     /// which a config may set apart from the head width), the scaling on the
-    /// global table, and a second base for sliding-window layers when the
+    /// global rotation, and a second base for sliding-window layers when the
     /// family has one.
     pub fn new(
         use_kv_cache: bool,
@@ -61,21 +64,12 @@ impl Cache {
         device: &Device,
     ) -> Result<Self> {
         let rotary_dim = architecture.rotary_dim;
-        // A family whose positions are learned, ALiBi or absent rotates
-        // nothing; its tables keep the one row for position zero rather than
-        // a row for every position.
-        let positions = if architecture.positions == super::Positions::Rotary {
-            config.max_position_embeddings
-        } else {
-            1
-        };
         let global = rotary_frequencies(config, rotary_dim, config.rope_theta);
-        let ((cos, sin), long) = match &architecture.rope_scaling {
-            RopeScaling::None => (angle_tables(global, positions, 1.0, device)?, None),
+        let (global, long) = match &architecture.rope_scaling {
+            RopeScaling::None => (RotaryTable::new(global, 1.0, device)?, None),
             RopeScaling::Linear(factor) => (
-                angle_tables(
+                RotaryTable::new(
                     global.into_iter().map(|frequency| frequency / factor).collect(),
-                    positions,
                     1.0,
                     device,
                 )?,
@@ -91,10 +85,9 @@ impl Cache {
                 let rescaled = |factors: &[f32]| -> Vec<f32> {
                     global.iter().zip(factors).map(|(frequency, factor)| frequency / factor).collect()
                 };
-                let short = angle_tables(rescaled(short), positions, *short_attention, device)?;
-                let (long_cos, long_sin) =
-                    angle_tables(rescaled(long), positions, *long_attention, device)?;
-                (short, Some((long_cos, long_sin, *original)))
+                let short = RotaryTable::new(rescaled(short), *short_attention, device)?;
+                let long = RotaryTable::new(rescaled(long), *long_attention, device)?;
+                (short, Some((long, *original)))
             }
             RopeScaling::Yarn {
                 factor,
@@ -103,7 +96,7 @@ impl Cache {
                 beta_slow,
                 attention,
             } => (
-                angle_tables(
+                RotaryTable::new(
                     yarn_frequencies(
                         &global,
                         rotary_dim,
@@ -112,7 +105,6 @@ impl Cache {
                         *original,
                         (*beta_fast, *beta_slow),
                     ),
-                    positions,
                     *attention,
                     device,
                 )?,
@@ -120,12 +112,7 @@ impl Cache {
             ),
         };
         let local = match architecture.local_rope_theta {
-            Some(theta) => Some(angle_tables(
-                base_frequencies(rotary_dim, theta),
-                positions,
-                1.0,
-                device,
-            )?),
+            Some(theta) => Some(RotaryTable::new(base_frequencies(rotary_dim, theta), 1.0, device)?),
             None => None,
         };
         Ok(Self {
@@ -133,8 +120,7 @@ impl Cache {
             use_kv_cache,
             kvs: vec![None; config.num_hidden_layers],
             states: vec![None; config.num_hidden_layers],
-            cos,
-            sin,
+            global,
             local,
             long,
             weights: dtype,
@@ -177,25 +163,37 @@ pub(super) fn hidden_key(query: usize, key: usize, window: Option<usize>) -> boo
     key > query || window.is_some_and(|window| query - key >= window)
 }
 
-/// `cos` and `sin` of every position times every frequency, `[positions,
-/// rotary_dim / 2]`, in F32, each multiplied by `magnitude` (LongRoPE's
+/// One rotation: its frequencies, `[1, rotary_dim / 2]` in F32, and the
+/// magnitude its `cos` and `sin` are multiplied by (LongRoPE's and YaRN's
 /// attention factor; one otherwise, where the multiply is skipped).
-fn angle_tables(
-    frequencies: Vec<f32>,
-    positions: usize,
-    magnitude: f32,
-    device: &Device,
-) -> Result<(Tensor, Tensor)> {
-    let theta = Tensor::new(frequencies, device)?;
-    let positions = Tensor::arange(0, positions as u32, device)?
-        .to_dtype(DType::F32)?
-        .reshape((positions, 1))?;
-    let angles = positions.matmul(&theta.reshape((1, theta.elem_count()))?)?;
-    if magnitude == 1.0 {
-        return Ok((angles.cos()?, angles.sin()?));
+#[derive(Debug, Clone)]
+pub(super) struct RotaryTable {
+    frequencies: Tensor,
+    magnitude: f64,
+}
+
+impl RotaryTable {
+    fn new(frequencies: Vec<f32>, magnitude: f32, device: &Device) -> Result<Self> {
+        let width = frequencies.len();
+        Ok(Self {
+            frequencies: Tensor::from_vec(frequencies, (1, width), device)?,
+            magnitude: f64::from(magnitude),
+        })
     }
-    let magnitude = f64::from(magnitude);
-    Ok(((angles.cos()? * magnitude)?, (angles.sin()? * magnitude)?))
+
+    /// `cos` and `sin` of positions `start .. start + count` times every
+    /// frequency, `[count, rotary_dim / 2]`, in F32.
+    pub(super) fn angles(&self, start: usize, count: usize) -> Result<(Tensor, Tensor)> {
+        let device = self.frequencies.device();
+        let positions = Tensor::arange(start as u32, (start + count) as u32, device)?
+            .to_dtype(DType::F32)?
+            .reshape((count, 1))?;
+        let angles = positions.matmul(&self.frequencies)?;
+        if self.magnitude == 1.0 {
+            return Ok((angles.cos()?, angles.sin()?));
+        }
+        Ok(((angles.cos()? * self.magnitude)?, (angles.sin()? * self.magnitude)?))
+    }
 }
 
 fn base_frequencies(head_dim: usize, theta: f32) -> Vec<f32> {

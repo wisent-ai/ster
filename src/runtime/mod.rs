@@ -101,9 +101,9 @@ impl Runtime {
         self.model.config().num_hidden_layers
     }
 
-    /// The longest sequence the rotary tables and the position mask cover.
-    /// Training clamps against it for the same reason `generate` does: past
-    /// it the cached angles simply do not exist.
+    /// The longest sequence the model was configured for
+    /// (`max_position_embeddings`). Training clamps against it for the same
+    /// reason `generate` does: past it the model's positions are untrained.
     pub fn context_length(&self) -> usize {
         self.model.config().max_position_embeddings
     }

@@ -66,7 +66,7 @@ pub(super) struct Attention {
     query_bottleneck: Option<(Linear, Norm)>,
 }
 
-/// Which rotary table this layer rotates its query and key with.
+/// Which rotation this layer rotates its query and key with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Rotary {
     Global,
@@ -401,25 +401,27 @@ impl Attention {
         let query = query.transpose(1, 2)?.contiguous()?;
         let mut key = key.transpose(1, 2)?.contiguous()?;
         let mut value = value.transpose(1, 2)?.contiguous()?;
-        let tables = match self.rotary {
+        let table = match self.rotary {
             // LongRoPE switches every position to the long factors once the
             // sequence runs past the original context, as Phi-3 does.
             Rotary::Global => match &cache.long {
-                Some((cos, sin, original)) if index_pos + sequence > *original => Some((cos, sin)),
-                _ => Some((&cache.cos, &cache.sin)),
+                Some((long, original)) if index_pos + sequence > *original => Some(long),
+                _ => Some(&cache.global),
             },
-            Rotary::Local => cache.local.as_ref().map(|(cos, sin)| (cos, sin)),
+            Rotary::Local => cache.local.as_ref(),
             Rotary::None => None,
         };
-        let rotate = |input: &Tensor, (cos, sin): (&Tensor, &Tensor)| {
-            apply_rotary(input, index_pos, cos, sin, cache.weights, mode.pass, self.interleaved)
+        // The angles of exactly the positions this call rotates.
+        let angles = table.map(|table| table.angles(index_pos, sequence)).transpose()?;
+        let rotate = |input: &Tensor, (cos, sin): &(Tensor, Tensor)| {
+            apply_rotary(input, cos, sin, cache.weights, mode.pass, self.interleaved)
         };
-        let query = match tables {
-            Some(tables) => rotate(&query, tables)?,
+        let query = match &angles {
+            Some(angles) => rotate(&query, angles)?,
             None => query,
         };
-        if let Some(tables) = tables {
-            key = rotate(&key, tables)?;
+        if let Some(angles) = &angles {
+            key = rotate(&key, angles)?;
         }
         let (query, mut key) = if self.norm_after_rotary {
             (
@@ -676,11 +678,11 @@ pub(super) fn project(
     }
 }
 
-/// Rotates `input` by the angles at `index_pos..index_pos + sequence`, in F32,
-/// and returns the result at `weights`.
+/// Rotates `input` by `cos` and `sin`, the angles of exactly its positions,
+/// in F32, and returns the result at `weights`.
 ///
-/// The rotation is a multiply-add against a table indexed by absolute
-/// position, so it is the one place in the forward where a half-precision
+/// The rotation is a multiply-add against angles of absolute position, so it
+/// is the one place in the forward where a half-precision
 /// mantissa is spent on something other than a weight: at F16 the angles
 /// themselves collide late in the context, and the phase error it introduces
 /// looks like a slightly different sentence rather than like a numerical
@@ -692,24 +694,21 @@ pub(super) fn project(
 /// (candle-core-0.11.0/src/tensor.rs:2453), so the F32 path is unchanged down
 /// to the op it records.
 ///
-/// The tables are `rotary_dim / 2` wide. When that is narrower than the head
+/// The angles are `rotary_dim / 2` wide. When that is narrower than the head
 /// (a config's `partial_rotary_factor`), only the head's first `rotary_dim`
 /// components rotate and the rest pass through, as Phi-4-mini, GPT-NeoX and
 /// StableLM do. `interleaved` rotates adjacent pairs `(2i, 2i + 1)` instead
 /// of halves `d / 2` apart, as Cohere does.
 fn apply_rotary(
     input: &Tensor,
-    index_pos: usize,
     cos: &Tensor,
     sin: &Tensor,
     weights: DType,
     pass: Pass,
     interleaved: bool,
 ) -> candle_core::Result<Tensor> {
-    let (_, _, sequence, head_dim) = input.dims4()?;
+    let (_, _, _, head_dim) = input.dims4()?;
     let rotary_dim = 2 * cos.dim(1)?;
-    let cos = cos.narrow(0, index_pos, sequence)?;
-    let sin = sin.narrow(0, index_pos, sequence)?;
     let input = input.to_dtype(DType::F32)?;
     let (rotating, kept) = if rotary_dim < head_dim {
         (
