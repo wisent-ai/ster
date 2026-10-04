@@ -89,8 +89,12 @@ impl Experts {
         let count = spec.count;
         let intermediate = spec.intermediate;
         let (router, experts) = match spec.layout {
-            ExpertLayout::Mixtral => {
-                let block = builder.pp("block_sparse_moe");
+            ExpertLayout::Mixtral | ExpertLayout::Lfm2 => {
+                let block = if spec.layout == ExpertLayout::Lfm2 {
+                    builder.pp("feed_forward")
+                } else {
+                    builder.pp("block_sparse_moe")
+                };
                 let experts = (0..count)
                     .map(|expert| {
                         Expert::load(
@@ -220,16 +224,15 @@ impl Experts {
         // DeepSeek stores the bias as `[experts]`, ERNIE as `[1, experts]`;
         // either flattens to one score per expert.
         let selection_bias = match spec.selection_bias {
-            Some(module) => {
+            Some(tensor) => {
                 let bias = builder
-                    .pp(module)
-                    .get_unchecked("e_score_correction_bias")?
+                    .get_unchecked(tensor)?
                     .flatten_all()?
                     .to_dtype(DType::F32)?
                     .to_vec1::<f32>()?;
                 if bias.len() != count {
                     candle_core::bail!(
-                        "{module}.e_score_correction_bias holds {} scores for {count} experts",
+                        "{tensor} holds {} scores for {count} experts",
                         bias.len()
                     );
                 }

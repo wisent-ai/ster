@@ -667,9 +667,10 @@ pub struct MixtureOfExperts {
     /// equal groups, and a token picks among the experts of its best
     /// `chosen_groups` groups only.
     pub groups: Option<ExpertGroups>,
-    /// Where the layer keeps its `e_score_correction_bias`, added to the
-    /// scores to choose experts and never to weigh them: DeepSeek-V3's
-    /// `mlp.gate`, ERNIE 4.5's `mlp.moe_statics`.
+    /// The tensor holding the bias added to the scores to choose experts,
+    /// never to weigh them: DeepSeek-V3's `mlp.gate.e_score_correction_bias`,
+    /// ERNIE 4.5's `mlp.moe_statics.e_score_correction_bias`, LFM2-MoE's
+    /// `feed_forward.expert_bias`.
     pub selection_bias: Option<&'static str>,
     /// `routed_scaling_factor`, multiplying the routed experts' weights.
     pub routed_scale: Option<f64>,
@@ -728,6 +729,8 @@ pub enum ExpertLayout {
     Jamba,
     /// `mlp.gate.wg`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`.
     HunYuan,
+    /// `feed_forward.gate`, `feed_forward.experts.{e}.w1|w3|w2` (LFM2-MoE).
+    Lfm2,
     /// `mlp.experts.gate_up_proj` and `down_proj`, with biases.
     GptOss,
     /// `ffn.router.layer`, and every expert stacked in

@@ -84,13 +84,14 @@ pub(super) enum Family {
     Phimoe,
     HunYuanMoe,
     Telechat,
+    Lfm2Moe,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 60] = [
+    pub(super) const ALL: [Self; 61] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -148,6 +149,7 @@ impl Family {
         Self::Phimoe,
         Self::HunYuanMoe,
         Self::Telechat,
+        Self::Lfm2Moe,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -218,6 +220,7 @@ impl Family {
             Self::Phimoe => "phimoe",
             Self::HunYuanMoe => "hunyuan_v1_moe",
             Self::Telechat => "telechat",
+            Self::Lfm2Moe => "lfm2_moe",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -978,7 +981,7 @@ pub(super) fn family(
                         module: "shared_experts",
                         gated: false,
                     });
-                routed.selection_bias = Some("mlp.moe_statics");
+                routed.selection_bias = Some("mlp.moe_statics.e_score_correction_bias");
                 architecture.experts = Some(routed);
             }
         }
@@ -1174,7 +1177,7 @@ pub(super) fn family(
             architecture.query_key_value_bias = flag(raw, "bias");
             architecture.output_bias = architecture.query_key_value_bias;
         }
-        "lfm2" => {
+        "lfm2" | "lfm2_moe" => {
             // LFM2: gated short convolutions on every layer but those
             // `full_attn_idxs` (or `layer_types`' `full_attention`) names,
             // per-head query and key norms on the attention layers.
@@ -1206,6 +1209,30 @@ pub(super) fn family(
                 bias: flag(raw, "conv_bias"),
                 layers: every_layer(layers, path)? & !attention,
             });
+            if model_type == "lfm2_moe" {
+                // LFM2-MoE: the first `num_dense_layers` layers keep the
+                // plain `intermediate_size` feed-forward; the rest route
+                // over `num_experts` experts (`feed_forward.gate`,
+                // `feed_forward.experts.{e}.w1`/`w3`/`w2`) by sigmoid
+                // scores, chosen with `feed_forward.expert_bias` added when
+                // `use_expert_bias` holds, renormalised under
+                // `norm_topk_prob`, scaled by `routed_scaling_factor`.
+                let dense_count = whole(raw, "num_dense_layers").unwrap_or(0).min(layers);
+                let dense = (0..dense_count).fold(0u128, |set, layer| set | (1u128 << layer));
+                let mut routed = experts(
+                    raw,
+                    "num_experts",
+                    "moe_intermediate_size",
+                    flag(raw, "norm_topk_prob"),
+                    ExpertLayout::Lfm2,
+                    dense,
+                    path,
+                )?;
+                routed.scoring = Scoring::Sigmoid;
+                routed.selection_bias = flag(raw, "use_expert_bias").then_some("feed_forward.expert_bias");
+                routed.routed_scale = number(raw, "routed_scaling_factor");
+                architecture.experts = Some(routed);
+            }
         }
         "gpt_oss" => {
             // GPT-OSS: biased attention projections with a learned sink per
@@ -1690,7 +1717,7 @@ fn deepseek_experts(
             path.display()
         ),
     };
-    routed.selection_bias = (method == "noaux_tc").then_some("mlp.gate");
+    routed.selection_bias = (method == "noaux_tc").then_some("mlp.gate.e_score_correction_bias");
     let scale = number(raw, "routed_scaling_factor");
     routed.routed_scale = if v3_router || !(normalize && routed.top_k > 1) {
         scale
