@@ -38,9 +38,13 @@ impl NormSpec {
         }
     }
 
-    /// One norm over `width`, from `builder`'s `weight` (and `bias`).
+    /// One norm over `width`, from `builder`'s `weight` (and `bias`). A bare
+    /// norm stores nothing, so its scale is a constant one.
     pub fn load(self, width: usize, builder: VarBuilder<'_>) -> candle_core::Result<Norm> {
-        let weight = builder.get(width, "weight")?;
+        let weight = match self.kind {
+            NormKind::Bare => Tensor::ones(width, builder.dtype(), builder.device())?,
+            _ => builder.get(width, "weight")?,
+        };
         let bias = self.bias(|| builder.get(width, "bias"))?;
         self.assemble(weight, bias)
     }
@@ -134,7 +138,7 @@ impl Norm {
         let hidden = hidden.to_dtype(internal)?;
         let hidden = match self.kind {
             NormKind::Rms => hidden,
-            NormKind::Layer { .. } => {
+            NormKind::Layer { .. } | NormKind::Bare => {
                 let mean = (hidden.sum_keepdim(D::Minus1)? / width)?;
                 hidden.broadcast_sub(&mean)?
             }

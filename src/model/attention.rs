@@ -76,7 +76,7 @@ impl Attention {
         let spec = NormSpec {
             kind: match architecture.norm {
                 NormKind::Layer { .. } => NormKind::Layer { bias: false },
-                NormKind::Rms => NormKind::Rms,
+                other => other,
             },
             ..NormSpec::of(architecture)
         };
@@ -110,7 +110,7 @@ impl Attention {
         // Phi-3 stores query, key and value as one `qkv_proj` matrix, rows in
         // that order. Each projection is a row slice of it — a view of the
         // mapped weight, not a copy — so every adapter site stays separate.
-        let (query, key, value) = if architecture.fused_projections {
+        let (query, key, value) = if architecture.fused_attention {
             let fused = builder.get(
                 (query_width + 2 * key_value_width, input),
                 "qkv_proj.weight",

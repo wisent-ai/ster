@@ -277,28 +277,30 @@ pub fn merge(
 }
 
 /// The fused tensor a projection lives in and the first of its rows, for a
-/// checkpoint that stores query, key and value as `qkv_proj` and gate and up
-/// as `gate_up_proj` (Phi-3); `None` for a checkpoint that does not.
+/// checkpoint that stores query, key and value as `qkv_proj` (Phi-3) or gate
+/// and up as `gate_up_proj` (Phi-3, GLM); `None` for a projection that has
+/// its own tensor.
 fn fused_rows(
     target: lora::Target,
     layer: usize,
     config: &candle_transformers::models::llama::Config,
     architecture: &crate::model::Architecture,
 ) -> Option<(String, usize)> {
-    if !architecture.fused_projections {
-        return None;
-    }
     let query = architecture.attention_width(config.num_attention_heads);
     let key_value = config.num_key_value_heads * architecture.head_dim;
     let attention = format!("model.layers.{layer}.self_attn.qkv_proj.weight");
     let feed_forward = format!("model.layers.{layer}.mlp.gate_up_proj.weight");
     match target {
-        lora::Target::Query => Some((attention, 0)),
-        lora::Target::Key => Some((attention, query)),
-        lora::Target::Value => Some((attention, query + key_value)),
-        lora::Target::Gate => Some((feed_forward, 0)),
-        lora::Target::Up => Some((feed_forward, config.intermediate_size)),
-        lora::Target::Output | lora::Target::Down => None,
+        lora::Target::Query if architecture.fused_attention => Some((attention, 0)),
+        lora::Target::Key if architecture.fused_attention => Some((attention, query)),
+        lora::Target::Value if architecture.fused_attention => {
+            Some((attention, query + key_value))
+        }
+        lora::Target::Gate if architecture.fused_feed_forward => Some((feed_forward, 0)),
+        lora::Target::Up if architecture.fused_feed_forward => {
+            Some((feed_forward, config.intermediate_size))
+        }
+        _ => None,
     }
 }
 

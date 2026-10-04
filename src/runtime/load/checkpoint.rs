@@ -145,7 +145,7 @@ impl Checkpoint {
             );
         }
         let scaling = take_rope_scaling(&mut raw, &self.config)?;
-        fill_norm_eps(&mut raw);
+        fill_norm_eps(&mut raw, model_type);
         let mut llama: LlamaConfig = serde_json::from_value(raw.clone())
             .with_context(|| format!("invalid {model_type} config {}", self.config.display()))?;
         if TIED_BY_DEFAULT.contains(&model_type) && llama.tie_word_embeddings.is_none() {

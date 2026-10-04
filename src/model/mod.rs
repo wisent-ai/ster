@@ -172,7 +172,11 @@ pub struct Architecture {
     /// A rotary scaling Ster applies itself; Llama 3's is carried by Candle's
     /// config instead.
     pub rope_scaling: RopeScaling,
-    pub fused_projections: bool,
+    /// Query, key and value stored as one `qkv_proj` (Phi-3).
+    pub fused_attention: bool,
+    /// Gate and up stored as one `gate_up_proj`, gate rows first (Phi-3,
+    /// GLM).
+    pub fused_feed_forward: bool,
     pub norm_offset: bool,
     /// What the embedding is multiplied by before the first block.
     pub embedding_multiplier: Option<f64>,
@@ -221,7 +225,8 @@ impl Architecture {
             unrotated_layers: 0,
             local_rope_theta: None,
             rope_scaling: RopeScaling::None,
-            fused_projections: false,
+            fused_attention: false,
+            fused_feed_forward: false,
             norm_offset: false,
             embedding_multiplier: None,
             residual_multiplier: None,
@@ -340,17 +345,41 @@ pub struct Names {
     pub gate: Option<&'static str>,
     pub up: &'static str,
     pub down: &'static str,
+    /// The norm over attention's output, in a block that has one.
+    pub attention_output_norm: &'static str,
+    /// The norm before the feed-forward.
+    pub feed_forward_norm: &'static str,
+    /// The norm over the feed-forward's output, in a block that has one.
+    pub feed_forward_output_norm: &'static str,
     /// The norm after the last block, below `model`.
     pub final_norm: &'static str,
 }
 
 impl Names {
+    /// Llama's names; OLMo 2's post-norm block reuses
+    /// `post_attention_layernorm` for the norm over attention's output.
     pub const LLAMA: Self = Self {
         output: "self_attn.o_proj",
         gate: Some("mlp.gate_proj"),
         up: "mlp.up_proj",
         down: "mlp.down_proj",
+        attention_output_norm: "post_attention_layernorm",
+        feed_forward_norm: "post_attention_layernorm",
+        feed_forward_output_norm: "post_feedforward_layernorm",
         final_norm: "norm",
+    };
+    /// Gemma 2 and 3: `post_attention_layernorm` is over attention's output,
+    /// so the norm before the feed-forward is `pre_feedforward_layernorm`.
+    pub const GEMMA2: Self = Self {
+        feed_forward_norm: "pre_feedforward_layernorm",
+        ..Self::LLAMA
+    };
+    /// GLM-4-0414: `post_self_attn_layernorm` over attention's output and
+    /// `post_mlp_layernorm` over the feed-forward's.
+    pub const GLM4: Self = Self {
+        attention_output_norm: "post_self_attn_layernorm",
+        feed_forward_output_norm: "post_mlp_layernorm",
+        ..Self::LLAMA
     };
     /// Starcoder2's plain feed-forward.
     pub const STARCODER2: Self = Self {
@@ -359,8 +388,9 @@ impl Names {
         down: "mlp.c_proj",
         ..Self::LLAMA
     };
-    /// Nemotron's plain feed-forward keeps Llama's up and down names.
-    pub const NEMOTRON: Self = Self {
+    /// A plain feed-forward that keeps Llama's up and down names (Nemotron,
+    /// Arcee).
+    pub const UP_DOWN: Self = Self {
         gate: None,
         ..Self::LLAMA
     };
@@ -372,6 +402,7 @@ impl Names {
         up: "mlp.fc1",
         down: "mlp.fc2",
         final_norm: "final_layernorm",
+        ..Self::LLAMA
     };
 }
 
@@ -392,6 +423,8 @@ pub enum NormKind {
     /// Mean subtracted, then divided by the standard deviation; `bias` says
     /// whether a bias tensor follows the scale.
     Layer { bias: bool },
+    /// LayerNorm with no scale and no bias at all (OLMo 1).
+    Bare,
 }
 
 /// A rotary scaling read from the config's `rope_scaling`, beyond Llama 3's.

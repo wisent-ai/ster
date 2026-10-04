@@ -75,7 +75,7 @@ impl FeedForward {
         let names = architecture.names;
         // Phi-3 stores the gate and up projections as one `gate_up_proj`,
         // gate rows first; each is a row slice of that mapped weight.
-        let (gate, up) = if architecture.fused_projections {
+        let (gate, up) = if architecture.fused_feed_forward {
             let fused = builder.get((2 * intermediate, hidden), "mlp.gate_up_proj.weight")?;
             (
                 Some(Linear::new(fused.narrow(0, 0, intermediate)?, None)),
@@ -147,38 +147,34 @@ impl DecoderLayer {
     ) -> candle_core::Result<Self> {
         let spec = NormSpec::of(architecture);
         let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
-        // The checkpoints name the same position differently:
-        //
-        // * Llama: `input_layernorm` before attention and
-        //   `post_attention_layernorm` before the feed-forward.
-        // * Gemma 2 and 3: those plus `post_attention_layernorm` over the
-        //   attention output, so the norm before the feed-forward is
-        //   `pre_feedforward_layernorm`, and `post_feedforward_layernorm`
-        //   closes the block.
-        // * OLMo 2: no norm before either sublayer; `post_attention_layernorm`
-        //   and `post_feedforward_layernorm` sit over their outputs.
-        // * A parallel block (Cohere, Phi-2, StableLM's
-        //   `use_parallel_residual`): one `input_layernorm` feeds both halves.
+        let names = architecture.names;
+        // Which norms a block has comes from the architecture; what each is
+        // called comes from the family's names (Llama's
+        // `post_attention_layernorm` before the feed-forward, Gemma 2's
+        // `pre_feedforward_layernorm`, GLM-4's `post_self_attn_layernorm`
+        // over attention's output). A parallel block (Cohere, Phi-2,
+        // StableLM's `use_parallel_residual`) has one `input_layernorm` that
+        // feeds both halves; OLMo 2 has no norm before either sublayer.
         let (attention_norm, attention_output_norm, feed_forward_norm, feed_forward_output_norm) =
             match (architecture.parallel, architecture.pre_norms, architecture.output_norms) {
                 (true, _, _) => (Some(norm("input_layernorm")?), None, None, None),
                 (false, true, false) => (
                     Some(norm("input_layernorm")?),
                     None,
-                    Some(norm("post_attention_layernorm")?),
+                    Some(norm(names.feed_forward_norm)?),
                     None,
                 ),
                 (false, true, true) => (
                     Some(norm("input_layernorm")?),
-                    Some(norm("post_attention_layernorm")?),
-                    Some(norm("pre_feedforward_layernorm")?),
-                    Some(norm("post_feedforward_layernorm")?),
+                    Some(norm(names.attention_output_norm)?),
+                    Some(norm(names.feed_forward_norm)?),
+                    Some(norm(names.feed_forward_output_norm)?),
                 ),
                 (false, false, _) => (
                     None,
-                    Some(norm("post_attention_layernorm")?),
+                    Some(norm(names.attention_output_norm)?),
                     None,
-                    Some(norm("post_feedforward_layernorm")?),
+                    Some(norm(names.feed_forward_output_norm)?),
                 ),
             };
         Ok(Self {

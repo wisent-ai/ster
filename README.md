@@ -36,15 +36,18 @@ Included now:
 - local and Hugging Face checkpoints published as unquantized Safetensors
   whose `model_type` is `llama`, `mistral`, `mixtral`, `qwen2`, `qwen2_moe`,
   `qwen3`, `qwen3_moe`, `phi`, `phi3`, `granite`, `granitemoe`, `stablelm`,
-  `starcoder2`, `cohere`, `cohere2`, `nemotron`, `olmo2`, `olmo3`, `olmoe`,
-  `smollm3`, `gemma`, `gemma2` or `gemma3_text`. Coverage is measured
+  `starcoder2`, `cohere`, `cohere2`, `nemotron`, `olmo`, `olmo2`, `olmo3`,
+  `olmoe`, `exaone4`, `internlm3`, `seed_oss`, `arcee`, `ernie4_5`,
+  `minicpm`, `orion`, `glm`, `glm4`, `smollm3`, `gemma`, `gemma2` or
+  `gemma3_text`. Coverage is measured
   against vLLM's list of text-only architectures; every architecture on it
   that Ster does not load is tracked with what the decoder lacks for it.
   Each family is the same rotary, grouped-query decoder with what its config
   adds read from the config itself: a stated `head_dim` (attention wider or
   narrower than the residual stream), RMS or LayerNorm norms (with a bias
-  for StableLM, Starcoder2, Phi-2 and Nemotron, without for Cohere, offset
-  from one for Gemma and Nemotron), query and key norms per head (Qwen3,
+  for StableLM, Starcoder2, Phi-2, Nemotron and Orion, without for Cohere,
+  with neither scale nor bias for OLMo 1, offset from one for Gemma and
+  Nemotron), query and key norms per head (Qwen3,
   Gemma 3, Cohere's `use_qk_norm`, StableLM's `qk_layernorm`) or over the
   whole projection (OLMo 2 and 3, OLMoE), projection bias (`attention_bias`,
   `use_qkv_bias`, `use_bias`, `mlp_bias`, Phi-2's biased head), a gated
@@ -57,10 +60,13 @@ Included now:
   StableLM's `use_parallel_residual`),
   sliding-window attention on the layers `sliding_window`,
   `max_window_layers`, `sliding_window_pattern` or `layer_types` name,
-  Phi-3's fused `qkv_proj` and `gate_up_proj` (split at load, and merged back
-  row by row by `ster tune merge`), OLMo 2's norms after each sublayer instead
-  of before it, Granite's embedding, residual, attention and logit
-  multipliers, Cohere's `logit_scale` and interleaved rotation, unrotated
+  Phi-3's fused `qkv_proj` and `gate_up_proj` and GLM's fused `gate_up_proj`
+  (split at load, and merged back row by row by `ster tune merge`), OLMo 2's
+  and EXAONE 4's norms after each sublayer instead of before it, GLM-4's
+  `post_self_attn_layernorm` and `post_mlp_layernorm`, Granite's and
+  MiniCPM's embedding, residual and logit multipliers, Granite's attention
+  multiplier, Cohere's `logit_scale`, interleaved rotation (Cohere, GLM,
+  ERNIE 4.5), unrotated
   layers (SmolLM3's `no_rope_layers`, Cohere 2's global layers), rotation of
   only the `partial_rotary_factor` share of each head, `linear` rotary
   scaling and Phi-3's `longrope` (short factors within the original context,

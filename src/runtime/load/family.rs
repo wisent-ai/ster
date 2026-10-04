@@ -33,9 +33,19 @@ pub(super) const FAMILIES: &[&str] = &[
     "cohere",
     "cohere2",
     "nemotron",
+    "olmo",
     "olmo2",
     "olmo3",
     "olmoe",
+    "exaone4",
+    "internlm3",
+    "seed_oss",
+    "arcee",
+    "ernie4_5",
+    "minicpm",
+    "orion",
+    "glm",
+    "glm4",
     "smollm3",
     "gemma",
     "gemma2",
@@ -44,19 +54,32 @@ pub(super) const FAMILIES: &[&str] = &[
 
 /// Families whose Transformers config class leaves `tie_word_embeddings` at
 /// the library default, true, so their configs often omit it.
-pub(super) const TIED_BY_DEFAULT: &[&str] =
-    &["gemma", "gemma2", "gemma3_text", "cohere", "cohere2", "starcoder2"];
+pub(super) const TIED_BY_DEFAULT: &[&str] = &[
+    "gemma",
+    "gemma2",
+    "gemma3_text",
+    "cohere",
+    "cohere2",
+    "starcoder2",
+    "ernie4_5",
+];
+
+/// OLMo 1's configs state no norm epsilon; Transformers' `OlmoLayerNorm`
+/// passes this one to `F.layer_norm` itself.
+const OLMO_NORM_EPS: f64 = 1e-5;
 
 /// Candle's Llama config reads the norm epsilon as `rms_norm_eps`; the
 /// LayerNorm families spell it otherwise. The first spelling present is
-/// copied under Candle's name before the config is parsed.
-pub(super) fn fill_norm_eps(raw: &mut Value) {
+/// copied under Candle's name before the config is parsed, and OLMo 1, which
+/// states none, gets the one its norm is defined with.
+pub(super) fn fill_norm_eps(raw: &mut Value, model_type: &str) {
     if raw.get("rms_norm_eps").is_some() {
         return;
     }
     let spelled = ["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]
         .iter()
-        .find_map(|key| raw.get(*key).cloned());
+        .find_map(|key| raw.get(*key).cloned())
+        .or_else(|| (model_type == "olmo").then(|| Value::from(OLMO_NORM_EPS)));
     if let (Some(eps), Some(object)) = (spelled, raw.as_object_mut()) {
         object.insert("rms_norm_eps".to_owned(), eps);
     }
@@ -204,7 +227,8 @@ pub(super) fn family(
         "llama" | "mistral" | "mixtral" | "phi3" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.fused_projections = model_type == "phi3";
+            architecture.fused_attention = model_type == "phi3";
+            architecture.fused_feed_forward = model_type == "phi3";
             // Mistral v0.2 and later publish `sliding_window: null`, which is
             // full attention on every layer; Phi-3 states a window it applies
             // on every layer.
@@ -349,7 +373,7 @@ pub(super) fn family(
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.feed_forward_bias = flag(raw, "mlp_bias");
             architecture.feed_forward = FeedForwardKind::Plain;
-            architecture.names = Names::NEMOTRON;
+            architecture.names = Names::UP_DOWN;
         }
         "phi" => {
             if flag(raw, "qk_layernorm") {
@@ -388,12 +412,83 @@ pub(super) fn family(
                 architecture.sliding_layers = every_layer(layers, path)?;
             }
         }
+        "olmo" => {
+            if raw.get("clip_qkv").is_some_and(|clip| !clip.is_null()) {
+                bail!(
+                    "{} declares clip_qkv; Ster implements OLMo without clipping query, key and value",
+                    path.display()
+                );
+            }
+            // OLMo 1's LayerNorm stores neither a scale nor a bias.
+            architecture.norm = NormKind::Bare;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+        }
+        "exaone4" => {
+            // OLMo 2's post-norm block with per-head query and key norms.
+            architecture.query_key_norm = QueryKeyNorm::PerHead;
+            architecture.pre_norms = false;
+            architecture.output_norms = true;
+            architecture.sliding_window = whole(raw, "sliding_window");
+            if let Some(pattern) = whole(raw, "sliding_window_pattern").filter(|p| *p > 0) {
+                fits(layers, path)?;
+                architecture.sliding_layers = (0..layers)
+                    .filter(|layer| (layer + 1) % pattern != 0)
+                    .fold(0, |set, layer| set | (1u128 << layer));
+            }
+        }
+        "internlm3" => {
+            architecture.query_key_value_bias = flag(raw, "qkv_bias");
+            architecture.output_bias = flag(raw, "bias");
+        }
+        "seed_oss" => {
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = flag(raw, "attention_out_bias");
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+        }
+        "arcee" => {
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.feed_forward = FeedForwardKind::Plain;
+            architecture.names = Names::UP_DOWN;
+        }
+        "ernie4_5" => {
+            let bias = flag(raw, "use_bias");
+            architecture.query_key_value_bias = bias;
+            architecture.output_bias = bias;
+            architecture.feed_forward_bias = bias;
+            architecture.interleaved_rotary = true;
+        }
+        "minicpm" => {
+            // MiniCPM's muP scales: the embedding by `scale_emb`, each
+            // sublayer by `scale_depth / sqrt(layers)`, and the logits by
+            // `dim_model_base / hidden_size`.
+            architecture.embedding_multiplier = number(raw, "scale_emb");
+            architecture.residual_multiplier =
+                number(raw, "scale_depth").map(|depth| depth / (layers as f64).sqrt());
+            architecture.logits_multiplier = number(raw, "dim_model_base")
+                .map(|base| base / llama.hidden_size as f64);
+        }
+        "orion" => {
+            architecture.norm = NormKind::Layer { bias: true };
+        }
+        "glm" | "glm4" => {
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.fused_feed_forward = true;
+            architecture.interleaved_rotary = true;
+            if model_type == "glm4" {
+                architecture.output_norms = true;
+                architecture.names = Names::GLM4;
+            }
+        }
         "gemma" | "gemma2" | "gemma3_text" => {
             architecture.norm_offset = true;
             architecture.embedding_multiplier = Some((llama.hidden_size as f64).sqrt());
             architecture.activation = Activation::GeluTanh;
             if model_type != "gemma" {
                 architecture.output_norms = true;
+                architecture.names = Names::GEMMA2;
                 architecture.sliding_window = whole(raw, "sliding_window");
                 if let Some(scalar) = number(raw, "query_pre_attn_scalar") {
                     architecture.score_divisor = scalar.sqrt();
@@ -424,7 +519,10 @@ pub(super) fn family(
     if let Some(types) = raw.get("layer_types").and_then(Value::as_array) {
         architecture.sliding_layers = listed_layers(types, layers, path)?;
     }
-    if model_type == "cohere2" {
+    // Cohere 2's global layers apply no rotary embedding; so do EXAONE 4's
+    // when the model mixes local and global layers at all.
+    let hybrid_exaone = model_type == "exaone4" && architecture.sliding_window.is_some();
+    if model_type == "cohere2" || hybrid_exaone {
         architecture.unrotated_layers = every_layer(layers, path)? & !architecture.sliding_layers;
     }
     if architecture.sliding_layers != 0 && architecture.sliding_window.is_none() {
