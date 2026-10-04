@@ -109,10 +109,14 @@ pub(super) enum Family {
     GraniteSwa,
     GraniteMoeSwa,
     GraniteMoeShared,
+    Glm4MoeLite,
+    IQuestCoder,
+    HyperClovaX,
+    VaultGemma,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 82] = [
+    pub(super) const ALL: [Self; 86] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -195,6 +199,10 @@ impl Family {
         Self::GraniteSwa,
         Self::GraniteMoeSwa,
         Self::GraniteMoeShared,
+        Self::Glm4MoeLite,
+        Self::IQuestCoder,
+        Self::HyperClovaX,
+        Self::VaultGemma,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -287,6 +295,10 @@ impl Family {
             Self::GraniteSwa => "granite_swa",
             Self::GraniteMoeSwa => "granitemoe_swa",
             Self::GraniteMoeShared => "granitemoeshared",
+            Self::Glm4MoeLite => "glm4_moe_lite",
+            Self::IQuestCoder => "iquestcoder",
+            Self::HyperClovaX => "hyperclovax",
+            Self::VaultGemma => "vaultgemma",
         }
     }
 
@@ -301,6 +313,7 @@ impl Family {
                 | Self::Gemma3Text
                 | Self::Gemma4Text
                 | Self::Gemma4UnifiedText
+                | Self::VaultGemma
                 | Self::Cohere
                 | Self::Cohere2
                 | Self::Starcoder2
@@ -946,15 +959,29 @@ pub(super) fn family(
                 architecture.experts = Some(routed);
             }
         }
-        "granite" | "granitemoe" | "granitemoehybrid" | "granite_swa" | "granitemoe_swa" | "granitemoeshared" => {
+        "granite" | "granitemoe" | "granitemoehybrid" | "granite_swa" | "granitemoe_swa" | "granitemoeshared"
+        | "hyperclovax" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
             architecture.embedding_multiplier = number(raw, "embedding_multiplier");
             architecture.residual_multiplier = number(raw, "residual_multiplier");
             if let Some(multiplier) = number(raw, "attention_multiplier") {
                 architecture.score_divisor = 1.0 / multiplier;
             }
-            architecture.logits_multiplier = number(raw, "logits_scaling").map(|scale| 1.0 / scale);
+            // HyperCLOVAX multiplies its logits by `logits_scaling` where
+            // Granite divides by it, and under `use_post_norm` (on unless
+            // stated off) normalises each sublayer's output (`post_norm1`,
+            // `post_norm2`) before the scaled residual add.
+            architecture.logits_multiplier = if model_type == "hyperclovax" {
+                number(raw, "logits_scaling")
+            } else {
+                number(raw, "logits_scaling").map(|scale| 1.0 / scale)
+            };
+            if model_type == "hyperclovax" && raw.get("use_post_norm").and_then(Value::as_bool) != Some(false) {
+                architecture.output_norms = true;
+                architecture.names = Names::HYPERCLOVAX;
+            }
             if matches!(model_type, "granitemoe" | "granitemoe_swa" | "granitemoeshared") {
                 // GraniteMoE takes the softmax over the top-k logits, which is
                 // the full softmax renormalised over the chosen experts.
@@ -1176,6 +1203,20 @@ pub(super) fn family(
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = flag(raw, "attention_out_bias");
             architecture.feed_forward_bias = flag(raw, "mlp_bias");
+        }
+        "iquestcoder" => {
+            // IQuest-Coder: Llama with `mlp_bias`, OLMo's `clip_qkv`, and
+            // Qwen2's sliding window on the layers from `max_window_layers`
+            // under `use_sliding_window`.
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.clip_qkv = number(raw, "clip_qkv");
+            if flag(raw, "use_sliding_window") {
+                architecture.sliding_window = whole(raw, "sliding_window");
+                let from = whole(raw, "max_window_layers").unwrap_or(0);
+                architecture.sliding_layers = every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
+            }
         }
         "arcee" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
@@ -1804,7 +1845,9 @@ pub(super) fn family(
             architecture.output_bias = true;
             architecture.down_bias = true;
         }
-        "deepseek_v2" | "deepseek_v3" | "minicpm3" => {
+        // GLM-4.7-Flash (`glm4_moe_lite`) is DeepSeek-V3's latent attention
+        // and router under GLM's name.
+        "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" => {
             if architecture.latent.is_none() {
                 bail!(
                     "{} declares no kv_lora_rank; Ster implements {model_type} with its latent attention",
@@ -2372,12 +2415,14 @@ pub(super) fn family(
                 architecture.names = Names::GLM4;
             }
         }
-        "gemma" | "gemma2" | "gemma3_text" => {
+        // VaultGemma is Gemma 2 without the norms over each sublayer's
+        // output.
+        "gemma" | "gemma2" | "gemma3_text" | "vaultgemma" => {
             architecture.norm_offset = true;
             architecture.embedding_multiplier = Some((llama.hidden_size as f64).sqrt());
             architecture.activation = Activation::GeluTanh;
             if model_type != "gemma" {
-                architecture.output_norms = true;
+                architecture.output_norms = model_type != "vaultgemma";
                 architecture.names = Names::GEMMA2;
                 architecture.sliding_window = whole(raw, "sliding_window");
                 if let Some(scalar) = number(raw, "query_pre_attn_scalar") {
@@ -2386,7 +2431,7 @@ pub(super) fn family(
                 architecture.attention_softcap = number(raw, "attn_logit_softcapping");
                 architecture.final_softcap = number(raw, "final_logit_softcapping");
             }
-            if model_type == "gemma2" {
+            if model_type == "gemma2" || model_type == "vaultgemma" {
                 architecture.sliding_layers = even_layers(layers, path)?;
             }
             if model_type == "gemma3_text" {
@@ -2607,9 +2652,13 @@ fn deepseek_experts(
     fits(layers, path)?;
     let first_dense = whole(raw, "first_k_dense_replace").unwrap_or(0);
     let frequency = whole(raw, "moe_layer_freq").unwrap_or(1).max(1);
-    let dense_layers = (0..layers)
-        .filter(|layer| *layer < first_dense || layer % frequency != 0)
-        .fold(0, |set, layer| set | (1u128 << layer));
+    let dense_layers = if raw.get("mlp_layer_types").is_some_and(Value::is_array) {
+        qwen_dense_layers(raw, layers, path)?
+    } else {
+        (0..layers)
+            .filter(|layer| *layer < first_dense || layer % frequency != 0)
+            .fold(0, |set, layer| set | (1u128 << layer))
+    };
     let normalize = flag(raw, "norm_topk_prob");
     let mut routed = experts(
         raw,
@@ -2630,7 +2679,7 @@ fn deepseek_experts(
         });
     // GLM-4-MoE's and Nemotron-H's routers are DeepSeek-V3's and their
     // configs leave the method out: sigmoid scores, `noaux_tc` selection.
-    let v3_default = matches!(model_type, "glm4_moe" | "nemotron_h");
+    let v3_default = matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "nemotron_h");
     let v3_router = v3_default || model_type == "deepseek_v3";
     routed.scoring = match text(raw, "scoring_func") {
         None if v3_default => Scoring::Sigmoid,

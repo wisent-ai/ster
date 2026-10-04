@@ -44,7 +44,7 @@ Included now:
   `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `mamba2`, `bamba`,
   `gpt_oss`, `lfm2`, `ernie4_5_moe`, `dbrx`, `phimoe`, `hunyuan_v1_moe`,
   `telechat`, `lfm2_moe`, `granitemoehybrid`, `nemotron_h`, `jais2`,
-  `bailing_moe`, `TeleFLM`, `falcon_h1`, `qwen3_next`, `kimi_linear`, `minimax_m2`, `minimax_text_01` (or `minimax`), `zamba2`, `step3_text` (also inside `step3_vl`), `mimo`, `mellum`, `flex_olmo`, `granite_swa`, `granitemoe_swa`, `granitemoeshared`, `smollm3`, `gemma`, `gemma2`, `gemma3_text`, `gemma4_text` or `gemma4_unified_text` (also inside `gemma4` and `gemma4_unified`), with the
+  `bailing_moe`, `TeleFLM`, `falcon_h1`, `qwen3_next`, `kimi_linear`, `minimax_m2`, `minimax_text_01` (or `minimax`), `zamba2`, `step3_text` (also inside `step3_vl`), `mimo`, `mellum`, `flex_olmo`, `granite_swa`, `granitemoe_swa`, `granitemoeshared`, `glm4_moe_lite`, `iquestcoder`, `hyperclovax`, `smollm3`, `gemma`, `gemma2`, `vaultgemma`, `gemma3_text`, `gemma4_text` or `gemma4_unified_text` (also inside `gemma4` and `gemma4_unified`), with the
   rotation read from
   `rope_theta` and `rope_scaling` or from Transformers 5's `rope_parameters`.
   OLMo, OLMoE and DBRX clamp

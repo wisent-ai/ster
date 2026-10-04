@@ -1146,6 +1146,13 @@ impl Names {
         feed_forward_norm: "pre_feedforward_layernorm",
         ..Self::LLAMA
     };
+    /// HyperCLOVAX: Llama's names, with `post_norm1` and `post_norm2` over
+    /// attention's and the feed-forward's outputs.
+    pub const HYPERCLOVAX: Self = Self {
+        attention_output_norm: "post_norm1",
+        feed_forward_output_norm: "post_norm2",
+        ..Self::LLAMA
+    };
     /// TeleChat2: everything below `transformer` (`word_embeddings`, `h`,
     /// `ln_f`), `self_attention.query` beside one `key_value` matrix, and
     /// `self_attention.dense` as the output.
