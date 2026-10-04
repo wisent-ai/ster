@@ -89,13 +89,14 @@ pub(super) enum Family {
     NemotronH,
     Jais2,
     BailingMoe,
+    TeleFlm,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 65] = [
+    pub(super) const ALL: [Self; 66] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -158,6 +159,7 @@ impl Family {
         Self::NemotronH,
         Self::Jais2,
         Self::BailingMoe,
+        Self::TeleFlm,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -233,6 +235,7 @@ impl Family {
             Self::NemotronH => "nemotron_h",
             Self::Jais2 => "jais2",
             Self::BailingMoe => "bailing_moe",
+            Self::TeleFlm => "TeleFLM",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -971,6 +974,27 @@ pub(super) fn family(
         "internlm3" => {
             architecture.query_key_value_bias = flag(raw, "qkv_bias");
             architecture.output_bias = flag(raw, "bias");
+        }
+        "TeleFLM" => {
+            // Tele-FLM: Llama's block; under `use_mup` the embeddings are
+            // multiplied by `input_mult` and the logits by `output_mult /
+            // mup_scale_factor`.
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            if flag(raw, "use_mup") {
+                let (Some(input), Some(output), Some(scale)) = (
+                    number(raw, "input_mult"),
+                    number(raw, "output_mult"),
+                    number(raw, "mup_scale_factor").filter(|scale| *scale != 0.0),
+                ) else {
+                    bail!(
+                        "{} declares use_mup without input_mult, output_mult and a nonzero mup_scale_factor",
+                        path.display()
+                    );
+                };
+                architecture.embedding_multiplier = Some(input);
+                architecture.logits_multiplier = Some(output / scale);
+            }
         }
         "seed_oss" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
