@@ -50,6 +50,8 @@ pub(super) struct Attention {
     /// ALiBi's slope per head, `[1, heads, 1, 1]`, for a family whose
     /// positions are a linear bias on the scores (BLOOM, MPT).
     alibi: Option<Tensor>,
+    /// The bias is `-slope · sqrt(distance)` (Step1) rather than linear.
+    alibi_root: bool,
     /// GPT-OSS's learned sink per head, `[1, heads, 1, 1]` in F32: one extra
     /// logit every query's softmax divides by and no value is read for.
     sinks: Option<Tensor>,
@@ -361,8 +363,12 @@ impl Attention {
                             * scale)?,
                     )
                 }
+                Positions::AlibiRoot => {
+                    Some(Tensor::new(alibi_slopes(heads), layer_builder.device())?.reshape((1, heads, 1, 1))?)
+                }
                 _ => None,
             },
+            alibi_root: architecture.positions == Positions::AlibiRoot,
             clip_qkv: architecture.clip_qkv,
             key_scale: architecture.key_scale,
             output_gate,
@@ -569,6 +575,22 @@ impl Attention {
         // row that is the published `-slope * distance` plus a constant the
         // softmax ignores, and it is what BLOOM computes.
         let attention = match &self.alibi {
+            // Step1 subtracts `slope · sqrt(distance)`, which is not a
+            // constant shift within a row, so the distance is measured from
+            // each query's absolute position; the last key sits at the last
+            // query's.
+            Some(slopes) if self.alibi_root => {
+                let keys = attention.dim(candle_core::D::Minus1)?;
+                let first_key = (index_pos + sequence) as f64 - keys as f64;
+                let queries = (Tensor::arange(0u32, sequence as u32, attention.device())?.to_dtype(DType::F32)?
+                    + index_pos as f64)?
+                    .reshape((1, 1, sequence, 1))?;
+                let key_positions = (Tensor::arange(0u32, keys as u32, attention.device())?.to_dtype(DType::F32)?
+                    + first_key)?
+                    .reshape((1, 1, 1, keys))?;
+                let distance = queries.broadcast_sub(&key_positions)?.relu()?.sqrt()?;
+                attention.broadcast_sub(&slopes.broadcast_mul(&distance)?)?
+            }
             Some(slopes) => {
                 let keys = attention.dim(candle_core::D::Minus1)?;
                 let positions = Tensor::arange(0u32, keys as u32, attention.device())?

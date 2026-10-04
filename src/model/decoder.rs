@@ -366,7 +366,12 @@ impl SteeringLlama {
             None => None,
         };
         let mut activations = BTreeMap::new();
+        // Solar's block skip connections keep up to two earlier hidden states.
+        let mut kept: [Option<Tensor>; 2] = [None, None];
         for (index, layer) in self.layers.iter().enumerate() {
+            if let Some(skips) = &self.architecture.skip_connections {
+                hidden = skips.apply(index, hidden, &mut kept)?;
+            }
             let mask = masks.map(|masks| masks.for_window(layer.window()));
             let inputs = LayerInputs {
                 embedded: &embedded,

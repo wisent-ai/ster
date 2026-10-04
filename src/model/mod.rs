@@ -254,6 +254,8 @@ pub struct Architecture {
     /// Every block's output multiplied by its stored `layer_scalar`
     /// (Gemma 4).
     pub layer_scalar: bool,
+    /// Solar's block skip connections.
+    pub skip_connections: Option<SkipConnections>,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -281,6 +283,44 @@ pub struct Architecture {
     /// LFM2's gated short convolution in place of attention on the layers it
     /// covers.
     pub short_convolution: Option<ShortConvolution>,
+}
+
+/// Solar's block skip connections (`bskcn_1` to `bskcn_4`): before the
+/// layers in `save[i]` the hidden state is kept in slot `i`; before the
+/// layers in `blend[i]` it becomes `weight · kept[i] + (1 − weight) · hidden`,
+/// `weight` being the inference value of `bskcn_tv`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkipConnections {
+    pub save: [u128; 2],
+    pub blend: [u128; 2],
+    pub weight: f64,
+}
+
+impl SkipConnections {
+    /// The hidden state layer `layer` reads, keeping what it must in `kept`.
+    pub(crate) fn apply(
+        &self,
+        layer: usize,
+        hidden: Tensor,
+        kept: &mut [Option<Tensor>; 2],
+    ) -> candle_core::Result<Tensor> {
+        let listed = |set: u128| layer < u128::BITS as usize && set & (1u128 << layer) != 0;
+        for slot in 0..2 {
+            if listed(self.save[slot]) {
+                kept[slot] = Some(hidden.clone());
+            }
+        }
+        let mut hidden = hidden;
+        for slot in 0..2 {
+            if listed(self.blend[slot]) {
+                let Some(earlier) = &kept[slot] else {
+                    candle_core::bail!("layer {layer} blends in a hidden state no earlier layer kept");
+                };
+                hidden = ((earlier * self.weight)? + (hidden * (1.0 - self.weight))?)?;
+            }
+        }
+        Ok(hidden)
+    }
 }
 
 /// Gemma 4's full-attention layers: heads `head_dim` wide
@@ -539,6 +579,7 @@ impl Architecture {
             per_layer_input: None,
             side_experts: None,
             layer_scalar: false,
+            skip_connections: None,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
@@ -907,6 +948,9 @@ pub enum Positions {
     /// `alibi`); `inside_scale` adds it before the scores are divided by the
     /// head width, as Falcon does, rather than after.
     Alibi { inside_scale: bool },
+    /// Step1's bias: `-slope · sqrt(distance)` on the scores after they are
+    /// divided by the head width, with ALiBi's slopes.
+    AlibiRoot,
     /// No position signal: the recurrence carries order (Mamba).
     None,
 }

@@ -14,7 +14,7 @@ use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
     GlobalAttention, LatentAttention, LightningSpec, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm,
     PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
-    SharedExpert, SharedForm, ShortConvolution, StateSpaceSpec, StructuredSpec,
+    SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec,
 };
 
 /// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
@@ -115,10 +115,12 @@ pub(super) enum Family {
     VaultGemma,
     Apertus,
     ExaoneMoe,
+    Solar,
+    Step1,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 88] = [
+    pub(super) const ALL: [Self; 90] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -207,6 +209,8 @@ impl Family {
         Self::VaultGemma,
         Self::Apertus,
         Self::ExaoneMoe,
+        Self::Solar,
+        Self::Step1,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -305,6 +309,8 @@ impl Family {
             Self::VaultGemma => "vaultgemma",
             Self::Apertus => "apertus",
             Self::ExaoneMoe => "exaone_moe",
+            Self::Solar => "solar",
+            Self::Step1 => "step1",
         }
     }
 
@@ -1231,6 +1237,41 @@ pub(super) fn family(
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = flag(raw, "attention_out_bias");
             architecture.feed_forward_bias = flag(raw, "mlp_bias");
+        }
+        "solar" => {
+            // Solar Pro: Llama's block with block skip connections — before
+            // the layers `bskcn_1` and `bskcn_2` list the hidden state is
+            // kept, and before those `bskcn_3` and `bskcn_4` list it is
+            // blended with the first and second kept one by the inference
+            // weight, the second of `bskcn_tv`.
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            fits(layers, path)?;
+            let listed = |key: &str| -> Result<u128> {
+                let Some(list) = raw.get(key).and_then(Value::as_array) else {
+                    bail!("{} declares a Solar model without {key}", path.display());
+                };
+                list.iter().try_fold(0u128, |set, entry| {
+                    match entry.as_u64().map(|layer| layer as usize).filter(|layer| *layer < layers) {
+                        Some(layer) => Ok(set | (1u128 << layer)),
+                        None => bail!("{} lists {entry} in {key}, which is not one of its {layers} layers", path.display()),
+                    }
+                })
+            };
+            let [_, inference] = numbers::<2>(raw, "bskcn_tv", path)?;
+            architecture.skip_connections = Some(SkipConnections {
+                save: [listed("bskcn_1")?, listed("bskcn_2")?],
+                blend: [listed("bskcn_3")?, listed("bskcn_4")?],
+                weight: inference,
+            });
+        }
+        "step1" => {
+            // Step1 (Step-Audio's language model): Llama's block with
+            // `num_attention_groups` key-value heads and no rotation;
+            // positions enter as `-slope · sqrt(distance)` on the scores,
+            // with ALiBi's slopes, as its `build_alibi_cache` builds them.
+            architecture.positions = Positions::AlibiRoot;
         }
         "iquestcoder" => {
             // IQuest-Coder: Llama with `mlp_bias`, OLMo's `clip_qkv`, and
