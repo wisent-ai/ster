@@ -103,10 +103,16 @@ pub(super) enum Family {
     Gemma3Text,
     Gemma4Text,
     Gemma4UnifiedText,
+    Mimo,
+    Mellum,
+    FlexOlmo,
+    GraniteSwa,
+    GraniteMoeSwa,
+    GraniteMoeShared,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 76] = [
+    pub(super) const ALL: [Self; 82] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -183,6 +189,12 @@ impl Family {
         Self::Gemma3Text,
         Self::Gemma4Text,
         Self::Gemma4UnifiedText,
+        Self::Mimo,
+        Self::Mellum,
+        Self::FlexOlmo,
+        Self::GraniteSwa,
+        Self::GraniteMoeSwa,
+        Self::GraniteMoeShared,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -269,6 +281,12 @@ impl Family {
             Self::Gemma3Text => "gemma3_text",
             Self::Gemma4Text => "gemma4_text",
             Self::Gemma4UnifiedText => "gemma4_unified_text",
+            Self::Mimo => "mimo",
+            Self::Mellum => "mellum",
+            Self::FlexOlmo => "flex_olmo",
+            Self::GraniteSwa => "granite_swa",
+            Self::GraniteMoeSwa => "granitemoe_swa",
+            Self::GraniteMoeShared => "granitemoeshared",
         }
     }
 
@@ -835,8 +853,10 @@ pub(super) fn family(
                 architecture.experts = Some(routed);
             }
         }
-        "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" | "qwen3_next" => {
-            if model_type.starts_with("qwen2") {
+        "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" | "qwen3_next" | "mimo" | "mellum" => {
+            // MiMo is Qwen2 with next-token-prediction layers
+            // (`model.mtp_layers`) that a single forward never reads.
+            if model_type.starts_with("qwen2") || model_type == "mimo" {
                 architecture.query_key_value_bias = true;
             } else {
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
@@ -902,7 +922,9 @@ pub(super) fn family(
                     form: DeltaRuleForm::Qwen3Next,
                 });
             }
-            if model_type.ends_with("_moe") || model_type == "qwen3_next" {
+            // Mellum is Qwen3-MoE with sliding-window layers, a rotation per
+            // layer kind, and dense layers where `mlp_layer_types` says so.
+            if model_type.ends_with("_moe") || model_type == "qwen3_next" || model_type == "mellum" {
                 let mut routed = experts(
                     raw,
                     "num_experts",
@@ -924,7 +946,7 @@ pub(super) fn family(
                 architecture.experts = Some(routed);
             }
         }
-        "granite" | "granitemoe" | "granitemoehybrid" => {
+        "granite" | "granitemoe" | "granitemoehybrid" | "granite_swa" | "granitemoe_swa" | "granitemoeshared" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.embedding_multiplier = number(raw, "embedding_multiplier");
@@ -933,18 +955,28 @@ pub(super) fn family(
                 architecture.score_divisor = 1.0 / multiplier;
             }
             architecture.logits_multiplier = number(raw, "logits_scaling").map(|scale| 1.0 / scale);
-            if model_type == "granitemoe" {
+            if matches!(model_type, "granitemoe" | "granitemoe_swa" | "granitemoeshared") {
                 // GraniteMoE takes the softmax over the top-k logits, which is
                 // the full softmax renormalised over the chosen experts.
-                architecture.experts = Some(experts(
-                    raw,
-                    "num_local_experts",
-                    "intermediate_size",
-                    true,
-                    ExpertLayout::Granite,
-                    0,
-                    path,
-                )?);
+                let mut routed =
+                    experts(raw, "num_local_experts", "intermediate_size", true, ExpertLayout::Granite, 0, path)?;
+                // GraniteMoeShared and GraniteMoeSWA add `shared_mlp`,
+                // `shared_intermediate_size` wide, to every layer's experts
+                // when that width is above zero.
+                if model_type != "granitemoe" {
+                    routed.shared = whole(raw, "shared_intermediate_size").filter(|width| *width > 0).map(
+                        |intermediate| SharedExpert {
+                            intermediate,
+                            module: "shared_mlp",
+                            gated: false,
+                            form: SharedForm::Stacked,
+                        },
+                    );
+                }
+                architecture.experts = Some(routed);
+            }
+            if model_type.ends_with("_swa") {
+                granite_windows(raw, layers, llama, &mut architecture, path)?;
             }
             if model_type == "granitemoehybrid" {
                 granite_hybrid(raw, layers, &mut architecture, path)?;
@@ -1034,7 +1066,7 @@ pub(super) fn family(
             architecture.lm_head_bias = true;
             architecture.names = Names::PHI;
         }
-        "olmo2" | "olmo3" => {
+        "olmo2" | "olmo3" | "flex_olmo" => {
             architecture.query_key_norm = QueryKeyNorm::Full;
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
@@ -1042,6 +1074,19 @@ pub(super) fn family(
             architecture.output_norms = true;
             if model_type == "olmo3" {
                 architecture.sliding_window = whole(raw, "sliding_window");
+            }
+            // FlexOlmo: OLMo 2's block with OLMoE's experts as its
+            // feed-forward.
+            if model_type == "flex_olmo" {
+                architecture.experts = Some(experts(
+                    raw,
+                    "num_experts",
+                    "intermediate_size",
+                    flag(raw, "norm_topk_prob"),
+                    ExpertLayout::Qwen,
+                    0,
+                    path,
+                )?);
             }
         }
         "smollm3" => {
@@ -2454,6 +2499,13 @@ pub(super) fn family(
         }
         other => bail!("model architecture {other:?} has no decoder in this Ster build"),
     }
+    // A rotation stated per layer kind (Transformers 5's `rope_parameters`
+    // by layer type) gives sliding-window layers their own base, whatever
+    // the family, so a scaling on the full-attention rotation (Mellum's
+    // YaRN) never reaches them.
+    if architecture.local_rope_theta.is_none() && architecture.sliding_window.is_some() {
+        architecture.local_rope_theta = number(raw, "rope_local_base_freq").map(|theta| theta as f32);
+    }
     // LFM2's `layer_types` say which layers convolve, read above; every other
     // family's say which layers attend through the window.
     let windows = raw.get("layer_types").and_then(Value::as_array).filter(|_| model_type != "lfm2");
@@ -2749,10 +2801,28 @@ fn structured(
     })
 }
 
-/// Qwen MoE's dense layers: those in `mlp_only_layers`, and those whose
-/// position is not a multiple of `decoder_sparse_step`.
+/// Qwen MoE's dense layers: those `mlp_layer_types` calls `dense` when the
+/// config lists them (Mellum), otherwise those in `mlp_only_layers` and
+/// those whose position is not a multiple of `decoder_sparse_step`.
 fn qwen_dense_layers(raw: &Value, layers: usize, path: &Path) -> Result<u128> {
     fits(layers, path)?;
+    if let Some(kinds) = raw.get("mlp_layer_types").and_then(Value::as_array) {
+        if kinds.len() != layers {
+            bail!("{} lists {} mlp_layer_types for {layers} layers", path.display(), kinds.len());
+        }
+        let mut dense = 0u128;
+        for (layer, kind) in kinds.iter().enumerate() {
+            match kind.as_str() {
+                Some("dense") => dense |= 1u128 << layer,
+                Some("sparse") => {}
+                other => bail!(
+                    "{} names layer {layer}'s feed-forward {other:?}; mlp_layer_types entries are dense or sparse",
+                    path.display()
+                ),
+            }
+        }
+        return Ok(dense);
+    }
     let step = whole(raw, "decoder_sparse_step").unwrap_or(1).max(1);
     let listed: Vec<usize> = raw
         .get("mlp_only_layers")
@@ -2762,6 +2832,68 @@ fn qwen_dense_layers(raw: &Value, layers: usize, path: &Path) -> Result<u128> {
     Ok((0..layers)
         .filter(|layer| listed.contains(layer) || (layer + 1) % step != 0)
         .fold(0, |set, layer| set | (1u128 << layer)))
+}
+
+/// How often GraniteSWA's default layout attends fully: every fourth layer
+/// from the first (`GraniteSWAConfig.__post_init__`, `i % 4 == 0`).
+const GRANITE_SWA_FULL_EVERY: usize = 4;
+
+/// GraniteSWA's and GraniteMoeSWA's additions to Granite: a learned sink per
+/// head (`self_attn.sinks`), sliding-window layers as `layer_types` lists
+/// them (every layer but each fourth from the first without it), and
+/// `layer_rope_theta`, a base per layer where zero means no rotation. Ster
+/// rotates full-attention layers by `rope_theta` and sliding-window layers
+/// by one base of their own, so the stated bases must fit that.
+fn granite_windows(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    architecture.attention_sinks = true;
+    architecture.sliding_window = whole(raw, "sliding_window");
+    architecture.sliding_layers = match raw.get("layer_types").and_then(Value::as_array) {
+        Some(types) => listed_layers(types, layers, path)?,
+        None => {
+            fits(layers, path)?;
+            (0..layers)
+                .filter(|layer| layer % GRANITE_SWA_FULL_EVERY != 0)
+                .fold(0, |set, layer| set | (1u128 << layer))
+        }
+    };
+    let Some(thetas) = raw.get("layer_rope_theta").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let thetas: Vec<f64> = thetas
+        .as_array()
+        .and_then(|list| list.iter().map(Value::as_f64).collect())
+        .with_context(|| format!("{} declares layer_rope_theta that is not a list of numbers", path.display()))?;
+    if thetas.len() != layers {
+        bail!("{} lists {} layer_rope_theta values for {layers} layers", path.display(), thetas.len());
+    }
+    let mut local: Option<f64> = None;
+    for (layer, theta) in thetas.into_iter().enumerate() {
+        let sliding = architecture.window(layer).is_some();
+        if theta == 0.0 {
+            architecture.unrotated_layers |= 1u128 << layer;
+        } else if !sliding && theta != f64::from(llama.rope_theta) {
+            bail!(
+                "{} rotates full-attention layer {layer} by base {theta}, not rope_theta {}; Ster rotates every full-attention layer by rope_theta",
+                path.display(),
+                llama.rope_theta
+            );
+        } else if sliding && local.is_some_and(|base| base != theta) {
+            bail!(
+                "{} rotates sliding-window layers by more than one base in layer_rope_theta; Ster rotates them all by one",
+                path.display()
+            );
+        } else if sliding {
+            local = Some(theta);
+        }
+    }
+    architecture.local_rope_theta = local.filter(|base| *base != f64::from(llama.rope_theta)).map(|base| base as f32);
+    Ok(())
 }
 
 /// A list of exactly `N` numbers under `key`.
