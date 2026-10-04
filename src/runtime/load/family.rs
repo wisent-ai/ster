@@ -85,13 +85,14 @@ pub(super) enum Family {
     HunYuanMoe,
     Telechat,
     Lfm2Moe,
+    GraniteMoeHybrid,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 61] = [
+    pub(super) const ALL: [Self; 62] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -150,6 +151,7 @@ impl Family {
         Self::HunYuanMoe,
         Self::Telechat,
         Self::Lfm2Moe,
+        Self::GraniteMoeHybrid,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -221,6 +223,7 @@ impl Family {
             Self::HunYuanMoe => "hunyuan_v1_moe",
             Self::Telechat => "telechat",
             Self::Lfm2Moe => "lfm2_moe",
+            Self::GraniteMoeHybrid => "granitemoehybrid",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -293,6 +296,14 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
             for (key, value) in nested {
                 object.entry(key).or_insert(value);
             }
+        }
+    }
+    // Granite 4.0 without experts runs its `shared_mlp` as the feed-forward,
+    // `shared_intermediate_size` wide; `intermediate_size` is then unused.
+    if model_type == "granitemoehybrid" && whole(raw, "num_local_experts").unwrap_or(0) == 0 {
+        let shared = raw.get("shared_intermediate_size").filter(|width| width.is_u64()).cloned();
+        if let (Some(width), Some(object)) = (shared, raw.as_object_mut()) {
+            object.insert("intermediate_size".to_owned(), width);
         }
     }
     let aliases: &[(&str, &[&str])] = &[
@@ -743,14 +754,15 @@ pub(super) fn family(
                     routed.shared = whole(raw, "shared_expert_intermediate_size")
                         .map(|intermediate| SharedExpert {
                             intermediate,
-                            module: "shared_expert",
+                            module: "mlp.shared_expert",
                             gated: true,
+                            stacked: false,
                         });
                 }
                 architecture.experts = Some(routed);
             }
         }
-        "granite" | "granitemoe" => {
+        "granite" | "granitemoe" | "granitemoehybrid" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.embedding_multiplier = number(raw, "embedding_multiplier");
@@ -771,6 +783,9 @@ pub(super) fn family(
                     0,
                     path,
                 )?);
+            }
+            if model_type == "granitemoehybrid" {
+                granite_hybrid(raw, layers, &mut architecture, path)?;
             }
         }
         "olmoe" => {
@@ -978,8 +993,9 @@ pub(super) fn family(
                     .filter(|shared| *shared > 0)
                     .map(|shared| SharedExpert {
                         intermediate: shared * routed.intermediate,
-                        module: "shared_experts",
+                        module: "mlp.shared_experts",
                         gated: false,
+                        stacked: false,
                     });
                 routed.selection_bias = Some("mlp.moe_statics.e_score_correction_bias");
                 architecture.experts = Some(routed);
@@ -1293,8 +1309,9 @@ pub(super) fn family(
                     let shared = uniform(raw, "num_shared_expert", path)?.unwrap_or(1);
                     routed.shared = (shared > 0).then_some(SharedExpert {
                         intermediate: shared * llama.intermediate_size,
-                        module: "shared_mlp",
+                        module: "mlp.shared_mlp",
                         gated: false,
+                        stacked: false,
                     });
                 }
                 architecture.experts = Some(routed);
@@ -1672,8 +1689,9 @@ fn deepseek_experts(
         .filter(|shared| *shared > 0)
         .map(|shared| SharedExpert {
             intermediate: shared * routed.intermediate,
-            module: "shared_experts",
+            module: "mlp.shared_experts",
             gated: false,
+            stacked: false,
         });
     // GLM-4-MoE's router is DeepSeek-V3's and its configs leave the method
     // out: sigmoid scores, `noaux_tc` selection.
@@ -1725,6 +1743,86 @@ fn deepseek_experts(
         None
     };
     Ok(routed)
+}
+
+/// Granite 4.0 (`granitemoehybrid`): Mamba-2 mixers (`mamba`, read from
+/// Bamba's `mamba_*` keys) on the layers `layer_types` calls `mamba`,
+/// attention on the others, rotation only when `position_embedding_type` is
+/// `rope`, and after every mixer either GraniteMoE's experts beside the
+/// stacked `shared_mlp` or, with no `num_local_experts`, the `shared_mlp`
+/// alone as the dense feed-forward.
+fn granite_hybrid(
+    raw: &Value,
+    layers: usize,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    fits(layers, path)?;
+    let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
+        bail!("{} declares a Granite 4.0 model without layer_types", path.display());
+    };
+    if types.len() != layers {
+        bail!("{} lists {} layer_types for {layers} layers", path.display(), types.len());
+    }
+    let mut mamba = 0u128;
+    for (layer, kind) in types.iter().enumerate() {
+        match kind.as_str() {
+            Some("mamba") => mamba |= 1u128 << layer,
+            Some("attention") => {}
+            other => bail!(
+                "{} names layer {layer} {other:?}; a Granite 4.0 layer is mamba or attention",
+                path.display()
+            ),
+        }
+    }
+    architecture.positions = match text(raw, "position_embedding_type") {
+        None | Some("rope") => Positions::Rotary,
+        Some("nope") => Positions::None,
+        Some(other) => bail!(
+            "{} declares position_embedding_type {other:?}; Granite 4.0 rotates (rope) or does not (nope)",
+            path.display()
+        ),
+    };
+    let heads = structured(raw, "mamba_n_heads", "mamba_d_head", "mamba_n_groups", path)?;
+    let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv")) else {
+        bail!(
+            "{} declares a Granite 4.0 model without mamba_d_state and mamba_d_conv",
+            path.display()
+        );
+    };
+    architecture.state_space = Some(StateSpaceSpec {
+        inner: heads.heads * heads.head_dim,
+        state,
+        kernel,
+        step_rank: 0,
+        projection_bias: flag(raw, "mamba_proj_bias"),
+        convolution_bias: raw.get("mamba_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+        parameter_norm: ParameterNorm::None,
+        layers: mamba,
+        feed_forward: true,
+        structured: Some(heads),
+    });
+    let Some(shared) = whole(raw, "shared_intermediate_size") else {
+        bail!(
+            "{} declares a Granite 4.0 model without shared_intermediate_size",
+            path.display()
+        );
+    };
+    if whole(raw, "num_local_experts").unwrap_or(0) == 0 {
+        architecture.names = Names::GRANITE_HYBRID;
+        architecture.fused_feed_forward = true;
+    } else {
+        let mut routed =
+            experts(raw, "num_local_experts", "intermediate_size", true, ExpertLayout::Granite, 0, path)?;
+        routed.shared = Some(SharedExpert {
+            intermediate: shared,
+            module: "shared_mlp",
+            gated: false,
+            stacked: true,
+        });
+        architecture.experts = Some(routed);
+    }
+    Ok(())
 }
 
 /// Mamba-2's head layout from the keys a family spells it with: the head

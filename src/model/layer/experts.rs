@@ -202,22 +202,26 @@ impl Experts {
             }
         };
         let shared = match spec.shared {
-            Some(SharedExpert { intermediate, module, gated }) => {
-                let block = builder.pp("mlp");
-                let name = module;
-                Some((
-                    Expert::load(
-                        hidden,
-                        intermediate,
-                        ["gate_proj", "up_proj", "down_proj"],
-                        block.pp(name),
-                    )?,
-                    if gated {
-                        Some(linear_no_bias(hidden, 1, block.pp("shared_expert_gate"))?)
-                    } else {
-                        None
-                    },
-                ))
+            Some(SharedExpert { intermediate, module, gated, stacked }) => {
+                let block = builder.pp(module);
+                let expert = if stacked {
+                    // Granite 4.0's `shared_mlp`: gate rows then up rows in
+                    // `input_linear`, the down projection in `output_linear`.
+                    let input = block.get((2 * intermediate, hidden), "input_linear.weight")?;
+                    Expert {
+                        gate: Linear::new(input.narrow(0, 0, intermediate)?, None),
+                        up: Linear::new(input.narrow(0, intermediate, intermediate)?, None),
+                        down: Linear::new(block.get((hidden, intermediate), "output_linear.weight")?, None),
+                    }
+                } else {
+                    Expert::load(hidden, intermediate, ["gate_proj", "up_proj", "down_proj"], block)?
+                };
+                let gate = if gated {
+                    Some(linear_no_bias(hidden, 1, builder.pp("mlp").pp("shared_expert_gate"))?)
+                } else {
+                    None
+                };
+                Some((expert, gate))
             }
             None => None,
         };

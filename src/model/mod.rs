@@ -682,11 +682,15 @@ pub struct MixtureOfExperts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedExpert {
     pub intermediate: usize,
-    /// Its module under `mlp`: Qwen2-MoE's `shared_expert`, DeepSeek's and
-    /// ERNIE's `shared_experts`, HunYuan's `shared_mlp`.
+    /// Its module below the layer: Qwen2-MoE's `mlp.shared_expert`,
+    /// DeepSeek's and ERNIE's `mlp.shared_experts`, HunYuan's
+    /// `mlp.shared_mlp`, Granite 4.0's `shared_mlp`.
     pub module: &'static str,
     /// Scaled by the sigmoid of `mlp.shared_expert_gate` (Qwen2-MoE).
     pub gated: bool,
+    /// Gate and up stacked in `input_linear`, down in `output_linear`
+    /// (Granite 4.0), rather than `gate_proj`, `up_proj` and `down_proj`.
+    pub stacked: bool,
 }
 
 /// How expert scores come from the router's logits.
@@ -838,6 +842,13 @@ impl Names {
         query_norm: "q_norm",
         key_norm: "k_norm",
         wrapper: "",
+    };
+    /// Granite 4.0 without experts: its `shared_mlp` is the feed-forward,
+    /// gate and up stacked in `input_linear`, down in `output_linear`.
+    pub const GRANITE_HYBRID: Self = Self {
+        fused_gate_up: "shared_mlp.input_linear",
+        down: "shared_mlp.output_linear",
+        ..Self::LLAMA
     };
     /// Gemma 2 and 3: `post_attention_layernorm` is over attention's output,
     /// so the norm before the feed-forward is `pre_feedforward_layernorm`.
