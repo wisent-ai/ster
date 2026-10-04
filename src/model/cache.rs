@@ -79,14 +79,15 @@ impl Cache {
                 short,
                 long,
                 original,
-                attention,
+                short_attention,
+                long_attention,
             } => {
                 let rescaled = |factors: &[f32]| -> Vec<f32> {
                     global.iter().zip(factors).map(|(frequency, factor)| frequency / factor).collect()
                 };
-                let short = angle_tables(rescaled(short), positions, *attention, device)?;
+                let short = angle_tables(rescaled(short), positions, *short_attention, device)?;
                 let (long_cos, long_sin) =
-                    angle_tables(rescaled(long), positions, *attention, device)?;
+                    angle_tables(rescaled(long), positions, *long_attention, device)?;
                 (short, Some((long_cos, long_sin, *original)))
             }
             RopeScaling::Yarn {

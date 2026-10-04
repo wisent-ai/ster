@@ -81,13 +81,14 @@ pub(super) enum Family {
     Lfm2,
     Ernie45Moe,
     Dbrx,
+    Phimoe,
     Gemma,
     Gemma2,
     Gemma3Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 57] = [
+    pub(super) const ALL: [Self; 58] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -142,6 +143,7 @@ impl Family {
         Self::Lfm2,
         Self::Ernie45Moe,
         Self::Dbrx,
+        Self::Phimoe,
         Self::Gemma,
         Self::Gemma2,
         Self::Gemma3Text,
@@ -209,6 +211,7 @@ impl Family {
             Self::Lfm2 => "lfm2",
             Self::Ernie45Moe => "ernie4_5_moe",
             Self::Dbrx => "dbrx",
+            Self::Phimoe => "phimoe",
             Self::Gemma => "gemma",
             Self::Gemma2 => "gemma2",
             Self::Gemma3Text => "gemma3_text",
@@ -244,6 +247,10 @@ impl Family {
 /// OPT's learned position table keeps this many rows before position zero;
 /// Transformers' `OPTLearnedPositionalEmbedding` reads `position + offset`.
 const OPT_POSITION_OFFSET: usize = 2;
+
+/// Transformers' `sparsemixer` (`models/phimoe/modeling_phimoe.py`) runs
+/// exactly two selection rounds, so PhiMoE routes two experts per token.
+const SPARSE_MIXER_EXPERTS: usize = 2;
 
 /// OLMo 1's and DBRX's configs state no norm epsilon; their LayerNorms use
 /// PyTorch's default, which this is.
@@ -500,11 +507,14 @@ fn rope_scaling(
                 None if factor <= 1.0 => 1.0,
                 None => (1.0 + factor.ln() / (original as f64).ln()).sqrt(),
             };
+            // PhiMoE states each table's magnitude itself.
+            let magnitude = |key: &str| scaling.get(key).and_then(Value::as_f64).unwrap_or(attention);
             Ok(RopeScaling::LongRope {
                 short,
                 long,
                 original,
-                attention: attention as f32,
+                short_attention: magnitude("short_mscale") as f32,
+                long_attention: magnitude("long_mscale") as f32,
             })
         }
         "yarn" => {
@@ -628,7 +638,7 @@ pub(super) fn family(
         architecture.activation = activation(raw, model_type, path)?;
     }
     match model_type {
-        "llama" | "mistral" | "mixtral" | "phi3" => {
+        "llama" | "mistral" | "mixtral" | "phi3" | "phimoe" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
             if model_type == "phi3" {
@@ -654,6 +664,38 @@ pub(super) fn family(
                     0,
                     path,
                 )?);
+            }
+            if model_type == "phimoe" {
+                // PhiMoE: Mixtral's tensors under LayerNorms with bias, a
+                // biased vocabulary projection when `lm_head_bias` says so,
+                // and SparseMixer routing, which Transformers defines for
+                // two experts per token.
+                architecture.norm = NormKind::Layer { bias: true };
+                architecture.lm_head_bias = flag(raw, "lm_head_bias");
+                let mut routed = experts(
+                    raw,
+                    "num_local_experts",
+                    "intermediate_size",
+                    false,
+                    ExpertLayout::Mixtral,
+                    0,
+                    path,
+                )?;
+                if routed.top_k != SPARSE_MIXER_EXPERTS {
+                    bail!(
+                        "{} routes {} experts per token; PhiMoE's SparseMixer chooses exactly {SPARSE_MIXER_EXPERTS}",
+                        path.display(),
+                        routed.top_k
+                    );
+                }
+                let Some(jitter) = number(raw, "router_jitter_noise") else {
+                    bail!(
+                        "{} states no router_jitter_noise; PhiMoE's SparseMixer needs it to bound the experts it weighs",
+                        path.display()
+                    );
+                };
+                routed.scoring = Scoring::SparseMixer { jitter: jitter as f32 };
+                architecture.experts = Some(routed);
             }
         }
         "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" => {

@@ -669,11 +669,16 @@ pub struct SharedExpert {
 }
 
 /// How expert scores come from the router's logits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scoring {
     Softmax,
     /// DeepSeek-V3's independent sigmoid per expert.
     Sigmoid,
+    /// PhiMoE's SparseMixer at inference: each of the `top_k` rounds takes
+    /// the best expert not yet chosen, and weighs it by its softmax among
+    /// the experts left whose logit lies within `2 · jitter` of the best,
+    /// relative to the larger of its own magnitude and the best logit.
+    SparseMixer { jitter: f32 },
 }
 
 /// Group-limited routing.
@@ -1085,12 +1090,15 @@ pub enum RopeScaling {
     Linear(f32),
     /// Phi-3's LongRoPE: each frequency divided by its own factor, from
     /// `short` while the sequence is within `original` positions and from
-    /// `long` once it goes beyond, and both tables multiplied by `attention`.
+    /// `long` once it goes beyond; the short table is multiplied by
+    /// `short_attention`, the long one by `long_attention` (equal for Phi-3,
+    /// PhiMoE's `short_mscale` and `long_mscale` otherwise).
     LongRope {
         short: Vec<f32>,
         long: Vec<f32>,
         original: usize,
-        attention: f32,
+        short_attention: f32,
+        long_attention: f32,
     },
     /// YaRN: frequencies whose wavelength fits `original` positions more
     /// than `beta_fast` times keep their value, those fitting fewer than
