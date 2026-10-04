@@ -118,11 +118,16 @@ impl Experts {
                     .collect::<candle_core::Result<Vec<_>>>()?;
                 (linear_no_bias(hidden, count, block.pp("gate"))?, experts)
             }
-            ExpertLayout::Qwen | ExpertLayout::Jamba | ExpertLayout::HunYuan | ExpertLayout::NemotronH => {
+            ExpertLayout::Qwen
+            | ExpertLayout::Jamba
+            | ExpertLayout::HunYuan
+            | ExpertLayout::NemotronH
+            | ExpertLayout::HyV3 => {
                 let (block, router) = match spec.layout {
                     ExpertLayout::Jamba => (builder.pp("feed_forward"), "router"),
                     ExpertLayout::HunYuan => (builder.pp("mlp"), "gate.wg"),
                     ExpertLayout::NemotronH => (builder.pp("mixer"), "gate"),
+                    ExpertLayout::HyV3 => (builder.pp("mlp"), "router.gate"),
                     _ => (builder.pp("mlp"), "gate"),
                 };
                 // Nemotron-H's experts have no gate projection.

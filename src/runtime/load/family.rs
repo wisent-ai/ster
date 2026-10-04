@@ -121,10 +121,11 @@ pub(super) enum Family {
     Param2Moe,
     PanguEmbedded,
     OlmoHybrid,
+    HyV3,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 94] = [
+    pub(super) const ALL: [Self; 95] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -219,6 +220,7 @@ impl Family {
         Self::Param2Moe,
         Self::PanguEmbedded,
         Self::OlmoHybrid,
+        Self::HyV3,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -323,6 +325,7 @@ impl Family {
             Self::Param2Moe => "param2moe",
             Self::PanguEmbedded => "PanguEmbedded",
             Self::OlmoHybrid => "olmo_hybrid",
+            Self::HyV3 => "hy_v3",
         }
     }
 
@@ -1126,6 +1129,39 @@ pub(super) fn family(
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.lm_head_bias = true;
             architecture.names = Names::PHI;
+        }
+        "hy_v3" => {
+            // HY V3 (Hy3): per-head query and key norms, a dense
+            // feed-forward on the layers `mlp_layer_types` calls `dense` (or
+            // the first `first_k_dense_replace`), and elsewhere `num_experts`
+            // experts chosen by sigmoid score plus `mlp.expert_bias`,
+            // renormalised under `route_norm`, scaled by
+            // `router_scaling_factor`, beside `num_shared_experts` shared
+            // experts in `mlp.shared_mlp`.
+            architecture.query_key_norm = QueryKeyNorm::PerHead;
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            fits(layers, path)?;
+            let dense = if raw.get("mlp_layer_types").is_some_and(Value::is_array) {
+                qwen_dense_layers(raw, layers, path)?
+            } else {
+                let first = whole(raw, "first_k_dense_replace").unwrap_or(0).min(layers);
+                (0..first).fold(0u128, |set, layer| set | (1u128 << layer))
+            };
+            let normalize = raw.get("route_norm").and_then(Value::as_bool).unwrap_or(true);
+            let mut routed =
+                experts(raw, "num_experts", "moe_intermediate_size", normalize, ExpertLayout::HyV3, dense, path)?;
+            routed.scoring = Scoring::Sigmoid;
+            routed.selection_bias = Some("mlp.expert_bias");
+            routed.routed_scale = number(raw, "router_scaling_factor");
+            routed.shared = whole(raw, "num_shared_experts").filter(|shared| *shared > 0).map(|shared| SharedExpert {
+                intermediate: shared * routed.intermediate,
+                module: "mlp.shared_mlp",
+                gated: false,
+                form: SharedForm::GateUpDown,
+            });
+            architecture.experts = Some(routed);
         }
         "olmo_hybrid" => {
             // OLMo Hybrid: Gated DeltaNet (`linear_attn`) in a pre-norm block

@@ -1082,6 +1082,9 @@ pub enum ExpertLayout {
     /// every expert stacked in `experts.gate_up_proj` (`[experts, 2 · width,
     /// hidden]`, gate rows first) and `experts.down_proj` (Gemma 4).
     Gemma4,
+    /// `mlp.router.gate`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`
+    /// (HY V3).
+    HyV3,
 }
 
 /// Where a family keeps its tensors. `embeddings`, `positions`,
