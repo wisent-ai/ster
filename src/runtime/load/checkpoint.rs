@@ -168,6 +168,9 @@ impl Checkpoint {
         if let Some(loops) = architecture.loops {
             llama.num_hidden_layers = loops.physical * loops.count;
         }
+        if let Some(recurrence) = architecture.recurrence {
+            llama.num_hidden_layers = recurrence.layers();
+        }
         let tokens = eos_tokens(&llama);
         Ok((llama.into_config(false), architecture, tokens))
     }

@@ -37,6 +37,8 @@ pub struct SteeringLlama {
     ngram: Option<NgramEmbeddings>,
     /// Gemma 3n's projections into and out of its AltUp streams.
     streams: Option<StreamProjections>,
+    /// HRM-Text's starting low state (`model.z_L_init`).
+    low_start: Option<Tensor>,
     final_norm: Norm,
     lm_head: Linear,
     config: Config,
@@ -186,7 +188,12 @@ impl SteeringLlama {
         // more than once; each later pass reuses the first pass's tensors.
         // LongCat-Flash's stored layers are two Ster layers each, read under
         // their halves' names.
-        let stored = architecture.loops.map_or(config.num_hidden_layers, |loops| loops.physical);
+        // HRM-Text's two stacks are stored apart, each below its own path.
+        let stored = match (architecture.recurrence, architecture.loops) {
+            (Some(recurrence), _) => 2 * recurrence.per_stack,
+            (None, Some(loops)) => loops.physical,
+            (None, None) => config.num_hidden_layers,
+        };
         let physical = (0..stored)
             .map(|index| {
                 let block = architecture
@@ -203,7 +210,10 @@ impl SteeringLlama {
                     &half
                 };
                 DecoderLayer::load(
-                    builder.pp(format!("{}.{source}", names.layers)),
+                    builder.pp(format!(
+                        "{}.{source}",
+                        if architecture.recurrence.is_some() { layer_names.layers } else { names.layers }
+                    )),
                     &config,
                     layer_architecture,
                     index,
@@ -212,7 +222,16 @@ impl SteeringLlama {
                 )
             })
             .collect::<candle_core::Result<Vec<_>>>()?;
-        let layers = (0..config.num_hidden_layers).map(|index| physical[index % stored].clone()).collect();
+        let layers = (0..config.num_hidden_layers)
+            .map(|index| match architecture.recurrence {
+                Some(recurrence) => physical[recurrence.stored(index)].clone(),
+                None => physical[index % stored].clone(),
+            })
+            .collect();
+        let low_start = match architecture.recurrence {
+            Some(_) => Some(builder.get(config.hidden_size, "model.z_L_init")?),
+            None => None,
+        };
         Ok(Self {
             embeddings,
             positions,
@@ -221,6 +240,7 @@ impl SteeringLlama {
             per_layer,
             ngram,
             streams,
+            low_start,
             final_norm,
             lm_head,
             config,
@@ -423,7 +443,21 @@ impl SteeringLlama {
             Some(streams) => Some(streams.spread(&hidden)?),
             None => None,
         };
+        // HRM-Text's high and low states: the high one starts as the scaled
+        // embedding, the low one as `z_L_init` at every position.
+        let mut states = match (self.architecture.recurrence, &self.low_start) {
+            (Some(_), Some(low)) => {
+                Some((hidden.clone(), low.to_dtype(hidden.dtype())?.broadcast_as(hidden.shape())?.contiguous()?))
+            }
+            _ => None,
+        };
         for (index, layer) in self.layers.iter().enumerate() {
+            // A pass of either stack reads the two states summed.
+            if let (Some(recurrence), Some((high, low))) = (self.architecture.recurrence, &states) {
+                if index % recurrence.per_stack == 0 {
+                    hidden = (high + low)?;
+                }
+            }
             // Nanbeige normalises the hidden state by the final norm after
             // every pass but the last, whose norm is the model's own.
             if let Some(loops) = self.architecture.loops {
@@ -466,12 +500,25 @@ impl SteeringLlama {
                     })?;
                 }
             }
+            // The pass ends in the stack's scale-free norm and replaces its
+            // own state.
+            if let (Some(recurrence), Some((high, low))) = (self.architecture.recurrence, states.as_mut()) {
+                if index % recurrence.per_stack == recurrence.per_stack - 1 {
+                    hidden = self.final_norm.forward(&hidden, mode.pass)?;
+                    if recurrence.low(index) {
+                        *low = hidden.clone();
+                    } else {
+                        *high = hidden.clone();
+                    }
+                }
+            }
         }
         let hidden = match (&self.streams, &rest) {
             (Some(streams), Some(others)) => streams.join(&hidden, others)?,
             _ => hidden,
         };
-        let hidden = self.final_norm.forward(&hidden, mode.pass)?;
+        // HRM-Text's last pass already ended in its norm.
+        let hidden = if states.is_some() { hidden } else { self.final_norm.forward(&hidden, mode.pass)? };
         // Decoding only ever samples the next token, so it projects one row and
         // leaves the rest of the vocabulary matmul undone. Anything that scores
         // a sequence against its own successors needs every position, and a

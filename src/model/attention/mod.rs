@@ -12,7 +12,7 @@ use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
     Activation, Architecture, Cache, GateFunction, LatentAttention, Mode, NormKind, Pass, Positions, QkvLayout,
-    QueryKeyNorm, QueryTemperature, Route,
+    QueryKeyNorm, QueryTemperature, Readout, Route,
     layer::{
         experts::Experts,
         norm::{Norm, NormSpec},
@@ -50,6 +50,9 @@ pub(super) struct Attention {
     interleaved: bool,
     score_divisor: f64,
     softcap: Option<f64>,
+    /// HRM-Text's PrefixLM mask: a prompt read in one pass from position zero
+    /// sees itself both ways.
+    prefix_bidirectional: bool,
     /// ALiBi's slope per head, `[1, heads, 1, 1]`, for a family whose
     /// positions are a linear bias on the scores (BLOOM, MPT).
     alibi: Option<Tensor>,
@@ -312,8 +315,10 @@ impl Attention {
             // — a view of the mapped weight, not a copy — so every adapter
             // site stays separate. GPT-2's `Conv1D` stores it transposed, so
             // that one is laid out once at load.
-            QkvLayout::Stacked => {
-                let rows = query_width + key_value_width + value_width;
+            // HRM-Text's `gqkv_proj` puts its elementwise gate's rows first.
+            QkvLayout::Stacked | QkvLayout::GateStacked => {
+                let gate_width = if architecture.qkv_layout == QkvLayout::GateStacked { heads * value_dim } else { 0 };
+                let rows = gate_width + query_width + key_value_width + value_width;
                 let fused = builder.pp(names.fused_qkv);
                 let weight = if conv1d {
                     fused.get((input, rows), "weight")?.t()?.contiguous()?
@@ -323,8 +328,8 @@ impl Attention {
                 let bias = if bias { Some(fused.get(rows, "bias")?) } else { None };
                 let slice = |start: usize, width: usize| -> candle_core::Result<Linear> {
                     Ok(Linear::new(
-                        weight.narrow(0, start, width)?,
-                        bias.as_ref().map(|bias| bias.narrow(0, start, width)).transpose()?,
+                        weight.narrow(0, gate_width + start, width)?,
+                        bias.as_ref().map(|bias| bias.narrow(0, gate_width + start, width)).transpose()?,
                     ))
                 };
                 (
@@ -448,6 +453,7 @@ impl Attention {
             interleaved: architecture.interleaved_rotary,
             score_divisor: architecture.score_divisor,
             softcap: architecture.attention_softcap,
+            prefix_bidirectional: architecture.prefix_lm,
             alibi: match architecture.positions {
                 // Falcon adds the bias before dividing the scores, so its
                 // slopes are divided too.
@@ -474,9 +480,19 @@ impl Attention {
                 Some(function) => Some((projection(input, heads, false, conv1d, builder.pp("g_proj"))?, function)),
                 None => None,
             },
-            elementwise_gate: match architecture.attention_gate {
-                Some(function) => Some((projection(input, heads * value_dim, false, conv1d, builder.pp("gate_proj"))?, function)),
-                None => None,
+            elementwise_gate: match (architecture.attention_gate, architecture.qkv_layout) {
+                (Some(function), QkvLayout::GateStacked) => {
+                    let width = heads * value_dim;
+                    let fused = builder.pp(names.fused_qkv);
+                    let rows = width + query_width + key_value_width + value_width;
+                    let weight = fused.get((rows, input), "weight")?.narrow(0, 0, width)?;
+                    let bias = if bias { Some(fused.get(rows, "bias")?.narrow(0, 0, width)?) } else { None };
+                    Some((Linear::new(weight, bias), function))
+                }
+                (Some(function), _) => {
+                    Some((projection(input, heads * value_dim, false, conv1d, builder.pp("gate_proj"))?, function))
+                }
+                (None, _) => None,
             },
             value_experts,
             low_rank: None,
@@ -862,6 +878,10 @@ impl Attention {
             // already exist, so there is nothing causality would remove — and
             // nothing a window would either, while every key is inside it.
             None if sequence == 1 && window.is_none_or(|window| keys <= window) => attention,
+            // A prompt read whole from position zero under a PrefixLM mask
+            // is one bidirectional block. A pass that scores every position
+            // is not a prompt, and stays causal.
+            None if self.prefix_bidirectional && index_pos == 0 && mode.readout != Readout::EveryPosition => attention,
             None => {
                 let mask = cache
                     .mask(sequence, index_pos, window)?

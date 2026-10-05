@@ -303,6 +303,12 @@ pub struct Architecture {
     pub skip_connections: Option<SkipConnections>,
     /// Nanbeige's loops: the stored layers run more than once.
     pub loops: Option<Loops>,
+    /// HRM-Text's two recurrent stacks.
+    pub recurrence: Option<Recurrence>,
+    /// HRM-Text's `prefix_lm`: a prompt read whole from position zero is
+    /// one bidirectional block, as Transformers reads it given
+    /// `token_type_ids` of ones.
+    pub prefix_lm: bool,
     /// DeciLM's per-layer plan, one entry per layer.
     pub layer_plans: Option<Vec<LayerPlan>>,
     /// DeepSeek Sparse Attention's indexer (DeepSeek-V3.2, GLM-5).
@@ -403,6 +409,40 @@ pub struct Loops {
     pub count: usize,
     pub norm_between: bool,
     pub gate_window: Option<usize>,
+}
+
+/// HRM-Text's schedule: a low stack and a high stack of `per_stack` stored
+/// layers each, run `high_cycles` times as `low_cycles` passes of the low
+/// stack and one of the high stack. Every pass is `per_stack` Ster layers
+/// with their own key-value slots. A low pass reads the low state plus the
+/// high state and replaces the low state; a high pass reads the high state
+/// plus the low state and replaces the high state; each pass ends in a
+/// scale-free norm. The high state starts as the scaled embedding, the low
+/// state as `z_L_init`, and the last high state is the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recurrence {
+    pub per_stack: usize,
+    pub high_cycles: usize,
+    pub low_cycles: usize,
+}
+
+impl Recurrence {
+    /// How many Ster layers the schedule runs.
+    pub fn layers(self) -> usize {
+        self.high_cycles * (self.low_cycles + 1) * self.per_stack
+    }
+
+    /// Whether Ster layer `layer` belongs to a low pass.
+    pub fn low(self, layer: usize) -> bool {
+        (layer / self.per_stack) % (self.low_cycles + 1) < self.low_cycles
+    }
+
+    /// The stored layer Ster layer `layer` runs: the low stack's first, then
+    /// the high stack's.
+    pub fn stored(self, layer: usize) -> usize {
+        let within = layer % self.per_stack;
+        if self.low(layer) { within } else { self.per_stack + within }
+    }
 }
 
 /// Solar's block skip connections (`bskcn_1` to `bskcn_4`): before the
@@ -771,6 +811,8 @@ impl Architecture {
             layer_scalar: false,
             skip_connections: None,
             loops: None,
+            recurrence: None,
+            prefix_lm: false,
             layer_plans: None,
             sparse_index: None,
             routed_output_norm: false,
@@ -804,6 +846,13 @@ impl Architecture {
     /// names it reads them by: the half of a LongCat-Flash layer
     /// (`self_attn.0`, `mlps.0`, … then `.1`), or the layer itself.
     pub fn stored_layer(&self, layer: usize) -> (usize, Names) {
+        if let Some(recurrence) = self.recurrence {
+            return if layer < recurrence.per_stack {
+                (layer, Names { layers: Names::HRM_LOW_LAYERS, ..self.names })
+            } else {
+                (layer - recurrence.per_stack, Names { layers: Names::HRM_HIGH_LAYERS, ..self.names })
+            };
+        }
         match self.shortcut_experts {
             Some(_) if layer % 2 == 0 => (layer / 2, Names::LONGCAT_FIRST),
             Some(_) => (layer / 2, Names::LONGCAT_SECOND),
@@ -1030,6 +1079,8 @@ impl Architecture {
                     .collect();
                 Placement::blocks(in_attention(names.fused_qkv), blocks)
             }
+            // HRM-Text refuses adapters before a placement is asked for.
+            (Some(_), QkvLayout::GateStacked) => return None,
             (None, _) => match target {
                 Target::Output => Placement::whole(in_layer(names.output)),
                 Target::Gate if self.fused_feed_forward => {
@@ -1077,9 +1128,9 @@ impl Architecture {
                 "this model's layers each hold two attention and feed-forward pairs beside shortcut-connected experts (LongCat-Flash), so no projection sits at one name per Ster layer; Ster steers it but trains no adapters on it"
             );
         }
-        if self.loops.is_some() && !targets.is_empty() {
+        if (self.loops.is_some() || self.recurrence.is_some()) && !targets.is_empty() {
             bail!(
-                "this model runs its layers more than once (Nanbeige's num_loops, IQuest-LoopCoder's loop_num), so one adapter would correct every pass of its layer; Ster steers it but trains no adapters on it"
+                "this model runs its layers more than once (Nanbeige's num_loops, IQuest-LoopCoder's loop_num, HRM-Text's H_cycles and L_cycles), so one adapter would correct every pass of its layer; Ster steers it but trains no adapters on it"
             );
         }
         if self.lightning.is_some() && !targets.is_empty() {
@@ -1192,6 +1243,9 @@ pub enum QkvLayout {
     /// The query its own tensor, key and value one tensor whose rows hold
     /// each key-value head's key, then its value (TeleChat2's `key_value`).
     PairedKeyValue,
+    /// One tensor: the elementwise attention gate's rows, then query, key and
+    /// value rows (HRM-Text's `gqkv_proj`).
+    GateStacked,
 }
 
 /// The function an elementwise attention gate passes `gate_proj` through:
@@ -1528,6 +1582,18 @@ impl Names {
         feed_forward_norm: "pre_feedforward_layernorm",
         ..Self::LLAMA
     };
+    /// HRM-Text: two stacks of layers with `attn.gqkv_proj` (gate, query,
+    /// key and value rows) and `attn.o_proj`, `mlp.gate_up_proj` and
+    /// `mlp.down_proj`; the low stack's layers below `model.L_module.layers`,
+    /// the high stack's below `model.H_module.layers`.
+    pub const HRM: Self = Self {
+        attention: "attn",
+        fused_qkv: "gqkv_proj",
+        output: "attn.o_proj",
+        ..Self::LLAMA
+    };
+    pub const HRM_LOW_LAYERS: &'static str = "model.L_module.layers";
+    pub const HRM_HIGH_LAYERS: &'static str = "model.H_module.layers";
     /// PLaMo 3: layers below `model.layers.layers`, each a `mixer` with one
     /// `qkv_proj` and `o_proj`, a `mlp` with one `gate_up_proj`, and
     /// `pre_mixer_norm`, `post_mixer_norm`, `pre_mlp_norm`, `post_mlp_norm`.
@@ -1956,6 +2022,8 @@ pub enum NormKind {
     Layer { bias: bool },
     /// LayerNorm with no scale and no bias at all (OLMo 1).
     Bare,
+    /// Root mean square with no scale at all (HRM-Text's norms).
+    BareRms,
 }
 
 /// A rotary scaling read from the config's `rope_scaling`, beyond Llama 3's.

@@ -48,7 +48,7 @@ impl NormSpec {
     /// norm stores nothing, so its scale is a constant one.
     pub fn load(self, width: usize, builder: VarBuilder<'_>) -> candle_core::Result<Norm> {
         let weight = match self.kind {
-            NormKind::Bare => Tensor::ones(width, builder.dtype(), builder.device())?,
+            NormKind::Bare | NormKind::BareRms => Tensor::ones(width, builder.dtype(), builder.device())?,
             _ => builder.get(width, "weight")?,
         };
         let bias = self.bias(|| builder.get(width, "bias"))?;
@@ -163,7 +163,7 @@ impl Norm {
         let fused = pass == Pass::Inference && self.weight.rank() == 1 && hidden.is_contiguous() && self.groups == 1;
         if fused {
             match (self.kind, &self.bias) {
-                (NormKind::Rms, None) => {
+                (NormKind::Rms | NormKind::BareRms, None) => {
                     return candle_nn::ops::rms_norm(hidden, &self.weight, self.eps as f32);
                 }
                 (NormKind::Layer { .. }, Some(bias)) => {
@@ -189,7 +189,7 @@ impl Norm {
         let width = hidden.dim(D::Minus1)? as f64;
         let hidden = hidden.to_dtype(internal)?;
         let hidden = match self.kind {
-            NormKind::Rms => hidden,
+            NormKind::Rms | NormKind::BareRms => hidden,
             NormKind::Layer { .. } | NormKind::Bare => {
                 let mean = (hidden.sum_keepdim(D::Minus1)? / width)?;
                 hidden.broadcast_sub(&mean)?
