@@ -157,6 +157,11 @@ impl Checkpoint {
         }
         let mut architecture = family(model_type, &raw, scaling.as_ref(), &llama, &self.config)?;
         architecture.names.wrapper = wrapper;
+        // A looped model's layer count is every pass's layers, so the cache,
+        // steering and capture address each pass's layers apart.
+        if let Some(loops) = architecture.loops {
+            llama.num_hidden_layers = loops.physical * loops.count;
+        }
         let tokens = eos_tokens(&llama);
         Ok((llama.into_config(false), architecture, tokens))
     }

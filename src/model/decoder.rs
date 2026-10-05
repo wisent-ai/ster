@@ -152,7 +152,10 @@ impl SteeringLlama {
             }
             None => Vec::new(),
         };
-        let layers = (0..config.num_hidden_layers)
+        // A looped model (Nanbeige's `num_loops`) runs its stored layers
+        // more than once; each later pass reuses the first pass's tensors.
+        let stored = architecture.loops.map_or(config.num_hidden_layers, |loops| loops.physical);
+        let physical = (0..stored)
             .map(|index| {
                 let block = architecture
                     .shared_blocks
@@ -169,6 +172,7 @@ impl SteeringLlama {
                 )
             })
             .collect::<candle_core::Result<Vec<_>>>()?;
+        let layers = (0..config.num_hidden_layers).map(|index| physical[index % stored].clone()).collect();
         Ok(Self {
             embeddings,
             positions,
@@ -369,6 +373,13 @@ impl SteeringLlama {
         // Solar's block skip connections keep up to two earlier hidden states.
         let mut kept: [Option<Tensor>; 2] = [None, None];
         for (index, layer) in self.layers.iter().enumerate() {
+            // Nanbeige normalises the hidden state by the final norm after
+            // every pass but the last, whose norm is the model's own.
+            if let Some(loops) = self.architecture.loops {
+                if loops.norm_between && index > 0 && index % loops.physical == 0 {
+                    hidden = self.final_norm.forward(&hidden, mode.pass)?;
+                }
+            }
             if let Some(skips) = &self.architecture.skip_connections {
                 hidden = skips.apply(index, hidden, &mut kept)?;
             }

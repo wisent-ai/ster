@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
-    GlobalAttention, LatentAttention, LightningSpec, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm,
+    GlobalAttention, LatentAttention, LightningSpec, Loops, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm,
     PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
     SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec,
 };
@@ -122,10 +122,11 @@ pub(super) enum Family {
     PanguEmbedded,
     OlmoHybrid,
     HyV3,
+    Nanbeige,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 95] = [
+    pub(super) const ALL: [Self; 96] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -221,6 +222,7 @@ impl Family {
         Self::PanguEmbedded,
         Self::OlmoHybrid,
         Self::HyV3,
+        Self::Nanbeige,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -326,6 +328,7 @@ impl Family {
             Self::PanguEmbedded => "PanguEmbedded",
             Self::OlmoHybrid => "olmo_hybrid",
             Self::HyV3 => "hy_v3",
+            Self::Nanbeige => "nanbeige",
         }
     }
 
@@ -1129,6 +1132,46 @@ pub(super) fn family(
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.lm_head_bias = true;
             architecture.names = Names::PHI;
+        }
+        "nanbeige" => {
+            // Nanbeige: Llama's block, per-head `q_layernorm` and
+            // `k_layernorm` under `qk_layernorm`, and the stored layers run
+            // `num_loops` times, the final norm closing every pass unless
+            // `skip_loop_final_norm`. Its n-gram embeddings, hyper-connections,
+            // split loops, shared loop caches and depth attention are
+            // refused.
+            for key in [
+                "enable_hyper_connection",
+                "enable_mhc",
+                "enable_double_loop_split",
+                "loop_share_kv",
+                "enable_depth_attention",
+            ] {
+                if flag(raw, key) {
+                    bail!("{} turns on Nanbeige's {key}, which Ster does not implement", path.display());
+                }
+            }
+            if raw.get("ngram_vocab_size_ratio").is_some_and(|value| !value.is_null()) {
+                bail!(
+                    "{} declares Nanbeige's n-gram embeddings (ngram_vocab_size_ratio), which Ster does not implement",
+                    path.display()
+                );
+            }
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            if flag(raw, "qk_layernorm") {
+                architecture.query_key_norm = QueryKeyNorm::PerHead;
+                architecture.names = Names::NANBEIGE;
+            }
+            let count = whole(raw, "num_loops").unwrap_or(1).max(1);
+            if count > 1 {
+                architecture.loops = Some(Loops {
+                    physical: layers,
+                    count,
+                    norm_between: !flag(raw, "skip_loop_final_norm"),
+                });
+            }
         }
         "hy_v3" => {
             // HY V3 (Hy3): per-head query and key norms, a dense

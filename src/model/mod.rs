@@ -256,6 +256,8 @@ pub struct Architecture {
     pub layer_scalar: bool,
     /// Solar's block skip connections.
     pub skip_connections: Option<SkipConnections>,
+    /// Nanbeige's loops: the stored layers run more than once.
+    pub loops: Option<Loops>,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -283,6 +285,17 @@ pub struct Architecture {
     /// LFM2's gated short convolution in place of attention on the layers it
     /// covers.
     pub short_convolution: Option<ShortConvolution>,
+}
+
+/// A looped decoder (Nanbeige's `num_loops`): `physical` stored layers run
+/// in order as many times as the config's layer count holds them, each pass
+/// with its own key-value cache slots; under `norm_between` the final norm
+/// also closes every pass but the last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Loops {
+    pub physical: usize,
+    pub count: usize,
+    pub norm_between: bool,
 }
 
 /// Solar's block skip connections (`bskcn_1` to `bskcn_4`): before the
@@ -588,6 +601,7 @@ impl Architecture {
             side_experts: None,
             layer_scalar: false,
             skip_connections: None,
+            loops: None,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
@@ -832,6 +846,11 @@ impl Architecture {
         if self.short_convolution.is_some() && !targets.is_empty() {
             bail!(
                 "this model's blocks include short-convolution mixers (LFM2) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
+            );
+        }
+        if self.loops.is_some() && !targets.is_empty() {
+            bail!(
+                "this model runs its layers more than once (Nanbeige's num_loops), so one adapter would correct every pass of its layer; Ster steers it but trains no adapters on it"
             );
         }
         if self.lightning.is_some() && !targets.is_empty() {
@@ -1248,6 +1267,12 @@ impl Names {
     pub const PANGU_SANDWICH: Self = Self {
         feed_forward_norm: "pre_mlp_layernorm",
         feed_forward_output_norm: "post_mlp_layernorm",
+        ..Self::LLAMA
+    };
+    /// Nanbeige: per-head `q_layernorm` and `k_layernorm`.
+    pub const NANBEIGE: Self = Self {
+        query_norm: "q_layernorm",
+        key_norm: "k_layernorm",
         ..Self::LLAMA
     };
     /// Apertus: `attention_layernorm` before attention and
