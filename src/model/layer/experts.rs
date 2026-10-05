@@ -534,6 +534,10 @@ impl Experts {
                 None => produced,
             };
             output = (output + produced)?;
+            // Cohere2-MoE averages the routed and shared outputs.
+            if self.spec.average_shared {
+                output = (output / 2.0)?;
+            }
         }
         output.reshape((batch, sequence, produced_width))
     }

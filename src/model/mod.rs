@@ -1173,6 +1173,9 @@ pub struct MixtureOfExperts {
     /// `zero_expert_type` `identity`): router outputs past `count` whose
     /// expert returns its input.
     pub identity_experts: usize,
+    /// Cohere2-MoE's `shared_expert_combination_strategy` `average`: the
+    /// routed and shared experts' sum is halved.
+    pub average_shared: bool,
 }
 
 /// How a family clamps its experts' SwiGLU.
