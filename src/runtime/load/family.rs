@@ -150,10 +150,11 @@ pub(super) enum Family {
     Laguna,
     LongcatFlashNgram,
     MuseGlimmerText,
+    Plamo3,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 122] = [
+    pub(super) const ALL: [Self; 123] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -276,6 +277,7 @@ impl Family {
         Self::Laguna,
         Self::LongcatFlashNgram,
         Self::MuseGlimmerText,
+        Self::Plamo3,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -427,6 +429,7 @@ impl Family {
             Self::Laguna => "laguna",
             Self::LongcatFlashNgram => "longcat_flash_ngram",
             Self::MuseGlimmerText => "muse_glimmer_text",
+            Self::Plamo3 => "plamo3",
         }
     }
 
@@ -967,6 +970,7 @@ fn rope_scaling(
                 beta_fast: stated("beta_fast").unwrap_or(YARN_BETA_FAST) as f32,
                 beta_slow: stated("beta_slow").unwrap_or(YARN_BETA_SLOW) as f32,
                 attention: attention as f32,
+                truncate: scaling.get("truncate").and_then(Value::as_bool).unwrap_or(true),
             })
         }
         "proportional" => Ok(proportional(scaling, rotary_dim)),
@@ -2506,6 +2510,7 @@ pub(super) fn family(
         "afmoe" => afmoe(raw, layers, llama, &mut architecture, path)?,
         "laguna" => laguna(raw, scaling, layers, llama, &mut architecture, path)?,
         "muse_glimmer_text" => muse_glimmer(raw, layers, llama, &mut architecture, path)?,
+        "plamo3" => plamo3(raw, layers, llama, &mut architecture, path)?,
         "deepseek" => {
             // DeepSeek-MoE (v1): Llama's attention, rotating by halves, and
             // DeepSeek's experts — `n_routed_experts` scored by softmax and
@@ -5034,6 +5039,66 @@ fn layer_bases(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &m
         }
     }
     architecture.local_rope_theta = local.filter(|base| *base != f64::from(llama.rope_theta)).map(|base| base as f32);
+    Ok(())
+}
+
+/// PLaMo 3's output norms' offsets (`modeling_plamo.py`,
+/// `PLAMO3_POST_MIXER_NORM_OFFSET = 1.0 / 5` and
+/// `PLAMO3_POST_MLP_NORM_OFFSET = 1.0 / (5**1.5)`).
+const PLAMO3_POST_MIXER_NORM_OFFSET: f64 = 0.2;
+const PLAMO3_POST_MLP_NORM_OFFSET: f64 = 0.089_442_719_099_991_59;
+
+/// The YaRN band `Plamo3Config.rope_parameters` fixes for the
+/// full-attention layers (`"beta_fast": 32.0`, `"beta_slow": 1.0`).
+const PLAMO3_YARN_BETA_FAST: f64 = 32.0;
+const PLAMO3_YARN_BETA_SLOW: f64 = 1.0;
+
+/// PLaMo 3 (`plamo3`): Llama's block under its names (`model.layers.layers`,
+/// `mixer.qkv_proj`, `mlp.gate_up_proj`) with sandwich norms — the pre-norms
+/// and the final norm storing their scales as offsets from one, the output
+/// norms from 1/5 and 5^-1.5 — and per-head query and key norms before the
+/// rotation. Every `sliding_window_pattern`-th layer attends fully, the
+/// others through `window_size` and rotate at `rope_local_theta`; the full
+/// layers rotate at `rope_theta`, by YaRN over `initial_context_length`
+/// positions without rounding its band when `rope_scaling_factor` is not
+/// one. Under `scale_embedding` the embedding is multiplied by
+/// `sqrt(hidden_size)`.
+fn plamo3(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+    if text(raw, "linear_type").is_some_and(|kind| kind != "normal") {
+        bail!("{} declares a linear_type other than normal; Ster reads PLaMo 3's unquantized projections", path.display());
+    }
+    let pattern = whole(raw, "sliding_window_pattern").filter(|pattern| *pattern > 0).with_context(|| {
+        format!("{} declares a PLaMo 3 model without a sliding_window_pattern above zero", path.display())
+    })?;
+    fits(layers, path)?;
+    architecture.names = Names::PLAMO3;
+    architecture.qkv_layout = QkvLayout::Stacked;
+    architecture.fused_feed_forward = true;
+    architecture.norm_offset = true;
+    architecture.output_norms = true;
+    architecture.output_norm_shifts = Some((PLAMO3_POST_MIXER_NORM_OFFSET, PLAMO3_POST_MLP_NORM_OFFSET));
+    architecture.query_key_norm = QueryKeyNorm::PerHead;
+    architecture.sliding_window = whole(raw, "window_size").or_else(|| whole(raw, "sliding_window"));
+    architecture.sliding_layers =
+        (0..layers).filter(|layer| (layer + 1) % pattern != 0).fold(0u128, |set, layer| set | (1u128 << layer));
+    architecture.local_rope_theta = number(raw, "rope_local_theta").map(|theta| theta as f32);
+    if flag(raw, "scale_embedding") {
+        architecture.embedding_multiplier = Some((llama.hidden_size as f64).sqrt());
+    }
+    let factor = number(raw, "rope_scaling_factor").unwrap_or(1.0);
+    if factor != 1.0 {
+        let original = whole(raw, "initial_context_length")
+            .with_context(|| format!("{} scales its rotation without initial_context_length", path.display()))?;
+        let yarn = serde_json::json!({
+            "rope_type": "yarn",
+            "factor": factor,
+            "beta_fast": PLAMO3_YARN_BETA_FAST,
+            "beta_slow": PLAMO3_YARN_BETA_SLOW,
+            "original_max_position_embeddings": original,
+            "truncate": false,
+        });
+        architecture.rope_scaling = rope_scaling(Some(&yarn), architecture.rotary_dim, raw, llama, path)?;
+    }
     Ok(())
 }
 

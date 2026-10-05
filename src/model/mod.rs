@@ -311,6 +311,10 @@ pub struct Architecture {
     /// The final norm stores its scale as is while the block norms store an
     /// offset from one (MuseGlimmer).
     pub plain_final_norm: bool,
+    /// What attention's and the feed-forward's output norms add to their
+    /// stored scales in place of the block's offset (PLaMo 3's 1/5 and
+    /// 5^-1.5).
+    pub output_norm_shifts: Option<(f64, f64)>,
     /// What attention scores are divided by: `sqrt(head_dim)`, Gemma 2's
     /// `sqrt(query_pre_attn_scalar)`, or Granite's `1 / attention_multiplier`.
     pub score_divisor: f64,
@@ -760,6 +764,7 @@ impl Architecture {
             output_norms: false,
             output_norm_eps: None,
             plain_final_norm: false,
+            output_norm_shifts: None,
             score_divisor: (head_dim as f64).sqrt(),
             attention_softcap: None,
             final_softcap: None,
@@ -1508,6 +1513,19 @@ impl Names {
         feed_forward_norm: "pre_feedforward_layernorm",
         ..Self::LLAMA
     };
+    /// PLaMo 3: layers below `model.layers.layers`, each a `mixer` with one
+    /// `qkv_proj` and `o_proj`, a `mlp` with one `gate_up_proj`, and
+    /// `pre_mixer_norm`, `post_mixer_norm`, `pre_mlp_norm`, `post_mlp_norm`.
+    pub const PLAMO3: Self = Self {
+        layers: "model.layers.layers",
+        attention: "mixer",
+        output: "mixer.o_proj",
+        attention_norm: "pre_mixer_norm",
+        attention_output_norm: "post_mixer_norm",
+        feed_forward_norm: "pre_mlp_norm",
+        feed_forward_output_norm: "post_mlp_norm",
+        ..Self::LLAMA
+    };
     /// MuseGlimmer: Gemma 2's sandwich norms, attention's output gate in
     /// `self_attn.gate_proj`, and a weightless norm after the embedding
     /// that names no tensor.
@@ -1946,13 +1964,16 @@ pub enum RopeScaling {
     /// YaRN: frequencies whose wavelength fits `original` positions more
     /// than `beta_fast` times keep their value, those fitting fewer than
     /// `beta_slow` times are divided by `factor`, a linear ramp blends the
-    /// band between, and both tables are multiplied by `attention`.
+    /// band between, and both tables are multiplied by `attention`. The band's
+    /// bounds are rounded out to whole dimension pairs unless `truncate` is
+    /// false (Transformers' `truncate`, which GPT-OSS and PLaMo 3 turn off).
     Yarn {
         factor: f32,
         original: usize,
         beta_fast: f32,
         beta_slow: f32,
         attention: f32,
+        truncate: bool,
     },
     /// Gemma 4's proportional rotation: the first `rotated` frequency pairs
     /// keep their value and the rest are zero, so those components pass

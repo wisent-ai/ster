@@ -725,14 +725,20 @@ impl Block {
                 ),
                 (false, true, true) => {
                     // MuseGlimmer's output norms keep their own epsilon
-                    // (`post_norm_eps`).
-                    let output_spec = NormSpec { eps: architecture.output_norm_eps.unwrap_or(spec.eps), ..spec };
-                    let output_norm = |name: &str| output_spec.load(config.hidden_size, builder.pp(name));
+                    // (`post_norm_eps`); PLaMo 3's add their own shifts to
+                    // the stored scale in place of the block's offset.
+                    let output_spec = NormSpec {
+                        eps: architecture.output_norm_eps.unwrap_or(spec.eps),
+                        offset: spec.offset && architecture.output_norm_shifts.is_none(),
+                        ..spec
+                    };
+                    let (attention_shift, feed_forward_shift) = architecture.output_norm_shifts.unwrap_or_default();
+                    let output_norm = |name: &str, shift: f64| output_spec.load(config.hidden_size, builder.pp(name))?.shifted(shift);
                     (
                         Some(norm(names.attention_norm)?),
-                        Some(output_norm(names.attention_output_norm)?),
+                        Some(output_norm(names.attention_output_norm, attention_shift)?),
                         Some(norm(names.feed_forward_norm)?),
-                        Some(output_norm(names.feed_forward_output_norm)?),
+                        Some(output_norm(names.feed_forward_output_norm, feed_forward_shift)?),
                     )
                 }
                 (false, false, _) => (

@@ -117,6 +117,7 @@ impl Cache {
                 beta_fast,
                 beta_slow,
                 attention,
+                truncate,
             } => (
                 RotaryTable::new(
                     yarn_frequencies(
@@ -126,6 +127,7 @@ impl Cache {
                         *factor,
                         *original,
                         (*beta_fast, *beta_slow),
+                        *truncate,
                     ),
                     *attention,
                     device,
@@ -265,9 +267,10 @@ const YARN_RAMP_WIDENING: f32 = 0.001;
 /// YaRN's frequencies, as Transformers' `_compute_yarn_parameters` computes
 /// them: the dimension pair where a frequency completes `beta_fast` turns
 /// over `original` positions and the one where it completes `beta_slow`
-/// bound a linear ramp; above the band a frequency keeps its value
-/// (extrapolation), below it is divided by `factor` (interpolation), and in
-/// the band the two are blended along the ramp.
+/// bound a linear ramp — rounded out to whole pairs when `truncate` holds —;
+/// above the band a frequency keeps its value (extrapolation), below it is
+/// divided by `factor` (interpolation), and in the band the two are blended
+/// along the ramp.
 fn yarn_frequencies(
     base: &[f32],
     rotary_dim: usize,
@@ -275,12 +278,15 @@ fn yarn_frequencies(
     factor: f32,
     original: usize,
     (beta_fast, beta_slow): (f32, f32),
+    truncate: bool,
 ) -> Vec<f32> {
     let correction = |turns: f32| -> f32 {
         rotary_dim as f32 * (original as f32 / (turns * 2.0 * PI)).ln() / (2.0 * theta.ln())
     };
-    let low = correction(beta_fast).floor().max(0.0);
-    let high = correction(beta_slow).ceil().min(rotary_dim as f32 - 1.0);
+    let (low, high) = (correction(beta_fast), correction(beta_slow));
+    let (low, high) = if truncate { (low.floor(), high.ceil()) } else { (low, high) };
+    let low = low.max(0.0);
+    let high = high.min(rotary_dim as f32 - 1.0);
     let high = if high == low { high + YARN_RAMP_WIDENING } else { high };
     base.iter()
         .enumerate()

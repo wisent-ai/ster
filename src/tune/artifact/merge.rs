@@ -236,7 +236,7 @@ pub fn merge(
     ];
     let required = [
         (&source.config, source.layout.config_file()),
-        (&source.tokenizer, "tokenizer.json"),
+        (&source.tokenizer, source.tokenizer.file_name().and_then(|name| name.to_str()).unwrap_or("tokenizer.json")),
     ];
     for (from, leaf) in required
         .into_iter()

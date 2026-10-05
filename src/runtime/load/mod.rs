@@ -256,12 +256,7 @@ impl BaseLoad {
         let source = Checkpoint::resolve(model, revision)?;
         let (config, architecture, eos_tokens) = source.decoder_config()?;
         let chat = source.chat()?;
-        let tokenizer = Tokenizer::from_file(&source.tokenizer).map_err(|error| {
-            anyhow::anyhow!(
-                "failed to load tokenizer {}: {error}",
-                source.tokenizer.display()
-            )
-        })?;
+        let tokenizer = super::vocabulary::load(&source.tokenizer, source.tokenizer_config.as_deref())?;
         Ok(Self {
             tokenizer,
             config,

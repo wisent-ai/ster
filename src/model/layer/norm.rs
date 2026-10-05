@@ -133,6 +133,16 @@ impl Norm {
             ..self
         })
     }
+
+    /// This norm with `shift` added to its scale (PLaMo 3's output norms,
+    /// whose stored scale is an offset from 1/5 or 5^-1.5); a zero shift
+    /// leaves it as it is.
+    pub fn shifted(self, shift: f64) -> candle_core::Result<Self> {
+        if shift == 0.0 {
+            return Ok(self);
+        }
+        Ok(Self { weight: (self.weight + shift)?, ..self })
+    }
 }
 
 impl Norm {

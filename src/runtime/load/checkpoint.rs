@@ -54,7 +54,7 @@ impl Checkpoint {
                 Layout::Mistral
             };
             let config = local.join(layout.config_file());
-            let tokenizer = local.join("tokenizer.json");
+            let tokenizer = local.join(tokenizer_file(|name| local.join(name).is_file()));
             let weights = local_safetensors(local, layout)?;
             require_files(&config, &tokenizer, &weights)?;
             let (tokenizer_config, chat_template) = chat::local_files(local);
@@ -78,7 +78,7 @@ impl Checkpoint {
         let info = remote
             .info()
             .with_context(|| format!("failed to read model repository {model}"))?;
-        let tokenizer = remote.get("tokenizer.json")?;
+        let tokenizer = remote.get(tokenizer_file(|name| published(&info, name)))?;
         // The two template files are fetched exactly like the three required
         // ones, but only when the repository lists them: `get` on a file a
         // repository does not publish is an error, and a base model not
@@ -203,6 +203,13 @@ impl Checkpoint {
 /// when asking for it can succeed.
 fn published(info: &hf_hub::api::RepoInfo, name: &str) -> bool {
     info.siblings.iter().any(|file| file.rfilename == name)
+}
+
+/// The tokenizer file a checkpoint publishes: Transformers'
+/// `tokenizer.json`, else PLaMo's `tokenizer.jsonl`, else the
+/// `tokenizer.json` whose absence is then reported.
+fn tokenizer_file(exists: impl Fn(&str) -> bool) -> &'static str {
+    if !exists("tokenizer.json") && exists("tokenizer.jsonl") { "tokenizer.jsonl" } else { "tokenizer.json" }
 }
 
 fn local_safetensors(root: &Path, layout: Layout) -> Result<Vec<PathBuf>> {

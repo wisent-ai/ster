@@ -19,6 +19,7 @@ mod device;
 mod infer;
 mod load;
 mod text;
+mod vocabulary;
 
 pub use device::{DeviceChoice, Precision};
 pub use infer::{Completion, GenerationOptions};
