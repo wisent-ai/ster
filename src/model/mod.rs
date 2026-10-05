@@ -312,6 +312,9 @@ pub struct Architecture {
     /// A routed feed-forward in place of the dense one, on the layers it
     /// covers.
     pub experts: Option<MixtureOfExperts>,
+    /// Each layer's own `(top_k, intermediate)` where it differs from
+    /// `experts` (Nemotron Puzzle's `block_configs`).
+    pub expert_overrides: Option<Vec<Option<(usize, usize)>>>,
     /// DeepSeek's multi-head latent attention in place of separate query,
     /// key and value projections.
     pub latent: Option<LatentAttention>,
@@ -726,6 +729,7 @@ impl Architecture {
             final_softcap: None,
             logits_multiplier: None,
             experts: None,
+            expert_overrides: None,
             latent: None,
             latent_scales: None,
             shortcut_experts: None,
@@ -835,6 +839,17 @@ impl Architecture {
         self.delta_rule
             .as_ref()
             .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
+    }
+
+    /// Layer `layer`'s mixture of experts, with the layer's own count of
+    /// chosen experts and width where the family states one.
+    pub fn experts_at(&self, layer: usize) -> Option<MixtureOfExperts> {
+        let mut experts = self.experts.clone()?;
+        if let Some(Some((top_k, intermediate))) = self.expert_overrides.as_ref().and_then(|all| all.get(layer)) {
+            experts.top_k = *top_k;
+            experts.intermediate = *intermediate;
+        }
+        Some(experts)
     }
 
     /// Whether layer `layer`'s feed-forward is the mixture of experts.
@@ -1196,6 +1211,10 @@ pub struct MixtureOfExperts {
     /// Llama 4: each chosen expert reads its input already multiplied by
     /// its router weight, and its output joins unweighted.
     pub weight_input: bool,
+    /// Nemotron-H's latent experts (`moe_latent_size`): the routed experts
+    /// work on `fc1_latent_proj(x)`, this wide, and their sum returns
+    /// through `fc2_latent_proj`; the router and shared experts read `x`.
+    pub latent: Option<usize>,
 }
 
 /// Llama 4's attention temperature: on the layers in `layers`, each query
@@ -1704,6 +1723,15 @@ impl Names {
         up: "mixer.up_proj",
         down: "mixer.down_proj",
         ..Self::MAMBA
+    };
+    /// Nemotron Puzzle: Nemotron-H's layout below `model` rather than
+    /// `backbone`.
+    pub const NEMOTRON_H_MODEL: Self = Self {
+        root: "model",
+        embeddings: "model.embeddings",
+        layers: "model.layers",
+        final_norm: "model.norm_f",
+        ..Self::NEMOTRON_H
     };
     /// Jamba: `mamba` or `self_attn` after `input_layernorm`,
     /// `pre_ff_layernorm` before `feed_forward`, and `final_layernorm`.

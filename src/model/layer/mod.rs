@@ -796,11 +796,11 @@ fn feed_forward_block(
         };
         return Ok(FeedForwardBlock::Shortcut(dense, shortcut));
     }
-    Ok(match &architecture.experts {
+    Ok(match architecture.experts_at(layer) {
         Some(experts) if architecture.routed(layer) => FeedForwardBlock::Routed(Experts::load(
             builder,
             config.hidden_size,
-            experts,
+            &experts,
             architecture.activation,
             layer,
         )?),

@@ -104,6 +104,9 @@ pub(in crate::model) struct Experts {
     activation: Activation,
     /// The routed experts' and the shared expert's clamps on this layer.
     clamps: (Option<Clamp>, Option<Clamp>),
+    /// Nemotron-H's `fc1_latent_proj` and `fc2_latent_proj`, around the
+    /// routed experts.
+    latent: Option<(Linear, Linear)>,
 }
 
 impl Experts {
@@ -151,16 +154,18 @@ impl Experts {
                     ExpertLayout::LongCat => (builder.pp("mlp"), "router.classifier"),
                     _ => (builder.pp("mlp"), "gate"),
                 };
-                // Nemotron-H's experts have no gate projection.
+                // Nemotron-H's experts have no gate projection, and its
+                // latent experts work on `moe_latent_size`.
                 let gate = (spec.layout != ExpertLayout::NemotronH).then_some("gate_proj");
+                let width = spec.latent.unwrap_or(hidden);
                 let stacked = block.pp("experts");
                 // Transformers 5 saves every expert stacked: `gate_up_proj`
                 // `[experts, 2 · width, hidden]`, gate rows first, and
                 // `down_proj` `[experts, hidden, width]` (A.X-K1 and any
                 // checkpoint it writes); each expert is a view of its slice.
                 let experts = if gate.is_some() && stacked.contains_tensor("gate_up_proj") {
-                    let gate_up = stacked.get((count, 2 * intermediate, hidden), "gate_up_proj")?;
-                    let down = stacked.get((count, hidden, intermediate), "down_proj")?;
+                    let gate_up = stacked.get((count, 2 * intermediate, width), "gate_up_proj")?;
+                    let down = stacked.get((count, width, intermediate), "down_proj")?;
                     (0..count)
                         .map(|expert| -> candle_core::Result<Expert> {
                             let rows = gate_up.get(expert)?;
@@ -174,7 +179,7 @@ impl Experts {
                 } else {
                     (0..count)
                         .map(|expert| {
-                            Expert::load(hidden, intermediate, gate, ["up_proj", "down_proj"], stacked.pp(expert.to_string()))
+                            Expert::load(width, intermediate, gate, ["up_proj", "down_proj"], stacked.pp(expert.to_string()))
                         })
                         .collect::<candle_core::Result<Vec<_>>>()?
                 };
@@ -416,6 +421,20 @@ impl Experts {
             Some(SwigluLimit::Step { routed, shared }) => (at(routed), at(shared)),
             None => (None, None),
         };
+        // Nemotron-H's latent projections sit beside its experts under
+        // `mixer`, with a bias when the checkpoint stores one (`mlp_bias`).
+        let latent = match spec.latent {
+            Some(width) => {
+                let block = builder.pp("mixer");
+                let projection = |input: usize, output: usize, name: &str| -> candle_core::Result<Linear> {
+                    let module = block.pp(name);
+                    let bias = if module.contains_tensor("bias") { Some(module.get(output, "bias")?) } else { None };
+                    Ok(Linear::new(module.get((output, input), "weight")?, bias))
+                };
+                Some((projection(hidden, width, "fc1_latent_proj")?, projection(width, hidden, "fc2_latent_proj")?))
+            }
+            None => None,
+        };
         Ok(Self {
             router,
             selection_bias,
@@ -425,6 +444,7 @@ impl Experts {
             spec: spec.clone(),
             activation,
             clamps,
+            latent,
         })
     }
 
@@ -530,15 +550,25 @@ impl Experts {
             None => weights,
         };
         // K2-Horizon's value experts yield a value `intermediate` wide; every
-        // other mixture yields the hidden width.
+        // other mixture yields the hidden width. Nemotron-H's latent experts
+        // read and sum in `moe_latent_size`.
         let produced_width = if self.spec.layout == ExpertLayout::Mova { self.spec.intermediate } else { width };
-        let mut output = Tensor::zeros((tokens, produced_width), flat.dtype(), device)?;
+        let routed_input = match &self.latent {
+            Some((down, _)) => down.forward(&flat)?,
+            None => flat.clone(),
+        };
+        let routed_width = routed_input.dim(D::Minus1)?;
+        let mut output = Tensor::zeros(
+            (tokens, if self.latent.is_some() { routed_width } else { produced_width }),
+            flat.dtype(),
+            device,
+        )?;
         for (expert, tokens) in routed.iter().enumerate() {
             if tokens.is_empty() {
                 continue;
             }
             let index = Tensor::new(tokens.as_slice(), device)?;
-            let inputs = flat.index_select(&index, 0)?;
+            let inputs = routed_input.index_select(&index, 0)?;
             let weight = weights
                 .index_select(&index, 0)?
                 .narrow(1, expert, 1)?
@@ -559,6 +589,9 @@ impl Experts {
                 None => produced,
             };
             output = output.index_add(&index, &produced, 0)?;
+        }
+        if let Some((_, up)) = &self.latent {
+            output = up.forward(&output)?;
         }
         if let Some((shared, gate)) = &self.shared {
             let produced = shared.forward(&flat, self.activation, self.clamps.1)?;

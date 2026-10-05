@@ -145,10 +145,11 @@ pub(super) enum Family {
     Qwen35Text,
     Qwen35MoeText,
     Afmoe,
+    NemotronHPuzzle,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 117] = [
+    pub(super) const ALL: [Self; 118] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -266,6 +267,7 @@ impl Family {
         Self::Qwen35Text,
         Self::Qwen35MoeText,
         Self::Afmoe,
+        Self::NemotronHPuzzle,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -393,6 +395,7 @@ impl Family {
             Self::Qwen35Text => "qwen3_5_text",
             Self::Qwen35MoeText => "qwen3_5_moe_text",
             Self::Afmoe => "afmoe",
+            Self::NemotronHPuzzle => "nemotron_h_puzzle",
         }
     }
 
@@ -562,6 +565,9 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
                 object.insert("intermediate_size".to_owned(), dense);
             }
         }
+    }
+    if model_type == "nemotron_h_puzzle" {
+        nemotron_puzzle_keys(raw);
     }
     // openPangu-Ultra-MoE leaves its router's form to its config class:
     // sigmoid scores, renormalised (`PanguUltraMoEConfig`'s
@@ -1966,7 +1972,7 @@ pub(super) fn family(
                 structured: Some(heads),
             });
         }
-        "nemotron_h" => {
+        "nemotron_h" | "nemotron_h_puzzle" => {
             // Nemotron-H: one norm and one sublayer per layer, its kind the
             // layer's letter in `hybrid_override_pattern` — `M` a Mamba-2
             // scan, `*` attention without rotation, `-` a squared-ReLU
@@ -2001,26 +2007,50 @@ pub(super) fn family(
                 // (sigmoid scores, `mixer.gate.e_score_correction_bias` added
                 // to choose, `n_group`/`topk_group` limits, renormalised under
                 // `norm_topk_prob`, scaled by `routed_scaling_factor`) beside
-                // `mixer.shared_experts`, `moe_shared_expert_intermediate_size`
-                // wide; every projection is `up_proj`/`down_proj`.
-                if raw.get("moe_latent_size").is_some_and(|size| !size.is_null()) {
-                    bail!(
-                        "{} projects its experts' input into moe_latent_size; Ster implements Nemotron-H experts on the full hidden width",
-                        path.display()
-                    );
-                }
+                // `n_shared_experts` shared ones under `mixer.shared_experts`,
+                // `moe_shared_expert_intermediate_size` wide each; every
+                // projection is `up_proj`/`down_proj`. Under `moe_latent_size`
+                // the routed experts work on `mixer.fc1_latent_proj(x)` and
+                // return through `mixer.fc2_latent_proj`. Nemotron Puzzle's
+                // `block_configs` give each `moe` layer its own
+                // `num_experts_per_tok` and `moe_intermediate_size`.
                 let mut routed = deepseek_experts(raw, model_type, layers, path)?;
                 routed.layout = ExpertLayout::NemotronH;
                 routed.dense_layers = every_layer(layers, path)? & !routed_layers;
                 routed.selection_bias = Some("mixer.gate.e_score_correction_bias");
+                routed.latent = whole(raw, "moe_latent_size").filter(|width| *width > 0);
+                let shared_count = whole(raw, "n_shared_experts").unwrap_or(1).max(1);
                 routed.shared = whole(raw, "moe_shared_expert_intermediate_size")
                     .filter(|width| *width > 0)
                     .map(|intermediate| SharedExpert {
-                        intermediate,
+                        intermediate: shared_count * intermediate,
                         module: "mixer.shared_experts",
                         gated: false,
                         form: SharedForm::UpDown,
                     });
+                if let Some(blocks) = raw.get("block_configs").and_then(Value::as_array) {
+                    if blocks.len() != layers {
+                        bail!("{} lists {} block_configs for {layers} layers", path.display(), blocks.len());
+                    }
+                    architecture.expert_overrides = Some(
+                        blocks
+                            .iter()
+                            .map(|block| {
+                                let moe = block.get("block_type").and_then(Value::as_str) == Some("moe");
+                                let top_k = whole(block, "num_experts_per_tok").unwrap_or(routed.top_k);
+                                let width = whole(block, "moe_intermediate_size").unwrap_or(routed.intermediate);
+                                if moe && (top_k == 0 || top_k > routed.count) {
+                                    bail!(
+                                        "{} routes a block's tokens to {top_k} of {} experts; it must be at least one and at most all of them",
+                                        path.display(),
+                                        routed.count
+                                    );
+                                }
+                                Ok(moe.then_some((top_k, width)))
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    );
+                }
                 architecture.experts = Some(routed);
             }
             let heads = structured(raw, "mamba_num_heads", "mamba_head_dim", "n_groups", path)?;
@@ -2031,7 +2061,8 @@ pub(super) fn family(
                     path.display()
                 );
             };
-            architecture.names = Names::NEMOTRON_H;
+            architecture.names =
+                if model_type == "nemotron_h_puzzle" { Names::NEMOTRON_H_MODEL } else { Names::NEMOTRON_H };
             architecture.positions = Positions::None;
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.query_key_value_bias = flag(raw, "attention_bias");
@@ -3147,6 +3178,7 @@ fn experts(
         identity_experts: 0,
         average_shared: false,
         weight_input: false,
+        latent: None,
     })
 }
 
@@ -3218,7 +3250,8 @@ fn deepseek_experts(
         });
     // GLM-4-MoE's and Nemotron-H's routers are DeepSeek-V3's and their
     // configs leave the method out: sigmoid scores, `noaux_tc` selection.
-    let v3_default = matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "glm_moe_dsa" | "nemotron_h" | "exaone_moe");
+    let v3_default =
+        matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "glm_moe_dsa" | "exaone_moe") || model_type.starts_with("nemotron_h");
     let v3_router = v3_default || matches!(model_type, "deepseek_v3" | "deepseek_v32" | "axk1" | "pangu_ultra_moe");
     routed.scoring = match text(raw, "scoring_func") {
         None if v3_default => Scoring::Sigmoid,
@@ -3694,6 +3727,46 @@ fn step_experts(raw: &Value, layers: usize, path: &Path) -> Result<MixtureOfExpe
     Ok(routed)
 }
 
+/// Nemotron Puzzle's config, put in Nemotron-H's shape: its
+/// `layers_block_type` (`mamba`, `attention`, `mlp`, `moe`) becomes
+/// `hybrid_override_pattern` (`M`, `*`, `-`, `E`), and the first `moe`
+/// block's `num_experts_per_tok` and `moe_intermediate_size` stand in for
+/// the top-level ones the per-layer `block_configs` override. A block type
+/// it does not know is left as `?`, which the Nemotron-H reading refuses
+/// by layer.
+fn nemotron_puzzle_keys(raw: &mut Value) {
+    let pattern: Option<String> = raw.get("layers_block_type").and_then(Value::as_array).map(|kinds| {
+        kinds
+            .iter()
+            .map(|kind| match kind.as_str() {
+                Some("mamba") => 'M',
+                Some("attention") => '*',
+                Some("mlp") => '-',
+                Some("moe") => 'E',
+                _ => '?',
+            })
+            .collect()
+    });
+    let first_moe = raw
+        .get("block_configs")
+        .and_then(Value::as_array)
+        .and_then(|blocks| blocks.iter().find(|block| block.get("block_type").and_then(Value::as_str) == Some("moe")))
+        .cloned();
+    let Some(object) = raw.as_object_mut() else {
+        return;
+    };
+    if let Some(pattern) = pattern {
+        object.entry("hybrid_override_pattern").or_insert(Value::from(pattern));
+    }
+    if let Some(block) = first_moe {
+        for key in ["num_experts_per_tok", "moe_intermediate_size"] {
+            if let Some(value) = block.get(key).cloned() {
+                object.entry(key).or_insert(value);
+            }
+        }
+    }
+}
+
 /// Step 3.5's config, put in the shape the rest of the reading expects. Its
 /// per-layer lists also cover the multi-token-prediction layers past
 /// `num_hidden_layers`, which Ster does not run, so they are cut to the
@@ -4023,6 +4096,7 @@ fn k2_horizon(
             identity_experts: 0,
             average_shared: false,
             weight_input: false,
+            latent: None,
         });
     }
     architecture.experts = Some(routed);
