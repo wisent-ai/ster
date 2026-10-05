@@ -1733,6 +1733,24 @@ impl Names {
         final_norm: "model.norm_f",
         ..Self::NEMOTRON_H
     };
+    /// ChatGLM (`chatglm`): everything below `transformer`,
+    /// `embedding.word_embeddings`, `encoder.layers.{i}` with
+    /// `self_attention.query_key_value` and `dense`, `mlp.dense_h_to_4h`
+    /// (gate rows above up rows) and `dense_4h_to_h`,
+    /// `encoder.final_layernorm`, and `output_layer` as the head.
+    pub const CHATGLM: Self = Self {
+        root: "transformer",
+        embeddings: "transformer.embedding.word_embeddings",
+        layers: "transformer.encoder.layers",
+        final_norm: "transformer.encoder.final_layernorm",
+        lm_head: "transformer.output_layer",
+        attention: "self_attention",
+        fused_qkv: "query_key_value",
+        output: "self_attention.dense",
+        fused_gate_up: "mlp.dense_h_to_4h",
+        down: "mlp.dense_4h_to_h",
+        ..Self::LLAMA
+    };
     /// Jamba: `mamba` or `self_attn` after `input_layernorm`,
     /// `pre_ff_layernorm` before `feed_forward`, and `final_layernorm`.
     pub const JAMBA: Self = Self {

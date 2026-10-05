@@ -146,10 +146,11 @@ pub(super) enum Family {
     Qwen35MoeText,
     Afmoe,
     NemotronHPuzzle,
+    ChatGlm,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 118] = [
+    pub(super) const ALL: [Self; 119] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -268,6 +269,7 @@ impl Family {
         Self::Qwen35MoeText,
         Self::Afmoe,
         Self::NemotronHPuzzle,
+        Self::ChatGlm,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -396,6 +398,7 @@ impl Family {
             Self::Qwen35MoeText => "qwen3_5_moe_text",
             Self::Afmoe => "afmoe",
             Self::NemotronHPuzzle => "nemotron_h_puzzle",
+            Self::ChatGlm => "chatglm",
         }
     }
 
@@ -568,6 +571,9 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     }
     if model_type == "nemotron_h_puzzle" {
         nemotron_puzzle_keys(raw);
+    }
+    if model_type == "chatglm" {
+        chatglm_keys(raw);
     }
     // openPangu-Ultra-MoE leaves its router's form to its config class:
     // sigmoid scores, renormalised (`PanguUltraMoEConfig`'s
@@ -2948,6 +2954,37 @@ pub(super) fn family(
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.activation = Activation::Gelu;
         }
+        "chatglm" => {
+            // ChatGLM (GLM-4-9B and ChatGLM2/3): Llama's block under its own
+            // names, query, key and value stacked in `query_key_value`
+            // (biased under `add_qkv_bias`), gate and up stacked in
+            // `dense_h_to_4h`, the first half of each head rotating —
+            // adjacent pairs under `original_rope` — and RMS norms under
+            // `rmsnorm`, LayerNorms otherwise.
+            if flag(raw, "apply_residual_connection_post_layernorm") {
+                bail!(
+                    "{} adds its residual after the norm (apply_residual_connection_post_layernorm); Ster implements ChatGLM's pre-norm block",
+                    path.display()
+                );
+            }
+            if raw.get("post_layer_norm").and_then(Value::as_bool) == Some(false) {
+                bail!(
+                    "{} declares no final norm (post_layer_norm false); Ster implements ChatGLM with its final_layernorm",
+                    path.display()
+                );
+            }
+            architecture.names = Names::CHATGLM;
+            architecture.qkv_layout = QkvLayout::Stacked;
+            architecture.fused_feed_forward = true;
+            let bias = flag(raw, "add_bias_linear");
+            architecture.query_key_value_bias = bias || flag(raw, "add_qkv_bias");
+            architecture.output_bias = bias;
+            architecture.feed_forward_bias = bias;
+            architecture.interleaved_rotary = raw.get("original_rope").and_then(Value::as_bool).unwrap_or(true);
+            if raw.get("rmsnorm").and_then(Value::as_bool) == Some(false) {
+                architecture.norm = NormKind::Layer { bias: true };
+            }
+        }
         "glm" | "glm4" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.fused_feed_forward = true;
@@ -3725,6 +3762,36 @@ fn step_experts(raw: &Value, layers: usize, path: &Path) -> Result<MixtureOfExpe
             form: SharedForm::GateUpDown,
         });
     Ok(routed)
+}
+
+/// The share of each ChatGLM head that rotates (vLLM's `chatglm.py`,
+/// `"partial_rotary_factor": 0.5`).
+const CHATGLM_ROTARY_SHARE: f64 = 0.5;
+
+/// ChatGLM's config, put in Llama's shape: its key-value groups
+/// (`multi_query_group_num` under `multi_query_attention`), head width
+/// (`kv_channels`), vocabulary (`padded_vocab_size`), the half of each head
+/// that rotates, and the base `10000 · rope_ratio`.
+fn chatglm_keys(raw: &mut Value) {
+    let groups = raw.get("multi_query_group_num").filter(|_| flag(raw, "multi_query_attention")).cloned();
+    let heads = raw.get("num_attention_heads").cloned();
+    let width = raw.get("kv_channels").cloned();
+    let vocabulary = raw.get("padded_vocab_size").cloned();
+    let base = DEFAULT_ROPE_THETA * number(raw, "rope_ratio").unwrap_or(1.0);
+    let Some(object) = raw.as_object_mut() else {
+        return;
+    };
+    if let Some(key_value_heads) = groups.or(heads) {
+        object.entry("num_key_value_heads").or_insert(key_value_heads);
+    }
+    if let Some(width) = width {
+        object.entry("head_dim").or_insert(width);
+    }
+    if let Some(vocabulary) = vocabulary {
+        object.entry("vocab_size").or_insert(vocabulary);
+    }
+    object.entry("partial_rotary_factor").or_insert(Value::from(CHATGLM_ROTARY_SHARE));
+    object.entry("rope_theta").or_insert(Value::from(base));
 }
 
 /// Nemotron Puzzle's config, put in Nemotron-H's shape: its
