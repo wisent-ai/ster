@@ -123,10 +123,11 @@ pub(super) enum Family {
     OlmoHybrid,
     HyV3,
     Nanbeige,
+    IQuestLoopCoder,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 96] = [
+    pub(super) const ALL: [Self; 97] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -223,6 +224,7 @@ impl Family {
         Self::OlmoHybrid,
         Self::HyV3,
         Self::Nanbeige,
+        Self::IQuestLoopCoder,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -329,6 +331,7 @@ impl Family {
             Self::OlmoHybrid => "olmo_hybrid",
             Self::HyV3 => "hy_v3",
             Self::Nanbeige => "nanbeige",
+            Self::IQuestLoopCoder => "iquestloopcoder",
         }
     }
 
@@ -1170,7 +1173,23 @@ pub(super) fn family(
                     physical: layers,
                     count,
                     norm_between: !flag(raw, "skip_loop_final_norm"),
+                    gate_window: None,
                 });
+            }
+        }
+        "iquestloopcoder" => {
+            // IQuest-LoopCoder: Llama's block with `mlp_bias`, its stored
+            // layers run `loop_num` times; each later pass mixes global
+            // attention over the first pass's keys and values with local
+            // attention over its own within `loop_window_size`, gated per
+            // head by `model.gate_projections.{layer}` of the rotated query.
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            let count = whole(raw, "loop_num").unwrap_or(LOOP_CODER_LOOPS).max(1);
+            let window = whole(raw, "loop_window_size").unwrap_or(LOOP_CODER_WINDOW);
+            if count > 1 {
+                architecture.loops = Some(Loops { physical: layers, count, norm_between: false, gate_window: Some(window) });
             }
         }
         "hy_v3" => {
@@ -3159,6 +3178,13 @@ const GRANITE_SWA_FULL_EVERY: usize = 4;
 /// How often OLMo Hybrid's default layout attends: each fourth layer from
 /// the fourth (`OlmoHybridConfig.__post_init__`, `i % 4 == 3`).
 const OLMO_HYBRID_FULL_EVERY: usize = 4;
+
+/// IQuest-LoopCoder's defaults when its config leaves them out: two passes
+/// and a 64-position local window (vLLM's `iquest_loopcoder.py`,
+/// `getattr(config, "loop_num", 2)` and `getattr(config,
+/// "loop_window_size", 64)`).
+const LOOP_CODER_LOOPS: usize = 2;
+const LOOP_CODER_WINDOW: usize = 64;
 
 /// GraniteSWA's and GraniteMoeSWA's additions to Granite: a learned sink per
 /// head (`self_attn.sinks`), sliding-window layers as `layer_types` lists

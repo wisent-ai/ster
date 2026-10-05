@@ -287,15 +287,18 @@ pub struct Architecture {
     pub short_convolution: Option<ShortConvolution>,
 }
 
-/// A looped decoder (Nanbeige's `num_loops`): `physical` stored layers run
-/// in order as many times as the config's layer count holds them, each pass
-/// with its own key-value cache slots; under `norm_between` the final norm
-/// also closes every pass but the last.
+/// A looped decoder: `physical` stored layers run in order as many times as
+/// the config's layer count holds them, each pass with its own key-value
+/// cache slots. Under `norm_between` (Nanbeige's `num_loops`) the final
+/// norm also closes every pass but the last; with `gate_window`
+/// (IQuest-LoopCoder's `loop_window_size`) every later pass mixes global
+/// attention over the first pass's keys with local attention over its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Loops {
     pub physical: usize,
     pub count: usize,
     pub norm_between: bool,
+    pub gate_window: Option<usize>,
 }
 
 /// Solar's block skip connections (`bskcn_1` to `bskcn_4`): before the
@@ -850,7 +853,7 @@ impl Architecture {
         }
         if self.loops.is_some() && !targets.is_empty() {
             bail!(
-                "this model runs its layers more than once (Nanbeige's num_loops), so one adapter would correct every pass of its layer; Ster steers it but trains no adapters on it"
+                "this model runs its layers more than once (Nanbeige's num_loops, IQuest-LoopCoder's loop_num), so one adapter would correct every pass of its layer; Ster steers it but trains no adapters on it"
             );
         }
         if self.lightning.is_some() && !targets.is_empty() {

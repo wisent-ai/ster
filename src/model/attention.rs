@@ -76,6 +76,22 @@ pub(super) struct Attention {
     /// layers of its kind reuse; each call leaves them in the cache's
     /// `shared` slot.
     stores_key_values: bool,
+    /// IQuest-LoopCoder's gated mix on its later passes.
+    loop_mix: Option<LoopMix>,
+}
+
+/// IQuest-LoopCoder's mix: on a layer past the first `physical`, the
+/// attention is `g · global + (1 − g) · local`, global over the first pass's
+/// keys and values of the same stored layer, local over the pass's own
+/// within `window`, `g = sigmoid(weight_h · q_h + bias_h)` per head from
+/// `gate_projections.{layer}`, both in F32 shaped to broadcast over
+/// `[batch, heads, sequence, head_dim]`.
+#[derive(Debug, Clone)]
+struct LoopMix {
+    physical: usize,
+    window: usize,
+    weight: Tensor,
+    bias: Tensor,
 }
 
 /// A low-rank term `up(down(x))` the base model adds to a projection.
@@ -347,6 +363,22 @@ impl Attention {
             value_dim,
             value_norm: if architecture.value_norm { Some(spec.unscaled(head_dim, &builder)?) } else { None },
             stores_key_values: architecture.stores_key_values(layer),
+            loop_mix: match architecture.loops.and_then(|loops| loops.gate_window.map(|window| (loops, window))) {
+                Some((loops, window)) => {
+                    // `gate_projections` sits beside `layers`, below the
+                    // model root.
+                    let parent = names.layers.rsplit_once('.').map_or("", |(parent, _)| parent);
+                    let root = if parent.is_empty() { layer_builder.root() } else { layer_builder.root().pp(parent) };
+                    let gate = root.pp("gate_projections").pp(layer.to_string());
+                    Some(LoopMix {
+                        physical: loops.physical,
+                        window,
+                        weight: gate.get((heads, head_dim), "weight")?.to_dtype(DType::F32)?.reshape((1, heads, 1, head_dim))?,
+                        bias: gate.get(heads, "bias")?.to_dtype(DType::F32)?.reshape((1, heads, 1, 1))?,
+                    })
+                }
+                None => None,
+            },
             window,
             rotary,
             interleaved: architecture.interleaved_rotary,
@@ -548,6 +580,13 @@ impl Attention {
                 if self.stores_key_values {
                     cache.shared[layer] = Some((key.clone(), value.clone()));
                 }
+                // IQuest-LoopCoder's first pass leaves every key and value
+                // it saw for the later passes' global attention.
+                if let Some(mix) = &self.loop_mix {
+                    if layer < mix.physical {
+                        cache.shared[layer] = Some((key.clone(), value.clone()));
+                    }
+                }
                 (key, value)
             }
             // The source layer ran earlier in this same call and left every
@@ -563,6 +602,70 @@ impl Attention {
                 })?
             }
         };
+        let output = match &self.loop_mix {
+            // IQuest-LoopCoder's later passes mix global attention over the
+            // first pass's keys and values with local attention over their
+            // own, within `loop_window_size`, by a per-head gate of the
+            // rotated query: `sigmoid(W_h · q_h + b_h)`.
+            Some(mix) if layer >= mix.physical => {
+                let source = layer % mix.physical;
+                let (global_key, global_value) = cache.shared[source].clone().ok_or_else(|| {
+                    candle_core::Error::Msg(format!(
+                        "layer {layer} attends over layer {source}'s first-pass keys, which left none in this call"
+                    ))
+                })?;
+                let global = self.attend(&query, global_key, global_value, None, mask, index_pos, cache, mode)?;
+                let local_mask = match mask {
+                    Some(full) => Some(
+                        full.broadcast_maximum(&cache.mask(sequence, index_pos, Some(mix.window))?.to_dtype(full.dtype())?)?,
+                    ),
+                    None => None,
+                };
+                let local =
+                    self.attend(&query, key, value, Some(mix.window), local_mask.as_ref(), index_pos, cache, mode)?;
+                let logits = query
+                    .to_dtype(DType::F32)?
+                    .broadcast_mul(&mix.weight)?
+                    .sum_keepdim(3)?
+                    .broadcast_add(&mix.bias)?;
+                // sigmoid, composed so it has a backward pass.
+                let gate = (logits.neg()?.exp()? + 1.0)?.recip()?.to_dtype(global.dtype())?;
+                (global.broadcast_mul(&gate)? + local.broadcast_mul(&(gate.neg()? + 1.0)?)?)?
+            }
+            _ => self.attend(&query, key, value, self.window, mask, index_pos, cache, mode)?,
+        };
+        let output = output
+            .transpose(1, 2)?
+            .reshape((batch, sequence, self.heads * self.value_dim))?;
+        // sigmoid, composed so it has a backward pass.
+        let output = match &self.output_gate {
+            Some(gate) => output.broadcast_mul(&(gate.forward(hidden)?.neg()?.exp()? + 1.0)?.recip()?)?,
+            None => output,
+        };
+        project(
+            &self.output,
+            self.output_adapter.as_ref(),
+            &output,
+            mode.route,
+        )
+    }
+
+    /// The attention of `query` `[batch, heads, sequence, head_dim]` over
+    /// `key` and `value` (key-value heads, not yet repeated), through
+    /// `window` when it is a sliding-window attention, `[batch, heads,
+    /// sequence, value_dim]` at the query's dtype.
+    fn attend(
+        &self,
+        query: &Tensor,
+        key: Tensor,
+        value: Tensor,
+        window: Option<usize>,
+        mask: Option<&Tensor>,
+        index_pos: usize,
+        cache: &mut Cache,
+        mode: Mode,
+    ) -> candle_core::Result<Tensor> {
+        let (_, _, sequence, _) = query.dims4()?;
         let repeats = self.heads / self.key_value_heads;
         let key = repeat_key_value(key, repeats)?;
         let value = repeat_key_value(value, repeats)?;
@@ -619,10 +722,10 @@ impl Attention {
             // A lone query with no supplied mask can only reach keys that
             // already exist, so there is nothing causality would remove — and
             // nothing a window would either, while every key is inside it.
-            None if sequence == 1 && self.window.is_none_or(|window| keys <= window) => attention,
+            None if sequence == 1 && window.is_none_or(|window| keys <= window) => attention,
             None => {
                 let mask = cache
-                    .mask(sequence, index_pos, self.window)?
+                    .mask(sequence, index_pos, window)?
                     .broadcast_as(attention.shape())?;
                 masked_fill(&attention, &mask, f32::NEG_INFINITY)?
             }
@@ -649,23 +752,7 @@ impl Attention {
             Some(keys) => attention.narrow(3, 0, keys)?,
             None => attention,
         };
-        let output = attention
-            .matmul(&value.contiguous()?)?
-            .to_dtype(input_dtype)?;
-        let output = output
-            .transpose(1, 2)?
-            .reshape((batch, sequence, self.heads * self.value_dim))?;
-        // sigmoid, composed so it has a backward pass.
-        let output = match &self.output_gate {
-            Some(gate) => output.broadcast_mul(&(gate.forward(hidden)?.neg()?.exp()? + 1.0)?.recip()?)?,
-            None => output,
-        };
-        project(
-            &self.output,
-            self.output_adapter.as_ref(),
-            &output,
-            mode.route,
-        )
+        attention.matmul(&value.contiguous()?)?.to_dtype(input_dtype)
     }
 }
 
