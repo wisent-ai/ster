@@ -167,7 +167,7 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
         warmup_steps,
         max_sequence,
         generation: GenerationOptions {
-            strength: 1.0,
+            strength: None,
             max_new_tokens,
             temperature,
             top_p: Some(top_p),

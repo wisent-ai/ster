@@ -99,7 +99,7 @@ pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) 
         dedupe: DedupeOptions::new(request.dedupe_bits, request.dedupe_bands),
         refusal_threshold: request.refusal_threshold,
         generation: GenerationOptions {
-            strength: 1.0,
+            strength: None,
             max_new_tokens: request.max_new_tokens,
             temperature: request.temperature,
             top_p: Some(request.top_p),

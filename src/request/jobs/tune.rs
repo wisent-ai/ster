@@ -203,7 +203,7 @@ pub(in crate::request) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Valu
         warmup_steps: request.warmup_steps,
         max_sequence: request.max_sequence,
         generation: GenerationOptions {
-            strength: 1.0,
+            strength: None,
             max_new_tokens: request.max_new_tokens,
             temperature: request.temperature,
             top_p: Some(request.top_p),

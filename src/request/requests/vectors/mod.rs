@@ -108,9 +108,11 @@ pub(in crate::request) struct GenerateRequest {
     /// refuses a mismatch rather than steering the wrong residual stream.
     #[serde(default)]
     pub(in crate::request) adapter: Option<String>,
-    /// Scale, token budget, temperature and seed are the caller's; Ster
-    /// assumes none. Temperature zero is argmax decoding.
-    pub(in crate::request) strength: f64,
+    /// Scale on the steering vector: required with `vector`, which it
+    /// belongs to, and meaningless without one. Token budget, temperature and
+    /// seed are the caller's; Ster assumes none. Temperature zero is argmax.
+    #[serde(default)]
+    pub(in crate::request) strength: Option<f64>,
     pub(in crate::request) max_new_tokens: usize,
     pub(in crate::request) temperature: f64,
     /// Nucleus mass; absent samples from the whole distribution.
@@ -129,6 +131,10 @@ pub(in crate::request) struct GenerateRequest {
 impl Validate for GenerateRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("generate")?;
+        let steers = self.vector.as_deref().is_some_and(|vector| !vector.trim().is_empty());
+        if steers && self.strength.is_none() {
+            return Err("generate with a vector requires a strength; Ster assumes no steering scale".to_owned());
+        }
         require(&self.prompt, "generate requires a prompt".to_owned())
     }
 }

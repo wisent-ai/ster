@@ -127,9 +127,10 @@ pub(super) struct GenerateArgs {
     /// is cast to it on the way in. bf16 needs --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
-    /// Scale on the steering vector; Ster assumes none.
-    #[arg(long)]
-    strength: f64,
+    /// Scale on the steering vector; required with --vector, which it
+    /// belongs to, and Ster assumes none.
+    #[arg(long, requires = "vector")]
+    strength: Option<f64>,
     #[arg(long)]
     max_new_tokens: usize,
     /// Zero selects deterministic argmax generation.
@@ -278,6 +279,9 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
     // `Reward::parse` resolves its source ahead of the policy load for
     // this reason and says so.
     let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
+    if artifact.is_some() && strength.is_none() {
+        anyhow::bail!("--vector needs --strength; Ster assumes no steering scale");
+    }
     // The system turn is read here for the same reason: an unreadable or
     // empty file is refused before the checkpoint is paid for.
     let system = match system.as_deref() {

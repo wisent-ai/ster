@@ -238,7 +238,7 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                 dedupe: DedupeOptions::new(dedupe_bits, dedupe_bands),
                 refusal_threshold,
                 generation: GenerationOptions {
-                    strength: 1.0,
+                    strength: None,
                     max_new_tokens,
                     temperature,
                     top_p: Some(top_p),

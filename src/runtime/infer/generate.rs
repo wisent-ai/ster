@@ -14,7 +14,9 @@ use super::super::{Runtime, validate_layers};
 
 #[derive(Debug, Clone, Copy)]
 pub struct GenerationOptions {
-    pub strength: f64,
+    /// Scale on the steering vector. It belongs to a vector: a run without
+    /// one carries none, and a run with one is refused without it.
+    pub strength: Option<f64>,
     pub max_new_tokens: usize,
     pub temperature: f64,
     pub top_p: Option<f64>,
@@ -118,12 +120,15 @@ impl Runtime {
                         .collect::<Vec<_>>(),
                     self.layer_count(),
                 )?;
+                let strength = options
+                    .strength
+                    .context("a steering vector needs a strength; Ster assumes none")?;
                 Some(SteeringPlan::new(
                     artifact
                         .vectors
                         .iter()
                         .map(|vector| (vector.layer, vector.values.clone())),
-                    options.strength,
+                    strength,
                     self.hidden_size(),
                     &self.device,
                     self.dtype,
