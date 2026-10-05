@@ -101,6 +101,10 @@ impl Checkpoint {
             Layout::Mistral
         };
         let config = remote.get(layout.config_file())?;
+        // The architecture and quantization refusals come before the
+        // weights: a checkpoint Ster cannot run is refused for the price of
+        // its config, not of every shard.
+        supported(&config::read(&config, layout)?.0, &config)?;
         let weight_names: Vec<String> = info
             .siblings
             .into_iter()
@@ -146,26 +150,8 @@ impl Checkpoint {
                 object.entry("eos_token_id").or_insert(serde_json::Value::from(eos));
             }
         }
-        // A remote-code config may leave `model_type` to its config class
-        // (LongCat-Flash-Lite); its `architectures` class then names it.
-        let model_type = match raw.get("model_type").and_then(|value| value.as_str()) {
-            Some(stated) => stated.to_owned(),
-            None => Family::of_architectures(&raw).map(Family::model_type).unwrap_or("").to_owned(),
-        };
+        let (model_type, found) = supported(&raw, &self.config)?;
         let model_type = model_type.as_str();
-        let Some(found) = Family::of(model_type) else {
-            let families: Vec<&str> = Family::ALL.iter().map(|family| family.model_type()).collect();
-            bail!(
-                "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face checkpoint whose model_type is one of {}",
-                families.join(", ")
-            );
-        };
-        if raw.get("quantization_config").is_some() {
-            bail!(
-                "{} is a quantized checkpoint (it declares quantization_config); Ster maps unquantized safetensors only, so use the checkpoint it was quantized from",
-                self.config.display()
-            );
-        }
         let scaling = take_rope_scaling(&mut raw, &self.config)?;
         fill_llama_keys(&mut raw, model_type);
         let mut llama: LlamaConfig = serde_json::from_value(raw.clone())
@@ -197,6 +183,32 @@ impl Checkpoint {
             self.chat_template.as_deref(),
         )
     }
+}
+
+/// The family `raw` (a decoder config read by [`config::read`]) belongs to,
+/// and its `model_type`, or the refusal of a model Ster does not implement
+/// or of a quantized checkpoint. A remote-code config may leave `model_type`
+/// to its config class (LongCat-Flash-Lite); its `architectures` class then
+/// names it.
+fn supported(raw: &serde_json::Value, path: &Path) -> Result<(String, Family)> {
+    let model_type = match raw.get("model_type").and_then(|value| value.as_str()) {
+        Some(stated) => stated.to_owned(),
+        None => Family::of_architectures(raw).map(Family::model_type).unwrap_or("").to_owned(),
+    };
+    let Some(found) = Family::of(&model_type) else {
+        let families: Vec<&str> = Family::ALL.iter().map(|family| family.model_type()).collect();
+        bail!(
+            "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face checkpoint whose model_type is one of {}",
+            families.join(", ")
+        );
+    };
+    if raw.get("quantization_config").is_some() {
+        bail!(
+            "{} is a quantized checkpoint (it declares quantization_config); Ster maps unquantized safetensors only, so use the checkpoint it was quantized from",
+            path.display()
+        );
+    }
+    Ok((model_type, found))
 }
 
 /// Whether the repository lists a file, so an optional one is only fetched
