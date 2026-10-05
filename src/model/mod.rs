@@ -279,6 +279,18 @@ pub struct Architecture {
     /// LongCat-Flash-Lite's hashed n-gram embeddings beside the token
     /// embedding.
     pub ngram: Option<NgramSpec>,
+    /// Gemma 3n's AltUp: this many copies of the hidden state carried
+    /// through the stack (`altup_num_inputs`), the blocks running on the
+    /// first.
+    pub altup_streams: Option<usize>,
+    /// Gemma 3n's Laurel rank (`laurel_rank`): a low-rank residual beside
+    /// attention, averaged with it.
+    pub laurel_rank: Option<usize>,
+    /// Gemma 3n's activation sparsity: on the layers in the set, the
+    /// feed-forward gate keeps only what lies above its mean plus this many
+    /// standard deviations (`activation_sparsity_pattern` read as a normal
+    /// quantile).
+    pub activation_sparsity: Option<(f64, u128)>,
     /// Gemma 4's experts beside the dense feed-forward on every layer: the
     /// router reads the residual through a scale-free norm, the experts read
     /// it through `pre_feedforward_layernorm_2`, and the two outputs, each
@@ -752,6 +764,9 @@ impl Architecture {
             shared_key_values: None,
             per_layer_input: None,
             ngram: None,
+            altup_streams: None,
+            laurel_rank: None,
+            activation_sparsity: None,
             side_experts: None,
             layer_scalar: false,
             skip_connections: None,

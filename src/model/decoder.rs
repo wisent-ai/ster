@@ -15,6 +15,7 @@ use super::{
     attention::padded_causal_mask,
     layer::{
         DecoderLayer, LayerInputs,
+        altup::StreamProjections,
         norm::{Norm, NormSpec},
         projection,
         shared::SharedBlock,
@@ -34,6 +35,8 @@ pub struct SteeringLlama {
     per_layer: Option<PerLayerEmbeddings>,
     /// LongCat-Flash-Lite's n-gram tables.
     ngram: Option<NgramEmbeddings>,
+    /// Gemma 3n's projections into and out of its AltUp streams.
+    streams: Option<StreamProjections>,
     final_norm: Norm,
     lm_head: Linear,
     config: Config,
@@ -156,6 +159,13 @@ impl SteeringLlama {
             }
             None => None,
         };
+        let streams = match architecture.altup_streams {
+            Some(count) => {
+                let root = if names.root.is_empty() { builder.clone() } else { builder.pp(names.root) };
+                Some(StreamProjections::load(&root, config.hidden_size, count)?)
+            }
+            None => None,
+        };
         // Zamba2's shared blocks are mapped once, from the first hybrid
         // layers that use them, and every later use shares their tensors.
         let shared = match architecture.shared_blocks {
@@ -210,6 +220,7 @@ impl SteeringLlama {
             layers,
             per_layer,
             ngram,
+            streams,
             final_norm,
             lm_head,
             config,
@@ -407,6 +418,11 @@ impl SteeringLlama {
         let mut activations = BTreeMap::new();
         // Solar's block skip connections keep up to two earlier hidden states.
         let mut kept: [Option<Tensor>; 2] = [None, None];
+        // Gemma 3n's AltUp streams beside the first, which is `hidden`.
+        let mut rest = match &self.streams {
+            Some(streams) => Some(streams.spread(&hidden)?),
+            None => None,
+        };
         for (index, layer) in self.layers.iter().enumerate() {
             // Nanbeige normalises the hidden state by the final norm after
             // every pass but the last, whose norm is the model's own.
@@ -423,7 +439,18 @@ impl SteeringLlama {
                 embedded: &embedded,
                 per_layer: per_layer.as_ref().map(|all| all.i((.., .., index, ..))).transpose()?,
             };
-            hidden = layer.forward(&hidden, &inputs, index_pos, index, cache, mask, mode)?;
+            hidden = match rest.take() {
+                Some(others) => {
+                    let mut all = Vec::with_capacity(others.len() + 1);
+                    all.push(hidden);
+                    all.extend(others);
+                    let mut corrected = layer.forward_streams(&all, &inputs, index_pos, index, cache, mask, mode)?;
+                    let first = corrected.remove(0);
+                    rest = Some(corrected);
+                    first
+                }
+                None => layer.forward(&hidden, &inputs, index_pos, index, cache, mask, mode)?,
+            };
             if capture_layers.binary_search(&index).is_ok() {
                 let activation = hidden
                     .i((0, sequence - 1, ..))?
@@ -440,6 +467,10 @@ impl SteeringLlama {
                 }
             }
         }
+        let hidden = match (&self.streams, &rest) {
+            (Some(streams), Some(others)) => streams.join(&hidden, others)?,
+            _ => hidden,
+        };
         let hidden = self.final_norm.forward(&hidden, mode.pass)?;
         // Decoding only ever samples the next token, so it projects one row and
         // leaves the rest of the vocabulary matmul undone. Anything that scores

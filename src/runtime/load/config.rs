@@ -89,9 +89,9 @@ fn language_model(outer: Value) -> (Value, &'static str) {
     ];
     let prefix = match outer.get("model_type").and_then(|value| value.as_str()) {
         Some("gemma3" | "mistral3" | "llama4") => "language_model",
-        Some("gemma4" | "gemma4_unified" | "qwen3_5" | "qwen3_5_moe" | "muse_glimmer" | "hyperclovax_vision_v2") => {
-            "model.language_model"
-        }
+        Some(
+            "gemma3n" | "gemma4" | "gemma4_unified" | "qwen3_5" | "qwen3_5_moe" | "muse_glimmer" | "hyperclovax_vision_v2",
+        ) => "model.language_model",
         Some("step3_vl") => "",
         _ => return (outer, ""),
     };

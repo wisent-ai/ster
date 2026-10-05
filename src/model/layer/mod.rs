@@ -1,6 +1,7 @@
 //! One decoder block: the feed-forward half, the norms around both halves,
 //! and how their outputs join the residual stream.
 
+pub(super) mod altup;
 pub(super) mod experts;
 pub(super) mod norm;
 mod recurrent;
@@ -133,6 +134,9 @@ pub(super) struct FeedForward {
     scales: Option<(f64, f64)>,
     /// xIELU's parameters, when the activation is xIELU (Apertus).
     xielu: Option<Xielu>,
+    /// Gemma 3n's activation sparsity: the gate keeps only what lies above
+    /// its mean plus this many standard deviations.
+    sparsity: Option<f64>,
 }
 
 /// xIELU's parameters from the feed-forward's `act_fn`, as Transformers'
@@ -238,6 +242,10 @@ impl FeedForward {
             } else {
                 None
             },
+            sparsity: architecture
+                .activation_sparsity
+                .filter(|(_, layers)| layer < 128 && layers & (1u128 << layer) != 0)
+                .map(|(multiplier, _)| multiplier),
         })
     }
 
@@ -254,7 +262,7 @@ impl FeedForward {
                     Some((gate_scale, _)) => (gate * gate_scale)?,
                     None => gate,
                 };
-                (self.activate(&gate)? * up)?
+                (self.activate(&self.sparse(gate)?)? * up)?
             }
             None => self.activate(&up)?,
         };
@@ -270,6 +278,18 @@ impl FeedForward {
             Some(xielu) => xielu.apply(input),
             None => self.activation.apply(input),
         }
+    }
+
+    /// Gemma 3n's Gaussian top-k (`Gemma3nTextMLP._gaussian_topk`):
+    /// `relu(gate − mean − std · multiplier)` per position, the standard
+    /// deviation taken over the whole width; the gate unchanged elsewhere.
+    fn sparse(&self, gate: Tensor) -> candle_core::Result<Tensor> {
+        let Some(multiplier) = self.sparsity else {
+            return Ok(gate);
+        };
+        let mean = gate.mean_keepdim(candle_core::D::Minus1)?;
+        let deviation = gate.broadcast_sub(&mean)?.sqr()?.mean_keepdim(candle_core::D::Minus1)?.sqrt()?;
+        gate.broadcast_sub(&(mean + (deviation * multiplier)?)?)?.relu()
     }
 }
 
@@ -342,6 +362,8 @@ pub(super) struct DecoderLayer {
     block: Block,
     per_layer_input: Option<PerLayerInput>,
     scalar: Option<Tensor>,
+    /// Gemma 3n's AltUp around the block.
+    altup: Option<altup::AltUp>,
 }
 
 /// What every layer reads beside the hidden state: the embeddings the first
@@ -385,10 +407,15 @@ impl DecoderLayer {
             None => None,
         };
         let scalar = if architecture.layer_scalar { Some(builder.get(1, "layer_scalar")?) } else { None };
+        let altup = match architecture.altup_streams {
+            Some(streams) => Some(altup::AltUp::load(builder.pp("altup"), config.hidden_size, streams, NormSpec::of(architecture))?),
+            None => None,
+        };
         Ok(Self {
             block: Block::load(builder, config, architecture, layer, adapters, shared)?,
             per_layer_input,
             scalar,
+            altup,
         })
     }
 
@@ -422,6 +449,39 @@ impl DecoderLayer {
             None => Ok(output),
         }
     }
+
+    /// Gemma 3n's layer over its AltUp streams, the first being the hidden
+    /// state the decoder steers and reads: every stream predicted from all
+    /// of them, the block run on the first prediction, every stream
+    /// corrected by what the block did, and the per-layer input — gated by
+    /// the first corrected stream times `correct_output_scale` — added to
+    /// every stream but the first.
+    pub(super) fn forward_streams(
+        &self,
+        streams: &[Tensor],
+        inputs: &LayerInputs<'_>,
+        index_pos: usize,
+        layer: usize,
+        cache: &mut Cache,
+        mask: Option<&Tensor>,
+        mode: Mode,
+    ) -> candle_core::Result<Vec<Tensor>> {
+        let Some(altup) = &self.altup else {
+            candle_core::bail!("layer {layer} carries no AltUp streams");
+        };
+        let predictions = altup.predict(streams, mode.pass)?;
+        let activated = self.block.forward(&predictions[0], inputs.embedded, index_pos, layer, cache, mask, mode)?;
+        let mut corrected = altup.correct(&predictions, &activated, mode.pass)?;
+        if let (Some(per_layer), Some(input)) = (&self.per_layer_input, &inputs.per_layer) {
+            let first = altup.scaled(&corrected[0])?;
+            let gated = (per_layer.activation.apply(&per_layer.gate.forward(&first)?)? * input)?;
+            let added = per_layer.norm.forward(&per_layer.projection.forward(&gated)?, mode.pass)?;
+            for stream in corrected.iter_mut().skip(1) {
+                *stream = (&*stream + &added)?;
+            }
+        }
+        Ok(corrected)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -444,6 +504,8 @@ struct Block {
     parallel: bool,
     /// MiniMax-Text-01's scaled residuals for this block, if any.
     scales: Option<BlockScales>,
+    /// Gemma 3n's Laurel beside attention.
+    laurel: Option<altup::Laurel>,
 }
 
 /// How a MiniMax-Text-01 block's sublayers join the residual stream:
@@ -493,6 +555,7 @@ impl Block {
                     mixer: scales.linear_attention,
                     feed_forward: scales.feed_forward,
                 }),
+                laurel: None,
             });
         }
         // Qwen3-Next's linear-attention layers: a norm, the delta-rule
@@ -517,6 +580,7 @@ impl Block {
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
                 scales: None,
+                laurel: None,
             });
         }
         // LFM2's convolution layers: a norm, the convolution, a norm and the
@@ -536,6 +600,7 @@ impl Block {
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
                 scales: None,
+                laurel: None,
             });
         }
         // Zamba2's hybrid layers: the shared block's output, projected by the
@@ -576,6 +641,7 @@ impl Block {
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
                 scales: None,
+                laurel: None,
             });
         }
         // A state-space block is one norm, the mixer and the residual add —
@@ -615,6 +681,7 @@ impl Block {
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
                 scales: None,
+                laurel: None,
             });
         }
         // Falcon-H1: attention and a Mamba-2 scan side by side on one normed
@@ -645,6 +712,7 @@ impl Block {
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
                 scales: None,
+                laurel: None,
             });
         }
         // Nemotron-H: one norm and one sublayer per block — the feed-forward
@@ -665,6 +733,7 @@ impl Block {
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
                 scales: None,
+                laurel: None,
             });
         }
         // DeciLM (Nemotron Super and Ultra): each layer states its own
@@ -695,6 +764,7 @@ impl Block {
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
                 scales: None,
+                laurel: None,
             });
         }
         // Which norms a block has comes from the architecture; what each is
@@ -772,6 +842,10 @@ impl Block {
                 mixer: scales.full_attention,
                 feed_forward: scales.feed_forward,
             }),
+            laurel: match architecture.laurel_rank {
+                Some(rank) => Some(altup::Laurel::load(builder.pp("laurel"), config.hidden_size, rank, spec)?),
+                None => None,
+            },
         })
     }
 }
@@ -904,6 +978,11 @@ impl Block {
             return (hidden + self.scaled(attention)?)? + self.scaled(feed_forward)?;
         }
         let hidden = (hidden + self.scaled(attention)?)?;
+        // Gemma 3n averages attention's residual with Laurel's.
+        let hidden = match &self.laurel {
+            Some(laurel) => ((hidden + laurel.forward(&normed, mode.pass)?)? / std::f64::consts::SQRT_2)?,
+            None => hidden,
+        };
         let feed_forward_input = optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?;
         let feed_forward = feed_forward_block.forward(&feed_forward_input, mode)?;
         let feed_forward =
