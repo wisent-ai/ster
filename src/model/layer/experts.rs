@@ -141,12 +141,14 @@ impl Experts {
             | ExpertLayout::Jamba
             | ExpertLayout::HunYuan
             | ExpertLayout::NemotronH
-            | ExpertLayout::HyV3 => {
+            | ExpertLayout::HyV3
+            | ExpertLayout::LongCat => {
                 let (block, router) = match spec.layout {
                     ExpertLayout::Jamba => (builder.pp("feed_forward"), "router"),
                     ExpertLayout::HunYuan => (builder.pp("mlp"), "gate.wg"),
                     ExpertLayout::NemotronH => (builder.pp("mixer"), "gate"),
                     ExpertLayout::HyV3 => (builder.pp("mlp"), "router.gate"),
+                    ExpertLayout::LongCat => (builder.pp("mlp"), "router.classifier"),
                     _ => (builder.pp("mlp"), "gate"),
                 };
                 // Nemotron-H's experts have no gate projection.
@@ -176,7 +178,8 @@ impl Experts {
                         })
                         .collect::<candle_core::Result<Vec<_>>>()?
                 };
-                (linear_no_bias(hidden, count, block.pp(router))?, experts)
+                // LongCat-Flash's router also scores its identity experts.
+                (linear_no_bias(hidden, count + spec.identity_experts, block.pp(router))?, experts)
             }
             // Step3 stacks each projection of every expert in one tensor as a
             // projection stores it; each expert is a view of its slice.
@@ -360,9 +363,10 @@ impl Experts {
                     .flatten_all()?
                     .to_dtype(DType::F32)?
                     .to_vec1::<f32>()?;
-                if bias.len() != count {
+                let routes = count + spec.identity_experts;
+                if bias.len() != routes {
                     candle_core::bail!(
-                        "{tensor} holds {} scores for {count} experts",
+                        "{tensor} holds {} scores for {routes} experts",
                         bias.len()
                     );
                 }
@@ -478,7 +482,8 @@ impl Experts {
         let tokens = batch * sequence;
         let flat = hidden.reshape((tokens, width))?;
         let device = flat.device();
-        let count = self.experts.len();
+        // LongCat-Flash's identity experts follow the stored ones.
+        let count = self.experts.len() + self.spec.identity_experts;
         let logits = self
             .router
             .forward(&router_input.reshape((tokens, router_input.dim(D::Minus1)?))?)?
@@ -510,7 +515,10 @@ impl Experts {
             }
             let index = Tensor::new(tokens.as_slice(), device)?;
             let inputs = flat.index_select(&index, 0)?;
-            let produced = self.experts[expert].forward(&inputs, self.activation, self.clamps.0)?;
+            let produced = match self.experts.get(expert) {
+                Some(stored) => stored.forward(&inputs, self.activation, self.clamps.0)?,
+                None => inputs,
+            };
             let weight = weights
                 .index_select(&index, 0)?
                 .narrow(1, expert, 1)?

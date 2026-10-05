@@ -307,6 +307,15 @@ pub struct Architecture {
     /// DeepSeek's multi-head latent attention in place of separate query,
     /// key and value projections.
     pub latent: Option<LatentAttention>,
+    /// LongCat-Flash's `mla_scale_q_lora` and `mla_scale_kv_lora`: the
+    /// latent query and key-value bottlenecks' normed outputs multiplied by
+    /// these, `(query, key_value)`.
+    pub latent_scales: Option<(f64, f64)>,
+    /// LongCat-Flash's shortcut-connected experts: each stored layer is two
+    /// Ster layers (attention and feed-forward each), and the experts read
+    /// the first half's feed-forward input and join the residual at the end
+    /// of the second half.
+    pub shortcut_experts: Option<MixtureOfExperts>,
     /// Mamba's selective state-space mixer in place of attention, with no
     /// feed-forward beside it.
     pub state_space: Option<StateSpaceSpec>,
@@ -703,6 +712,8 @@ impl Architecture {
             logits_multiplier: None,
             experts: None,
             latent: None,
+            latent_scales: None,
+            shortcut_experts: None,
             state_space: None,
             short_convolution: None,
         }
@@ -712,6 +723,17 @@ impl Architecture {
     pub fn window(&self, layer: usize) -> Option<usize> {
         let sliding = layer < 128 && self.sliding_layers & (1u128 << layer) != 0;
         self.sliding_window.filter(|_| sliding)
+    }
+
+    /// The stored layer Ster layer `layer` reads its tensors from, and the
+    /// names it reads them by: the half of a LongCat-Flash layer
+    /// (`self_attn.0`, `mlps.0`, … then `.1`), or the layer itself.
+    pub fn stored_layer(&self, layer: usize) -> (usize, Names) {
+        match self.shortcut_experts {
+            Some(_) if layer % 2 == 0 => (layer / 2, Names::LONGCAT_FIRST),
+            Some(_) => (layer / 2, Names::LONGCAT_SECOND),
+            None => (layer, self.names),
+        }
     }
 
     /// DeciLM's plan for `layer`, when the family states one per layer.
@@ -964,6 +986,11 @@ impl Architecture {
                 "this model's layers differ in key-value heads and feed-forward width, and some have neither (DeciLM's block_configs), so no projection has one shape on every layer; Ster steers it but trains no adapters on it"
             );
         }
+        if self.shortcut_experts.is_some() && !targets.is_empty() {
+            bail!(
+                "this model's layers each hold two attention and feed-forward pairs beside shortcut-connected experts (LongCat-Flash), so no projection sits at one name per Ster layer; Ster steers it but trains no adapters on it"
+            );
+        }
         if self.loops.is_some() && !targets.is_empty() {
             bail!(
                 "this model runs its layers more than once (Nanbeige's num_loops, IQuest-LoopCoder's loop_num), so one adapter would correct every pass of its layer; Ster steers it but trains no adapters on it"
@@ -1142,6 +1169,10 @@ pub struct MixtureOfExperts {
     /// Clamped SwiGLU experts: GPT-OSS's one `swiglu_limit`, or Step 3.5's
     /// limits per layer.
     pub swiglu_limit: Option<SwigluLimit>,
+    /// LongCat-Flash's zero-computation experts (`zero_expert_num`, of
+    /// `zero_expert_type` `identity`): router outputs past `count` whose
+    /// expert returns its input.
+    pub identity_experts: usize,
 }
 
 /// How a family clamps its experts' SwiGLU.
@@ -1244,6 +1275,9 @@ pub enum ExpertLayout {
     /// `mlp.router.gate`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`
     /// (HY V3).
     HyV3,
+    /// `mlp.router.classifier`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`
+    /// (LongCat-Flash).
+    LongCat,
     /// `self_attn.v_router`, `self_attn.v_experts.{e}`: K2-Horizon's value
     /// experts, each one projection whose SiLU output is the value
     /// (`intermediate` wide), with no gate or down projection.
@@ -1421,6 +1455,30 @@ impl Names {
     /// output.
     pub const AXK1: Self = Self {
         feed_forward_output_norm: "post_mlp_layernorm",
+        ..Self::LLAMA
+    };
+    /// LongCat-Flash's first half of a stored layer: `input_layernorm.0`,
+    /// `self_attn.0`, `post_attention_layernorm.0`, `mlps.0`.
+    pub const LONGCAT_FIRST: Self = Self {
+        attention: "self_attn.0",
+        output: "self_attn.0.o_proj",
+        attention_norm: "input_layernorm.0",
+        feed_forward_norm: "post_attention_layernorm.0",
+        gate: Some("mlps.0.gate_proj"),
+        up: "mlps.0.up_proj",
+        down: "mlps.0.down_proj",
+        ..Self::LLAMA
+    };
+    /// LongCat-Flash's second half of a stored layer, the same names under
+    /// `.1`.
+    pub const LONGCAT_SECOND: Self = Self {
+        attention: "self_attn.1",
+        output: "self_attn.1.o_proj",
+        attention_norm: "input_layernorm.1",
+        feed_forward_norm: "post_attention_layernorm.1",
+        gate: Some("mlps.1.gate_proj"),
+        up: "mlps.1.up_proj",
+        down: "mlps.1.down_proj",
         ..Self::LLAMA
     };
     /// Nanbeige: per-head `q_layernorm` and `k_layernorm`.

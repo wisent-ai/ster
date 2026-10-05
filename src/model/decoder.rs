@@ -154,6 +154,8 @@ impl SteeringLlama {
         };
         // A looped model (Nanbeige's `num_loops`) runs its stored layers
         // more than once; each later pass reuses the first pass's tensors.
+        // LongCat-Flash's stored layers are two Ster layers each, read under
+        // their halves' names.
         let stored = architecture.loops.map_or(config.num_hidden_layers, |loops| loops.physical);
         let physical = (0..stored)
             .map(|index| {
@@ -162,10 +164,18 @@ impl SteeringLlama {
                     .filter(|blocks| index < u128::BITS as usize && blocks.hybrid_layers & (1u128 << index) != 0)
                     .and_then(|blocks| shared.get(blocks.slot(index) % blocks.blocks))
                     .map(|(block, block_builder)| (block, block_builder));
+                let (source, layer_names) = architecture.stored_layer(index);
+                let half;
+                let layer_architecture = if layer_names == architecture.names {
+                    &architecture
+                } else {
+                    half = Architecture { names: layer_names, ..architecture.clone() };
+                    &half
+                };
                 DecoderLayer::load(
-                    builder.pp(format!("{}.{index}", names.layers)),
+                    builder.pp(format!("{}.{source}", names.layers)),
                     &config,
-                    &architecture,
+                    layer_architecture,
                     index,
                     &adapters,
                     block,

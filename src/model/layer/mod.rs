@@ -27,20 +27,27 @@ use recurrent::{
 };
 
 /// The feed-forward half of a block: one dense feed-forward, a router over
-/// experts, or Gemma 4's dense feed-forward beside its experts.
+/// experts, Gemma 4's dense feed-forward beside its experts, or a
+/// LongCat-Flash half-layer's dense feed-forward with the stored layer's
+/// shortcut experts.
 #[derive(Debug, Clone)]
 enum FeedForwardBlock {
     Dense(FeedForward),
     Routed(Experts),
     Paired(Box<PairedExperts>),
+    /// The first half's experts read its feed-forward input and are kept in
+    /// the cache; the second half (`None`) adds them to its output.
+    Shortcut(FeedForward, Option<Experts>),
 }
 
 impl FeedForwardBlock {
     /// `hidden` is the normed input, except for a paired block, which norms
-    /// the residual itself for each of its halves.
+    /// the residual itself for each of its halves. A shortcut block runs
+    /// its dense feed-forward here; [`FeedForwardBlock::shortcut`] runs the
+    /// rest.
     fn forward(&self, hidden: &Tensor, mode: Mode) -> candle_core::Result<Tensor> {
         match self {
-            Self::Dense(dense) => dense.forward(hidden, mode.route),
+            Self::Dense(dense) | Self::Shortcut(dense, _) => dense.forward(hidden, mode.route),
             Self::Routed(experts) => experts.forward(hidden),
             Self::Paired(paired) => {
                 let dense = paired.dense.forward(&paired.dense_norm.forward(hidden, mode.pass)?, mode.route)?;
@@ -51,6 +58,24 @@ impl FeedForwardBlock {
                 )?;
                 dense + paired.experts_output_norm.forward(&routed, mode.pass)?
             }
+        }
+    }
+
+    /// LongCat-Flash's shortcut: the first half keeps its experts' output
+    /// over `input` (its feed-forward input) in the cache and adds nothing;
+    /// the second half takes it and adds it to `output`. Every other block
+    /// returns `output` as it is.
+    fn shortcut(&self, input: &Tensor, output: Tensor, layer: usize, cache: &mut Cache) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Shortcut(_, Some(experts)) => {
+                cache.shortcut = Some(experts.forward(input)?);
+                Ok(output)
+            }
+            Self::Shortcut(_, None) => match cache.shortcut.take() {
+                Some(kept) => output + kept,
+                None => candle_core::bail!("layer {layer} closes a shortcut that no earlier layer opened"),
+            },
+            _ => Ok(output),
         }
     }
 }
@@ -760,6 +785,17 @@ fn feed_forward_block(
             experts_output_norm: norm("post_feedforward_layernorm_2")?,
         })));
     }
+    // LongCat-Flash: each half-layer's dense `mlps.{half}`, and on the first
+    // half the stored layer's shortcut experts.
+    if let Some(experts) = &architecture.shortcut_experts {
+        let dense = FeedForward::load(builder, config, architecture, layer, adapters)?;
+        let shortcut = if layer % 2 == 0 {
+            Some(Experts::load(builder, config.hidden_size, experts, architecture.activation, layer)?)
+        } else {
+            None
+        };
+        return Ok(FeedForwardBlock::Shortcut(dense, shortcut));
+    }
     Ok(match &architecture.experts {
         Some(experts) if architecture.routed(layer) => FeedForwardBlock::Routed(Experts::load(
             builder,
@@ -855,13 +891,12 @@ impl Block {
             return (hidden + self.scaled(attention)?)? + self.scaled(feed_forward)?;
         }
         let hidden = (hidden + self.scaled(attention)?)?;
-        let feed_forward = feed_forward_block.forward(
-            &optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?,
-            mode,
-        )?;
+        let feed_forward_input = optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?;
+        let feed_forward = feed_forward_block.forward(&feed_forward_input, mode)?;
         let feed_forward =
             optional_norm(self.feed_forward_output_norm.as_ref(), &feed_forward, mode.pass)?;
-        hidden + self.scaled(feed_forward)?
+        let output = (hidden + self.scaled(feed_forward)?)?;
+        feed_forward_block.shortcut(&feed_forward_input, output, layer, cache)
     }
 
     /// A sublayer's output as it joins the residual stream.

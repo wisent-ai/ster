@@ -32,6 +32,9 @@ pub struct Cache {
     /// The keys the last indexed layer of this call hid, which GLM-5's
     /// `shared` layers reuse.
     pub(super) index_mask: Option<Tensor>,
+    /// LongCat-Flash's shortcut experts' output for the stored layer this
+    /// call is in, set by its first half and taken by its second.
+    pub(super) shortcut: Option<Tensor>,
     /// The global rotation, held in F32 whatever the weights are. See
     /// [`Cache::new`].
     pub(super) global: RotaryTable,
@@ -151,6 +154,7 @@ impl Cache {
             shared: vec![None; config.num_hidden_layers],
             index_keys: vec![None; config.num_hidden_layers],
             index_mask: None,
+            shortcut: None,
             global,
             local,
             long,

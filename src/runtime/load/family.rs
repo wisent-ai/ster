@@ -135,10 +135,11 @@ pub(super) enum Family {
     Step3p5,
     K2Horizon,
     PanguUltraMoe,
+    LongcatFlash,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 107] = [
+    pub(super) const ALL: [Self; 108] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -246,6 +247,7 @@ impl Family {
         Self::Step3p5,
         Self::K2Horizon,
         Self::PanguUltraMoe,
+        Self::LongcatFlash,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -363,6 +365,7 @@ impl Family {
             Self::Step3p5 => "step3p5",
             Self::K2Horizon => "k2_horizon",
             Self::PanguUltraMoe => "pangu_ultra_moe",
+            Self::LongcatFlash => "longcat_flash",
         }
     }
 
@@ -488,6 +491,14 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     }
     if model_type == "step3p5" {
         step3p5_keys(raw);
+    }
+    // LongCat-Flash's `num_layers` stored layers each hold two attention and
+    // feed-forward pairs, which Ster runs as two layers.
+    if model_type == "longcat_flash" {
+        let stored = whole(raw, "num_layers");
+        if let (Some(stored), Some(object)) = (stored, raw.as_object_mut()) {
+            object.insert("num_hidden_layers".to_owned(), Value::from(2 * stored));
+        }
     }
     // openPangu-Ultra-MoE leaves its router's form to its config class:
     // sigmoid scores, renormalised (`PanguUltraMoEConfig`'s
@@ -2283,6 +2294,7 @@ pub(super) fn family(
         }
         "step3p5" => step3p5(raw, layers, llama, &mut architecture, path)?,
         "k2_horizon" => k2_horizon(raw, layers, llama, &mut architecture, path)?,
+        "longcat_flash" => longcat_flash(raw, llama, &mut architecture, path)?,
         "zamba2" => {
             // Zamba2: Mamba-2 layers, and on the layers `layers_block_type`
             // calls `hybrid` a shared transformer block (one of
@@ -2986,6 +2998,7 @@ fn experts(
         selection_bias: None,
         routed_scale: None,
         swiglu_limit: None,
+        identity_experts: 0,
     })
 }
 
@@ -3859,9 +3872,67 @@ fn k2_horizon(
             selection_bias: biased.then_some("self_attn.v_router.bias"),
             routed_scale: routed.routed_scale,
             swiglu_limit: None,
+            identity_experts: 0,
         });
     }
     architecture.experts = Some(routed);
+    Ok(())
+}
+
+/// LongCat-Flash (`longcat_flash`): each of its `num_layers` stored layers
+/// is two Ster layers, `input_layernorm.{h}`, DeepSeek's latent attention
+/// `self_attn.{h}` (rotating adjacent pairs), `post_attention_layernorm.{h}`
+/// and a dense `mlps.{h}` for halves 0 and 1, beside shortcut-connected
+/// experts that read the first half's feed-forward input and join the
+/// residual at the end of the second. Under `mla_scale_q_lora` and
+/// `mla_scale_kv_lora` the latent bottlenecks' normed outputs are
+/// multiplied by `sqrt(hidden_size / rank)`. The experts' router
+/// (`mlp.router.classifier`) scores `n_routed_experts` experts
+/// `expert_ffn_hidden_size` wide and `zero_expert_num` identity experts by
+/// softmax, `mlp.router.e_score_correction_bias` moving the choice of
+/// `moe_topk`, and scales the chosen weights by `routed_scaling_factor`.
+fn longcat_flash(raw: &Value, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+    let Some(latent) = architecture.latent else {
+        bail!("{} declares a LongCat-Flash model without kv_lora_rank", path.display());
+    };
+    if let Some(method) = text(raw, "attention_method").filter(|method| *method != "MLA") {
+        bail!(
+            "{} declares attention_method {method:?}; Ster implements LongCat-Flash's MLA",
+            path.display()
+        );
+    }
+    let identity = whole(raw, "zero_expert_num").unwrap_or(0);
+    if identity > 0 && text(raw, "zero_expert_type").is_some_and(|kind| kind != "identity") {
+        bail!(
+            "{} declares zero_expert_type {:?}; Ster implements identity zero experts",
+            path.display(),
+            text(raw, "zero_expert_type")
+        );
+    }
+    architecture.interleaved_rotary = true;
+    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    let hidden = llama.hidden_size as f64;
+    let scale = |key: &str, rank: Option<usize>| match rank {
+        Some(rank) if flag(raw, key) && rank > 0 => (hidden / rank as f64).sqrt(),
+        _ => 1.0,
+    };
+    architecture.latent_scales = Some((
+        scale("mla_scale_q_lora", latent.query_rank),
+        scale("mla_scale_kv_lora", Some(latent.key_value_rank)),
+    ));
+    let mut routed = experts(
+        raw,
+        "n_routed_experts",
+        "expert_ffn_hidden_size",
+        flag(raw, "norm_topk_prob"),
+        ExpertLayout::LongCat,
+        0,
+        path,
+    )?;
+    routed.identity_experts = identity;
+    routed.selection_bias = Some("mlp.router.e_score_correction_bias");
+    routed.routed_scale = number(raw, "routed_scaling_factor");
+    architecture.shortcut_experts = Some(routed);
     Ok(())
 }
 

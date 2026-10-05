@@ -240,7 +240,15 @@ impl Attention {
                 source,
             }
         } else if let Some(spec) = architecture.latent {
-            Projections::Latent(Latent::load(&builder, input, heads, spec, bias, NormSpec::of(architecture))?)
+            Projections::Latent(Latent::load(
+                &builder,
+                input,
+                heads,
+                spec,
+                bias,
+                NormSpec::of(architecture),
+                architecture.latent_scales.unwrap_or((1.0, 1.0)),
+            )?)
         } else {
         let (query, key, value) = match architecture.qkv_layout {
             // Qwen3-Next's `q_proj` holds each head's query rows and then its
@@ -909,6 +917,8 @@ struct Latent {
 }
 
 impl Latent {
+    /// `scales` multiply the query and key-value bottlenecks' normed
+    /// outputs (LongCat-Flash's `mla_scale_q_lora`, `mla_scale_kv_lora`).
     fn load(
         builder: &VarBuilder<'_>,
         input: usize,
@@ -916,13 +926,14 @@ impl Latent {
         spec: LatentAttention,
         bias: bool,
         norms: NormSpec,
+        (query_scale, key_value_scale): (f64, f64),
     ) -> candle_core::Result<Self> {
         let query_width = heads * (spec.unrotated + spec.rotated);
         let (query_down, query_up) = match spec.query_rank {
             Some(rank) => (
                 Some((
                     projection(input, rank, bias, false, builder.pp("q_a_proj"))?,
-                    norms.load(rank, builder.pp("q_a_layernorm"))?,
+                    norms.load(rank, builder.pp("q_a_layernorm"))?.scaled(query_scale)?,
                 )),
                 projection(rank, query_width, false, false, builder.pp("q_b_proj"))?,
             ),
@@ -938,7 +949,9 @@ impl Latent {
                 false,
                 builder.pp("kv_a_proj_with_mqa"),
             )?,
-            key_value_norm: norms.load(spec.key_value_rank, builder.pp("kv_a_layernorm"))?,
+            key_value_norm: norms
+                .load(spec.key_value_rank, builder.pp("kv_a_layernorm"))?
+                .scaled(key_value_scale)?,
             key_value_up: projection(
                 spec.key_value_rank,
                 heads * (spec.unrotated + spec.value),

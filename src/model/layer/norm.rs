@@ -124,6 +124,18 @@ impl NormSpec {
 }
 
 impl Norm {
+    /// This norm with its scale and bias multiplied by `factor`, so its
+    /// whole output is (LongCat-Flash's latent-attention scaling).
+    pub fn scaled(self, factor: f64) -> candle_core::Result<Self> {
+        Ok(Self {
+            weight: (self.weight * factor)?,
+            bias: self.bias.map(|bias| bias * factor).transpose()?,
+            ..self
+        })
+    }
+}
+
+impl Norm {
     /// Normalises the last axis: fused for inference where Candle has a
     /// kernel, composed for training.
     ///
