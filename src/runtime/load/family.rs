@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
     GateFunction, GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningForm, LightningSpec, Loops, MixtureOfExperts,
-    Names, NormKind, ParallelScan, ParameterNorm,
+    Names, NgramSpec, NormKind, ParallelScan, ParameterNorm,
     PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, QueryTemperature, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
     SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec, SwigluLimit,
 };
@@ -148,10 +148,11 @@ pub(super) enum Family {
     NemotronHPuzzle,
     ChatGlm,
     Laguna,
+    LongcatFlashNgram,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 120] = [
+    pub(super) const ALL: [Self; 121] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -272,11 +273,31 @@ impl Family {
         Self::NemotronHPuzzle,
         Self::ChatGlm,
         Self::Laguna,
+        Self::LongcatFlashNgram,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
     pub(super) fn of(model_type: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|family| family.model_type() == model_type)
+    }
+
+    /// The family a config without `model_type` belongs to, from the model
+    /// class its `architectures` names, for the families whose published
+    /// configs leave `model_type` to their remote-code config class.
+    pub(super) fn of_architectures(raw: &Value) -> Option<Self> {
+        let names = raw.get("architectures")?.as_array()?;
+        Self::ALL.into_iter().find(|family| {
+            family.remote_class().is_some_and(|class| names.iter().any(|name| name.as_str() == Some(class)))
+        })
+    }
+
+    /// The remote-code model class that stands in for `model_type` in this
+    /// family's configs, where they omit it.
+    fn remote_class(self) -> Option<&'static str> {
+        match self {
+            Self::LongcatFlashNgram => Some("LongcatFlashNgramForCausalLM"),
+            _ => None,
+        }
     }
 
     /// The `model_type` value Transformers writes for this family.
@@ -402,6 +423,7 @@ impl Family {
             Self::NemotronHPuzzle => "nemotron_h_puzzle",
             Self::ChatGlm => "chatglm",
             Self::Laguna => "laguna",
+            Self::LongcatFlashNgram => "longcat_flash_ngram",
         }
     }
 
@@ -531,7 +553,7 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     }
     // LongCat-Flash's `num_layers` stored layers each hold two attention and
     // feed-forward pairs, which Ster runs as two layers.
-    if model_type == "longcat_flash" {
+    if model_type == "longcat_flash" || model_type == "longcat_flash_ngram" {
         let stored = whole(raw, "num_layers");
         if let (Some(stored), Some(object)) = (stored, raw.as_object_mut()) {
             object.insert("num_hidden_layers".to_owned(), Value::from(2 * stored));
@@ -2485,6 +2507,10 @@ pub(super) fn family(
         "step3p5" => step3p5(raw, layers, llama, &mut architecture, path)?,
         "k2_horizon" => k2_horizon(raw, layers, llama, &mut architecture, path)?,
         "longcat_flash" => longcat_flash(raw, llama, &mut architecture, path)?,
+        "longcat_flash_ngram" => {
+            longcat_flash(raw, llama, &mut architecture, path)?;
+            architecture.ngram = Some(longcat_ngram(raw, path)?);
+        }
         "sarvam_mla" => sarvam_mla(raw, layers, &mut architecture, path)?,
         "cohere2_moe" => cohere2_moe(raw, layers, &mut architecture, path)?,
         "llama4_text" => llama4(raw, layers, &mut architecture, path)?,
@@ -4295,6 +4321,39 @@ fn k2_horizon(
     architecture.experts = Some(routed);
     Ok(())
 }
+
+/// LongCat-Flash-Lite's n-gram embeddings (`longcat_flash_ngram`): tables
+/// for orders 2 to `emb_neighbor_num`, `emb_split_num` of each, sized by
+/// `ngram_vocab_size_ratio`, their runs restarting after `eos_token_id`
+/// (the first, when it is a list; 2, the config class's default, when it
+/// is left out).
+fn longcat_ngram(raw: &Value, path: &Path) -> Result<NgramSpec> {
+    let (Some(ratio), Some(splits), Some(neighbors)) =
+        (whole(raw, "ngram_vocab_size_ratio"), whole(raw, "emb_split_num"), whole(raw, "emb_neighbor_num"))
+    else {
+        bail!(
+            "{} declares a LongCat n-gram model without ngram_vocab_size_ratio, emb_split_num or emb_neighbor_num",
+            path.display()
+        );
+    };
+    if splits == 0 || neighbors < 2 {
+        bail!(
+            "{} declares {splits} n-gram splits over neighbourhoods of {neighbors}; Ster needs at least one split and a neighbourhood of two tokens",
+            path.display()
+        );
+    }
+    let eos = match raw.get("eos_token_id") {
+        None | Some(Value::Null) => LONGCAT_NGRAM_EOS,
+        Some(Value::Array(ids)) => ids.first().and_then(Value::as_u64).unwrap_or(LONGCAT_NGRAM_EOS),
+        Some(id) => id.as_u64().with_context(|| format!("{} declares an eos_token_id that is not a token", path.display()))?,
+    };
+    Ok(NgramSpec { ratio, splits, neighbors, eos: eos as u32 })
+}
+
+/// The end-of-sequence token LongCat's n-gram config class assumes when a
+/// config leaves `eos_token_id` out (`configuration_longcat_ngram.py`,
+/// `eos_token_id=2`).
+const LONGCAT_NGRAM_EOS: u64 = 2;
 
 /// LongCat-Flash (`longcat_flash`): each of its `num_layers` stored layers
 /// is two Ster layers, `input_layernorm.{h}`, DeepSeek's latent attention

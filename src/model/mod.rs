@@ -276,6 +276,9 @@ pub struct Architecture {
     pub shared_key_values: Option<usize>,
     /// Gemma 4's per-layer inputs (`hidden_size_per_layer_input`).
     pub per_layer_input: Option<PerLayerInputSpec>,
+    /// LongCat-Flash-Lite's hashed n-gram embeddings beside the token
+    /// embedding.
+    pub ngram: Option<NgramSpec>,
     /// Gemma 4's experts beside the dense feed-forward on every layer: the
     /// router reads the residual through a scale-free norm, the experts read
     /// it through `pre_feedforward_layernorm_2`, and the two outputs, each
@@ -448,6 +451,21 @@ pub struct GlobalAttention {
 pub struct PerLayerInputSpec {
     pub width: usize,
     pub vocab: usize,
+}
+
+/// LongCat's n-gram embeddings (`ngram_vocab_size_ratio`, `emb_split_num`,
+/// `emb_neighbor_num`): for each n-gram order from 2 to `neighbors` and each
+/// of `splits` tables, the token and the ones before it hash to a row of
+/// table `(order - 2) · splits + split`, `ratio · vocab + 2 · index + 1`
+/// rows tall; each row is projected to the hidden width, and the token
+/// embedding and every projection are averaged. A run of tokens restarts
+/// after each `eos` token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NgramSpec {
+    pub ratio: usize,
+    pub splits: usize,
+    pub neighbors: usize,
+    pub eos: u32,
 }
 
 /// LFM2's gated short convolution: `in_proj` to `B`, `C` and `x`, a causal
@@ -723,6 +741,7 @@ impl Architecture {
             value_norm: false,
             shared_key_values: None,
             per_layer_input: None,
+            ngram: None,
             side_experts: None,
             layer_scalar: false,
             skip_connections: None,

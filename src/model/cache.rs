@@ -35,6 +35,9 @@ pub struct Cache {
     /// LongCat-Flash's shortcut experts' output for the stored layer this
     /// call is in, set by its first half and taken by its second.
     pub(super) shortcut: Option<Tensor>,
+    /// The last `emb_neighbor_num - 1` tokens of every sequence, which
+    /// LongCat's n-gram embeddings hash the next call's tokens with.
+    pub(super) ngram_context: Option<Vec<Vec<u32>>>,
     /// How many earlier chunks a windowed layer's query also sees when the
     /// model attends by chunks (Llama 4, Rnj-1); `None` for sliding
     /// windows.
@@ -159,6 +162,7 @@ impl Cache {
             index_keys: vec![None; config.num_hidden_layers],
             index_mask: None,
             shortcut: None,
+            ngram_context: None,
             chunk_lookback: architecture.chunk_lookback,
             global,
             local,

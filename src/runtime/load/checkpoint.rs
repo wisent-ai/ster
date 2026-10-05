@@ -127,11 +127,12 @@ impl Checkpoint {
         let outer: serde_json::Value = serde_json::from_slice(&finite_literals(&bytes))
             .with_context(|| format!("invalid model config {}", self.config.display()))?;
         let (mut raw, wrapper) = language_model(outer);
-        let model_type = raw
-            .get("model_type")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_owned();
+        // A remote-code config may leave `model_type` to its config class
+        // (LongCat-Flash-Lite); its `architectures` class then names it.
+        let model_type = match raw.get("model_type").and_then(|value| value.as_str()) {
+            Some(stated) => stated.to_owned(),
+            None => Family::of_architectures(&raw).map(Family::model_type).unwrap_or("").to_owned(),
+        };
         let model_type = model_type.as_str();
         let Some(found) = Family::of(model_type) else {
             let families: Vec<&str> = Family::ALL.iter().map(|family| family.model_type()).collect();
