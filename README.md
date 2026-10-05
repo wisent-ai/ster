@@ -343,7 +343,8 @@ ster generate \
 Use an immutable Hugging Face commit with `--revision <sha>` when the artifact
 must remain reproducible across model updates. A local directory may be passed
 to `--model` when it contains `config.json`, `tokenizer.json` (or PLaMo's
-`tokenizer.jsonl`, read as the unigram model it is), and one or more
+`tokenizer.jsonl`, read as the unigram model it is, or GLM-4's tiktoken
+`tokenizer.model`, read as byte-level BPE), and one or more
 Safetensors weight files. A checkpoint in Mistral's own format — `params.json`
 and `consolidated*.safetensors` with no `config.json`, as Mistral Large 3 is
 published — is read the same way, locally or from the Hub: its config is put
