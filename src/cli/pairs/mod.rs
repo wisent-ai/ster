@@ -9,10 +9,7 @@ use serde_json::json;
 use ster::{
     ChatChoice, ContrastivePair, DeviceChoice, GenerationOptions, PairSet, Precision, Runtime,
     brama,
-    pairs::{
-        self, InspectOptions, SynthesisOptions, quality::dedupe::DedupeOptions,
-        quality::diversity::DEFAULT_MAX_SAMPLE,
-    },
+    pairs::{self, InspectOptions, SynthesisOptions, quality::dedupe::DedupeOptions},
 };
 
 use super::resolve_pairs;
@@ -249,8 +246,6 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                     top_p: Some(top_p),
                     seed,
                 },
-                diversity_seed: seed,
-                diversity_max_sample: DEFAULT_MAX_SAMPLE,
             };
             // The runtime or the gateway is built inside the arm that uses it:
             // `--generator brama` must not load weights or touch a device, and

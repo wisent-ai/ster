@@ -40,8 +40,6 @@ pub struct SynthesisOptions {
     pub dedupe: DedupeOptions,
     pub refusal_threshold: f32,
     pub generation: GenerationOptions,
-    pub diversity_seed: u64,
-    pub diversity_max_sample: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -210,11 +208,7 @@ pub fn synthesize(
 
     // Diversity is measured over the questions, matching the Python report:
     // the answers inherit their variety from the prompt that produced them.
-    let diversity = diversity::compute(
-        &questions,
-        options.diversity_seed,
-        options.diversity_max_sample,
-    );
+    let diversity = diversity::compute(&questions);
 
     let report = SynthesisReport {
         generator: generator.label(),

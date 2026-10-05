@@ -8,7 +8,6 @@ use std::path::Path;
 
 use crate::{
     brama,
-    pairs::quality::diversity::DEFAULT_MAX_SAMPLE,
     pairs::{self, quality::dedupe::DedupeOptions, InspectOptions, SynthesisOptions},
     ChatChoice, ContrastivePair, GenerationOptions, PairSet,
 };
@@ -114,8 +113,6 @@ pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) 
             top_p: Some(request.top_p),
             seed: request.seed,
         },
-        diversity_seed: request.seed,
-        diversity_max_sample: DEFAULT_MAX_SAMPLE,
     };
     // Same two arms as the CLI, calling the same `pairs::synthesize`: a brama
     // request loads no weights and never touches a device.

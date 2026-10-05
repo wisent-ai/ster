@@ -102,8 +102,8 @@ margin.
 
 `diversity` reports `unique_unigrams`, `unique_bigrams`, `avg_jaccard`,
 `mean_simhash_hamming`, and `min_simhash_hamming`. Inspection measures them over
-the positive sides, and above 256 texts the pairwise passes are sampled with a
-seeded RNG.
+every positive side; the pairwise passes compare every pair of texts, so a larger
+set takes longer to report on rather than being sampled.
 
 `ster pairs synthesize` builds a set from a trait description, in this order:
 

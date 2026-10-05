@@ -5,11 +5,10 @@
 //! Here is" teach a direction more about that opening than about the trait.
 //! These five numbers are the cheap summary an operator needs to decide whether
 //! a synthesis run produced a usable set or a template with the nouns swapped.
-//! Everything here is O(n^2) in the sample, which is why the sample is capped.
+//! The pairwise passes are quadratic in the number of texts; every text is in them.
 
 use std::collections::HashSet;
 
-use rand::{SeedableRng, rngs::StdRng, seq::IndexedRandom};
 use serde::Serialize;
 
 /// Width of the SimHash fingerprint; the Python `SIMHASH_BIT_WIDTH`.
@@ -19,9 +18,6 @@ const SIMHASH_BIT_WIDTH: u32 = 64;
 const FNV_OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
 /// FNV-1a 64-bit prime.
 const FNV_PRIME: u64 = 0x100_0000_01B3;
-
-/// Default cap on the number of texts drawn for the pairwise passes.
-pub const DEFAULT_MAX_SAMPLE: usize = 256;
 
 /// The five diversity numbers.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -40,27 +36,15 @@ pub struct Scores {
 
 /// Computes the diversity summary for `texts`.
 ///
-/// The distinct-N ratios cover every text; the pairwise passes are quadratic, so
-/// they run over a sample of at most `max_sample` texts drawn without
-/// replacement from a `seed`-derived generator, which keeps a report
-/// reproducible for a given seed.
-///
-/// Deviation, forced. The Python samples with `numpy.random.default_rng(seed)`
-/// (PCG64) and `Generator.choice`; Rust draws with `StdRng` and
-/// `choose_multiple`. Both are seeded and both are uniform without replacement,
-/// but the two generators are different algorithms, so the *particular* subset
-/// differs from Python's for the same seed. Nothing downstream depends on which
-/// subset is drawn, only that repeated runs agree with each other.
-pub fn compute(texts: &[String], seed: u64, max_sample: usize) -> Scores {
+/// Every text is measured, the distinct-N ratios and the pairwise Jaccard and
+/// SimHash passes alike: a sample would describe a subset the operator did not
+/// choose, and its size would be a number nobody stated. The pairwise passes
+/// are quadratic, so a larger set takes longer to report on, not less of it.
+pub fn compute(texts: &[String]) -> Scores {
     let unique_unigrams = distinct_n(texts, 1);
     let unique_bigrams = distinct_n(texts, 2);
 
-    let sample: Vec<&String> = if texts.len() <= max_sample {
-        texts.iter().collect()
-    } else {
-        let mut rng = StdRng::seed_from_u64(seed);
-        texts.choose_multiple(&mut rng, max_sample).collect()
-    };
+    let sample: Vec<&String> = texts.iter().collect();
 
     if sample.len() < 2 {
         return Scores {

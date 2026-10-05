@@ -25,8 +25,6 @@ pub const UNBALANCED_RATIO: f64 = 3.0;
 pub struct InspectOptions {
     pub dedupe: DedupeOptions,
     pub refusal_threshold: f32,
-    pub diversity_seed: u64,
-    pub diversity_max_sample: usize,
 }
 
 impl Default for InspectOptions {
@@ -34,8 +32,6 @@ impl Default for InspectOptions {
         Self {
             dedupe: DedupeOptions::default(),
             refusal_threshold: refusal::DEFAULT_THRESHOLD,
-            diversity_seed: 42,
-            diversity_max_sample: diversity::DEFAULT_MAX_SAMPLE,
         }
     }
 }
@@ -117,8 +113,7 @@ pub fn inspect(pairs: &PairSet, options: &InspectOptions) -> Result<SetReport> {
     // near-copies of each other by construction, so scoring both would report
     // the contrast as repetition.
     let positives: Vec<String> = pairs.pairs.iter().map(|pair| pair.positive.clone()).collect();
-    let diversity =
-        diversity::compute(&positives, options.diversity_seed, options.diversity_max_sample);
+    let diversity = diversity::compute(&positives);
 
     Ok(SetReport {
         trait_name: pairs.trait_name.clone(),
