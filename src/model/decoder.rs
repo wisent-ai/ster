@@ -572,13 +572,20 @@ impl SteeringLlama {
 }
 
 impl SteeringLlama {
-    /// Cohere multiplies its final logits by `logit_scale` and Granite divides
-    /// them by `logits_scaling`; Gemma 2 and 3 bound them to `(-cap, cap)`
-    /// with a tanh.
+    /// Cohere multiplies its final logits by `logit_scale`, Granite divides
+    /// them by `logits_scaling` and Inkling by `logits_mup_width_multiplier`;
+    /// Gemma 2 and 3 bound them to `(-cap, cap)` with a tanh; Inkling scores
+    /// only the first `unpadded_vocab_size` tokens.
     fn soft_cap(&self, logits: Tensor) -> candle_core::Result<Tensor> {
         let logits = match self.architecture.logits_multiplier {
             Some(multiplier) => (logits * multiplier)?,
             None => logits,
+        };
+        let logits = match self.architecture.vocabulary_limit {
+            Some(limit) if limit < logits.dim(candle_core::D::Minus1)? => {
+                logits.narrow(candle_core::D::Minus1, 0, limit)?.contiguous()?
+            }
+            _ => logits,
         };
         match self.architecture.final_softcap {
             Some(cap) => (logits / cap)?.tanh()? * cap,

@@ -21,6 +21,10 @@ pub struct Cache {
     /// layer that runs attention and a scan side by side (Falcon-H1) keeps
     /// both.
     pub(super) states: Vec<Option<(Tensor, Tensor)>>,
+    /// Inkling's residual short convolutions' last `kernel - 1` inputs,
+    /// `[batch, kernel - 1, channels]` in F32, under (layer, slot): a layer
+    /// runs four of them.
+    pub(super) convolutions: HashMap<(usize, usize), Tensor>,
     /// The keys and values of the current call that Gemma 4's
     /// key-value-sharing layers reuse, under the layer that produced them.
     /// Rewritten on every call, whether or not `kvs` keeps a history.
@@ -160,6 +164,7 @@ impl Cache {
             use_kv_cache,
             kvs: vec![None; config.num_hidden_layers],
             states: vec![None; config.num_hidden_layers],
+            convolutions: HashMap::new(),
             shared: vec![None; config.num_hidden_layers],
             index_keys: vec![None; config.num_hidden_layers],
             index_mask: None,

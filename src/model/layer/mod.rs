@@ -15,8 +15,9 @@ use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
     Activation, Architecture, Cache, DeltaRuleForm, FeedForwardKind, Mode, ParallelScan, Pass, Route,
-    attention::{Attention, project},
+    attention::{Attention, project, relative::RelativeAttention},
     depth::{DepthMix, DepthMixes},
+    inkling,
 };
 use experts::Experts;
 use norm::{Norm, NormSpec};
@@ -40,6 +41,8 @@ enum FeedForwardBlock {
     /// The first half's experts read its feed-forward input and are kept in
     /// the cache; the second half (`None`) adds them to its output.
     Shortcut(FeedForward, Option<Experts>),
+    /// Inkling's dense or routed feed-forward and its residual convolution.
+    Inkling(Box<inkling::FeedForward>),
 }
 
 impl FeedForwardBlock {
@@ -51,6 +54,7 @@ impl FeedForwardBlock {
         match self {
             Self::Dense(dense) | Self::Shortcut(dense, _) => dense.forward(hidden, mode.route),
             Self::Routed(experts) => experts.forward(hidden),
+            Self::Inkling(_) => candle_core::bail!("Inkling's feed-forward keeps a convolution history and runs only with its layer's cache"),
             Self::Paired(paired) => {
                 let dense = paired.dense.forward(&paired.dense_norm.forward(hidden, mode.pass)?, mode.route)?;
                 let dense = paired.dense_output_norm.forward(&dense, mode.pass)?;
@@ -60,6 +64,15 @@ impl FeedForwardBlock {
                 )?;
                 dense + paired.experts_output_norm.forward(&routed, mode.pass)?
             }
+        }
+    }
+
+    /// The feed-forward of layer `layer`, with the cache an Inkling
+    /// feed-forward keeps its convolution history in.
+    fn forward_at(&self, hidden: &Tensor, mode: Mode, layer: usize, cache: &mut Cache) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Inkling(feed_forward) => feed_forward.forward(hidden, layer, cache),
+            _ => self.forward(hidden, mode),
         }
     }
 
@@ -321,6 +334,8 @@ enum Mixer {
     Hybrid(Box<Hybrid>),
     /// No mixer at all (DeciLM's no-op attention).
     Skip,
+    /// Inkling's relative-position attention.
+    Relative(Box<RelativeAttention>),
 }
 
 /// A Zamba2 hybrid layer's mixer: the shared block over the hidden state
@@ -470,7 +485,7 @@ impl DecoderLayer {
             None => attended,
         };
         let input = depth.feed_forward.mix(blocks, &running)?;
-        running + self.block.feed_forward_output(&input, layer, mode)?
+        running + self.block.feed_forward_output(&input, layer, cache, mode)?
     }
 
     /// The window this layer's attention looks through, if any.
@@ -874,7 +889,16 @@ impl Block {
             };
         Ok(Self {
             attention_norm,
-            mixer: Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
+            mixer: match &architecture.inkling {
+                Some(spec) => Mixer::Relative(Box::new(RelativeAttention::load(
+                    &builder,
+                    config.hidden_size,
+                    spec,
+                    architecture.norm_eps,
+                    layer,
+                )?)),
+                None => Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
+            },
             attention_output_norm,
             // Gemma 4's paired block norms the residual itself.
             feed_forward_norm: if architecture.side_experts.is_some() { None } else { feed_forward_norm },
@@ -913,6 +937,16 @@ fn feed_forward_block(
     layer: usize,
     adapters: &Adapters,
 ) -> candle_core::Result<FeedForwardBlock> {
+    if let Some(spec) = &architecture.inkling {
+        return Ok(FeedForwardBlock::Inkling(Box::new(inkling::FeedForward::load(
+            builder,
+            config.hidden_size,
+            config.intermediate_size,
+            spec,
+            architecture.activation,
+            layer,
+        )?)));
+    }
     if let Some(experts) = &architecture.side_experts {
         let spec = NormSpec::of(architecture);
         let norm = |name: &str| spec.load(config.hidden_size, builder.pp(name));
@@ -956,6 +990,7 @@ impl Block {
             Mixer::Attention(attention) => attention.window(),
             Mixer::Parallel(mixers) => mixers.attention.window(),
             Mixer::Hybrid(_) | Mixer::Skip => None,
+            Mixer::Relative(attention) => attention.window(),
             Mixer::StateSpace(_)
             | Mixer::Structured(_)
             | Mixer::ShortConv(_)
@@ -984,7 +1019,7 @@ impl Block {
                 return Ok(hidden.clone());
             };
             let normed = optional_norm(self.feed_forward_norm.as_ref(), hidden, mode.pass)?;
-            return hidden + self.scaled(feed_forward_block.forward(&normed, mode)?)?;
+            return hidden + self.scaled(feed_forward_block.forward_at(&normed, mode, layer, cache)?)?;
         }
         let normed = optional_norm(self.attention_norm.as_ref(), hidden, mode.pass)?;
         let mixed = self.mix(&normed, embedded, index_pos, layer, cache, mask, mode)?;
@@ -1001,7 +1036,7 @@ impl Block {
             };
             let hidden = join(if from_normed { &normed } else { hidden }, attention, mixer)?;
             let normed = optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?;
-            let output = feed_forward_block.forward(&normed, mode)?;
+            let output = feed_forward_block.forward_at(&normed, mode, layer, cache)?;
             return join(if from_normed { &normed } else { &hidden }, output, feed_forward);
         }
         if self.parallel {
@@ -1011,7 +1046,7 @@ impl Block {
                 Some(norm) => norm.forward(hidden, mode.pass)?,
                 None => normed,
             };
-            let feed_forward = feed_forward_block.forward(&feed_forward_input, mode)?;
+            let feed_forward = feed_forward_block.forward_at(&feed_forward_input, mode, layer, cache)?;
             return (hidden + self.scaled(attention)?)? + self.scaled(feed_forward)?;
         }
         let hidden = (hidden + self.scaled(attention)?)?;
@@ -1021,7 +1056,7 @@ impl Block {
             None => hidden,
         };
         let feed_forward_input = optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?;
-        let feed_forward = feed_forward_block.forward(&feed_forward_input, mode)?;
+        let feed_forward = feed_forward_block.forward_at(&feed_forward_input, mode, layer, cache)?;
         let feed_forward =
             optional_norm(self.feed_forward_output_norm.as_ref(), &feed_forward, mode.pass)?;
         let output = (hidden + self.scaled(feed_forward)?)?;
@@ -1055,13 +1090,14 @@ impl Block {
             Mixer::ShortConv(convolution) => convolution.forward(normed, layer, cache)?,
             Mixer::DeltaRule(delta) => delta.forward(normed, layer, cache)?,
             Mixer::Lightning(lightning) => lightning.forward(normed, index_pos, layer, cache, mode)?,
-            Mixer::FeedForward(feed_forward) => feed_forward.forward(normed, mode)?,
+            Mixer::FeedForward(feed_forward) => feed_forward.forward_at(normed, mode, layer, cache)?,
             Mixer::Parallel(mixers) => mixers.forward(normed, index_pos, layer, cache, mask, mode)?,
             Mixer::Hybrid(hybrid) => {
                 let shared = hybrid.shared.forward(normed, embedded, index_pos, layer, cache, mask, mode)?;
                 let joined = hybrid.norm.forward(&(normed + shared)?, mode.pass)?;
                 hybrid.scan.forward(&joined, layer, cache)?
             }
+            Mixer::Relative(attention) => attention.forward(normed, index_pos, layer, cache, mask, mode)?,
         })
     }
 
@@ -1083,12 +1119,12 @@ impl Block {
     }
 
     /// The feed-forward's output alone, before any residual.
-    fn feed_forward_output(&self, input: &Tensor, layer: usize, mode: Mode) -> candle_core::Result<Tensor> {
+    fn feed_forward_output(&self, input: &Tensor, layer: usize, cache: &mut Cache, mode: Mode) -> candle_core::Result<Tensor> {
         let Some(feed_forward_block) = &self.feed_forward else {
             candle_core::bail!("layer {layer} has no feed-forward to run");
         };
         let normed = optional_norm(self.feed_forward_norm.as_ref(), input, mode.pass)?;
-        let output = feed_forward_block.forward(&normed, mode)?;
+        let output = feed_forward_block.forward_at(&normed, mode, layer, cache)?;
         optional_norm(self.feed_forward_output_norm.as_ref(), &output, mode.pass)
     }
 }

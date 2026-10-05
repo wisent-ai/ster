@@ -75,7 +75,9 @@ fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// X Vision V2's (`hyperclovax_vision_v2`) nest them the same way under
 /// `model.language_model`, the head at the root or beside the decoder;
 /// Step3's (`step3_vl`) nest the config the same way and keep the text
-/// weights at the root. The vision and audio towers beside it are never
+/// weights at the root. Inkling's (`inkling_mm_model`) nest the config
+/// under `text_config` and the weights under `model.llm` (see
+/// [`inkling_text`]). The vision and audio towers beside it are never
 /// read. The keys the nested config leaves to the outer one
 /// (`eos_token_id`, `bos_token_id`, `tie_word_embeddings`,
 /// `quantization_config`) are copied in. Any other config is returned as it
@@ -93,11 +95,15 @@ fn language_model(outer: Value) -> (Value, &'static str) {
             "gemma3n" | "gemma4" | "gemma4_unified" | "qwen3_5" | "qwen3_5_moe" | "muse_glimmer" | "hyperclovax_vision_v2",
         ) => "model.language_model",
         Some("step3_vl") => "",
+        Some("inkling_mm_model") => "model.llm",
         _ => return (outer, ""),
     };
     let Some(mut inner) = outer.get("text_config").cloned() else {
         return (outer, "");
     };
+    if outer.get("model_type").and_then(Value::as_str) == Some("inkling_mm_model") {
+        inkling_text(&mut inner);
+    }
     if let Some(object) = inner.as_object_mut() {
         for key in INHERITED {
             if let (false, Some(value)) = (object.contains_key(key), outer.get(key)) {
@@ -106,4 +112,28 @@ fn language_model(outer: Value) -> (Value, &'static str) {
         }
     }
     (inner, prefix)
+}
+
+/// Inkling's text config as Transformers' `InklingTextConfig` reads it.
+/// Thinking Machines' own config names no `model_type`, states the dense
+/// feed-forward's width as `dense_intermediate_size` and the experts' as
+/// `intermediate_size`, and the short convolutions' as
+/// `sconv_kernel_size`; Transformers' converted config states
+/// `intermediate_size`, `moe_intermediate_size` and `conv_kernel_size`.
+/// The expert width is the stored one (`shared_w13_weight` of
+/// Inkling-Small is `[2, 4096, 4096]`, twice its `intermediate_size`
+/// 2048).
+fn inkling_text(inner: &mut Value) {
+    let Some(object) = inner.as_object_mut() else {
+        return;
+    };
+    object.entry("model_type").or_insert_with(|| Value::from("inkling_text"));
+    if let Some(dense) = object.remove("dense_intermediate_size") {
+        if let Some(experts) = object.insert("intermediate_size".to_owned(), dense) {
+            object.entry("moe_intermediate_size").or_insert(experts);
+        }
+    }
+    if let Some(kernel) = object.remove("sconv_kernel_size") {
+        object.entry("conv_kernel_size").or_insert(kernel);
+    }
 }

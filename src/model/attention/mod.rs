@@ -3,6 +3,7 @@
 //! may not see.
 
 mod indexer;
+pub(super) mod relative;
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};

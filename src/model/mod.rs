@@ -81,6 +81,7 @@ mod attention;
 mod cache;
 mod decoder;
 mod depth;
+mod inkling;
 mod layer;
 
 pub use cache::Cache;
@@ -316,6 +317,11 @@ pub struct Architecture {
     /// model's `output_attn_res_norm` and `output_attn_res_proj` before the
     /// final norm.
     pub depth_block_size: Option<usize>,
+    /// Inkling's relative-position attention, short convolutions and
+    /// feed-forward.
+    pub inkling: Option<InklingSpec>,
+    /// Inkling's `unpadded_vocab_size`: logits past it are never scored.
+    pub vocabulary_limit: Option<usize>,
     /// DeciLM's per-layer plan, one entry per layer.
     pub layer_plans: Option<Vec<LayerPlan>>,
     /// DeepSeek Sparse Attention's indexer (DeepSeek-V3.2, GLM-5).
@@ -648,6 +654,49 @@ pub enum DeltaRuleForm {
     Ling,
 }
 
+/// Inkling's decoder (`inkling_text`): every layer's attention scores keys
+/// by a relative-position bias in place of a rotation, its keys and values
+/// and both sublayers' outputs pass a residual short convolution, and its
+/// feed-forward is dense or routed as `routed_layers` says.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InklingSpec {
+    /// The full-attention layers' heads, key-value heads, head width and
+    /// relative extent (`rel_extent`).
+    pub full: RelativeHeads,
+    /// The sliding layers' (`swa_*`), their extent the window
+    /// (`sliding_window_size`).
+    pub sliding: RelativeHeads,
+    /// The layers that attend through the window.
+    pub sliding_layers: u128,
+    /// `d_rel`: how many bias-versus-distance profiles each head mixes.
+    pub profiles: usize,
+    /// `conv_kernel_size` (`sconv_kernel_size`).
+    pub kernel: usize,
+    /// `log_scaling_alpha` and `log_scaling_n_floor`: on the full layers,
+    /// the scores at position `p` times `1 + alpha · ln(max((p + 1) /
+    /// floor, 1))`.
+    pub log_scaling: Option<(f64, f64)>,
+    /// The layers whose feed-forward is routed (`mlp_layer_types`
+    /// `sparse`).
+    pub routed_layers: u128,
+    /// `n_routed_experts`, `n_shared_experts`, `num_experts_per_tok`,
+    /// `moe_intermediate_size` and `route_scale`.
+    pub experts: usize,
+    pub shared: usize,
+    pub top_k: usize,
+    pub expert_intermediate: usize,
+    pub route_scale: f64,
+}
+
+/// One kind of Inkling attention layer's shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelativeHeads {
+    pub heads: usize,
+    pub key_value_heads: usize,
+    pub head_dim: usize,
+    pub extent: usize,
+}
+
 /// Zamba2's shared transformer blocks: on every layer in `hybrid_layers`, a
 /// block reads the hidden state beside the embeddings (`attention_input`
 /// wide), and its output, projected back by the layer's own `linear`, joins
@@ -824,6 +873,8 @@ impl Architecture {
             recurrence: None,
             prefix_lm: false,
             depth_block_size: None,
+            inkling: None,
+            vocabulary_limit: None,
             layer_plans: None,
             sparse_index: None,
             routed_output_norm: false,
@@ -1142,6 +1193,11 @@ impl Architecture {
         if (self.loops.is_some() || self.recurrence.is_some()) && !targets.is_empty() {
             bail!(
                 "this model runs its layers more than once (Nanbeige's num_loops, IQuest-LoopCoder's loop_num, HRM-Text's H_cycles and L_cycles), so one adapter would correct every pass of its layer; Ster steers it but trains no adapters on it"
+            );
+        }
+        if self.inkling.is_some() && !targets.is_empty() {
+            bail!(
+                "this model's attention and feed-forward are Inkling's own (wq_du, wk_dv, wv_dv, wo_ud, w13_dn, w2_md behind short convolutions), which Ster's adapters do not attach to; Ster steers it but trains no adapters on it"
             );
         }
         if self.lightning.is_some() && !targets.is_empty() {
@@ -1633,6 +1689,20 @@ impl Names {
     };
     pub const HRM_LOW_LAYERS: &'static str = "model.L_module.layers";
     pub const HRM_HIGH_LAYERS: &'static str = "model.H_module.layers";
+    /// Inkling, as Thinking Machines stores it below `model.llm`: `embed`
+    /// and its `embed_norm`, `layers.{i}` with `attn_norm` and `mlp_norm`,
+    /// the final `norm`, and the head `unembed`.
+    pub const INKLING: Self = Self {
+        root: "",
+        embeddings: "embed",
+        embedding_norm: "embed_norm",
+        layers: "layers",
+        final_norm: "norm",
+        lm_head: "unembed",
+        attention_norm: "attn_norm",
+        feed_forward_norm: "mlp_norm",
+        ..Self::LLAMA
+    };
     /// PLaMo 3: layers below `model.layers.layers`, each a `mixer` with one
     /// `qkv_proj` and `o_proj`, a `mlp` with one `gate_up_proj`, and
     /// `pre_mixer_norm`, `post_mixer_norm`, `pre_mlp_norm`, `post_mlp_norm`.
