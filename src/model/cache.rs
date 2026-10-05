@@ -25,6 +25,12 @@ pub struct Cache {
     /// `[batch, kernel - 1, channels]` in F32, under (layer, slot): a layer
     /// runs four of them.
     pub(super) convolutions: HashMap<(usize, usize), Tensor>,
+    /// DeepSeek-V4's compressors' running state under (layer, slot): slot
+    /// 0 the attention's compressor, slot 1 its indexer's.
+    pub(super) compressors: HashMap<(usize, usize), super::deepseek4::CompressorState>,
+    /// The ids of the tokens this call runs, which DeepSeek-V4's hash layers
+    /// route by.
+    pub(super) token_ids: Option<Vec<u32>>,
     /// The keys and values of the current call that Gemma 4's
     /// key-value-sharing layers reuse, under the layer that produced them.
     /// Rewritten on every call, whether or not `kvs` keeps a history.
@@ -165,6 +171,8 @@ impl Cache {
             kvs: vec![None; config.num_hidden_layers],
             states: vec![None; config.num_hidden_layers],
             convolutions: HashMap::new(),
+            compressors: HashMap::new(),
+            token_ids: None,
             shared: vec![None; config.num_hidden_layers],
             index_keys: vec![None; config.num_hidden_layers],
             index_mask: None,
@@ -235,7 +243,7 @@ pub(super) struct RotaryTable {
 }
 
 impl RotaryTable {
-    fn new(frequencies: Vec<f32>, magnitude: f32, device: &Device) -> Result<Self> {
+    pub(super) fn new(frequencies: Vec<f32>, magnitude: f32, device: &Device) -> Result<Self> {
         let width = frequencies.len();
         Ok(Self {
             frequencies: Tensor::from_vec(frequencies, (1, width), device)?,
@@ -256,9 +264,22 @@ impl RotaryTable {
         }
         Ok(((angles.cos()? * self.magnitude)?, (angles.sin()? * self.magnitude)?))
     }
+
+    /// `cos` and `sin` of each of `positions` times every frequency,
+    /// `[positions, rotary_dim / 2]`, in F32.
+    pub(super) fn angles_at(&self, positions: &[usize]) -> Result<(Tensor, Tensor)> {
+        let device = self.frequencies.device();
+        let count = positions.len();
+        let positions: Vec<f32> = positions.iter().map(|position| *position as f32).collect();
+        let angles = Tensor::from_vec(positions, (count, 1), device)?.matmul(&self.frequencies)?;
+        if self.magnitude == 1.0 {
+            return Ok((angles.cos()?, angles.sin()?));
+        }
+        Ok(((angles.cos()? * self.magnitude)?, (angles.sin()? * self.magnitude)?))
+    }
 }
 
-fn base_frequencies(head_dim: usize, theta: f32) -> Vec<f32> {
+pub(super) fn base_frequencies(head_dim: usize, theta: f32) -> Vec<f32> {
     (0..head_dim)
         .step_by(2)
         .map(|index| 1f32 / theta.powf(index as f32 / head_dim as f32))
@@ -276,7 +297,7 @@ const YARN_RAMP_WIDENING: f32 = 0.001;
 /// above the band a frequency keeps its value (extrapolation), below it is
 /// divided by `factor` (interpolation), and in the band the two are blended
 /// along the ramp.
-fn yarn_frequencies(
+pub(super) fn yarn_frequencies(
     base: &[f32],
     rotary_dim: usize,
     theta: f32,

@@ -13,6 +13,7 @@ use crate::lora::Adapters;
 use super::{
     Architecture, Cache, ForwardOutput, Mode, Positions, Readout, SteeringPlan,
     depth::DepthMix,
+    deepseek4::HyperHead,
     attention::padded_causal_mask,
     layer::{
         DecoderLayer, LayerInputs,
@@ -42,6 +43,8 @@ pub struct SteeringLlama {
     low_start: Option<Tensor>,
     /// Kimi-K3's attention-residual mix before the final norm.
     depth_output: Option<DepthMix>,
+    /// DeepSeek-V4's collapse of its residual streams before the final norm.
+    hyper_head: Option<HyperHead>,
     final_norm: Norm,
     lm_head: Linear,
     config: Config,
@@ -129,13 +132,20 @@ impl SteeringLlama {
             };
             Linear::new(embeddings.embeddings().clone(), bias)
         } else {
-            let head = if builder.contains_tensor(&format!("{}.weight", names.lm_head)) { &builder } else { &outer };
+            let stored = |builder: &VarBuilder<'_>, name: &str| builder.contains_tensor(&format!("{name}.weight"));
+            // DeepSeek-V4's own checkpoints keep the head as `head`.
+            let name = if !stored(&builder, names.lm_head) && !stored(&outer, names.lm_head) && stored(&builder, "head") {
+                "head"
+            } else {
+                names.lm_head
+            };
+            let head = if stored(&builder, name) { &builder } else { &outer };
             projection(
                 config.hidden_size,
                 config.vocab_size,
                 architecture.lm_head_bias,
                 false,
-                head.pp(names.lm_head),
+                head.pp(name),
             )?
         };
         let final_spec = if architecture.plain_final_norm { NormSpec { offset: false, ..spec } } else { spec };
@@ -250,6 +260,14 @@ impl SteeringLlama {
             }
             None => None,
         };
+        // DeepSeek-V4's collapse of its last streams, below the model's root.
+        let hyper_head = match architecture.compressed {
+            Some(spec) => {
+                let root = if names.root.is_empty() { builder.clone() } else { builder.pp(names.root) };
+                Some(HyperHead::load(&root, config.hidden_size, spec.streams, spec.hyper_eps, architecture.norm_eps)?)
+            }
+            None => None,
+        };
         Ok(Self {
             embeddings,
             positions,
@@ -260,6 +278,7 @@ impl SteeringLlama {
             streams,
             low_start,
             depth_output,
+            hyper_head,
             final_norm,
             lm_head,
             config,
@@ -472,6 +491,18 @@ impl SteeringLlama {
         };
         // Kimi-K3's finished block sums; `hidden` is the running sum.
         let mut blocks: Vec<Tensor> = Vec::new();
+        // DeepSeek-V4's residual streams, each the embedding at first;
+        // `hidden` is their mean, and steering moves every one of them.
+        let mut hyper = match (&self.hyper_head, self.architecture.compressed) {
+            (Some(_), Some(spec)) => {
+                let (batch, sequence, width) = hidden.dims3()?;
+                Some(hidden.unsqueeze(2)?.expand((batch, sequence, spec.streams, width))?.contiguous()?)
+            }
+            _ => None,
+        };
+        if hyper.is_some() || self.architecture.experts.as_ref().is_some_and(|experts| experts.hash_layers != 0) {
+            cache.token_ids = Some(tokens.flatten_all()?.to_vec1::<u32>()?);
+        }
         for (index, layer) in self.layers.iter().enumerate() {
             // A pass of either stack reads the two states summed.
             if let (Some(recurrence), Some((high, low))) = (self.architecture.recurrence, &states) {
@@ -504,6 +535,15 @@ impl SteeringLlama {
                     rest = Some(corrected);
                     first
                 }
+                None if hyper.is_some() => {
+                    let streams = match hyper.take() {
+                        Some(streams) => layer.forward_hyper(&streams, &inputs, index_pos, index, cache, mask, mode)?,
+                        None => candle_core::bail!("layer {index} lost the residual streams"),
+                    };
+                    let mean = streams.mean(2)?;
+                    hyper = Some(streams);
+                    mean
+                }
                 None if self.depth_output.is_some() => {
                     layer.forward_depth(&hidden, &mut blocks, &inputs, index_pos, index, cache, mask, mode)?
                 }
@@ -522,6 +562,9 @@ impl SteeringLlama {
                     hidden = hidden.broadcast_add(&scaled).map_err(|error| {
                         error.context(format!("failed to apply steering at layer {index}"))
                     })?;
+                    if let Some(streams) = hyper.take() {
+                        hyper = Some(streams.broadcast_add(&scaled.unsqueeze(2)?)?);
+                    }
                 }
             }
             // The pass ends in the stack's scale-free norm and replaces its
@@ -544,6 +587,10 @@ impl SteeringLlama {
         let hidden = match &self.depth_output {
             Some(mix) => mix.mix(&blocks, &hidden)?,
             None => hidden,
+        };
+        let hidden = match (&self.hyper_head, &hyper) {
+            (Some(head), Some(streams)) => head.collapse(streams)?,
+            _ => hidden,
         };
         // HRM-Text's last pass already ended in its norm.
         let hidden = if states.is_some() { hidden } else { self.final_norm.forward(&hidden, mode.pass)? };

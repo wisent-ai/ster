@@ -37,6 +37,8 @@ enum Clamp {
     GptOss(f64),
     /// Step 3.5's `min(act(gate), limit) · clamp(up, -limit, limit)`.
     Step(f64),
+    /// DeepSeek-V4's `act(min(gate, limit)) · clamp(up, -limit, limit)`.
+    Inner(f64),
 }
 
 impl Expert {
@@ -58,6 +60,10 @@ impl Expert {
             }
             (Some(gate), Some(Clamp::Step(limit))) => {
                 let gate = activation.apply(&gate.forward(input)?)?.minimum(limit)?;
+                (gate * up.clamp(-limit, limit)?)?
+            }
+            (Some(gate), Some(Clamp::Inner(limit))) => {
+                let gate = activation.apply(&gate.forward(input)?.minimum(limit)?)?;
                 (gate * up.clamp(-limit, limit)?)?
             }
             (Some(gate), None) => activation.gated(&gate.forward(input)?, &up)?,
@@ -109,6 +115,9 @@ pub(in crate::model) struct Experts {
     /// The latent experts' projection down, the norm over their sum, and the
     /// projection back.
     latent: Option<(Linear, Option<Norm>, Linear)>,
+    /// DeepSeek-V4's hash routing on this layer: every token id's `top_k`
+    /// experts, `tid2eid` flattened row by row.
+    hash: Option<Vec<u32>>,
 }
 
 impl Experts {
@@ -149,7 +158,8 @@ impl Experts {
             | ExpertLayout::HunYuan
             | ExpertLayout::NemotronH
             | ExpertLayout::HyV3
-            | ExpertLayout::LongCat => {
+            | ExpertLayout::LongCat
+            | ExpertLayout::DeepseekV4 => {
                 let (block, router) = match spec.layout {
                     ExpertLayout::Jamba => (builder.pp("feed_forward"), "router"),
                     ExpertLayout::HunYuan => (builder.pp("mlp"), "gate.wg"),
@@ -160,7 +170,12 @@ impl Experts {
                 };
                 // Nemotron-H's experts have no gate projection, and its
                 // latent experts work on `moe_latent_size`.
-                let gate = (spec.layout != ExpertLayout::NemotronH).then_some("gate_proj");
+                let gate = match spec.layout {
+                    ExpertLayout::NemotronH => None,
+                    ExpertLayout::DeepseekV4 => Some("w1"),
+                    _ => Some("gate_proj"),
+                };
+                let names = if spec.layout == ExpertLayout::DeepseekV4 { ["w3", "w2"] } else { ["up_proj", "down_proj"] };
                 let width = spec.latent.map_or(hidden, |latent| latent.width);
                 let stacked = block.pp("experts");
                 // Transformers 5 saves every expert stacked: `gate_up_proj`
@@ -183,7 +198,7 @@ impl Experts {
                 } else {
                     (0..count)
                         .map(|expert| {
-                            Expert::load(width, intermediate, gate, ["up_proj", "down_proj"], stacked.pp(expert.to_string()))
+                            Expert::load(width, intermediate, gate, names, stacked.pp(expert.to_string()))
                         })
                         .collect::<candle_core::Result<Vec<_>>>()?
                 };
@@ -388,8 +403,9 @@ impl Experts {
             None => None,
         };
         // DeepSeek stores the bias as `[experts]`, ERNIE as `[1, experts]`;
-        // either flattens to one score per expert.
-        let selection_bias = match spec.selection_bias {
+        // either flattens to one score per expert. A hash layer chooses by
+        // token id and stores none.
+        let selection_bias = match spec.selection_bias.filter(|_| spec.hash_layers >> layer & 1 == 0) {
             Some(tensor) => {
                 let bias = builder
                     .get_unchecked(tensor)?
@@ -423,6 +439,7 @@ impl Experts {
         let clamps = match &spec.swiglu_limit {
             Some(SwigluLimit::GptOss(limit)) => (Some(Clamp::GptOss(*limit)), None),
             Some(SwigluLimit::Step { routed, shared }) => (at(routed), at(shared)),
+            Some(SwigluLimit::Inner(limit)) => (Some(Clamp::Inner(*limit)), Some(Clamp::Inner(*limit))),
             None => (None, None),
         };
         // Latent projections sit beside the experts, with a bias when the
@@ -444,6 +461,21 @@ impl Experts {
             }
             None => None,
         };
+        let hash = if spec.hash_layers >> layer & 1 == 1 {
+            let block = builder.pp(if spec.layout == ExpertLayout::DeepseekV4 { "mlp" } else { "block_sparse_moe" });
+            let table = block.pp("gate").get_unchecked("tid2eid")?;
+            let (_, width) = table.dims2()?;
+            if width != spec.top_k {
+                candle_core::bail!("layer {layer}'s mlp.gate.tid2eid lists {width} experts per token, not {}", spec.top_k);
+            }
+            let flat = table.to_dtype(DType::I64)?.flatten_all()?.to_vec1::<i64>()?;
+            if let Some(bad) = flat.iter().find(|expert| !(0..count as i64).contains(*expert)) {
+                candle_core::bail!("layer {layer}'s mlp.gate.tid2eid names expert {bad}, outside 0 to {}", count - 1);
+            }
+            Some(flat.into_iter().map(|expert| expert as u32).collect())
+        } else {
+            None
+        };
         Ok(Self {
             router,
             selection_bias,
@@ -454,6 +486,7 @@ impl Experts {
             activation,
             clamps,
             latent,
+            hash,
         })
     }
 
@@ -494,14 +527,29 @@ impl Experts {
     }
 
     /// The weights of the experts `choose` picks from `scores` `[tokens,
-    /// experts]`, zero elsewhere and renormalised when the family does; every
-    /// chosen token is listed under its expert in `routed`.
-    fn ranked(&self, scores: Tensor, routed: &mut [Vec<u32>]) -> candle_core::Result<Tensor> {
+    /// experts]` — or, on a hash layer, the experts `ids`' rows of
+    /// `tid2eid` name — zero elsewhere and renormalised when the family
+    /// does; every chosen token is listed under its expert in `routed`.
+    fn ranked(&self, scores: Tensor, routed: &mut [Vec<u32>], ids: Option<&[u32]>) -> candle_core::Result<Tensor> {
         let (tokens, count) = scores.dims2()?;
         let host = scores.to_vec2::<f32>()?;
         let mut mask = vec![0f32; tokens * count];
         for (token, row) in host.iter().enumerate() {
-            for expert in self.choose(row) {
+            let chosen: Vec<usize> = match (&self.hash, ids) {
+                (Some(table), Some(ids)) => {
+                    let Some(&id) = ids.get(token) else {
+                        candle_core::bail!("hash routing was given {} token ids for {tokens} tokens", ids.len());
+                    };
+                    let start = id as usize * self.spec.top_k;
+                    let Some(row) = table.get(start..start + self.spec.top_k) else {
+                        candle_core::bail!("token id {id} is past the hash routing table");
+                    };
+                    row.iter().map(|expert| *expert as usize).collect()
+                }
+                (Some(_), None) => candle_core::bail!("this layer routes by token id (tid2eid) and was given no token ids"),
+                (None, _) => self.choose(row),
+            };
+            for expert in chosen {
                 mask[token * count + expert] = 1.0;
                 routed[expert].push(token as u32);
             }
@@ -524,13 +572,23 @@ impl Experts {
     /// `exp` and `sum`, `index_select`, `index_add`, the mask multiply — has a
     /// backward pass.
     pub(in crate::model) fn forward(&self, hidden: &Tensor) -> candle_core::Result<Tensor> {
-        self.forward_routed(hidden, hidden)
+        self.route(hidden, hidden, None)
+    }
+
+    /// [`Experts::forward`] with the ids of the tokens `hidden` holds, which
+    /// a hash layer chooses its experts by.
+    pub(in crate::model) fn forward_ids(&self, hidden: &Tensor, ids: Option<&[u32]>) -> candle_core::Result<Tensor> {
+        self.route(hidden, hidden, ids)
     }
 
     /// [`Experts::forward`] with the router reading `router_input` rather
     /// than the experts' input (Gemma 4's router reads the residual through
     /// a scale-free norm, its experts through `pre_feedforward_layernorm_2`).
     pub(super) fn forward_routed(&self, router_input: &Tensor, hidden: &Tensor) -> candle_core::Result<Tensor> {
+        self.route(router_input, hidden, None)
+    }
+
+    fn route(&self, router_input: &Tensor, hidden: &Tensor, ids: Option<&[u32]>) -> candle_core::Result<Tensor> {
         let (batch, sequence, width) = hidden.dims3()?;
         let tokens = batch * sequence;
         let flat = hidden.reshape((tokens, width))?;
@@ -543,11 +601,17 @@ impl Experts {
             .to_dtype(DType::F32)?;
         let mut routed: Vec<Vec<u32>> = vec![Vec::new(); count];
         let weights = match self.spec.scoring {
-            Scoring::Softmax => self.ranked(candle_nn::ops::softmax(&logits, D::Minus1)?, &mut routed)?,
+            Scoring::Softmax => self.ranked(candle_nn::ops::softmax(&logits, D::Minus1)?, &mut routed, ids)?,
             // sigmoid, composed so it has a backward pass.
-            Scoring::Sigmoid => self.ranked((logits.neg()?.exp()? + 1.0)?.recip()?, &mut routed)?,
+            Scoring::Sigmoid => self.ranked((logits.neg()?.exp()? + 1.0)?.recip()?, &mut routed, ids)?,
             Scoring::SparseMixer { jitter } => {
                 sparse_mixer(&logits, self.spec.top_k, jitter, &mut routed)?
+            }
+            // softplus as `relu(x) + ln(1 + exp(-|x|))`, which no logit
+            // overflows.
+            Scoring::SqrtSoftplus => {
+                let softplus = (logits.relu()? + (logits.abs()?.neg()?.exp()? + 1.0)?.log()?)?;
+                self.ranked(softplus.sqrt()?, &mut routed, ids)?
             }
         };
         let weights = match self.spec.routed_scale {

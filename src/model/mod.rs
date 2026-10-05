@@ -80,6 +80,7 @@ use candle_transformers::models::llama::Config;
 mod attention;
 mod cache;
 mod decoder;
+mod deepseek4;
 mod depth;
 mod inkling;
 mod layer;
@@ -320,6 +321,8 @@ pub struct Architecture {
     /// Inkling's relative-position attention, short convolutions and
     /// feed-forward.
     pub inkling: Option<InklingSpec>,
+    /// DeepSeek-V4's hyper-connections and compressed attention.
+    pub compressed: Option<CompressedSpec>,
     /// Inkling's `unpadded_vocab_size`: logits past it are never scored.
     pub vocabulary_limit: Option<usize>,
     /// DeciLM's per-layer plan, one entry per layer.
@@ -688,6 +691,56 @@ pub struct InklingSpec {
     pub route_scale: f64,
 }
 
+/// DeepSeek-V4's decoder (`deepseek_v4`): `hc_mult` residual streams mixed
+/// by manifold-constrained hyper-connections around every sublayer, and an
+/// attention whose one key-value head is both key and value, attended
+/// through `sliding_window` and, on the compressed layers, beside entries
+/// that summarise every `rate` earlier tokens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompressedSpec {
+    /// `hc_mult`, `hc_sinkhorn_iters` and `hc_eps`.
+    pub streams: usize,
+    pub sinkhorn_iterations: usize,
+    pub hyper_eps: f64,
+    pub heads: usize,
+    pub head_dim: usize,
+    /// The trailing slice of each head that rotates (`qk_rope_head_dim`).
+    pub rotary_dim: usize,
+    /// `q_lora_rank`.
+    pub query_rank: usize,
+    /// `o_groups` and `o_lora_rank`: the output projection's groups and
+    /// each group's width.
+    pub output_groups: usize,
+    pub output_rank: usize,
+    pub window: usize,
+    /// The layers attending beside compressed sparse entries (`csa`) and
+    /// heavily compressed ones (`hca`), and their rates.
+    pub sparse_layers: u128,
+    pub heavy_layers: u128,
+    pub sparse_rate: usize,
+    pub heavy_rate: usize,
+    /// The sparse layers' indexer: `index_n_heads`, `index_head_dim`,
+    /// `index_topk`.
+    pub index_heads: usize,
+    pub index_head_dim: usize,
+    pub index_top_k: usize,
+    /// The sliding layers' rotation base (`rope_theta`) and the compressed
+    /// layers' (`compress_rope_theta`), whose YaRN is `compress_yarn`.
+    pub main_theta: f32,
+    pub compress_theta: f32,
+    pub compress_yarn: Option<CompressYarn>,
+}
+
+/// The YaRN DeepSeek-V4's compressed layers rotate by, its magnitude one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompressYarn {
+    pub factor: f32,
+    pub original: usize,
+    pub beta_fast: f32,
+    pub beta_slow: f32,
+    pub truncate: bool,
+}
+
 /// One kind of Inkling attention layer's shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelativeHeads {
@@ -874,6 +927,7 @@ impl Architecture {
             prefix_lm: false,
             depth_block_size: None,
             inkling: None,
+            compressed: None,
             vocabulary_limit: None,
             layer_plans: None,
             sparse_index: None,
@@ -1195,6 +1249,11 @@ impl Architecture {
                 "this model runs its layers more than once (Nanbeige's num_loops, IQuest-LoopCoder's loop_num, HRM-Text's H_cycles and L_cycles), so one adapter would correct every pass of its layer; Ster steers it but trains no adapters on it"
             );
         }
+        if self.compressed.is_some() && !targets.is_empty() {
+            bail!(
+                "this model's residual is several hyper-connected streams and its attention DeepSeek-V4's compressed one (q_a_proj, kv_proj, o_a_proj in groups), which Ster's adapters do not attach to; Ster steers it but trains no adapters on it"
+            );
+        }
         if self.inkling.is_some() && !targets.is_empty() {
             bail!(
                 "this model's attention and feed-forward are Inkling's own (wq_du, wk_dv, wv_dv, wo_ud, w13_dn, w2_md behind short convolutions), which Ster's adapters do not attach to; Ster steers it but trains no adapters on it"
@@ -1394,6 +1453,10 @@ pub struct MixtureOfExperts {
     /// `x`, and their sum returns through a projection back; the router and
     /// shared experts read `x`.
     pub latent: Option<LatentExperts>,
+    /// DeepSeek-V4's hash layers (`mlp_layer_types` `hash_moe`): a token's
+    /// experts are its row of `{module}.gate.tid2eid`, fixed by its id; the
+    /// router still weighs them.
+    pub hash_layers: u128,
 }
 
 /// Where a mixture's latent experts read and return: Nemotron-H's
@@ -1452,6 +1515,9 @@ pub enum SwigluLimit {
     /// shared expert's `shared[i]` (`swiglu_limits_shared`); zero means
     /// unclamped.
     Step { routed: Vec<f64>, shared: Vec<f64> },
+    /// DeepSeek-V4: `silu(min(gate, limit)) · clamp(up, ±limit)`, on the
+    /// routed and the shared experts.
+    Inner(f64),
 }
 
 /// A shared expert's inner width and whether a sigmoid gate scales it.
@@ -1491,6 +1557,8 @@ pub enum Scoring {
     /// the experts left whose logit lies within `2 · jitter` of the best,
     /// relative to the larger of its own magnitude and the best logit.
     SparseMixer { jitter: f32 },
+    /// DeepSeek-V4's `sqrtsoftplus`: `sqrt(softplus(logit))` per expert.
+    SqrtSoftplus,
 }
 
 /// Group-limited routing.
@@ -1509,6 +1577,9 @@ pub struct ExpertGroups {
 pub enum ExpertLayout {
     /// `block_sparse_moe.gate`, `block_sparse_moe.experts.{e}.w1|w3|w2`.
     Mixtral,
+    /// DeepSeek-V4: `mlp.gate`, `mlp.experts.{e}.w1|w3|w2` (gate, up,
+    /// down) or stacked `mlp.experts.gate_up_proj` and `down_proj`.
+    DeepseekV4,
     /// `mlp.gate`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`; a shared
     /// expert is Qwen2-MoE's `mlp.shared_expert` or DeepSeek's
     /// `mlp.shared_experts`.

@@ -17,6 +17,7 @@ use super::{
     Activation, Architecture, Cache, DeltaRuleForm, FeedForwardKind, Mode, ParallelScan, Pass, Route,
     attention::{Attention, project, relative::RelativeAttention},
     depth::{DepthMix, DepthMixes},
+    deepseek4::{HyperConnection, attention::CompressedAttention},
     inkling,
 };
 use experts::Experts;
@@ -72,6 +73,7 @@ impl FeedForwardBlock {
     fn forward_at(&self, hidden: &Tensor, mode: Mode, layer: usize, cache: &mut Cache) -> candle_core::Result<Tensor> {
         match self {
             Self::Inkling(feed_forward) => feed_forward.forward(hidden, layer, cache),
+            Self::Routed(experts) => experts.forward_ids(hidden, cache.token_ids.as_deref()),
             _ => self.forward(hidden, mode),
         }
     }
@@ -336,6 +338,8 @@ enum Mixer {
     Skip,
     /// Inkling's relative-position attention.
     Relative(Box<RelativeAttention>),
+    /// DeepSeek-V4's compressed attention.
+    Compressed(Box<CompressedAttention>),
 }
 
 /// A Zamba2 hybrid layer's mixer: the shared block over the hidden state
@@ -386,6 +390,9 @@ pub(super) struct DecoderLayer {
     altup: Option<altup::AltUp>,
     /// Kimi-K3's attention residuals around the block.
     depth: Option<DepthMixes>,
+    /// DeepSeek-V4's hyper-connections before attention and before the
+    /// feed-forward.
+    hyper: Option<(HyperConnection, HyperConnection)>,
 }
 
 /// What every layer reads beside the hidden state: the embeddings the first
@@ -446,12 +453,29 @@ impl DecoderLayer {
             }
             None => None,
         };
+        let hyper = match architecture.compressed {
+            Some(spec) => {
+                let connection = |name: &str| {
+                    HyperConnection::load(
+                        &builder.pp(name),
+                        config.hidden_size,
+                        spec.streams,
+                        spec.sinkhorn_iterations,
+                        spec.hyper_eps,
+                        architecture.norm_eps,
+                    )
+                };
+                Some((connection("attn_hc")?, connection("ffn_hc")?))
+            }
+            None => None,
+        };
         Ok(Self {
             block: Block::load(builder, config, architecture, layer, adapters, shared)?,
             per_layer_input,
             scalar,
             altup,
             depth,
+            hyper,
         })
     }
 
@@ -486,6 +510,31 @@ impl DecoderLayer {
         };
         let input = depth.feed_forward.mix(blocks, &running)?;
         running + self.block.feed_forward_output(&input, layer, cache, mode)?
+    }
+
+    /// DeepSeek-V4's layer over its residual streams `[batch, sequence, N,
+    /// hidden]`: each sublayer reads the streams collapsed by its
+    /// hyper-connection, and its output is spread back over them beside the
+    /// streams' own mix.
+    pub(super) fn forward_hyper(
+        &self,
+        streams: &Tensor,
+        inputs: &LayerInputs<'_>,
+        index_pos: usize,
+        layer: usize,
+        cache: &mut Cache,
+        mask: Option<&Tensor>,
+        mode: Mode,
+    ) -> candle_core::Result<Tensor> {
+        let Some((attention, feed_forward)) = &self.hyper else {
+            candle_core::bail!("layer {layer} has no hyper-connections and was asked to run its streams");
+        };
+        let mixing = attention.mixing(streams)?;
+        let attended = self.block.mixer_output(&mixing.collapsed, inputs.embedded, index_pos, layer, cache, mask, mode)?;
+        let streams = mixing.spread(&attended, streams)?;
+        let mixing = feed_forward.mixing(&streams)?;
+        let output = self.block.feed_forward_output(&mixing.collapsed, layer, cache, mode)?;
+        mixing.spread(&output, &streams)
     }
 
     /// The window this layer's attention looks through, if any.
@@ -889,15 +938,22 @@ impl Block {
             };
         Ok(Self {
             attention_norm,
-            mixer: match &architecture.inkling {
-                Some(spec) => Mixer::Relative(Box::new(RelativeAttention::load(
+            mixer: match (&architecture.inkling, &architecture.compressed) {
+                (Some(spec), _) => Mixer::Relative(Box::new(RelativeAttention::load(
                     &builder,
                     config.hidden_size,
                     spec,
                     architecture.norm_eps,
                     layer,
                 )?)),
-                None => Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
+                (None, Some(spec)) => Mixer::Compressed(Box::new(CompressedAttention::load(
+                    &builder,
+                    config.hidden_size,
+                    spec,
+                    architecture.norm_eps,
+                    layer,
+                )?)),
+                (None, None) => Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
             },
             attention_output_norm,
             // Gemma 4's paired block norms the residual itself.
@@ -991,6 +1047,7 @@ impl Block {
             Mixer::Parallel(mixers) => mixers.attention.window(),
             Mixer::Hybrid(_) | Mixer::Skip => None,
             Mixer::Relative(attention) => attention.window(),
+            Mixer::Compressed(attention) => attention.window(),
             Mixer::StateSpace(_)
             | Mixer::Structured(_)
             | Mixer::ShortConv(_)
@@ -1098,6 +1155,7 @@ impl Block {
                 hybrid.scan.forward(&joined, layer, cache)?
             }
             Mixer::Relative(attention) => attention.forward(normed, index_pos, layer, cache, mask, mode)?,
+            Mixer::Compressed(attention) => attention.forward(normed, index_pos, layer, cache, mask, mode)?,
         })
     }
 
