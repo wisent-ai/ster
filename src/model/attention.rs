@@ -146,10 +146,12 @@ impl Attention {
         let heads = config.num_attention_heads;
         let window = architecture.window(layer);
         // Gemma 4's full-attention layers have their own head width and
-        // key-value head count.
+        // key-value head count; DeciLM states each layer's key-value heads.
         let global = architecture.global_at(layer);
-        let key_value_heads =
-            global.and_then(|global| global.key_value_heads).unwrap_or(config.num_key_value_heads);
+        let key_value_heads = global
+            .and_then(|global| global.key_value_heads)
+            .or_else(|| architecture.layer_plan(layer).and_then(|plan| plan.key_value_heads))
+            .unwrap_or(config.num_key_value_heads);
         let head_dim = global.map_or(architecture.head_dim, |global| global.head_dim);
         let query_width = match global {
             Some(_) => heads * head_dim,

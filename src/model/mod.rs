@@ -258,6 +258,8 @@ pub struct Architecture {
     pub skip_connections: Option<SkipConnections>,
     /// Nanbeige's loops: the stored layers run more than once.
     pub loops: Option<Loops>,
+    /// DeciLM's per-layer plan, one entry per layer.
+    pub layer_plans: Option<Vec<LayerPlan>>,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -285,6 +287,15 @@ pub struct Architecture {
     /// LFM2's gated short convolution in place of attention on the layers it
     /// covers.
     pub short_convolution: Option<ShortConvolution>,
+}
+
+/// One DeciLM layer (`block_configs`): its key-value heads, `None` for a
+/// no-op attention, and its feed-forward width, `None` for a no-op
+/// feed-forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerPlan {
+    pub key_value_heads: Option<usize>,
+    pub intermediate: Option<usize>,
 }
 
 /// A looped decoder: `physical` stored layers run in order as many times as
@@ -605,6 +616,7 @@ impl Architecture {
             layer_scalar: false,
             skip_connections: None,
             loops: None,
+            layer_plans: None,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
@@ -623,6 +635,11 @@ impl Architecture {
     pub fn window(&self, layer: usize) -> Option<usize> {
         let sliding = layer < 128 && self.sliding_layers & (1u128 << layer) != 0;
         self.sliding_window.filter(|_| sliding)
+    }
+
+    /// DeciLM's plan for `layer`, when the family states one per layer.
+    pub fn layer_plan(&self, layer: usize) -> Option<LayerPlan> {
+        self.layer_plans.as_ref().and_then(|plans| plans.get(layer).copied())
     }
 
     /// The full-attention spec layer `layer` uses: Gemma 4's on a layer
@@ -849,6 +866,11 @@ impl Architecture {
         if self.short_convolution.is_some() && !targets.is_empty() {
             bail!(
                 "this model's blocks include short-convolution mixers (LFM2) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
+            );
+        }
+        if self.layer_plans.is_some() && !targets.is_empty() {
+            bail!(
+                "this model's layers differ in key-value heads and feed-forward width, and some have neither (DeciLM's block_configs), so no projection has one shape on every layer; Ster steers it but trains no adapters on it"
             );
         }
         if self.loops.is_some() && !targets.is_empty() {

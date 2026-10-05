@@ -160,7 +160,12 @@ impl FeedForward {
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
-        let (hidden, intermediate) = (config.hidden_size, config.intermediate_size);
+        // DeciLM states each layer's feed-forward width apart.
+        let intermediate = architecture
+            .layer_plan(layer)
+            .and_then(|plan| plan.intermediate)
+            .unwrap_or(config.intermediate_size);
+        let hidden = config.hidden_size;
         let bias = architecture.feed_forward_bias;
         let names = architecture.names;
         let conv1d = architecture.conv1d;
@@ -264,6 +269,8 @@ enum Mixer {
     Parallel(Box<ParallelMixers>),
     /// Zamba2's hybrid layers: a shared block feeding a Mamba-2 scan.
     Hybrid(Box<Hybrid>),
+    /// No mixer at all (DeciLM's no-op attention).
+    Skip,
 }
 
 /// A Zamba2 hybrid layer's mixer: the shared block over the hidden state
@@ -633,6 +640,36 @@ impl Block {
                 scales: None,
             });
         }
+        // DeciLM (Nemotron Super and Ultra): each layer states its own
+        // key-value heads and feed-forward width, and either half may be
+        // absent — no norm, no weights, the residual passed through.
+        if let Some(plan) = architecture.layer_plan(layer) {
+            let (attention_norm, mixer) = match plan.key_value_heads {
+                Some(_) => (
+                    Some(norm(names.attention_norm)?),
+                    Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
+                ),
+                None => (None, Mixer::Skip),
+            };
+            let (feed_forward_norm, feed_forward) = match plan.intermediate {
+                Some(_) => (
+                    Some(norm(names.feed_forward_norm)?),
+                    Some(FeedForwardBlock::Dense(FeedForward::load(&builder, config, architecture, layer, adapters)?)),
+                ),
+                None => (None, None),
+            };
+            return Ok(Self {
+                attention_norm,
+                mixer,
+                attention_output_norm: None,
+                feed_forward_norm,
+                feed_forward,
+                feed_forward_output_norm: None,
+                residual_multiplier: architecture.residual_multiplier,
+                parallel: false,
+                scales: None,
+            });
+        }
         // Which norms a block has comes from the architecture; what each is
         // called comes from the family's names (Llama's
         // `post_attention_layernorm` before the feed-forward, Gemma 2's
@@ -730,7 +767,7 @@ impl Block {
         match &self.mixer {
             Mixer::Attention(attention) => attention.window(),
             Mixer::Parallel(mixers) => mixers.attention.window(),
-            Mixer::Hybrid(_) => None,
+            Mixer::Hybrid(_) | Mixer::Skip => None,
             Mixer::StateSpace(_)
             | Mixer::Structured(_)
             | Mixer::ShortConv(_)
@@ -752,8 +789,18 @@ impl Block {
         mask: Option<&Tensor>,
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
+        // DeciLM's no-op attention: the block is its feed-forward alone, or
+        // nothing at all.
+        if let Mixer::Skip = self.mixer {
+            let Some(feed_forward_block) = &self.feed_forward else {
+                return Ok(hidden.clone());
+            };
+            let normed = optional_norm(self.feed_forward_norm.as_ref(), hidden, mode.pass)?;
+            return hidden + self.scaled(feed_forward_block.forward(&normed, mode)?)?;
+        }
         let normed = optional_norm(self.attention_norm.as_ref(), hidden, mode.pass)?;
         let mixed = match &self.mixer {
+            Mixer::Skip => candle_core::bail!("layer {layer} has no attention to run"),
             Mixer::Attention(attention) => {
                 attention.forward(&normed, index_pos, layer, cache, mask, mode)?
             }

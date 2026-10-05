@@ -12,7 +12,8 @@ use serde_json::Value;
 
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
-    GlobalAttention, LatentAttention, LightningSpec, Loops, MixtureOfExperts, Names, NormKind, ParallelScan, ParameterNorm,
+    GlobalAttention, LatentAttention, LayerPlan, LightningSpec, Loops, MixtureOfExperts, Names, NormKind, ParallelScan,
+    ParameterNorm,
     PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
     SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec,
 };
@@ -124,10 +125,11 @@ pub(super) enum Family {
     HyV3,
     Nanbeige,
     IQuestLoopCoder,
+    NemotronNas,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 97] = [
+    pub(super) const ALL: [Self; 98] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -225,6 +227,7 @@ impl Family {
         Self::HyV3,
         Self::Nanbeige,
         Self::IQuestLoopCoder,
+        Self::NemotronNas,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -332,6 +335,7 @@ impl Family {
             Self::HyV3 => "hy_v3",
             Self::Nanbeige => "nanbeige",
             Self::IQuestLoopCoder => "iquestloopcoder",
+            Self::NemotronNas => "nemotron-nas",
         }
     }
 
@@ -420,6 +424,27 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     if model_type == "zamba2" {
         if let Some(object) = raw.as_object_mut() {
             object.insert("tie_word_embeddings".to_owned(), Value::Bool(true));
+        }
+    }
+    // DeciLM states its feed-forward widths per layer and leaves
+    // `intermediate_size` null; the widest stands in for the Llama key,
+    // which no DeciLM layer reads.
+    if model_type == "nemotron-nas" && raw.get("intermediate_size").is_none_or(Value::is_null) {
+        let hidden = whole(raw, "hidden_size").unwrap_or(0);
+        let widest = raw
+            .get("block_configs")
+            .and_then(Value::as_array)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| block.get("ffn"))
+                    .filter_map(|ffn| deci_intermediate(ffn, hidden))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        if let Some(object) = raw.as_object_mut() {
+            object.insert("intermediate_size".to_owned(), Value::from(widest));
         }
     }
     let aliases: &[(&str, &[&str])] = &[
@@ -1135,6 +1160,21 @@ pub(super) fn family(
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.lm_head_bias = true;
             architecture.names = Names::PHI;
+        }
+        "nemotron-nas" => {
+            // DeciLM (Llama-3.3-Nemotron Super and Ultra): Llama's block,
+            // each layer's own `block_configs` entry giving its key-value
+            // heads (`num_attention_heads / n_heads_in_group`) and
+            // feed-forward width (`ffn_mult`), either half possibly a
+            // no-op. Linear replacements, attention windows and sinks, and
+            // sparsified layers are refused.
+            architecture.query_key_value_bias = flag(raw, "attention_bias") || flag(raw, "bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            if let Some(bias) = raw.get("qkv_bias").and_then(Value::as_bool) {
+                architecture.query_key_value_bias = bias;
+            }
+            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.layer_plans = Some(deci_plans(raw, layers, llama, path)?);
         }
         "nanbeige" => {
             // Nanbeige: Llama's block, per-head `q_layernorm` and
@@ -3185,6 +3225,85 @@ const OLMO_HYBRID_FULL_EVERY: usize = 4;
 /// "loop_window_size", 64)`).
 const LOOP_CODER_LOOPS: usize = 2;
 const LOOP_CODER_WINDOW: usize = 64;
+
+/// DeciLM rounds every feed-forward width up to a multiple of this
+/// (`_find_multiple(intermediate_size, 256)` in vLLM's `nemotron_nas.py`
+/// and the checkpoints' `modeling_decilm.py`).
+const DECI_WIDTH_MULTIPLE: usize = 256;
+
+/// A DeciLM `ffn` entry's width: its `intermediate_size`, or
+/// `2 · ffn_mult · hidden / 3` truncated and rounded up to a multiple of
+/// [`DECI_WIDTH_MULTIPLE`].
+fn deci_intermediate(ffn: &Value, hidden: usize) -> Option<usize> {
+    if let Some(width) = whole(ffn, "intermediate_size") {
+        return Some(width);
+    }
+    let multiplier = number(ffn, "ffn_mult")?;
+    let width = (2.0 * multiplier * hidden as f64 / 3.0) as usize;
+    Some(width.div_ceil(DECI_WIDTH_MULTIPLE) * DECI_WIDTH_MULTIPLE)
+}
+
+/// DeciLM's `block_configs`, one plan per layer.
+fn deci_plans(raw: &Value, layers: usize, llama: &LlamaConfig, path: &Path) -> Result<Vec<LayerPlan>> {
+    let Some(blocks) = raw.get("block_configs").and_then(Value::as_array) else {
+        bail!("{} declares a DeciLM model without block_configs", path.display());
+    };
+    if blocks.len() != layers {
+        bail!("{} lists {} block_configs for {layers} layers", path.display(), blocks.len());
+    }
+    let stated = |section: &Value, key: &str| section.get(key).is_some_and(|value| !value.is_null() && value != false);
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(layer, block)| {
+            let (Some(attention), Some(ffn)) = (block.get("attention"), block.get("ffn")) else {
+                bail!("{} gives layer {layer} no attention or ffn block config", path.display());
+            };
+            for (section, name) in [(attention, "attention"), (ffn, "ffn")] {
+                for key in ["replace_with_linear", "sparsify"] {
+                    if stated(section, key) {
+                        bail!("{} sets layer {layer}'s {name} {key}, which Ster does not implement", path.display());
+                    }
+                }
+            }
+            for key in ["window_length", "num_sink_tokens"] {
+                if stated(attention, key) {
+                    bail!("{} sets layer {layer}'s attention {key}, which Ster does not implement", path.display());
+                }
+            }
+            if text(ffn, "hidden_act").is_some_and(|act| Some(act) != text(raw, "hidden_act")) {
+                bail!(
+                    "{} gives layer {layer} its own feed-forward hidden_act; Ster runs one activation in every layer",
+                    path.display()
+                );
+            }
+            let key_value_heads = if flag(attention, "no_op") {
+                None
+            } else {
+                let Some(group) = whole(attention, "n_heads_in_group").filter(|group| *group > 0) else {
+                    bail!("{} gives layer {layer}'s attention no n_heads_in_group", path.display());
+                };
+                if llama.num_attention_heads % group != 0 {
+                    bail!(
+                        "{} groups layer {layer}'s {} heads by {group}, which does not divide them",
+                        path.display(),
+                        llama.num_attention_heads
+                    );
+                }
+                Some(llama.num_attention_heads / group)
+            };
+            let intermediate = if flag(ffn, "no_op") {
+                None
+            } else {
+                let Some(width) = deci_intermediate(ffn, llama.hidden_size) else {
+                    bail!("{} gives layer {layer}'s ffn neither ffn_mult nor intermediate_size", path.display());
+                };
+                Some(width)
+            };
+            Ok(LayerPlan { key_value_heads, intermediate })
+        })
+        .collect()
+}
 
 /// GraniteSWA's and GraniteMoeSWA's additions to Granite: a learned sink per
 /// head (`self_attn.sinks`), sliding-window layers as `layer_types` lists
