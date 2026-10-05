@@ -11,7 +11,7 @@ use candle_transformers::models::llama::Config;
 use crate::lora::Adapters;
 
 use super::{
-    Architecture, Cache, ForwardOutput, Mode, Positions, Readout, SteeringPlan,
+    Architecture, Cache, ForwardOutput, Mode, Names, Positions, Readout, SteeringPlan,
     depth::DepthMix,
     deepseek4::HyperHead,
     attention::padded_causal_mask,
@@ -94,6 +94,16 @@ impl SteeringLlama {
         // whether the embedding is where the root says.
         if !builder.contains_tensor(&format!("{}.weight", architecture.names.embeddings)) {
             architecture.names = architecture.names.without_root();
+        }
+        // Transformers saves Kimi-K2.5's decoder layers as `model.blocks`
+        // where Moonshot's release keeps `model.layers`; which one this is
+        // shows in where the first layer's norm is.
+        let first_norm = |layers: &str| format!("{layers}.0.{}.weight", architecture.names.attention_norm);
+        if architecture.names.layers == Names::LLAMA.layers
+            && !builder.contains_tensor(&first_norm(architecture.names.layers))
+            && builder.contains_tensor(&first_norm(Names::BLOCKS_LAYERS))
+        {
+            architecture.names.layers = Names::BLOCKS_LAYERS;
         }
         let names = architecture.names;
         let embeddings = embedding(

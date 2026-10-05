@@ -1761,6 +1761,8 @@ impl Names {
     };
     pub const HRM_LOW_LAYERS: &'static str = "model.L_module.layers";
     pub const HRM_HIGH_LAYERS: &'static str = "model.H_module.layers";
+    /// Where Transformers saves Kimi-K2.5's decoder layers.
+    pub const BLOCKS_LAYERS: &'static str = "model.blocks";
     /// Inkling, as Thinking Machines stores it below `model.llm`: `embed`
     /// and its `embed_norm`, `layers.{i}` with `attn_norm` and `mlp_norm`,
     /// the final `norm`, and the head `unembed`.
