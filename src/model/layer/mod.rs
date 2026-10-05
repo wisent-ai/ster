@@ -455,6 +455,7 @@ impl Block {
                     layer,
                     config.num_hidden_layers,
                     lightning,
+                    spec,
                 )?),
                 attention_output_norm: None,
                 feed_forward_norm: Some(norm(names.feed_forward_norm)?),
@@ -817,7 +818,7 @@ impl Block {
             Mixer::Structured(structured) => structured.forward(&normed, layer, cache)?,
             Mixer::ShortConv(convolution) => convolution.forward(&normed, layer, cache)?,
             Mixer::DeltaRule(delta) => delta.forward(&normed, layer, cache)?,
-            Mixer::Lightning(lightning) => lightning.forward(&normed, layer, cache)?,
+            Mixer::Lightning(lightning) => lightning.forward(&normed, index_pos, layer, cache, mode)?,
             Mixer::FeedForward(feed_forward) => feed_forward.forward(&normed, mode)?,
             Mixer::Parallel(mixers) => mixers.forward(&normed, index_pos, layer, cache, mask, mode)?,
             Mixer::Hybrid(hybrid) => {

@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
-    GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningSpec, Loops, MixtureOfExperts, Names, NormKind,
-    ParallelScan, ParameterNorm,
+    GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningForm, LightningSpec, Loops, MixtureOfExperts,
+    Names, NormKind, ParallelScan, ParameterNorm,
     PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
     SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec,
 };
@@ -129,10 +129,11 @@ pub(super) enum Family {
     DeepseekV32,
     GlmMoeDsa,
     Axk1,
+    BailingHybrid,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 101] = [
+    pub(super) const ALL: [Self; 102] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -234,6 +235,7 @@ impl Family {
         Self::DeepseekV32,
         Self::GlmMoeDsa,
         Self::Axk1,
+        Self::BailingHybrid,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -345,6 +347,7 @@ impl Family {
             Self::DeepseekV32 => "deepseek_v32",
             Self::GlmMoeDsa => "glm_moe_dsa",
             Self::Axk1 => "axk1",
+            Self::BailingHybrid => "bailing_hybrid",
         }
     }
 
@@ -1865,8 +1868,9 @@ pub(super) fn family(
                 structured: Some(heads),
             });
         }
-        // Param2-MoE is Ling 2.0's block and router under its own name.
-        "bailing_moe" | "param2moe" => {
+        // Param2-MoE is Ling 2.0's block and router under its own name;
+        // Ling 2.5 and 3.0 (`bailing_hybrid`) add lightning attention.
+        "bailing_moe" | "param2moe" | "bailing_hybrid" => {
             // Ling 1.x and 2.0: Llama's block under Bailing's names, one
             // stacked `query_key_value`, per-head query and key norms when
             // `use_qk_norm` holds, the first `first_k_dense_replace` layers
@@ -1888,7 +1892,9 @@ pub(super) fn family(
             architecture.qkv_layout = QkvLayout::Stacked;
             architecture.query_key_value_bias = flag(raw, "use_qkv_bias");
             architecture.output_bias = flag(raw, "use_bias");
-            if flag(raw, "use_qk_norm") {
+            if model_type == "bailing_hybrid" {
+                bailing_hybrid(raw, layers, llama, &mut architecture, path)?;
+            } else if flag(raw, "use_qk_norm") {
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
             }
             fits(layers, path)?;
@@ -2401,6 +2407,7 @@ pub(super) fn family(
                 heads: llama.num_attention_heads,
                 head_dim: architecture.head_dim,
                 layers: lightning,
+                form: LightningForm::MiniMax,
             });
             architecture.scaled_residuals = Some(ScaledResiduals {
                 from_normed: raw.get("postnorm").and_then(Value::as_bool).unwrap_or(true),
@@ -3329,6 +3336,63 @@ fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Re
         interleaved: glm && raw.get("indexer_rope_interleave").and_then(Value::as_bool).unwrap_or(true),
         shared_layers,
     })
+}
+
+/// Ling 2.5's and 3.0's additions to Ling 2.0: DeepSeek's latent attention
+/// (rotating adjacent pairs under `rope_interleave`) on every
+/// `layer_group_size`-th layer, and lightning attention on the others, its
+/// heads `head_dim` wide with their first `partial_rotary_factor` share
+/// rotated by halves at the latent attention's base.
+fn bailing_hybrid(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    fits(layers, path)?;
+    let Some(latent) = architecture.latent else {
+        bail!("{} declares a Ling hybrid model without kv_lora_rank", path.display());
+    };
+    let group = whole(raw, "layer_group_size").unwrap_or(1).max(1);
+    let linear = (0..layers)
+        .filter(|layer| (layer + 1) % group != 0)
+        .fold(0u128, |set, layer| set | (1u128 << layer));
+    let Some(head_dim) = whole(raw, "head_dim") else {
+        bail!("{} declares a Ling hybrid model without head_dim", path.display());
+    };
+    let heads = llama.num_attention_heads;
+    if whole(raw, "num_kv_heads_for_linear_attn").is_some_and(|stated| stated != heads) {
+        bail!(
+            "{} gives its lightning attention a key-value head count other than its {heads} heads; Ster runs it with one key and value per head",
+            path.display()
+        );
+    }
+    let share = number(raw, "partial_rotary_factor").unwrap_or(1.0);
+    let rotated = (head_dim as f64 * share) as usize;
+    if rotated != latent.rotated {
+        bail!(
+            "{} rotates {rotated} components of each lightning head and {} of each latent one; Ster rotates both by one table",
+            path.display(),
+            latent.rotated
+        );
+    }
+    let groups = whole(raw, "group_norm_size").unwrap_or(1).max(1);
+    if (heads * head_dim) % groups != 0 {
+        bail!("{} splits its {} lightning channels into {groups} norm groups unevenly", path.display(), heads * head_dim);
+    }
+    architecture.interleaved_rotary = raw.get("rope_interleave").and_then(Value::as_bool).unwrap_or(true);
+    architecture.lightning = Some(LightningSpec {
+        heads,
+        head_dim,
+        layers: linear,
+        form: LightningForm::Bailing {
+            groups,
+            silu: flag(raw, "linear_silu") || flag(raw, "use_linear_silu"),
+            qk_norm: flag(raw, "use_qk_norm"),
+        },
+    });
+    Ok(())
 }
 
 /// DeciLM rounds every feed-forward width up to a multiple of this

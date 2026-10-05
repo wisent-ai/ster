@@ -986,7 +986,7 @@ pub(super) fn project(
 /// components rotate and the rest pass through, as Phi-4-mini, GPT-NeoX and
 /// StableLM do. `interleaved` rotates adjacent pairs `(2i, 2i + 1)` instead
 /// of halves `d / 2` apart, as Cohere does.
-fn apply_rotary(
+pub(in crate::model) fn apply_rotary(
     input: &Tensor,
     cos: &Tensor,
     sin: &Tensor,

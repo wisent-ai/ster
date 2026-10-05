@@ -528,13 +528,28 @@ impl SharedBlocksSpec {
     }
 }
 
-/// MiniMax-Text-01's lightning attention: `heads` heads of `head_dim`, on
-/// the layers in `layers`.
+/// Lightning attention: `heads` heads of `head_dim`, on the layers in
+/// `layers`, in MiniMax-Text-01's or Ling 2.5's form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LightningSpec {
     pub heads: usize,
     pub head_dim: usize,
     pub layers: u128,
+    pub form: LightningForm,
+}
+
+/// Which family's lightning attention a layer runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightningForm {
+    /// MiniMax-Text-01 (`self_attn`): `qkv_proj` through SiLU, one RMS
+    /// norm over all heads, a sigmoid `output_gate`, `out_proj`.
+    MiniMax,
+    /// Ling 2.5 (`attention`): `query_key_value` (through SiLU under
+    /// `linear_silu`), per-head `query_layernorm` and `key_layernorm` under
+    /// `qk_norm`, the global rotation by halves, the query scaled by
+    /// `head_dim^-0.5`, an RMS norm over `groups` equal groups of the
+    /// read-out scaled by `g_norm`, a sigmoid `g_proj` gate, `dense`.
+    Bailing { groups: usize, silu: bool, qk_norm: bool },
 }
 
 /// MiniMax-Text-01's residual scaling: `(alpha, beta)` for the lightning
