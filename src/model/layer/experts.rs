@@ -11,7 +11,7 @@ use candle_core::{D, DType, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 
 use crate::model::{
-    Activation, ExpertGroups, ExpertLayout, MixtureOfExperts, Scoring, SharedExpert, SharedForm,
+    Activation, ExpertGroups, ExpertLayout, MixtureOfExperts, Scoring, SharedExpert, SharedForm, SwigluLimit,
 };
 
 #[derive(Debug, Clone)]
@@ -26,24 +26,36 @@ struct Expert {
 /// sigmoid approximation of GELU it was trained with.
 const GPT_OSS_GATE_SHARPNESS: f64 = 1.702;
 
+/// One expert's clamped SwiGLU, resolved for its layer.
+#[derive(Debug, Clone, Copy)]
+enum Clamp {
+    /// GPT-OSS's `(clamp(up, -limit, limit) + 1) · g · sigmoid(1.702 g)`
+    /// where `g = min(gate, limit)`.
+    GptOss(f64),
+    /// Step 3.5's `min(act(gate), limit) · clamp(up, -limit, limit)`.
+    Step(f64),
+}
+
 impl Expert {
-    /// `down(act(gate) · up)`, or `down(act(up))` without a gate; with a
-    /// `limit`, GPT-OSS's clamped form,
-    /// `down((clamp(up, -limit, limit) + 1) · g · sigmoid(1.702 g))` where
-    /// `g = min(gate, limit)`.
+    /// `down(act(gate) · up)`, or `down(act(up))` without a gate, with the
+    /// gate and up clamped as `clamp` says.
     fn forward(
         &self,
         input: &Tensor,
         activation: Activation,
-        limit: Option<f64>,
+        clamp: Option<Clamp>,
     ) -> candle_core::Result<Tensor> {
         let up = self.up.forward(input)?;
-        let gated = match (&self.gate, limit) {
-            (Some(gate), Some(limit)) => {
+        let gated = match (&self.gate, clamp) {
+            (Some(gate), Some(Clamp::GptOss(limit))) => {
                 let gate = gate.forward(input)?.minimum(limit)?;
                 let up = (up.clamp(-limit, limit)? + 1.0)?;
                 let sigmoid = ((gate.clone() * -GPT_OSS_GATE_SHARPNESS)?.exp()? + 1.0)?.recip()?;
                 ((gate * sigmoid)? * up)?
+            }
+            (Some(gate), Some(Clamp::Step(limit))) => {
+                let gate = activation.apply(&gate.forward(input)?)?.minimum(limit)?;
+                (gate * up.clamp(-limit, limit)?)?
             }
             (Some(gate), None) => (activation.apply(&gate.forward(input)?)? * up)?,
             (None, _) => activation.apply(&up)?,
@@ -86,15 +98,18 @@ pub(super) struct Experts {
     expert_scales: Option<Tensor>,
     spec: MixtureOfExperts,
     activation: Activation,
+    /// The routed experts' and the shared expert's clamps on this layer.
+    clamps: (Option<Clamp>, Option<Clamp>),
 }
 
 impl Experts {
-    /// `builder` is the layer's.
+    /// `builder` is the layer's; `layer` picks Step 3.5's clamps.
     pub(super) fn load(
         builder: &VarBuilder<'_>,
         hidden: usize,
         spec: &MixtureOfExperts,
         activation: Activation,
+        layer: usize,
     ) -> candle_core::Result<Self> {
         let count = spec.count;
         let intermediate = spec.intermediate;
@@ -346,6 +361,13 @@ impl Experts {
         } else {
             None
         };
+        // Step 3.5 states a limit per layer, zero meaning none.
+        let at = |limits: &[f64]| limits.get(layer).copied().filter(|limit| *limit != 0.0).map(Clamp::Step);
+        let clamps = match &spec.swiglu_limit {
+            Some(SwigluLimit::GptOss(limit)) => (Some(Clamp::GptOss(*limit)), None),
+            Some(SwigluLimit::Step { routed, shared }) => (at(routed), at(shared)),
+            None => (None, None),
+        };
         Ok(Self {
             router,
             selection_bias,
@@ -354,6 +376,7 @@ impl Experts {
             expert_scales,
             spec: spec.clone(),
             activation,
+            clamps,
         })
     }
 
@@ -464,8 +487,7 @@ impl Experts {
             }
             let index = Tensor::new(tokens.as_slice(), device)?;
             let inputs = flat.index_select(&index, 0)?;
-            let produced =
-                self.experts[expert].forward(&inputs, self.activation, self.spec.swiglu_limit)?;
+            let produced = self.experts[expert].forward(&inputs, self.activation, self.clamps.0)?;
             let weight = weights
                 .index_select(&index, 0)?
                 .narrow(1, expert, 1)?
@@ -473,7 +495,7 @@ impl Experts {
             output = output.index_add(&index, &produced.broadcast_mul(&weight)?, 0)?;
         }
         if let Some((shared, gate)) = &self.shared {
-            let produced = shared.forward(&flat, self.activation, None)?;
+            let produced = shared.forward(&flat, self.activation, self.clamps.1)?;
             let produced = match gate {
                 // sigmoid, composed so it has a backward pass.
                 Some(gate) => produced

@@ -754,7 +754,7 @@ fn feed_forward_block(
             dense: FeedForward::load(builder, config, architecture, layer, adapters)?,
             dense_norm: norm(architecture.names.feed_forward_norm)?,
             dense_output_norm: norm("post_feedforward_layernorm_1")?,
-            experts: Experts::load(builder, config.hidden_size, experts, architecture.activation)?,
+            experts: Experts::load(builder, config.hidden_size, experts, architecture.activation, layer)?,
             router_norm: spec.unscaled(config.hidden_size, builder)?,
             experts_norm: norm("pre_feedforward_layernorm_2")?,
             experts_output_norm: norm("post_feedforward_layernorm_2")?,
@@ -766,6 +766,7 @@ fn feed_forward_block(
             config.hidden_size,
             experts,
             architecture.activation,
+            layer,
         )?),
         _ => FeedForwardBlock::Dense(FeedForward::load(builder, config, architecture, layer, adapters)?),
     })

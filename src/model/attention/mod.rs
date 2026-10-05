@@ -66,6 +66,9 @@ pub(super) struct Attention {
     /// Qwen3-Next's gate rows of `q_proj`: attention's output is multiplied
     /// by their sigmoid before the output projection.
     output_gate: Option<Linear>,
+    /// Step 3.5's `g_proj`: one logit per head, each head's output
+    /// multiplied by its sigmoid.
+    head_gate: Option<Linear>,
     /// Step3's query bottleneck: `q_proj` down to `share_q_dim` and the RMS
     /// norm `inter_norm`, whose output the query projection (`wq`) reads in
     /// place of the hidden state.
@@ -151,11 +154,12 @@ impl Attention {
     ) -> candle_core::Result<Self> {
         let names = architecture.names;
         let builder = layer_builder.pp(names.attention);
-        let heads = config.num_attention_heads;
         let window = architecture.window(layer);
-        // Gemma 4's full-attention layers have their own head width and
-        // key-value head count; DeciLM states each layer's key-value heads.
+        // Gemma 4's full-attention layers have their own head width,
+        // MiMo-V2's and Gemma 4's their own key-value head count, Step 3.5's
+        // their own head counts; DeciLM states each layer's key-value heads.
         let global = architecture.global_at(layer);
+        let heads = global.and_then(|global| global.heads).unwrap_or(config.num_attention_heads);
         let key_value_heads = global
             .and_then(|global| global.key_value_heads)
             .or_else(|| architecture.layer_plan(layer).and_then(|plan| plan.key_value_heads))
@@ -430,6 +434,11 @@ impl Attention {
             key_scale: architecture.key_scale,
             value_scale: architecture.value_scale,
             output_gate,
+            head_gate: if architecture.head_gate {
+                Some(projection(input, heads, false, conv1d, builder.pp("g_proj"))?)
+            } else {
+                None
+            },
             low_rank: None,
             query_bottleneck: match architecture.query_bottleneck {
                 Some(width) => Some((
@@ -695,6 +704,15 @@ impl Attention {
                 (global.broadcast_mul(&gate)? + local.broadcast_mul(&(gate.neg()? + 1.0)?)?)?
             }
             _ => self.attend(&query, key, value, self.window, mask, index_pos, cache, mode)?,
+        };
+        // Step 3.5's head-wise gate: each head's output times the sigmoid
+        // of its `g_proj` logit, composed so it has a backward pass.
+        let output = match &self.head_gate {
+            Some(gate) => {
+                let logits = gate.forward(hidden)?.transpose(1, 2)?.unsqueeze(3)?;
+                output.broadcast_mul(&(logits.neg()?.exp()? + 1.0)?.recip()?.to_dtype(output.dtype())?)?
+            }
+            None => output,
         };
         let output = output
             .transpose(1, 2)?

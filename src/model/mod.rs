@@ -230,6 +230,10 @@ pub struct Architecture {
     /// and then as many gate rows, and attention's output is multiplied by
     /// the gate's sigmoid before `o_proj`.
     pub output_gate: bool,
+    /// Step 3.5's head-wise gate (`use_head_wise_attn_gate`): `g_proj`
+    /// yields one logit per head, and each head's output is multiplied by
+    /// its sigmoid before `o_proj`.
+    pub head_gate: bool,
     /// Step3's query bottleneck width (`share_q_dim`): the query is
     /// `wq(inter_norm(q_proj(x)))`.
     pub query_bottleneck: Option<usize>,
@@ -383,7 +387,9 @@ impl SkipConnections {
 }
 
 /// The full-attention layers' own attention shape, beside the
-/// sliding-window layers': heads `head_dim` wide (Gemma 4's
+/// sliding-window layers': `heads` query heads when the config states them
+/// apart (Step 3.5's `num_attention_heads` beside
+/// `attention_other_setting`), heads `head_dim` wide (Gemma 4's
 /// `global_head_dim`), `key_value_heads` of them when the config states
 /// them apart (Gemma 4's `num_global_key_value_heads`, MiMo-V2's
 /// `num_key_value_heads` beside `swa_num_key_value_heads`), the first
@@ -392,6 +398,7 @@ impl SkipConnections {
 /// key projection before its norm, with no `v_proj`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlobalAttention {
+    pub heads: Option<usize>,
     pub head_dim: usize,
     pub key_value_heads: Option<usize>,
     pub rotary_dim: usize,
@@ -657,6 +664,7 @@ impl Architecture {
             feed_forward_scales: None,
             delta_rule: None,
             output_gate: false,
+            head_gate: false,
             query_bottleneck: None,
             lightning: None,
             scaled_residuals: None,
@@ -970,7 +978,7 @@ impl Architecture {
             let why = if self.query_bottleneck.is_some() && *target == Target::Query {
                 "its query passes a bottleneck and a norm (Step3's q_proj and inter_norm) before wq"
             } else if self.global_attention.is_some() && !feed_forward_target(*target) {
-                "its full-attention layers' heads differ from its sliding-window layers' in width or key-value count (Gemma 4's global_head_dim, MiMo-V2's swa_num_key_value_heads)"
+                "its full-attention layers' heads differ from its sliding-window layers' in count or width (Gemma 4's global_head_dim, MiMo-V2's swa_num_key_value_heads, Step 3.5's attention_other_setting)"
             } else if self.latent.is_some() && !feed_forward_target(*target) {
                 "its attention is latent (DeepSeek's low-rank query and key-value)"
             } else if self.experts.is_some() {
@@ -1102,8 +1110,22 @@ pub struct MixtureOfExperts {
     pub selection_bias: Option<&'static str>,
     /// `routed_scaling_factor`, multiplying the routed experts' weights.
     pub routed_scale: Option<f64>,
-    /// GPT-OSS's `swiglu_limit`: its experts' clamped gate.
-    pub swiglu_limit: Option<f64>,
+    /// Clamped SwiGLU experts: GPT-OSS's one `swiglu_limit`, or Step 3.5's
+    /// limits per layer.
+    pub swiglu_limit: Option<SwigluLimit>,
+}
+
+/// How a family clamps its experts' SwiGLU.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SwigluLimit {
+    /// GPT-OSS: `(clamp(up, ±limit) + 1) · g · sigmoid(1.702 g)` with
+    /// `g = min(gate, limit)`, on every routed expert.
+    GptOss(f64),
+    /// Step 3.5: `min(silu(gate), limit) · clamp(up, ±limit)`, the routed
+    /// experts' limit on layer `i` `routed[i]` (`swiglu_limits`) and the
+    /// shared expert's `shared[i]` (`swiglu_limits_shared`); zero means
+    /// unclamped.
+    Step { routed: Vec<f64>, shared: Vec<f64> },
 }
 
 /// A shared expert's inner width and whether a sigmoid gate scales it.

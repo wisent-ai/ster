@@ -15,7 +15,7 @@ use crate::model::{
     GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningForm, LightningSpec, Loops, MixtureOfExperts,
     Names, NormKind, ParallelScan, ParameterNorm,
     PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
-    SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec,
+    SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec, SwigluLimit,
 };
 
 /// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
@@ -132,10 +132,11 @@ pub(super) enum Family {
     BailingHybrid,
     MimoV2Flash,
     MimoV2,
+    Step3p5,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 104] = [
+    pub(super) const ALL: [Self; 105] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -240,6 +241,7 @@ impl Family {
         Self::BailingHybrid,
         Self::MimoV2Flash,
         Self::MimoV2,
+        Self::Step3p5,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -354,6 +356,7 @@ impl Family {
             Self::BailingHybrid => "bailing_hybrid",
             Self::MimoV2Flash => "mimo_v2_flash",
             Self::MimoV2 => "mimo_v2",
+            Self::Step3p5 => "step3p5",
         }
     }
 
@@ -476,6 +479,9 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
             object.insert("num_global_key_value_heads".to_owned(), full);
             object.insert("num_key_value_heads".to_owned(), windowed);
         }
+    }
+    if model_type == "step3p5" {
+        step3p5_keys(raw);
     }
     let aliases: &[(&str, &[&str])] = &[
         ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon", "layernorm_epsilon"]),
@@ -2124,7 +2130,7 @@ pub(super) fn family(
                 0,
                 path,
             )?;
-            routed.swiglu_limit = number(raw, "swiglu_limit");
+            routed.swiglu_limit = number(raw, "swiglu_limit").map(SwigluLimit::GptOss);
             architecture.experts = Some(routed);
         }
         "hunyuan_v1_dense" | "hunyuan_v1_moe" => {
@@ -2233,52 +2239,15 @@ pub(super) fn family(
             // Step3 (its text decoder, `text_config` of `step3_vl`): the
             // query narrows through `q_proj` to `share_q_dim`, passes the RMS
             // norm `inter_norm` and widens through `wq`, beside
-            // `num_attention_groups` key-value heads; the layers
-            // `moe_layers_enum` lists (from zero; all but the first when
-            // absent) route over `moe_num_experts` experts stacked under
-            // `moe`, renormalised under `norm_expert_weight`, beside a shared
-            // `share_expert` `share_expert_dim` wide.
+            // `num_attention_groups` key-value heads, and Step's experts.
             let Some(width) = whole(raw, "share_q_dim").filter(|width| *width > 0) else {
                 bail!("{} declares a Step3 model without share_q_dim", path.display());
             };
-            fits(layers, path)?;
-            let routed_layers = match text(raw, "moe_layers_enum") {
-                Some(list) => {
-                    let mut set = 0u128;
-                    for entry in list.split(',') {
-                        match entry.trim().parse::<usize>() {
-                            Ok(layer) if layer < layers => set |= 1u128 << layer,
-                            _ => bail!(
-                                "{} lists moe_layers_enum entry {entry:?}, which names no layer below {layers}",
-                                path.display()
-                            ),
-                        }
-                    }
-                    set
-                }
-                None => every_layer(layers, path)? & !1u128,
-            };
             architecture.names = Names::STEP3;
             architecture.query_bottleneck = Some(width);
-            let mut routed = experts(
-                raw,
-                "moe_num_experts",
-                "moe_intermediate_size",
-                flag(raw, "norm_expert_weight"),
-                ExpertLayout::Step3,
-                every_layer(layers, path)? & !routed_layers,
-                path,
-            )?;
-            routed.shared = whole(raw, "share_expert_dim")
-                .filter(|width| *width > 0)
-                .map(|intermediate| SharedExpert {
-                    intermediate,
-                    module: "share_expert",
-                    gated: false,
-                    form: SharedForm::GateUpDown,
-                });
-            architecture.experts = Some(routed);
+            architecture.experts = Some(step_experts(raw, layers, path)?);
         }
+        "step3p5" => step3p5(raw, layers, llama, &mut architecture, path)?,
         "zamba2" => {
             // Zamba2: Mamba-2 layers, and on the layers `layers_block_type`
             // calls `hybrid` a shared transformer block (one of
@@ -2857,6 +2826,7 @@ pub(super) fn family(
             architecture.sliding_layers = listed_layers(types, layers, path)?;
             let key_is_value = flag(raw, "attention_k_eq_v");
             architecture.global_attention = Some(GlobalAttention {
+                heads: None,
                 head_dim: global_head_dim,
                 // Transformers gives the full-attention layers their own
                 // key-value head count only under `attention_k_eq_v`.
@@ -3476,6 +3446,7 @@ fn mimo_v2(
     architecture.value_head_dim = whole(raw, "v_head_dim");
     architecture.value_scale = number(raw, "attention_value_scale");
     architecture.global_attention = Some(GlobalAttention {
+        heads: None,
         head_dim: architecture.head_dim,
         key_value_heads: whole(raw, "num_global_key_value_heads"),
         rotary_dim: architecture.rotary_dim,
@@ -3483,6 +3454,268 @@ fn mimo_v2(
     });
     architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
     Ok(())
+}
+
+/// Step's experts (Step3, Step 3.5): the layers `moe_layers_enum` lists
+/// (from zero; all but the first when absent) route over `moe_num_experts`
+/// experts stacked under `moe`, renormalised under `norm_expert_weight`,
+/// beside a shared `share_expert` `share_expert_dim` wide.
+fn step_experts(raw: &Value, layers: usize, path: &Path) -> Result<MixtureOfExperts> {
+    fits(layers, path)?;
+    let routed_layers = match text(raw, "moe_layers_enum") {
+        Some(list) => {
+            let mut set = 0u128;
+            for entry in list.split(',') {
+                match entry.trim().parse::<usize>() {
+                    Ok(layer) if layer < layers => set |= 1u128 << layer,
+                    _ => bail!(
+                        "{} lists moe_layers_enum entry {entry:?}, which names no layer below {layers}",
+                        path.display()
+                    ),
+                }
+            }
+            set
+        }
+        None => every_layer(layers, path)? & !1u128,
+    };
+    let mut routed = experts(
+        raw,
+        "moe_num_experts",
+        "moe_intermediate_size",
+        flag(raw, "norm_expert_weight"),
+        ExpertLayout::Step3,
+        every_layer(layers, path)? & !routed_layers,
+        path,
+    )?;
+    routed.shared = whole(raw, "share_expert_dim")
+        .filter(|width| *width > 0)
+        .map(|intermediate| SharedExpert {
+            intermediate,
+            module: "share_expert",
+            gated: false,
+            form: SharedForm::GateUpDown,
+        });
+    Ok(routed)
+}
+
+/// Step 3.5's config, put in the shape the rest of the reading expects. Its
+/// per-layer lists also cover the multi-token-prediction layers past
+/// `num_hidden_layers`, which Ster does not run, so they are cut to the
+/// decoder's layers; a list `rope_theta` becomes `layer_rope_theta`, with
+/// the first full-attention layer's base as `rope_theta`; and the
+/// sliding-window layers' head counts in `attention_other_setting` become
+/// the base counts, the full-attention ones moving to
+/// `num_global_attention_heads` and `num_global_key_value_heads`.
+fn step3p5_keys(raw: &mut Value) {
+    let layers = whole(raw, "num_hidden_layers").unwrap_or(0);
+    let Some(object) = raw.as_object_mut() else {
+        return;
+    };
+    let per_layer = [
+        "layer_types",
+        "rope_theta",
+        "partial_rotary_factors",
+        "swiglu_limits",
+        "swiglu_limits_shared",
+        "use_rope_layers",
+    ];
+    for key in per_layer {
+        if let Some(Value::Array(list)) = object.get_mut(key) {
+            list.truncate(layers);
+        }
+    }
+    if let Some(Value::Array(bases)) = object.get("rope_theta").cloned() {
+        let first_full = object
+            .get("layer_types")
+            .and_then(Value::as_array)
+            .and_then(|kinds| kinds.iter().position(|kind| kind.as_str() == Some("full_attention")))
+            .unwrap_or(0);
+        if let Some(base) = bases.get(first_full).cloned() {
+            object.insert("rope_theta".to_owned(), base);
+        }
+        object.insert("layer_rope_theta".to_owned(), Value::Array(bases));
+    }
+    let Some(other) = object
+        .get("attention_other_setting")
+        .filter(|setting| setting.get("attention_type").and_then(Value::as_str) == Some("sliding_attention"))
+        .cloned()
+    else {
+        return;
+    };
+    let full_heads = object.get("num_attention_heads").cloned();
+    let full_groups = object.get("num_attention_groups").or_else(|| object.get("num_key_value_heads")).cloned();
+    let windowed_heads = other.get("num_attention_heads").cloned();
+    let windowed_groups = other.get("num_attention_groups").cloned();
+    if let (Some(heads), Some(groups), Some(own_heads), Some(own_groups)) =
+        (full_heads, full_groups, windowed_heads, windowed_groups)
+    {
+        object.insert("num_global_attention_heads".to_owned(), heads);
+        object.insert("num_global_key_value_heads".to_owned(), groups);
+        object.insert("num_attention_heads".to_owned(), own_heads);
+        object.insert("num_key_value_heads".to_owned(), own_groups);
+    }
+}
+
+/// Step 3.5 (`step3p5`): RMS norms scaled by `1 + weight` throughout (vLLM's
+/// `GemmaRMSNorm`), per-head query and key norms, and a sigmoid head-wise
+/// gate (`g_proj`) under `use_head_wise_attn_gate`. Its layers alternate
+/// full and `sliding_window` attention as `layer_types` lists; the
+/// sliding-window layers' head counts come from `attention_other_setting`,
+/// each kind rotates its own `partial_rotary_factors` share by halves at
+/// its own base, `rope_scaling` reaches the full-attention layers only
+/// (`yarn_only_types`), and `use_rope_layers` can leave layers unrotated.
+/// Step's experts route by `moe_router_activation` scores that
+/// `moe.router_bias` moves to choose and `moe_router_scaling_factor` scales,
+/// each routed and shared expert's SwiGLU clamped on the layers
+/// `swiglu_limits` and `swiglu_limits_shared` give a limit.
+fn step3p5(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
+        bail!("{} declares a Step 3.5 model without layer_types", path.display());
+    };
+    let windowed = listed_layers(types, layers, path)?;
+    if let Some(other) = raw.get("attention_other_setting").filter(|setting| !setting.is_null()) {
+        let kind = other.get("attention_type").and_then(Value::as_str);
+        if kind != Some("sliding_attention") {
+            bail!(
+                "{} states attention_other_setting for {kind:?} layers; Ster reads it for sliding_attention layers",
+                path.display()
+            );
+        }
+        if whole(other, "head_dim").is_some_and(|width| width != architecture.head_dim) {
+            bail!(
+                "{} gives its sliding-window heads a head_dim other than {}; Ster builds both kinds one width",
+                path.display(),
+                architecture.head_dim
+            );
+        }
+    }
+    let scaled = raw.get("rope_scaling").is_some_and(|scaling| !scaling.is_null());
+    let full_only = raw
+        .get("yarn_only_types")
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| kinds.len() == 1 && kinds[0].as_str() == Some("full_attention"));
+    if scaled && !full_only {
+        bail!(
+            "{} scales the rotation of sliding-window layers too (yarn_only_types); Ster scales the full-attention rotation only",
+            path.display()
+        );
+    }
+    architecture.sliding_layers = windowed;
+    architecture.sliding_window = whole(raw, "sliding_window");
+    architecture.norm_offset = true;
+    if flag(raw, "use_qk_norm") {
+        architecture.query_key_norm = QueryKeyNorm::PerHead;
+    }
+    architecture.head_gate = flag(raw, "use_head_wise_attn_gate");
+    if let Some(rotated) = raw.get("use_rope_layers").and_then(Value::as_array).filter(|list| !list.is_empty()) {
+        if rotated.len() != layers {
+            bail!("{} lists {} use_rope_layers entries for {layers} layers", path.display(), rotated.len());
+        }
+        for (layer, entry) in rotated.iter().enumerate() {
+            if entry.as_bool() == Some(false) {
+                architecture.unrotated_layers |= 1u128 << layer;
+            }
+        }
+    }
+    let head_dim = architecture.head_dim;
+    let (full_share, windowed_share) = per_kind(raw, "partial_rotary_factors", windowed, layers, path)?;
+    let width = |share: Option<f64>| (head_dim as f64 * share.unwrap_or(1.0)) as usize;
+    let (global_rotary, local_rotary) = (width(full_share), width(windowed_share));
+    if [global_rotary, local_rotary].iter().any(|rotated| *rotated == 0 || rotated % 2 != 0 || *rotated > head_dim) {
+        bail!(
+            "{} rotates {global_rotary} and {local_rotary} of {head_dim} components per head (partial_rotary_factors); each must be even, above zero and at most the head",
+            path.display()
+        );
+    }
+    architecture.rotary_dim = local_rotary;
+    let base = f64::from(llama.rope_theta);
+    let (full_base, windowed_base) = per_kind(raw, "layer_rope_theta", windowed, layers, path)?;
+    if full_base.is_some_and(|full| full != base) {
+        bail!("{} rotates its full-attention layers by more than one base; Ster rotates them all by one", path.display());
+    }
+    // The sliding-window layers always rotate by their own table: its width
+    // can differ from the full-attention layers' and it is never scaled.
+    architecture.local_rope_theta = Some(windowed_base.unwrap_or(base) as f32);
+    architecture.global_attention = Some(GlobalAttention {
+        heads: whole(raw, "num_global_attention_heads"),
+        head_dim,
+        key_value_heads: whole(raw, "num_global_key_value_heads"),
+        rotary_dim: global_rotary,
+        key_is_value: false,
+    });
+    let mut routed = step_experts(raw, layers, path)?;
+    routed.scoring = match text(raw, "moe_router_activation") {
+        None | Some("sigmoid") => Scoring::Sigmoid,
+        Some("softmax") => Scoring::Softmax,
+        Some(other) => bail!(
+            "{} declares moe_router_activation {other:?}; Ster implements sigmoid and softmax expert scores",
+            path.display()
+        ),
+    };
+    routed.routed_scale = number(raw, "moe_router_scaling_factor");
+    routed.selection_bias = flag(raw, "use_moe_router_bias").then_some("moe.router_bias");
+    let limits = |key: &str| -> Result<Vec<f64>> {
+        match raw.get(key).filter(|list| !list.is_null()) {
+            None => Ok(Vec::new()),
+            Some(list) => list
+                .as_array()
+                .and_then(|entries| {
+                    entries.iter().map(|entry| if entry.is_null() { Some(0.0) } else { entry.as_f64() }).collect()
+                })
+                .with_context(|| format!("{} declares {key} that is not a list of numbers", path.display())),
+        }
+    };
+    let (routed_limits, shared_limits) = (limits("swiglu_limits")?, limits("swiglu_limits_shared")?);
+    if let Some(layer) = (0..layers).find(|layer| {
+        routed.dense_layers & (1u128 << layer) != 0 && shared_limits.get(*layer).is_some_and(|limit| *limit != 0.0)
+    }) {
+        bail!(
+            "{} clamps the dense feed-forward of layer {layer} (swiglu_limits_shared); Ster clamps expert feed-forwards only",
+            path.display()
+        );
+    }
+    if routed_limits.iter().chain(&shared_limits).any(|limit| *limit != 0.0) {
+        routed.swiglu_limit = Some(SwigluLimit::Step { routed: routed_limits, shared: shared_limits });
+    }
+    architecture.experts = Some(routed);
+    Ok(())
+}
+
+/// A per-layer list of numbers under `key`, one value for the
+/// full-attention layers and one for the sliding-window layers in
+/// `windowed`, as `(full, sliding)`; refused when either kind's values
+/// differ.
+fn per_kind(raw: &Value, key: &str, windowed: u128, layers: usize, path: &Path) -> Result<(Option<f64>, Option<f64>)> {
+    let Some(list) = raw.get(key).filter(|list| !list.is_null()) else {
+        return Ok((None, None));
+    };
+    let values: Vec<f64> = list
+        .as_array()
+        .and_then(|entries| entries.iter().map(Value::as_f64).collect())
+        .with_context(|| format!("{} declares {key} that is not a list of numbers", path.display()))?;
+    if values.len() != layers {
+        bail!("{} lists {} {key} values for {layers} layers", path.display(), values.len());
+    }
+    fits(layers, path)?;
+    let mut kinds = [None, None];
+    for (layer, value) in values.into_iter().enumerate() {
+        let slot = usize::from(windowed & (1u128 << layer) != 0);
+        match kinds[slot] {
+            Some(seen) if seen != value => bail!(
+                "{} lists more than one {key} value for its {} layers; Ster gives each attention kind one",
+                path.display(),
+                if slot == 1 { "sliding-window" } else { "full-attention" }
+            ),
+            _ => kinds[slot] = Some(value),
+        }
+    }
+    Ok((kinds[0], kinds[1]))
 }
 
 /// DeciLM rounds every feed-forward width up to a multiple of this
