@@ -113,7 +113,7 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
             precision,
         )?,
     };
-    let chat = runtime.set_chat_template(chat_template);
+    let chat = runtime.set_chat_template(chat_template)?;
     let example_set = ExampleSet::load(&examples)?;
     let report = tune::evaluate(
         &runtime,

@@ -78,7 +78,7 @@ pub(super) fn run(args: ConverseArgs) -> Result<()> {
         )?,
         None => args.model.load_at(args.precision)?,
     };
-    runtime.set_chat_template(ChatChoice::Auto);
+    runtime.set_chat_template(ChatChoice::Auto)?;
     let generation = GenerationOptions {
         strength: 1.0,
         max_new_tokens: args.max_new_tokens,

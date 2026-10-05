@@ -103,7 +103,7 @@ pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(chat_template);
+    let chat = runtime.set_chat_template(chat_template)?;
     // The head joins the same VarMap the adapters live in, so one
     // optimizer steps the pair and the artifact holds both. It is
     // registered at the parameter dtype, never the base dtype: a

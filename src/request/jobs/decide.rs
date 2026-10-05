@@ -34,7 +34,7 @@ pub(in crate::request) fn decide_job(request: DecideRequest) -> Result<Value> {
         loaded.check_model(Path::new(path), &runtime.model_id)?;
         options.temperature = loaded.temperature;
     }
-    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let response = decide::decide(
         &runtime,
         &document,
@@ -47,7 +47,7 @@ pub(in crate::request) fn decide_job(request: DecideRequest) -> Result<Value> {
 pub(in crate::request) fn calibrate_job(request: CalibrateRequest) -> Result<Value> {
     let examples = ExampleSet::load(Path::new(&request.examples))?;
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let options = DecideOptions {
         permutations: request.permutations,
         temperature: RAW_TEMPERATURE,

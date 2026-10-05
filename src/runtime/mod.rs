@@ -44,7 +44,8 @@ pub struct Runtime {
     param_dtype: DType,
     eos_tokens: BTreeSet<u32>,
     /// The conversation format the checkpoint publishes, compiled at load
-    /// time, and whether this run uses it.
+    /// time — or why it does not compile, refused only when a run asks for
+    /// it — and whether this run uses it.
     ///
     /// The choice lives on the runtime rather than in each objective's
     /// options because the encoders are what need it, every objective reaches
@@ -53,7 +54,7 @@ pub struct Runtime {
     /// same checkpoint in two different shapes. It starts `Off`, so every
     /// path that never asks — steering, extraction, synthesis — encodes
     /// exactly the text it encoded before this existed.
-    chat: Option<chat::Template>,
+    chat: std::result::Result<Option<chat::Template>, String>,
     chat_status: chat::Status,
 }
 

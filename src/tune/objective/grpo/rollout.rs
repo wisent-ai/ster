@@ -43,7 +43,7 @@ impl UserSimulator {
     ) -> Result<Self> {
         workflow::progress(format!("loading the simulated user {model}"));
         let mut runtime = Runtime::load_at(model, revision, device, precision)?;
-        if runtime.set_chat_template(chat::Choice::Auto) != chat::Status::Applied {
+        if runtime.set_chat_template(chat::Choice::Auto)? != chat::Status::Applied {
             bail!(
                 "the simulated user {model} publishes no chat template, so it cannot write a user's turn in a conversation"
             );

@@ -104,7 +104,7 @@ pub(super) fn decide(args: DecideArgs) -> Result<()> {
         options.temperature = document.temperature;
     }
     options.explain = explain;
-    runtime.set_chat_template(read.chat_template);
+    runtime.set_chat_template(read.chat_template)?;
     let response = decide::decide(
         &runtime,
         &request,
@@ -131,7 +131,7 @@ pub(super) fn calibrate(args: CalibrateArgs) -> Result<()> {
     } = args;
     let examples = ExampleSet::load(&examples)?;
     let (mut runtime, options) = read.load()?;
-    runtime.set_chat_template(read.chat_template);
+    runtime.set_chat_template(read.chat_template)?;
     let calibration = decide::calibrate(&runtime, &examples, options, ece_bins)?;
     calibration.save(&output)?;
     super::answer(&calibration)?;

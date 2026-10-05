@@ -115,7 +115,7 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<()> {
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(chat_template);
+    let chat = runtime.set_chat_template(chat_template)?;
     let pair_set = PairSet::load(&pairs)?;
     let options = DpoOptions {
         spec: spec.clone(),

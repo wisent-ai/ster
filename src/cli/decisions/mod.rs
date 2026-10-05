@@ -260,7 +260,7 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
         document.check_model(path, &runtime.model_id)?;
         read.temperature = document.temperature;
     }
-    runtime.set_chat_template(args.chat_template);
+    runtime.set_chat_template(args.chat_template)?;
     let options = decide::BenchmarkOptions {
         read,
         calibration: calibration

@@ -115,7 +115,7 @@ pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) 
             // downstream inherits what it writes. Addressed without its
             // markers, an instruct checkpoint answers a pair request with
             // instructions about answering pair requests.
-            runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+            runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
             pairs::synthesize(pairs::Generator::Local(&runtime), &options)?
         }
         "brama" => {

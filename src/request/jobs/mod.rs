@@ -38,7 +38,7 @@ pub(super) use tune::{
 /// and the returned document is the same payload the CLI prints.
 pub(in crate::request) fn train_job(request: TrainRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let method = TrainingMethod::parse(&request.method)?;
@@ -51,7 +51,7 @@ pub(in crate::request) fn train_job(request: TrainRequest) -> Result<Value> {
 
 pub(in crate::request) fn optimize_job(request: OptimizeRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let selection = workflow::optimize(&runtime, &pair_set, &layers, request.holdout)?;
@@ -63,7 +63,7 @@ pub(in crate::request) fn optimize_job(request: OptimizeRequest) -> Result<Value
 
 pub(in crate::request) fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
     tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
@@ -104,7 +104,7 @@ pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value
         )?,
         None => request.model.load_runtime_at(&request.precision)?,
     };
-    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     if let Some(vector) = vector {
         tune_lib::warn_on_provenance(Path::new(vector), "direction", &runtime);
     }
@@ -124,7 +124,7 @@ pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value
 
 pub(in crate::request) fn extract_job(request: ExtractRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let input = Path::new(&request.input);
     let output = Path::new(&request.output);

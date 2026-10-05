@@ -200,7 +200,7 @@ pub(super) fn train(args: TrainArgs) -> Result<()> {
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let mut runtime = model.load_at(precision)?;
-    let chat = runtime.set_chat_template(chat_template);
+    let chat = runtime.set_chat_template(chat_template)?;
     let pair_set = PairSet::load(&pairs)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
     let artifact = workflow::train(&runtime, &pair_set, &layers, method)?;
@@ -222,7 +222,7 @@ pub(super) fn optimize(args: OptimizeArgs) -> Result<()> {
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let mut runtime = model.load_at(precision)?;
-    let chat = runtime.set_chat_template(chat_template);
+    let chat = runtime.set_chat_template(chat_template)?;
     let pair_set = PairSet::load(&pairs)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
     let selection = workflow::optimize(&runtime, &pair_set, &layers, holdout)?;
@@ -242,7 +242,7 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let mut runtime = model.load_at(precision)?;
-    let chat = runtime.set_chat_template(chat_template);
+    let chat = runtime.set_chat_template(chat_template)?;
     let pair_set = PairSet::load(&pairs)?;
     let artifact = SteeringArtifact::load(&vector)?;
     // The artifact now records the precision and the format it was
@@ -307,7 +307,7 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
         )?,
         None => model.load_at(precision)?,
     };
-    runtime.set_chat_template(chat_template);
+    runtime.set_chat_template(chat_template)?;
     if let Some(vector) = vector.as_deref() {
         tune::warn_on_provenance(vector, "direction", &runtime);
     }
@@ -349,7 +349,7 @@ pub(super) fn extract(args: ExtractArgs) -> Result<()> {
         precision,
     } = args;
     let mut runtime = model.load_at(precision)?;
-    runtime.set_chat_template(chat_template);
+    runtime.set_chat_template(chat_template)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
     workflow::extract(&runtime, &input, &output, &layers)?;
     println!("{}", output.display());

@@ -234,7 +234,7 @@ struct BaseLoad {
     layout: Layout,
     revision: Option<String>,
     eos_tokens: BTreeSet<u32>,
-    chat: Option<chat::Template>,
+    chat: std::result::Result<Option<chat::Template>, String>,
     device: Device,
     dtype: DType,
     precision: Precision,
@@ -255,7 +255,9 @@ impl BaseLoad {
         let param_dtype = DType::F32;
         let source = Checkpoint::resolve(model, revision)?;
         let (config, architecture, eos_tokens) = source.decoder_config()?;
-        let chat = source.chat()?;
+        // A template that does not compile is kept as its refusal, raised
+        // only by a run that asks for the template.
+        let chat = source.chat().map_err(|error| format!("{error:#}"));
         let tokenizer = super::vocabulary::load(&source.tokenizer, source.tokenizer_config.as_deref())?;
         Ok(Self {
             tokenizer,

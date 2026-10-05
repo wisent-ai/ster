@@ -17,15 +17,18 @@ impl Runtime {
     /// frozen judge inside policy optimization — must keep encoding exactly
     /// the bytes it encoded before. The progress line is written here so that
     /// one sentence reaches the operator whichever surface asked, and exactly
-    /// once per run.
-    pub fn set_chat_template(&mut self, choice: chat::Choice) -> chat::Status {
-        self.chat_status = match choice {
-            chat::Choice::Off => chat::Status::Off,
-            chat::Choice::Auto if self.chat.is_some() => chat::Status::Applied,
-            chat::Choice::Auto => chat::Status::Absent,
+    /// once per run. A template that does not compile is refused here, under
+    /// `auto` only: `off` runs the checkpoint on raw text whatever its
+    /// template says.
+    pub fn set_chat_template(&mut self, choice: chat::Choice) -> Result<chat::Status> {
+        self.chat_status = match (choice, &self.chat) {
+            (chat::Choice::Off, _) => chat::Status::Off,
+            (chat::Choice::Auto, Err(refusal)) => bail!("{refusal}"),
+            (chat::Choice::Auto, Ok(Some(_))) => chat::Status::Applied,
+            (chat::Choice::Auto, Ok(None)) => chat::Status::Absent,
         };
         workflow::progress(self.chat_status.sentence().to_owned());
-        self.chat_status
+        Ok(self.chat_status)
     }
 
     /// What this run decided about the chat template.
@@ -38,7 +41,7 @@ impl Runtime {
     /// than a condition each of them could forget.
     pub(super) fn applied_template(&self) -> Option<&chat::Template> {
         match self.chat_status {
-            chat::Status::Applied => self.chat.as_ref(),
+            chat::Status::Applied => self.chat.as_ref().ok().and_then(Option::as_ref),
             chat::Status::Absent | chat::Status::Off => None,
         }
     }

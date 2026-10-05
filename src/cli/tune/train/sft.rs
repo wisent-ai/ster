@@ -106,7 +106,7 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(chat_template);
+    let chat = runtime.set_chat_template(chat_template)?;
     let example_set = ExampleSet::load(&examples)?;
     let options = SftOptions {
         spec: spec.clone(),

@@ -154,7 +154,7 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(chat_template);
+    let chat = runtime.set_chat_template(chat_template)?;
     let prompt_set = PromptSet::load(&prompts)?;
     let options = GrpoOptions {
         spec: spec.clone(),

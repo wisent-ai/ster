@@ -109,7 +109,7 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(chat_template);
+    let chat = runtime.set_chat_template(chat_template)?;
     let options = DecideTuneOptions {
         spec: spec.clone(),
         epochs,

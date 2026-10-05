@@ -41,7 +41,7 @@ pub(in crate::request) fn tune_sft_job(request: TuneSftRequest) -> Result<Value>
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let examples = ExampleSet::load(Path::new(&request.examples))?;
     let options = SftOptions {
         spec: spec.clone(),
@@ -84,7 +84,7 @@ pub(in crate::request) fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value>
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let pairs = PairSet::load(Path::new(&request.pairs))?;
     let options = DpoOptions {
         spec: spec.clone(),
@@ -129,7 +129,7 @@ pub(in crate::request) fn tune_reward_job(request: TuneRewardRequest) -> Result<
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     // The head is registered at the parameter dtype, never the base dtype: a
     // scalar head is exactly the small trained weight that rounds away in
     // half precision.
@@ -190,7 +190,7 @@ pub(in crate::request) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Valu
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let prompts = PromptSet::load(Path::new(&request.prompts))?;
     let options = GrpoOptions {
         spec: spec.clone(),
@@ -264,7 +264,7 @@ pub(in crate::request) fn tune_evaluate_job(request: TuneEvaluateRequest) -> Res
             precision,
         )?,
     };
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
     let examples = ExampleSet::load(Path::new(&request.examples))?;
     let report = tune::evaluate(
         &runtime,
