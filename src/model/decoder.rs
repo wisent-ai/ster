@@ -321,12 +321,13 @@ impl SteeringLlama {
                 bail!("row {row} claims {length} tokens in a batch only {sequence} wide");
             }
         }
-        let full = padded_causal_mask(lengths, sequence, None, tokens.device())?;
+        let full = padded_causal_mask(lengths, sequence, None, None, tokens.device())?;
         let windowed = match self.architecture.sliding_window {
             Some(window) if self.architecture.sliding_layers != 0 => Some(padded_causal_mask(
                 lengths,
                 sequence,
                 Some(window),
+                self.architecture.chunk_lookback,
                 tokens.device(),
             )?),
             _ => None,

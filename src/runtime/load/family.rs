@@ -708,6 +708,16 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
                 object.entry("rope_local_base_freq").or_insert(theta);
             }
         }
+        // Chunked layers (Rnj-1.5) rotate by the global table, so their
+        // stated rotation must be the full-attention one.
+        if let Some(chunked) = per_type.get("chunked_attention").filter(|value| value.is_object()) {
+            if per_type.get("full_attention") != Some(chunked) {
+                bail!(
+                    "{} rotates its chunked_attention layers unlike its full_attention layers; Ster rotates both by the full-attention rotation",
+                    path.display()
+                );
+            }
+        }
         if let (Some(full), Some(object)) = (per_type.get("full_attention").cloned(), raw.as_object_mut()) {
             object.insert("rope_parameters".to_owned(), full);
         }
@@ -769,6 +779,10 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
         ),
     }
 }
+
+/// How many earlier chunks Rnj-1.5's chunked layers see (vLLM's `rnj1.py`,
+/// `chunk_lookback = 1 if self.is_chunked`).
+const RNJ1_CHUNK_LOOKBACK: usize = 1;
 
 /// The rotary base a config without `rope_theta` uses, Llama's and Candle's
 /// default.
@@ -2889,6 +2903,16 @@ pub(super) fn family(
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
                 architecture.local_rope_theta =
                     number(raw, "rope_local_base_freq").map(|theta| theta as f32);
+                // Rnj-1.5 lists `chunked_attention` layers: chunks of
+                // `sliding_window` positions, each query seeing its own
+                // chunk and the one before it.
+                let chunked = raw
+                    .get("layer_types")
+                    .and_then(Value::as_array)
+                    .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("chunked_attention")));
+                if chunked {
+                    architecture.chunk_lookback = Some(RNJ1_CHUNK_LOOKBACK);
+                }
                 // Older Gemma 3 configs state the pattern instead of
                 // `layer_types`: every `sliding_window_pattern`-th layer is
                 // global, the rest local.
@@ -3016,7 +3040,7 @@ pub(super) fn family(
         || architecture.state_space.is_some();
     let windows = raw.get("layer_types").and_then(Value::as_array).filter(|_| !mixers_listed);
     if let Some(types) = windows {
-        architecture.sliding_layers = listed_layers(types, layers, path)?;
+        architecture.sliding_layers = windowed_layers(types, layers, architecture.chunk_lookback.is_some(), path)?;
     }
     // Cohere 2's global layers apply no rotary embedding; so do EXAONE 4's
     // when the model mixes local and global layers at all.
@@ -4390,6 +4414,12 @@ fn even_layers(layers: usize, path: &Path) -> Result<u128> {
 /// `layer_types`, as newer configs list it: one entry per layer, either
 /// `sliding_attention` or `full_attention`.
 fn listed_layers(types: &[Value], layers: usize, path: &Path) -> Result<u128> {
+    windowed_layers(types, layers, false, path)
+}
+
+/// [`listed_layers`], with `chunked_attention` entries windowed too when
+/// the family attends by chunks (`chunked`).
+fn windowed_layers(types: &[Value], layers: usize, chunked: bool, path: &Path) -> Result<u128> {
     if types.len() != layers {
         bail!(
             "{} lists {} layer_types for {layers} layers",
@@ -4402,10 +4432,12 @@ fn listed_layers(types: &[Value], layers: usize, path: &Path) -> Result<u128> {
     for (layer, kind) in types.iter().enumerate() {
         match kind.as_str() {
             Some("sliding_attention") => set |= 1u128 << layer,
+            Some("chunked_attention") if chunked => set |= 1u128 << layer,
             Some("full_attention") => {}
             other => bail!(
-                "{} declares layer {layer} as {other:?}; Ster implements sliding_attention and full_attention",
-                path.display()
+                "{} declares layer {layer} as {other:?}; Ster implements sliding_attention and full_attention{}",
+                path.display(),
+                if chunked { " and chunked_attention" } else { "" }
             ),
         }
     }

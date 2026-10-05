@@ -1236,10 +1236,11 @@ fn masked_fill(values: &Tensor, mask: &Tensor, replacement: f32) -> candle_core:
 /// a zero length is refused.
 ///
 /// On a sliding-window layer a real query also loses every key `window` or
-/// more positions behind it. A filler query keeps all real keys instead: a
-/// window past the end of its row could leave it none, and a row of negative
-/// infinities is a NaN that a training step would carry back into the
-/// adapters even though no loss reads that row.
+/// more positions behind it, and on a chunked layer every key outside its
+/// chunk and the `chunk_lookback` chunks before it. A filler query keeps
+/// all real keys instead: a window past the end of its row could leave it
+/// none, and a row of negative infinities is a NaN that a training step
+/// would carry back into the adapters even though no loss reads that row.
 ///
 /// Masked entries are `1`, matching [`Cache::mask`], so both feed the same
 /// `masked_fill` and the same `f32::NEG_INFINITY`, which softmax turns into
@@ -1248,6 +1249,7 @@ pub(super) fn padded_causal_mask(
     lengths: &[usize],
     sequence: usize,
     window: Option<usize>,
+    chunk_lookback: Option<usize>,
     device: &Device,
 ) -> candle_core::Result<Tensor> {
     let mut values = vec![0u8; lengths.len() * sequence * sequence];
@@ -1261,7 +1263,7 @@ pub(super) fn padded_causal_mask(
             }
             if query < length {
                 for key in 0..visible {
-                    if super::cache::hidden_key(query, key, window) {
+                    if super::cache::hidden_key(query, key, window, chunk_lookback) {
                         values[offset + key] = 1;
                     }
                 }

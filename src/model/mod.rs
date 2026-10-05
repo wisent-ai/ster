@@ -182,6 +182,11 @@ pub struct Architecture {
     pub sliding_window: Option<usize>,
     /// Bit `i` set means layer `i` attends through the sliding window.
     pub sliding_layers: u128,
+    /// When set, the windowed layers attend by chunks rather than through a
+    /// sliding window: `sliding_window` is the chunk size, and a query sees
+    /// its own chunk and this many before it (Llama 4's chunked attention,
+    /// none; Rnj-1's, one).
+    pub chunk_lookback: Option<usize>,
     /// Bit `i` set means layer `i` applies no rotary embedding.
     pub unrotated_layers: u128,
     /// The rotary base sliding-window layers use, when it differs from
@@ -670,6 +675,7 @@ impl Architecture {
             names: Names::LLAMA,
             sliding_window: None,
             sliding_layers: 0,
+            chunk_lookback: None,
             unrotated_layers: 0,
             local_rope_theta: None,
             rope_scaling: RopeScaling::None,

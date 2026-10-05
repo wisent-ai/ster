@@ -35,6 +35,10 @@ pub struct Cache {
     /// LongCat-Flash's shortcut experts' output for the stored layer this
     /// call is in, set by its first half and taken by its second.
     pub(super) shortcut: Option<Tensor>,
+    /// How many earlier chunks a windowed layer's query also sees when the
+    /// model attends by chunks (Llama 4, Rnj-1); `None` for sliding
+    /// windows.
+    pub(super) chunk_lookback: Option<usize>,
     /// The global rotation, held in F32 whatever the weights are. See
     /// [`Cache::new`].
     pub(super) global: RotaryTable,
@@ -155,6 +159,7 @@ impl Cache {
             index_keys: vec![None; config.num_hidden_layers],
             index_mask: None,
             shortcut: None,
+            chunk_lookback: architecture.chunk_lookback,
             global,
             local,
             long,
@@ -165,7 +170,8 @@ impl Cache {
 
     /// The causal mask for `seq_len` queries starting at `index_pos`, with keys
     /// beyond `window` positions behind a query hidden too when the layer
-    /// attends through a sliding window.
+    /// attends through a sliding window, or outside its chunks when the
+    /// model attends by chunks.
     pub(super) fn mask(
         &mut self,
         seq_len: usize,
@@ -181,7 +187,7 @@ impl Cache {
         for query in 0..seq_len {
             let absolute_query = index_pos + query;
             for key_position in 0..key_len {
-                if hidden_key(absolute_query, key_position, window) {
+                if hidden_key(absolute_query, key_position, window, self.chunk_lookback) {
                     values[query * key_len + key_position] = 1;
                 }
             }
@@ -193,9 +199,19 @@ impl Cache {
 }
 
 /// Whether `query` may not see `key`: it is in the query's future, or it is
-/// `window` or more positions behind it.
-pub(super) fn hidden_key(query: usize, key: usize, window: Option<usize>) -> bool {
-    key > query || window.is_some_and(|window| query - key >= window)
+/// `window` or more positions behind it — or, when the model attends by
+/// chunks (`chunk_lookback`), `window` is the chunk size and `key` lies in
+/// a chunk more than `chunk_lookback` chunks before the query's (Llama 4's
+/// chunked attention looks back none, Rnj-1's one).
+pub(super) fn hidden_key(query: usize, key: usize, window: Option<usize>, chunk_lookback: Option<usize>) -> bool {
+    if key > query {
+        return true;
+    }
+    match (window, chunk_lookback) {
+        (Some(size), Some(lookback)) if size > 0 => key / size + lookback < query / size,
+        (Some(window), None) => query - key >= window,
+        _ => false,
+    }
 }
 
 /// One rotation: its frequencies, `[1, rotary_dim / 2]` in F32, and the
