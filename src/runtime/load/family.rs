@@ -134,10 +134,11 @@ pub(super) enum Family {
     MimoV2,
     Step3p5,
     K2Horizon,
+    PanguUltraMoe,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 106] = [
+    pub(super) const ALL: [Self; 107] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -244,6 +245,7 @@ impl Family {
         Self::MimoV2,
         Self::Step3p5,
         Self::K2Horizon,
+        Self::PanguUltraMoe,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -360,6 +362,7 @@ impl Family {
             Self::MimoV2 => "mimo_v2",
             Self::Step3p5 => "step3p5",
             Self::K2Horizon => "k2_horizon",
+            Self::PanguUltraMoe => "pangu_ultra_moe",
         }
     }
 
@@ -486,6 +489,15 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     if model_type == "step3p5" {
         step3p5_keys(raw);
     }
+    // openPangu-Ultra-MoE leaves its router's form to its config class:
+    // sigmoid scores, renormalised (`PanguUltraMoEConfig`'s
+    // `norm_topk_prob=True`, `MoEGate.forward`).
+    if model_type == "pangu_ultra_moe" {
+        if let Some(object) = raw.as_object_mut() {
+            object.entry("scoring_func").or_insert_with(|| Value::from("sigmoid"));
+            object.entry("norm_topk_prob").or_insert(Value::Bool(true));
+        }
+    }
     let aliases: &[(&str, &[&str])] = &[
         ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon", "layernorm_epsilon"]),
         ("hidden_size", &["n_embd", "n_embed", "d_model"]),
@@ -497,6 +509,16 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
         ("rope_theta", &["rotary_emb_base"]),
         ("num_experts_per_tok", &["moe_k", "moe_top_k", "moe_topk", "num_experts_per_token", "top_k_experts"]),
+        // openPangu-Ultra-MoE's names for DeepSeek's latent attention and
+        // experts.
+        ("kv_lora_rank", &["attention_kv_lora_dim"]),
+        ("q_lora_rank", &["attention_q_lora_dim"]),
+        ("qk_nope_head_dim", &["attention_qk_dim"]),
+        ("qk_rope_head_dim", &["attention_qk_rope_dim"]),
+        ("v_head_dim", &["attention_v_dim"]),
+        ("n_routed_experts", &["num_routed_experts"]),
+        ("n_shared_experts", &["num_shared_experts"]),
+        ("first_k_dense_replace", &["num_dense_layers"]),
     ];
     for (llama, spellings) in aliases {
         if raw.get(*llama).is_some_and(|value| !value.is_null()) {
@@ -2204,7 +2226,10 @@ pub(super) fn family(
         // and router under GLM's name.
         // DeepSeek-V3.2 and GLM-5 (`glm_moe_dsa`) add DeepSeek Sparse
         // Attention's indexer.
-        "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" | "deepseek_v32" | "glm_moe_dsa" | "axk1" => {
+        // openPangu-Ultra-MoE is DeepSeek-V3's latent attention and a sigmoid
+        // router without selection bias, under its own key names (read as
+        // DeepSeek's), with sandwich norms.
+        "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" | "deepseek_v32" | "glm_moe_dsa" | "axk1" | "pangu_ultra_moe" => {
             if architecture.latent.is_none() {
                 bail!(
                     "{} declares no kv_lora_rank; Ster implements {model_type} with its latent attention",
@@ -2236,6 +2261,12 @@ pub(super) fn family(
             if model_type == "axk1" {
                 architecture.names = Names::AXK1;
                 architecture.routed_output_norm = true;
+            }
+            // openPangu-Ultra-MoE's `sandwich_norm`: norms over each
+            // sublayer's output, `pre_mlp_layernorm` before the feed-forward.
+            if flag(raw, "sandwich_norm") {
+                architecture.output_norms = true;
+                architecture.names = Names::PANGU_SANDWICH;
             }
         }
         "step3_text" => {
@@ -3027,7 +3058,7 @@ fn deepseek_experts(
     // GLM-4-MoE's and Nemotron-H's routers are DeepSeek-V3's and their
     // configs leave the method out: sigmoid scores, `noaux_tc` selection.
     let v3_default = matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "glm_moe_dsa" | "nemotron_h" | "exaone_moe");
-    let v3_router = v3_default || matches!(model_type, "deepseek_v3" | "deepseek_v32" | "axk1");
+    let v3_router = v3_default || matches!(model_type, "deepseek_v3" | "deepseek_v32" | "axk1" | "pangu_ultra_moe");
     routed.scoring = match text(raw, "scoring_func") {
         None if v3_default => Scoring::Sigmoid,
         None | Some("softmax") => Scoring::Softmax,
