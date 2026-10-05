@@ -1,11 +1,14 @@
-//! A checkpoint's tokenizer: Transformers' `tokenizer.json`, or PLaMo's
-//! `tokenizer.jsonl` (`Plamo3Tokenizer` in PLaMo's `tokenization_plamo.py`),
-//! one `[piece, score, kind]` row per token id. PLaMo's tokenizer is a
-//! unigram model: the split of each stretch of text whose pieces' scores sum
-//! highest, a character no piece covers spelled as its UTF-8 bytes
-//! (`<0xXX>`), and its control tokens and the stretches its
-//! `break_around_*` thresholds isolate never crossed by a piece. It is built
-//! here as the same `tokenizers` Unigram model with byte fallback.
+//! A checkpoint's tokenizer: Transformers' `tokenizer.json`, PLaMo's
+//! `tokenizer.jsonl` or GLM-4's tiktoken `tokenizer.model`.
+//!
+//! PLaMo's (`Plamo3Tokenizer` in `tokenization_plamo.py`) is one
+//! `[piece, score, kind]` row per token id, a unigram model: the split of
+//! each stretch of text whose pieces' scores sum highest, a character no
+//! piece covers spelled as its UTF-8 bytes (`<0xXX>`), and its control
+//! tokens and the stretches its `break_around_*` thresholds isolate never
+//! crossed by a piece. It is built here as the same `tokenizers` Unigram
+//! model with byte fallback. GLM-4's is built as a byte-level BPE (see
+//! [`glm4`]).
 
 use std::{fs, path::Path};
 
@@ -27,7 +30,8 @@ use tokenizers::{
 /// else as Transformers' `tokenizer.json`. `tokenizer_config` supplies
 /// PLaMo's split thresholds and whether a sequence starts with its BOS.
 pub fn load(path: &Path, tokenizer_config: Option<&Path>) -> Result<Tokenizer> {
-    if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    if name != "tokenizer.jsonl" && name != "tokenizer.model" {
         return Tokenizer::from_file(path).map_err(|error| anyhow!("failed to load tokenizer {}: {error}", path.display()));
     }
     let settings: Value = match tokenizer_config {
@@ -35,7 +39,24 @@ pub fn load(path: &Path, tokenizer_config: Option<&Path>) -> Result<Tokenizer> {
             .with_context(|| format!("invalid tokenizer config {}", config.display()))?,
         None => Value::Null,
     };
-    plamo(path, &settings)
+    if name == "tokenizer.jsonl" {
+        return plamo(path, &settings);
+    }
+    // A `tokenizer.model` is read only as GLM-4's tiktoken vocabulary; any
+    // other (SentencePiece's protobuf, another tiktoken pattern) is refused
+    // by the class its config names.
+    let class = settings
+        .pointer("/auto_map/AutoTokenizer/0")
+        .or_else(|| settings.get("tokenizer_class"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !class.ends_with("ChatGLM4Tokenizer") {
+        bail!(
+            "{} is a tokenizer.model for {class:?}, and Ster reads a tokenizer.model only as GLM-4's (ChatGLM4Tokenizer); use a checkpoint that publishes tokenizer.json",
+            path.display()
+        );
+    }
+    glm4(path, &settings)
 }
 
 fn plamo(path: &Path, settings: &Value) -> Result<Tokenizer> {
@@ -86,23 +107,34 @@ fn plamo(path: &Path, settings: &Value) -> Result<Tokenizer> {
     }
     if settings.get("add_bos_token").and_then(Value::as_bool) == Some(true) {
         let bos = settings.get("bos_token").and_then(Value::as_str).context("the tokenizer config adds a BOS token it does not name")?;
-        let id = tokenizer.token_to_id(bos).with_context(|| format!("the BOS token {bos:?} is not in {}", path.display()))?;
-        // Built from pieces rather than the `"<bos> $A"` text form, which
-        // reads the `:` in PLaMo's `<|plamo:bos|>` as a type-id separator.
-        let template = |sequences: &[&str]| -> Result<Template> {
-            let mut pieces = vec![serde_json::json!({ "SpecialToken": { "id": bos, "type_id": 0 } })];
-            pieces.extend(sequences.iter().map(|id| serde_json::json!({ "Sequence": { "id": id, "type_id": 0 } })));
-            serde_json::from_value(Value::Array(pieces)).context("invalid BOS template")
-        };
-        let processor = TemplateProcessing::builder()
-            .single(template(&["A"])?)
-            .pair(template(&["A", "B"])?)
-            .special_tokens(vec![(bos.to_owned(), id)])
-            .build()
-            .map_err(|error| anyhow!("invalid BOS template: {error}"))?;
+        let processor = prefixed(&tokenizer, &[bos], path)?;
         tokenizer.with_post_processor(Some(processor));
     }
     Ok(tokenizer)
+}
+
+/// A post-processor that starts every sequence with the special tokens
+/// `prefix`, built from pieces rather than the `"<bos> $A"` text form, which
+/// reads a `:` inside a token (PLaMo's `<|plamo:bos|>`) as a type-id
+/// separator.
+fn prefixed(tokenizer: &Tokenizer, prefix: &[&str], path: &Path) -> Result<TemplateProcessing> {
+    let mut specials = Vec::new();
+    for token in prefix {
+        let id = tokenizer.token_to_id(token).with_context(|| format!("the prefix token {token:?} is not in {}", path.display()))?;
+        specials.push((token.to_string(), id));
+    }
+    let template = |sequences: &[&str]| -> Result<Template> {
+        let mut pieces: Vec<Value> =
+            prefix.iter().map(|id| serde_json::json!({ "SpecialToken": { "id": id, "type_id": 0 } })).collect();
+        pieces.extend(sequences.iter().map(|id| serde_json::json!({ "Sequence": { "id": id, "type_id": 0 } })));
+        serde_json::from_value(Value::Array(pieces)).context("invalid prefix template")
+    };
+    TemplateProcessing::builder()
+        .single(template(&["A"])?)
+        .pair(template(&["A", "B"])?)
+        .special_tokens(specials)
+        .build()
+        .map_err(|error| anyhow!("invalid prefix template: {error}"))
 }
 
 /// A pre-tokenizer that cuts every match of `pattern` out as its own
@@ -112,4 +144,99 @@ fn isolate(pattern: &str) -> Result<tokenizers::PreTokenizerWrapper> {
     Ok(Split::new(regex, SplitDelimiterBehavior::Isolated, false)
         .map_err(|error| anyhow!("invalid split pattern {pattern:?}: {error}"))?
         .into())
+}
+
+/// GLM-4's split of text into pieces before byte-pair merging
+/// (`tokenization_chatglm.py`, `ChatGLM4Tokenizer.pat_str`).
+const GLM4_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+/// The special tokens `ChatGLM4Tokenizer.get_prefix_tokens` puts before
+/// every sequence it encodes with special tokens.
+const GLM4_PREFIX: [&str; 2] = ["[gMASK]", "<sop>"];
+
+/// GLM-4's `tokenizer.model` (`ChatGLM4Tokenizer`): a tiktoken vocabulary,
+/// one `base64(bytes) rank` line per token id, read as the byte-level BPE
+/// tiktoken runs — each piece of [`GLM4_PATTERN`] kept whole when it is a
+/// token, else merged pair by pair in rank order, the merges recovered from
+/// the ranks as Transformers' `TikTokenConverter` recovers them — with
+/// `added_tokens_decoder`'s special tokens after it and `[gMASK]<sop>`
+/// before every sequence.
+fn glm4(path: &Path, settings: &Value) -> Result<Tokenizer> {
+    use base64::Engine;
+    let text = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut ranks: std::collections::HashMap<Vec<u8>, u32> = std::collections::HashMap::new();
+    for (line_number, line) in text.lines().filter(|line| !line.trim().is_empty()).enumerate() {
+        let parsed = line.split_once(' ').and_then(|(token, rank)| {
+            Some((base64::engine::general_purpose::STANDARD.decode(token).ok()?, rank.trim().parse::<u32>().ok()?))
+        });
+        let Some((bytes, rank)) = parsed else {
+            bail!("{} line {} is not a `base64 rank` pair", path.display(), line_number + 1);
+        };
+        ranks.insert(bytes, rank);
+    }
+    let spell = byte_spelling();
+    let spelled = |bytes: &[u8]| -> String { bytes.iter().map(|byte| spell[*byte as usize]).collect() };
+    let mut merges: Vec<(u32, String, String)> = Vec::new();
+    for (token, rank) in &ranks {
+        let mut local: Vec<(u32, u32, String, String)> = (1..token.len())
+            .filter_map(|cut| {
+                let (left, right) = token.split_at(cut);
+                Some((*ranks.get(left)?, *ranks.get(right)?, spelled(left), spelled(right)))
+            })
+            .collect();
+        local.sort();
+        merges.extend(local.into_iter().map(|(_, _, left, right)| (*rank, left, right)));
+    }
+    merges.sort_by_key(|(rank, _, _)| *rank);
+    let vocabulary: tokenizers::models::bpe::Vocab =
+        ranks.iter().map(|(bytes, rank)| (spelled(bytes), *rank)).collect();
+    let model = tokenizers::models::bpe::BPE::builder()
+        .vocab_and_merges(vocabulary, merges.into_iter().map(|(_, left, right)| (left, right)).collect())
+        .ignore_merges(true)
+        .build()
+        .map_err(|error| anyhow!("{} is not a byte-pair vocabulary: {error}", path.display()))?;
+    let mut tokenizer = Tokenizer::new(model);
+    let byte_level = tokenizers::pre_tokenizers::byte_level::ByteLevel::new(false, true, false);
+    tokenizer.with_pre_tokenizer(Some(PreTokenizerSequence::new(vec![isolate(GLM4_PATTERN)?, byte_level.clone().into()])));
+    tokenizer.with_decoder(Some(byte_level));
+    let mut specials: Vec<(u64, String)> = settings
+        .get("added_tokens_decoder")
+        .and_then(Value::as_object)
+        .map(|added| {
+            added
+                .iter()
+                .filter_map(|(id, token)| Some((id.parse().ok()?, token.get("content")?.as_str()?.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+    specials.sort();
+    for (index, (id, _)) in specials.iter().enumerate() {
+        if *id != (ranks.len() + index) as u64 {
+            bail!("{} numbers its special tokens from {id}, not after its {} ranks; Ster adds them in order", path.display(), ranks.len());
+        }
+    }
+    let added: Vec<AddedToken> = specials.into_iter().map(|(_, content)| AddedToken::from(content, true)).collect();
+    tokenizer.add_special_tokens(&added);
+    let processor = prefixed(&tokenizer, &GLM4_PREFIX, path)?;
+    tokenizer.with_post_processor(Some(processor));
+    Ok(tokenizer)
+}
+
+/// GPT-2's printable spelling of each byte (`bytes_to_unicode` in its
+/// `encoder.py`), which byte-level BPE vocabularies are written in: the
+/// printable bytes stand for themselves and the rest are moved, in order,
+/// to code points from 256.
+fn byte_spelling() -> Vec<char> {
+    let printable = |byte: u8| matches!(byte, b'!'..=b'~' | 0xA1..=0xAC | 0xAE..=0xFF);
+    let mut moved = 0u32;
+    (0..=u8::MAX)
+        .map(|byte| {
+            if printable(byte) {
+                char::from(byte)
+            } else {
+                moved += 1;
+                char::from_u32(u32::from(u8::MAX) + moved).expect("a code point below 512 is a char")
+            }
+        })
+        .collect()
 }

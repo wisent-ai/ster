@@ -2687,6 +2687,7 @@ name = "ster"
 version = "0.15.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "blake2",
  "candle-core",
  "candle-nn",
