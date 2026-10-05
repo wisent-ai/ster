@@ -89,6 +89,13 @@ impl SteeringLlama {
         } else {
             builder.pp(architecture.names.wrapper)
         };
+        // DeepSeek-V4's own release names its tensors its own way (`embed`,
+        // `layers.{i}.attn.wq_a`, `ffn.experts`); Ster reads Transformers'.
+        if architecture.compressed.is_some() && builder.contains_tensor("embed.weight") {
+            candle_core::bail!(
+                "this DeepSeek-V4 checkpoint keeps DeepSeek's own tensor names (embed, layers.N.attn.wq_a, layers.N.ffn.experts); Ster reads DeepSeek-V4 in Transformers' layout (model.embed_tokens, model.layers.N.self_attn.q_a_proj, model.layers.N.mlp.experts), as a checkpoint saved by Transformers stores it"
+            );
+        }
         // A checkpoint saved from the base model drops the family's root
         // (`wte` rather than `transformer.wte`); which one this is shows in
         // whether the embedding is where the root says.
