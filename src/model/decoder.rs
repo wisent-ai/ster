@@ -70,6 +70,9 @@ impl SteeringLlama {
         // A multimodal checkpoint keeps the language model below a wrapper
         // (Gemma 3's `language_model`); the vision tower beside it is never
         // mapped.
+        // The head may sit outside it, at the checkpoint's root (Qwen3.5's
+        // and MuseGlimmer's `lm_head`).
+        let outer = builder.clone();
         let builder = if architecture.names.wrapper.is_empty() {
             builder
         } else {
@@ -99,8 +102,14 @@ impl SteeringLlama {
             _ => None,
         };
         let spec = NormSpec::of(&architecture);
+        // BLOOM's embedding norm is stored; MuseGlimmer's is weightless and
+        // names no tensor.
         let embedding_norm = if architecture.embedding_norm {
-            Some(spec.load(config.hidden_size, builder.pp(names.embedding_norm))?)
+            Some(if names.embedding_norm.is_empty() {
+                spec.unscaled(config.hidden_size, &builder)?
+            } else {
+                spec.load(config.hidden_size, builder.pp(names.embedding_norm))?
+            })
         } else {
             None
         };
@@ -112,15 +121,17 @@ impl SteeringLlama {
             };
             Linear::new(embeddings.embeddings().clone(), bias)
         } else {
+            let head = if builder.contains_tensor(&format!("{}.weight", names.lm_head)) { &builder } else { &outer };
             projection(
                 config.hidden_size,
                 config.vocab_size,
                 architecture.lm_head_bias,
                 false,
-                builder.pp(names.lm_head),
+                head.pp(names.lm_head),
             )?
         };
-        let final_norm = spec.load(config.hidden_size, builder.pp(names.final_norm))?;
+        let final_spec = if architecture.plain_final_norm { NormSpec { offset: false, ..spec } } else { spec };
+        let final_norm = final_spec.load(config.hidden_size, builder.pp(names.final_norm))?;
         let per_layer = match architecture.per_layer_input {
             Some(per_layer) => {
                 let root = if names.root.is_empty() { builder.clone() } else { builder.pp(names.root) };

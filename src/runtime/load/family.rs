@@ -149,10 +149,11 @@ pub(super) enum Family {
     ChatGlm,
     Laguna,
     LongcatFlashNgram,
+    MuseGlimmerText,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 121] = [
+    pub(super) const ALL: [Self; 122] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -274,6 +275,7 @@ impl Family {
         Self::ChatGlm,
         Self::Laguna,
         Self::LongcatFlashNgram,
+        Self::MuseGlimmerText,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -424,6 +426,7 @@ impl Family {
             Self::ChatGlm => "chatglm",
             Self::Laguna => "laguna",
             Self::LongcatFlashNgram => "longcat_flash_ngram",
+            Self::MuseGlimmerText => "muse_glimmer_text",
         }
     }
 
@@ -2516,6 +2519,7 @@ pub(super) fn family(
         "llama4_text" => llama4(raw, layers, &mut architecture, path)?,
         "afmoe" => afmoe(raw, layers, llama, &mut architecture, path)?,
         "laguna" => laguna(raw, scaling, layers, llama, &mut architecture, path)?,
+        "muse_glimmer_text" => muse_glimmer(raw, layers, llama, &mut architecture, path)?,
         "deepseek" => {
             // DeepSeek-MoE (v1): Llama's attention, rotating by halves, and
             // DeepSeek's experts — `n_routed_experts` scored by softmax and
@@ -4975,6 +4979,14 @@ fn granite_windows(
                 .fold(0, |set, layer| set | (1u128 << layer))
         }
     };
+    layer_bases(raw, layers, llama, architecture, path)
+}
+
+/// `layer_rope_theta`, a base per layer where zero means no rotation
+/// (GraniteSWA, MuseGlimmer). Ster rotates full-attention layers by
+/// `rope_theta` and sliding-window layers by one base of their own, so the
+/// stated bases must fit that.
+fn layer_bases(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
     let Some(thetas) = raw.get("layer_rope_theta").filter(|value| !value.is_null()) else {
         return Ok(());
     };
@@ -5006,6 +5018,55 @@ fn granite_windows(
         }
     }
     architecture.local_rope_theta = local.filter(|base| *base != f64::from(llama.rope_theta)).map(|base| base as f32);
+    Ok(())
+}
+
+/// MuseGlimmer's text decoder (`muse_glimmer_text`, inside `muse_glimmer`,
+/// whose weights sit below `model.language_model` and whose `lm_head` sits
+/// at the root): Gemma 2's sandwich norms storing their scale as an offset
+/// from one, the output norms at `post_norm_eps`, and a final norm storing
+/// its scale as is; a weightless RMS norm after the embedding; a weightless
+/// per-head norm over every query and key unless `use_qk_norm` is false,
+/// the query then multiplied by `scale_query_by` (else `qk_scale_factor`,
+/// divided by `sqrt(head_dim)` when it is at least that, as vLLM's
+/// `_muse_glimmer_query_prescale` reads both schemas); attention's output
+/// multiplied by the sigmoid of `self_attn.gate_proj` unless
+/// `use_attn_output_gate` is false; sliding-window layers as `layer_types`
+/// lists, the bases of `layer_rope_theta` with zero for the unrotated
+/// full-attention layers; and the logits multiplied by `output_multiplier`
+/// and capped at `final_logit_softcapping`.
+fn muse_glimmer(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+    let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
+        bail!("{} declares a MuseGlimmer model without layer_types", path.display());
+    };
+    architecture.names = Names::MUSE_GLIMMER;
+    architecture.norm_offset = true;
+    architecture.plain_final_norm = true;
+    architecture.output_norms = true;
+    architecture.output_norm_eps = number(raw, "post_norm_eps");
+    architecture.embedding_norm = true;
+    architecture.sliding_window = whole(raw, "sliding_window");
+    architecture.sliding_layers = listed_layers(types, layers, path)?;
+    layer_bases(raw, layers, llama, architecture, path)?;
+    if raw.get("use_qk_norm").and_then(Value::as_bool) != Some(false) {
+        architecture.query_key_norm = QueryKeyNorm::Weightless;
+        let head_dim = architecture.head_dim as f64;
+        let prescale = match (number(raw, "scale_query_by"), number(raw, "qk_scale_factor")) {
+            (Some(explicit), _) => explicit,
+            (None, Some(factor)) if factor >= head_dim.sqrt() => factor / head_dim.sqrt(),
+            (None, Some(factor)) => factor,
+            (None, None) => 1.0,
+        };
+        if prescale <= 0.0 {
+            bail!("{} scales its queries by {prescale}; the scale must be above zero", path.display());
+        }
+        architecture.score_divisor = head_dim.sqrt() / prescale;
+    }
+    if raw.get("use_attn_output_gate").and_then(Value::as_bool) != Some(false) {
+        architecture.attention_gate = Some(GateFunction::Sigmoid);
+    }
+    architecture.logits_multiplier = number(raw, "output_multiplier");
+    architecture.final_softcap = number(raw, "final_logit_softcapping");
     Ok(())
 }
 

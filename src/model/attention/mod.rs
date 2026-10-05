@@ -225,6 +225,9 @@ impl Attention {
                 (Some(spec.unscaled(head_dim, &builder)?), Some(spec.unscaled(head_dim, &builder)?))
             }
             QueryKeyNorm::Unscaled => (None, None),
+            QueryKeyNorm::Weightless => {
+                (Some(spec.unscaled(head_dim, &builder)?), Some(spec.unscaled(head_dim, &builder)?))
+            }
         };
         let rotary = if !architecture.rotates(layer) {
             Rotary::None

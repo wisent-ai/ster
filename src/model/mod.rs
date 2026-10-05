@@ -305,6 +305,12 @@ pub struct Architecture {
     /// A norm over attention's and the feed-forward's outputs (Gemma 2 and 3,
     /// OLMo 2).
     pub output_norms: bool,
+    /// The output norms' own epsilon where it differs from the other norms'
+    /// (MuseGlimmer's `post_norm_eps`).
+    pub output_norm_eps: Option<f64>,
+    /// The final norm stores its scale as is while the block norms store an
+    /// offset from one (MuseGlimmer).
+    pub plain_final_norm: bool,
     /// What attention scores are divided by: `sqrt(head_dim)`, Gemma 2's
     /// `sqrt(query_pre_attn_scalar)`, or Granite's `1 / attention_multiplier`.
     pub score_divisor: f64,
@@ -752,6 +758,8 @@ impl Architecture {
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
+            output_norm_eps: None,
+            plain_final_norm: false,
             score_divisor: (head_dim as f64).sqrt(),
             attention_softcap: None,
             final_softcap: None,
@@ -1500,6 +1508,13 @@ impl Names {
         feed_forward_norm: "pre_feedforward_layernorm",
         ..Self::LLAMA
     };
+    /// MuseGlimmer: Gemma 2's sandwich norms, attention's output gate in
+    /// `self_attn.gate_proj`, and a weightless norm after the embedding
+    /// that names no tensor.
+    pub const MUSE_GLIMMER: Self = Self {
+        embedding_norm: "",
+        ..Self::GEMMA2
+    };
     /// HyperCLOVAX: Llama's names, with `post_norm1` and `post_norm2` over
     /// attention's and the feed-forward's outputs.
     pub const HYPERCLOVAX: Self = Self {
@@ -1963,6 +1978,9 @@ pub enum QueryKeyNorm {
     /// Llama 4's `use_qk_norm`: a weightless RMS norm over each head's
     /// query and key, after the rotation, on the rotating layers only.
     Unscaled,
+    /// MuseGlimmer's QK-norm: a weightless RMS norm over each head's query
+    /// and key on every layer, rotating or not.
+    Weightless,
 }
 
 /// The non-linearity in the feed-forward.

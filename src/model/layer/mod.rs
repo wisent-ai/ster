@@ -723,12 +723,18 @@ impl Block {
                     Some(norm(names.feed_forward_norm)?),
                     None,
                 ),
-                (false, true, true) => (
-                    Some(norm(names.attention_norm)?),
-                    Some(norm(names.attention_output_norm)?),
-                    Some(norm(names.feed_forward_norm)?),
-                    Some(norm(names.feed_forward_output_norm)?),
-                ),
+                (false, true, true) => {
+                    // MuseGlimmer's output norms keep their own epsilon
+                    // (`post_norm_eps`).
+                    let output_spec = NormSpec { eps: architecture.output_norm_eps.unwrap_or(spec.eps), ..spec };
+                    let output_norm = |name: &str| output_spec.load(config.hidden_size, builder.pp(name));
+                    (
+                        Some(norm(names.attention_norm)?),
+                        Some(output_norm(names.attention_output_norm)?),
+                        Some(norm(names.feed_forward_norm)?),
+                        Some(output_norm(names.feed_forward_output_norm)?),
+                    )
+                }
                 (false, false, _) => (
                     None,
                     Some(norm(names.attention_output_norm)?),
