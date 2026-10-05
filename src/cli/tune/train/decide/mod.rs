@@ -21,11 +21,11 @@ pub(in crate::cli) struct DecideArgs {
     /// Output LoRA adapter safetensors; the identity sidecar is written beside it.
     #[arg(long)]
     output: PathBuf,
-    /// Low-rank dimension shared by every adapter.
-    #[arg(long, default_value_t = 8)]
+    /// Low-rank dimension shared by every adapter; Ster assumes none.
+    #[arg(long)]
     rank: usize,
     /// LoRA scaling numerator; each update is scaled by alpha over rank.
-    #[arg(long, default_value_t = 16.0)]
+    #[arg(long)]
     alpha: f64,
     /// Comma-separated projections to adapt: query, key, value, output,
     /// gate, up, or down.
@@ -35,19 +35,19 @@ pub(in crate::cli) struct DecideArgs {
     #[arg(long, default_value = "all")]
     layers: String,
     /// Passes over the rows.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long)]
     epochs: usize,
-    #[arg(long, default_value_t = 1e-4)]
+    #[arg(long)]
     learning_rate: f64,
     /// Forwards folded into one optimizer step.
-    #[arg(long, default_value_t = 8)]
+    #[arg(long)]
     accumulation: usize,
     /// Steps over which the learning rate ramps up from zero.
     #[arg(long, default_value_t = 0)]
     warmup_steps: usize,
     /// Renderings longer than this many tokens are skipped rather than
     /// truncated; a cut state is a different state.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long)]
     max_sequence: usize,
     /// Option orders each question is trained in. 0 is every cyclic shift,
     /// so the letter is never predictive and the model has to read the
@@ -60,14 +60,14 @@ pub(in crate::cli) struct DecideArgs {
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
     chat_template: ChatChoice,
     /// Rows folded into one forward pass.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long)]
     batch_size: usize,
     /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
     /// Adapters and every optimizer moment stay in f32. bf16 needs
     /// --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
-    #[arg(long, default_value_t = 42)]
+    #[arg(long)]
     seed: u64,
 }
 

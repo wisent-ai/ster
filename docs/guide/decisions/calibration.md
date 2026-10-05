@@ -6,14 +6,19 @@ model rarely does. `ster calibrate` fits one temperature on labelled
 decisions; `ster decide --calibration` applies it.
 
 ```text
-ster calibrate --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
+ster calibrate --model <MODEL> --examples <EXAMPLES> --output <OUTPUT> --ece-bins <N>
                [--revision <REVISION>] [--device cpu] [--chat-template auto|off]
                [--precision f32|f16|bf16] [--permutations 0]
 ```
 
 It writes the artifact to `--output`, prints it, and is also the operation
 `ster request calibrate`, with `examples` and `output` as paths in the request
-body ([desktop requests](../desktop-requests.md)).
+body and `eceBins` required beside them
+([desktop requests](../desktop-requests.md)). `--ece-bins` is the number of
+equal-width confidence bins the expected calibration error is measured over;
+Ster assumes none, because an ECE is only comparable with one taken over as
+many bins, and each `before`, `after` and `control` block records it as
+`ece_bins`. `ster decisions benchmark` takes the same `--ece-bins`.
 
 ## What is fitted
 
@@ -21,9 +26,15 @@ Temperature scaling is the smallest correction that fixes overconfidence: one
 number the averaged log-scores of every question are divided by before the
 softmax. It sharpens or flattens every distribution at once and cannot change
 which option wins, so it cannot trade accuracy for calibration. The value is
-the one that minimizes the mean negative log-likelihood of the labels, found
-by golden-section search over `e^-3` to `e^3`; a result on either bound is
-worth reading as a warning that the labels and the model disagree badly.
+the one that minimizes the mean negative log-likelihood of the labels, searched
+over its logarithm with no window and no step count assumed: the search starts
+at the raw temperature, doubles its stride outward until the likelihood stops
+improving, which brackets the minimum wherever it lies, and then narrows the
+bracket by golden-section search until floating point cannot split it further.
+A likelihood that keeps improving until the temperature leaves the finite range
+— every label already won with certainty, or none ever can be — stops at the
+last finite temperature, which is worth reading as a warning that the labels
+and the model disagree badly.
 
 ## The labelled set
 
@@ -73,9 +84,11 @@ Written on `HuggingFaceTB/SmolLM2-1.7B-Instruct`, CPU, `f32`, in 48 seconds:
 
 - `before` and `after` are the same labels scored at temperature `1.0` and at
   the fitted one: mean negative log-likelihood of the correct option, expected
-  calibration error over ten confidence bins, and how often the winning option
+  calibration error over the stated confidence bins, and how often the winning option
   was the labelled one. Accuracy is identical in both, because scaling never
-  changes the winner; the fit can only move `nll` and `ece`.
+  changes the winner; the fit can only move `nll` and `ece`. This run predates
+  `--ece-bins`: it measured over ten bins and its blocks carry no `ece_bins`,
+  which a calibration written today always records.
 - `control` is the same labels with every question judged against another
   example's state — each example's questions paired with the next example's
   state. A model that reads the state scores its labels better on the real
@@ -108,6 +121,7 @@ a status-`1` result.
 
 A labelled set:
 
+- `the expected calibration error needs at least one bin` (`--ece-bins 0`)
 - `calibration needs at least one labelled example`
 - `calibration needs at least one labelled question`
 - `calibration example <i> is not a valid request`, over the request refusal

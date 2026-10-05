@@ -55,6 +55,10 @@ pub struct SynthesizeOptions {
     pub per_option: usize,
     /// Extra attempts allowed per state before giving up on an option.
     pub retry_multiplier: usize,
+    /// Sampling temperature of the writer, as the caller stated it.
+    pub temperature: f64,
+    /// The writer's token budget for one state, as the caller stated it.
+    pub max_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,18 +71,19 @@ pub struct SynthesizeReport {
     pub kept: usize,
     pub rejected_empty: usize,
     pub rejected_duplicates: usize,
+    /// The sampling the states were written with, as the caller stated it.
+    pub temperature: f64,
+    pub max_tokens: usize,
 }
-
-/// Sampling for a writer: warm enough that repeated asks differ, and a
-/// budget that fits one state.
-const TEMPERATURE: f64 = 0.9;
-const MAX_TOKENS: usize = 160;
 
 /// Writes `per_option` states for every option of every question through
 /// `gateway`, each labelled with the option it was written for.
 pub fn synthesize(gateway: &Gateway, schema: &Schema, options: &SynthesizeOptions) -> Result<(ExampleSet, SynthesizeReport)> {
     if options.per_option == 0 {
         bail!("synthesis needs at least one state per option");
+    }
+    if options.retry_multiplier == 0 {
+        bail!("synthesis needs a retry multiplier of at least one");
     }
     let mut examples = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -90,7 +95,7 @@ pub fn synthesize(gateway: &Gateway, schema: &Schema, options: &SynthesizeOption
         for (index, (name, text)) in targets(question).into_iter().enumerate() {
             requested += options.per_option;
             let mut kept = 0usize;
-            let budget = options.per_option * options.retry_multiplier.max(1);
+            let budget = options.per_option * options.retry_multiplier;
             let mut tried = 0usize;
             while kept < options.per_option && tried < budget {
                 tried += 1;
@@ -101,7 +106,7 @@ pub fn synthesize(gateway: &Gateway, schema: &Schema, options: &SynthesizeOption
                     options.per_option
                 ));
                 let prompt = writer_prompt(&schema.domain, question, &text);
-                let state = gateway.complete(&prompt, MAX_TOKENS, TEMPERATURE)?;
+                let state = gateway.complete(&prompt, options.max_tokens, options.temperature)?;
                 let state = state.trim().trim_matches('"').trim().to_owned();
                 if state.is_empty() {
                     rejected_empty += 1;
@@ -142,6 +147,8 @@ pub fn synthesize(gateway: &Gateway, schema: &Schema, options: &SynthesizeOption
         kept: set.examples.len(),
         rejected_empty,
         rejected_duplicates,
+        temperature: options.temperature,
+        max_tokens: options.max_tokens,
     };
     Ok((set, report))
 }

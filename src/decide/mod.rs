@@ -101,7 +101,10 @@ pub fn decide(
 /// from the options and the letters alone scores the same on both, and no
 /// temperature can make that honest. One example gives nothing to pair
 /// against, so the control is absent below two.
-pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options) -> Result<Calibration> {
+pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options, ece_bins: usize) -> Result<Calibration> {
+    if ece_bins == 0 {
+        bail!("the expected calibration error needs at least one bin");
+    }
     examples.validate()?;
     let count = examples.examples.len();
     let mut labelled = Vec::new();
@@ -126,9 +129,9 @@ pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options) -> 
         }
     }
     let temperature = calibration::fit_temperature(&labelled);
-    let before = calibration::metrics(&labelled, RAW_TEMPERATURE);
-    let after = calibration::metrics(&labelled, temperature);
-    let control = (count > 1).then(|| calibration::metrics(&shuffled, temperature));
+    let before = calibration::metrics(&labelled, RAW_TEMPERATURE, ece_bins);
+    let after = calibration::metrics(&labelled, temperature, ece_bins);
+    let control = (count > 1).then(|| calibration::metrics(&shuffled, temperature, ece_bins));
     workflow::progress(format!(
         "fitted temperature {temperature:.4} over {} labelled questions: nll {:.4} -> {:.4}, ece {:.4} -> {:.4}, accuracy {:.4}{}",
         labelled.len(),

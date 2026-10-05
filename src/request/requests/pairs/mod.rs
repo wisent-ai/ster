@@ -55,12 +55,12 @@ impl Validate for WorkspacePairSetRequest {
 pub(in crate::request) struct PairsInspectRequest {
     #[serde(default)]
     pub(in crate::request) pairs: String,
-    #[serde(default = "default_dedupe_bits")]
+    /// The deduplication and refusal settings are the caller's; Ster assumes
+    /// none, and a body without one is refused by name.
     pub(in crate::request) dedupe_bits: u32,
-    #[serde(default = "default_dedupe_bands")]
     pub(in crate::request) dedupe_bands: u32,
-    #[serde(default = "default_refusal_threshold")]
     pub(in crate::request) refusal_threshold: f32,
+    pub(in crate::request) unbalanced_ratio: f64,
 }
 
 impl Validate for PairsInspectRequest {
@@ -133,21 +133,15 @@ pub(in crate::request) struct PairsSynthesizeRequest {
     pub(in crate::request) count: usize,
     #[serde(default)]
     pub(in crate::request) output: String,
-    #[serde(default = "default_retry_multiplier")]
+    /// Every sampling and filtering number below is the caller's; Ster
+    /// assumes none, and a body without one is refused by name.
     pub(in crate::request) retry_multiplier: usize,
-    #[serde(default = "default_dedupe_bits")]
     pub(in crate::request) dedupe_bits: u32,
-    #[serde(default = "default_dedupe_bands")]
     pub(in crate::request) dedupe_bands: u32,
-    #[serde(default = "default_refusal_threshold")]
     pub(in crate::request) refusal_threshold: f32,
-    #[serde(default = "default_synthesis_max_new_tokens")]
     pub(in crate::request) max_new_tokens: usize,
-    #[serde(default = "default_synthesis_temperature")]
     pub(in crate::request) temperature: f64,
-    #[serde(default = "default_top_p")]
     pub(in crate::request) top_p: f64,
-    #[serde(default = "default_seed")]
     pub(in crate::request) seed: u64,
 }
 
@@ -192,7 +186,6 @@ pub(in crate::request) struct PairsImportRequest {
     pub(in crate::request) examples: Option<String>,
     #[serde(default)]
     pub(in crate::request) count: Option<usize>,
-    #[serde(default = "default_seed")]
     pub(in crate::request) seed: u64,
     #[serde(default)]
     pub(in crate::request) trait_name: Option<String>,

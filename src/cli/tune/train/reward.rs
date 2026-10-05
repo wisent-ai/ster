@@ -23,11 +23,11 @@ pub(in crate::cli) struct RewardArgs {
     /// head together; the identity sidecar is written beside it.
     #[arg(long)]
     output: PathBuf,
-    /// Low-rank dimension shared by every adapter.
-    #[arg(long, default_value_t = 8)]
+    /// Low-rank dimension shared by every adapter; Ster assumes none.
+    #[arg(long)]
     rank: usize,
     /// LoRA scaling numerator; each update is scaled by alpha over rank.
-    #[arg(long, default_value_t = 16.0)]
+    #[arg(long)]
     alpha: f64,
     /// Comma-separated projections to adapt: query, key, value, output,
     /// gate, up, or down.
@@ -37,35 +37,34 @@ pub(in crate::cli) struct RewardArgs {
     #[arg(long, default_value = "all")]
     layers: String,
     /// Passes over the pair set.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long)]
     epochs: usize,
-    #[arg(long, default_value_t = 1e-4)]
+    #[arg(long)]
     learning_rate: f64,
     /// Pairs folded into one optimizer step.
-    #[arg(long, default_value_t = 8)]
+    #[arg(long)]
     accumulation: usize,
     /// Steps over which the learning rate ramps up from zero.
     #[arg(long, default_value_t = 0)]
     warmup_steps: usize,
     /// Pairs with a side longer than this many tokens are skipped rather
     /// than truncated; a cut response is not the response that was ranked.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long)]
     max_sequence: usize,
     /// auto encodes both sides of every pair as the assistant turn the
     /// model's own chat template renders, when it publishes one; off
     /// encodes raw text.
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
     chat_template: ChatChoice,
-    /// Pairs folded into one forward pass; a pair is two rows. One is the
-    /// unbatched pass every run recorded so far took.
-    #[arg(long, default_value_t = 1)]
+    /// Pairs folded into one forward pass; a pair is two rows.
+    #[arg(long)]
     batch_size: usize,
     /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
     /// The adapters and the scalar head stay in f32. bf16 needs
     /// --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
-    #[arg(long, default_value_t = 42)]
+    #[arg(long)]
     seed: u64,
 }
 

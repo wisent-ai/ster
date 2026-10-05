@@ -45,7 +45,8 @@ pub(in crate::cli) struct EvaluateArgs {
     adapter: Option<PathBuf>,
     /// Examples longer than this many tokens are skipped rather than
     /// truncated; a cut completion is not the completion being scored.
-    #[arg(long, default_value_t = 512)]
+    /// Ster assumes none; it must match the run being compared against.
+    #[arg(long)]
     max_sequence: usize,
     /// auto scores every example in the shape the model's own chat
     /// template renders, when it publishes one; off scores raw text. It
@@ -53,9 +54,8 @@ pub(in crate::cli) struct EvaluateArgs {
     /// a format the adapter never saw.
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
     chat_template: ChatChoice,
-    /// Examples folded into one forward pass. One is the unbatched pass
-    /// every run recorded so far took.
-    #[arg(long, default_value_t = 1)]
+    /// Examples folded into one forward pass; Ster assumes none.
+    #[arg(long)]
     batch_size: usize,
     /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
     /// A score is only comparable with another score taken at the same

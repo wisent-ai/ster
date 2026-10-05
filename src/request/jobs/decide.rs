@@ -53,7 +53,7 @@ pub(in crate::request) fn calibrate_job(request: CalibrateRequest) -> Result<Val
         temperature: RAW_TEMPERATURE,
         explain: false,
     };
-    let calibration = decide::calibrate(&runtime, &examples, options)?;
+    let calibration = decide::calibrate(&runtime, &examples, options, request.ece_bins)?;
     calibration.save(Path::new(&request.output))?;
     Ok(serde_json::to_value(calibration)?)
 }

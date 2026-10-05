@@ -32,8 +32,8 @@ pub(in crate::cli) struct GrpoArgs {
     #[arg(long, default_value = "length")]
     reward: String,
     /// Completions sampled per prompt. Their mean is the baseline, which is
-    /// why two is the smallest group that means anything.
-    #[arg(long, default_value_t = 4)]
+    /// why two is the smallest group that means anything. Ster assumes none.
+    #[arg(long)]
     group: usize,
     /// Assistant turns per sampled conversation. Above one, --user-model
     /// writes each user turn in between, and a conversation's reward is
@@ -50,16 +50,16 @@ pub(in crate::cli) struct GrpoArgs {
     #[arg(long, requires = "user_model")]
     user_revision: Option<String>,
     /// Passes over the prompt set; each one re-samples from the current policy.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long)]
     iterations: usize,
     /// Weight on the KL penalty pulling the policy back to the frozen base.
-    #[arg(long, default_value_t = 0.04)]
+    #[arg(long)]
     beta: f64,
     /// Low-rank dimension shared by every adapter.
-    #[arg(long, default_value_t = 8)]
+    #[arg(long)]
     rank: usize,
     /// LoRA scaling numerator; each update is scaled by alpha over rank.
-    #[arg(long, default_value_t = 16.0)]
+    #[arg(long)]
     alpha: f64,
     /// Comma-separated projections to adapt: query, key, value, output,
     /// gate, up, or down.
@@ -68,26 +68,27 @@ pub(in crate::cli) struct GrpoArgs {
     /// Comma-separated layers, half-open ranges such as 8..16, or all.
     #[arg(long, default_value = "all")]
     layers: String,
-    #[arg(long, default_value_t = 1e-4)]
+    #[arg(long)]
     learning_rate: f64,
     /// Prompt groups folded into one optimizer step. One group is already
-    /// --group sequences, so a step per group is the natural unit.
-    #[arg(long, default_value_t = 1)]
+    /// --group sequences.
+    #[arg(long)]
     accumulation: usize,
     /// Steps over which the learning rate ramps up from zero.
     #[arg(long, default_value_t = 0)]
     warmup_steps: usize,
-    #[arg(long, default_value_t = 64)]
+    /// Token budget of one sampled completion.
+    #[arg(long)]
     max_new_tokens: usize,
     /// Must exceed zero; argmax sampling would draw one identical
     /// completion per group and leave the baseline with nothing to compare.
-    #[arg(long, default_value_t = 0.9)]
+    #[arg(long)]
     temperature: f64,
-    #[arg(long, default_value_t = 0.95)]
+    #[arg(long)]
     top_p: f64,
     /// Prompts whose prompt plus its longest completion exceed this many
     /// tokens are skipped rather than truncated.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long)]
     max_sequence: usize,
     /// auto samples every completion from the prompt as the model's own
     /// chat template renders it, when it publishes one; off samples from
@@ -99,7 +100,7 @@ pub(in crate::cli) struct GrpoArgs {
     /// --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
-    #[arg(long, default_value_t = 42)]
+    #[arg(long)]
     seed: u64,
 }
 

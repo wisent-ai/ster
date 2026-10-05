@@ -54,7 +54,7 @@ pub(in crate::request) fn optimize_job(request: OptimizeRequest) -> Result<Value
     let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?);
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
-    let selection = workflow::optimize(&runtime, &pair_set, &layers)?;
+    let selection = workflow::optimize(&runtime, &pair_set, &layers, request.holdout)?;
     selection.artifact.save(Path::new(&request.output))?;
     let mut summary = selection.summary();
     chat.annotate(&mut summary)?;

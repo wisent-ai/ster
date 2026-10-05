@@ -23,15 +23,19 @@ pub(super) enum PairsCommand {
         /// Pair-set JSON. Omit it to inspect the active imported set.
         #[arg(long)]
         pairs: Option<PathBuf>,
-        /// SimHash Hamming distance below which two pairs count as near-duplicates.
-        #[arg(long, default_value_t = 3)]
+        /// SimHash Hamming distance below which two pairs count as near-duplicates; Ster assumes none.
+        #[arg(long)]
         dedupe_bits: u32,
-        /// Banded-LSH band count; more bands catch more near-duplicates.
-        #[arg(long, default_value_t = 8)]
+        /// Banded-LSH band count, a divisor of 64; more bands catch more near-duplicates.
+        #[arg(long)]
         dedupe_bands: u32,
-        /// Refusal score at or above which a side is flagged.
-        #[arg(long, default_value_t = 0.5)]
+        /// Refusal score at or above which a side is flagged; Ster assumes none.
+        #[arg(long)]
         refusal_threshold: f32,
+        /// Longer-over-shorter character ratio above which a pair is
+        /// counted as unbalanced; Ster assumes none.
+        #[arg(long)]
+        unbalanced_ratio: f64,
     },
     /// Append one pair, creating the set when the file does not exist.
     Add {
@@ -101,26 +105,27 @@ pub(super) enum PairsCommand {
         /// Skip the opposite-trait generation step and use this text.
         #[arg(long)]
         opposite: Option<String>,
-        /// Attempt budget is count times this multiplier.
-        #[arg(long, default_value_t = 3)]
+        /// Attempt budget is count times this multiplier; Ster assumes none.
+        #[arg(long)]
         retry_multiplier: usize,
         /// SimHash Hamming distance below which two pairs count as near-duplicates.
-        #[arg(long, default_value_t = 3)]
+        #[arg(long)]
         dedupe_bits: u32,
-        /// Banded-LSH band count; more bands catch more near-duplicates.
-        #[arg(long, default_value_t = 8)]
+        /// Banded-LSH band count, a divisor of 64; more bands catch more near-duplicates.
+        #[arg(long)]
         dedupe_bands: u32,
         /// Refusal score at or above which a generated side is rejected.
-        #[arg(long, default_value_t = 0.5)]
+        #[arg(long)]
         refusal_threshold: f32,
-        #[arg(long, default_value_t = 96)]
+        /// Token budget of one generated side.
+        #[arg(long)]
         max_new_tokens: usize,
         /// Must exceed zero; argmax generation would repeat one pair.
-        #[arg(long, default_value_t = 0.9)]
+        #[arg(long)]
         temperature: f64,
-        #[arg(long, default_value_t = 0.95)]
+        #[arg(long)]
         top_p: f64,
-        #[arg(long, default_value_t = 42)]
+        #[arg(long)]
         seed: u64,
     },
     /// Write a pair set from a TruthfulQA, Do-Not-Answer or LiveCodeBench export.
@@ -137,17 +142,14 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
             dedupe_bits,
             dedupe_bands,
             refusal_threshold,
+            unbalanced_ratio,
         } => {
             let file = resolve_pairs(pairs)?;
             let pair_set = PairSet::load(&file)?;
             let options = InspectOptions {
-                dedupe: DedupeOptions {
-                    threshold_bits: dedupe_bits,
-                    num_bands: dedupe_bands,
-                    ..DedupeOptions::default()
-                },
+                dedupe: DedupeOptions::new(dedupe_bits, dedupe_bands),
                 refusal_threshold,
-                ..InspectOptions::default()
+                unbalanced_ratio,
             };
             let report = pairs::inspect(&pair_set, &options)?;
             super::answer(&report)?;
@@ -233,11 +235,7 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                 opposite,
                 count,
                 retry_multiplier,
-                dedupe: DedupeOptions {
-                    threshold_bits: dedupe_bits,
-                    num_bands: dedupe_bands,
-                    ..DedupeOptions::default()
-                },
+                dedupe: DedupeOptions::new(dedupe_bits, dedupe_bands),
                 refusal_threshold,
                 generation: GenerationOptions {
                     strength: 1.0,

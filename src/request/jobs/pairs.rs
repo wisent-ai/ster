@@ -62,13 +62,9 @@ pub(in crate::request) fn pairs_import_job(request: PairsImportRequest) -> Resul
 pub(in crate::request) fn pairs_inspect_job(request: PairsInspectRequest) -> Result<Value> {
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let options = InspectOptions {
-        dedupe: DedupeOptions {
-            threshold_bits: request.dedupe_bits,
-            num_bands: request.dedupe_bands,
-            ..DedupeOptions::default()
-        },
+        dedupe: DedupeOptions::new(request.dedupe_bits, request.dedupe_bands),
         refusal_threshold: request.refusal_threshold,
-        ..InspectOptions::default()
+        unbalanced_ratio: request.unbalanced_ratio,
     };
     let report = pairs::inspect(&pair_set, &options)?;
     Ok(serde_json::to_value(&report)?)
@@ -100,11 +96,7 @@ pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) 
         opposite: request.opposite,
         count: request.count,
         retry_multiplier: request.retry_multiplier,
-        dedupe: DedupeOptions {
-            threshold_bits: request.dedupe_bits,
-            num_bands: request.dedupe_bands,
-            ..DedupeOptions::default()
-        },
+        dedupe: DedupeOptions::new(request.dedupe_bits, request.dedupe_bands),
         refusal_threshold: request.refusal_threshold,
         generation: GenerationOptions {
             strength: 1.0,

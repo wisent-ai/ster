@@ -47,11 +47,10 @@ pub(in crate::request) struct TuneEvaluateRequest {
     /// the bare checkpoint, which is the run an adapter is compared against.
     #[serde(default)]
     pub(in crate::request) adapter: Option<String>,
-    #[serde(default = "default_max_sequence")]
+    /// Sequence and batch sizes are the caller's; Ster assumes none.
     pub(in crate::request) max_sequence: usize,
     #[serde(default = "default_chat_template")]
     pub(in crate::request) chat_template: String,
-    #[serde(default = "default_batch_size")]
     pub(in crate::request) batch_size: usize,
     #[serde(default = "default_precision")]
     pub(in crate::request) precision: String,

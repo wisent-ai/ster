@@ -228,9 +228,13 @@ and writing the one labelled-decision document `ster calibrate` already reads:
   `label` rows; the question's id and wording are the caller's.
 - `ster decisions synthesize` writes labelled decisions with a hosted model
   through Brama from a schema — a domain and the questions — one label per
-  state by construction.
-- `ster decisions split` holds out a seeded fraction of examples; `ster tune
-  decide` trains LoRA adapters on the training side; `ster decisions benchmark`
-  measures the base model and the adapter on the held-out side.
+  state by construction. `--per-option`, `--retry-multiplier`,
+  `--temperature` and `--max-tokens` are required; the report records the
+  temperature and token budget the states were written with.
+- `ster decisions split` holds out a seeded fraction of examples, both
+  `--holdout` and `--seed` stated by the caller; `ster tune decide` trains
+  LoRA adapters on the training side; `ster decisions benchmark` measures the
+  base model and the adapter on the held-out side over the stated
+  `--ece-bins`.
 
 Each has its own page on the documentation site under CLI commands.

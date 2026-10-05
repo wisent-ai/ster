@@ -15,25 +15,8 @@ use super::answer::{argmax, QuestionLogits};
 
 pub const SCHEMA: &str = "ster-calibration/1";
 
-/// The search window for the fitted temperature, as bounds on its logarithm.
-/// Twenty times sharper than raw and twenty times flatter cover every model
-/// this has been run on with room to spare; a fit that lands on a bound is
-/// reported as the bound, which an operator can read as a warning.
-const LOG_TEMPERATURE_MIN: f64 = -3.0;
-const LOG_TEMPERATURE_MAX: f64 = 3.0;
-
-/// Golden-section steps over that window. Each step shrinks it by 0.618, so
-/// sixty of them resolve the temperature to far below the noise of any
-/// labelled set an operator will actually have.
-const SEARCH_STEPS: usize = 60;
-
 /// The uncalibrated temperature: logits used as the model produced them.
 pub const RAW_TEMPERATURE: f64 = 1.0;
-
-/// Reliability bins for the expected calibration error, the number the
-/// calibration literature reports with and the one a reader can compare
-/// against.
-const ECE_BINS: usize = 10;
 
 /// The artifact `ster calibrate` writes and `ster decide --calibration`
 /// reads. It names the model it was fitted on, because a temperature fitted
@@ -69,6 +52,11 @@ pub struct Metrics {
     /// Expected calibration error: how far the confidence of the winning
     /// option is, on average, from how often it is right.
     pub ece: f64,
+    /// Equal-width confidence bins the ECE was measured over, as the caller
+    /// stated them; an ECE is only comparable with one taken over as many.
+    /// Absent on calibrations written before the count was recorded.
+    #[serde(default)]
+    pub ece_bins: Option<usize>,
     /// How often the winning option was the labelled one. The same at every
     /// temperature, because scaling never changes the winner.
     pub accuracy: f64,
@@ -123,30 +111,78 @@ pub struct Labelled {
 }
 
 /// The temperature that minimizes the mean negative log-likelihood over
-/// `labelled`, by golden-section search over its logarithm.
+/// `labelled`, searched over its logarithm.
+///
+/// No window and no step count are assumed. The search starts at the raw
+/// temperature and doubles its stride outward until the likelihood stops
+/// improving, which brackets the minimum wherever it lies; the
+/// negative log-likelihood of temperature scaling has one minimum, so the
+/// bracket holds it. Golden-section search then narrows the bracket until
+/// floating point cannot split it further. A likelihood that keeps improving
+/// until `exp` leaves the finite range — every label already won with
+/// certainty, or none ever can be — stops at the last finite temperature.
 pub fn fit_temperature(labelled: &[Labelled]) -> f64 {
+    let log_limit = f64::MAX.ln();
+    let at = |log_temperature: f64| nll(labelled, log_temperature.exp());
+    let origin = RAW_TEMPERATURE.ln();
+    let (low, high) = bracket(&at, origin, log_limit);
+    golden_section(&at, low, high).exp()
+}
+
+/// An interval of log temperatures holding the minimum: walks downhill from
+/// `origin` with a doubling stride until the value rises again.
+fn bracket(at: &impl Fn(f64) -> f64, origin: f64, log_limit: f64) -> (f64, f64) {
+    let centre = at(origin);
+    let mut stride = 1.0;
+    // Downhill is whichever side improves; neither improving brackets at once.
+    let direction = if at(origin + stride) < centre {
+        1.0
+    } else if at(origin - stride) < centre {
+        -1.0
+    } else {
+        return (origin - stride, origin + stride);
+    };
+    let mut previous = origin;
+    let mut current = origin + direction * stride;
+    let mut value = at(current);
+    loop {
+        stride *= 2.0;
+        let next = (current + direction * stride).clamp(-log_limit, log_limit);
+        let next_value = at(next);
+        if next_value >= value || next == current {
+            let (a, b) = (previous, next);
+            return if a < b { (a, b) } else { (b, a) };
+        }
+        previous = current;
+        current = next;
+        value = next_value;
+    }
+}
+
+/// Golden-section search for the minimum of `at` on `[low, high]`, run until
+/// the interval cannot be split into distinct floating-point probes.
+fn golden_section(at: &impl Fn(f64) -> f64, mut low: f64, mut high: f64) -> f64 {
     let golden = (5f64.sqrt() - 1.0) / 2.0;
-    let (mut low, mut high) = (LOG_TEMPERATURE_MIN, LOG_TEMPERATURE_MAX);
     let mut left = high - golden * (high - low);
     let mut right = low + golden * (high - low);
-    let mut left_value = nll(labelled, left.exp());
-    let mut right_value = nll(labelled, right.exp());
-    for _ in 0..SEARCH_STEPS {
+    let mut left_value = at(left);
+    let mut right_value = at(right);
+    while low < left && left < right && right < high {
         if left_value < right_value {
             high = right;
             right = left;
             right_value = left_value;
             left = high - golden * (high - low);
-            left_value = nll(labelled, left.exp());
+            left_value = at(left);
         } else {
             low = left;
             left = right;
             left_value = right_value;
             right = low + golden * (high - low);
-            right_value = nll(labelled, right.exp());
+            right_value = at(right);
         }
     }
-    ((low + high) / 2.0).exp()
+    (low + high) / 2.0
 }
 
 fn nll(labelled: &[Labelled], temperature: f64) -> f64 {
@@ -157,9 +193,9 @@ fn nll(labelled: &[Labelled], temperature: f64) -> f64 {
         / labelled.len() as f64
 }
 
-/// Every metric at one temperature.
-pub fn metrics(labelled: &[Labelled], temperature: f64) -> Metrics {
-    let mut bins = vec![(0usize, 0f64, 0f64); ECE_BINS];
+/// Every metric at one temperature, the ECE over `ece_bins` equal-width bins.
+pub fn metrics(labelled: &[Labelled], temperature: f64, ece_bins: usize) -> Metrics {
+    let mut bins = vec![(0usize, 0f64, 0f64); ece_bins];
     let mut correct = 0usize;
     for item in labelled {
         let probabilities = item.logits.probabilities(temperature);
@@ -167,7 +203,7 @@ pub fn metrics(labelled: &[Labelled], temperature: f64) -> Metrics {
         let hit = winner == item.truth;
         correct += usize::from(hit);
         let top = probabilities[winner];
-        let bin = ((top * ECE_BINS as f64) as usize).min(ECE_BINS - 1);
+        let bin = ((top * ece_bins as f64) as usize).min(ece_bins - 1);
         let (count, confidence_sum, hit_sum) = &mut bins[bin];
         *count += 1;
         *confidence_sum += top;
@@ -182,5 +218,5 @@ pub fn metrics(labelled: &[Labelled], temperature: f64) -> Metrics {
             (count / total) * (confidence_sum / count - hit_sum / count).abs()
         })
         .sum();
-    Metrics { temperature, nll: nll(labelled, temperature), ece, accuracy: correct as f64 / total }
+    Metrics { temperature, nll: nll(labelled, temperature), ece, ece_bins: Some(ece_bins), accuracy: correct as f64 / total }
 }

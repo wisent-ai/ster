@@ -10,9 +10,11 @@ ster request <operation>   < request body (one JSON document on stdin)
 ```
 
 Every operation runs the same functions as its CLI command, so the document in
-the result is the one the command prints and the defaults are the ones its
-flags have. The body carries each flag as a camelCase field; an empty body is
-the empty object, so every field takes its default.
+the result is the one the command prints, and a field is required exactly when
+its flag is. The body carries each flag as a camelCase field. Every training,
+sampling and judging number is required on both sides — Ster assumes none — so
+a body that leaves one out is refused before anything runs, naming it:
+`request body is not valid JSON: missing field \`learningRate\` at line <L> column <C>`.
 
 ## Operations
 
@@ -21,7 +23,7 @@ the empty object, so every field takes its default.
 | `train`, `optimize`, `evaluate`, `generate`, `extract`, `inspect` | the [steering](steering.md) commands |
 | `decide`, `calibrate` | [`ster decide`](decisions.md), [`ster calibrate`](decisions/calibration.md) |
 | `workspace/import-pairs`, `workspace/show`, `workspace/select`, `workspace/remove` | `ster workspace import-pairs`, `show`, `select`, `remove` (`select` and `remove` take the set's `id`; all three answer `ster workspace show`'s document) |
-| `pairs/import`, `pairs/inspect`, `pairs/save`, `pairs/synthesize` | the [pair-set](pair-sets.md) commands (`pairs/import` takes `benchmark`, `source`, `output` and optional `examples`, `count`, `seed`, `traitName`, and answers `ster pairs import`'s document with the skipped-row report) |
+| `pairs/import`, `pairs/inspect`, `pairs/save`, `pairs/synthesize` | the [pair-set](pair-sets.md) commands (`pairs/import` takes `benchmark`, `source`, `output`, `seed` and optional `examples`, `count`, `traitName`, and answers `ster pairs import`'s document with the skipped-row report) |
 | `tune/sft`, `tune/dpo`, `tune/reward`, `tune/grpo`, `tune/merge`, `tune/evaluate`, `tune/inspect` | the [adapter](tuning/adapters.md) commands |
 
 `decide` takes its request document inline under `request`, and `pairs/save`

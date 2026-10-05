@@ -14,7 +14,7 @@ ster train --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
            [--revision <REVISION>] [--device cpu] [--layers all]
            [--method caa|pca|logistic] [--chat-template auto|off]
            [--precision f32|f16|bf16]
-ster optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
+ster optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT> --holdout <FRACTION>
               [--revision <REVISION>] [--device cpu] [--layers all]
               [--chat-template auto|off] [--precision f32|f16|bf16]
 ster evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
@@ -23,8 +23,8 @@ ster evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
 ster generate --model <MODEL> --prompt <PROMPT> [--vector <VECTOR>]
               [--adapter <ADAPTER>] [--revision <REVISION>] [--device cpu]
               [--chat-template auto|off] [--precision f32|f16|bf16]
-              [--strength 1.0] [--max-new-tokens 128] [--temperature 0.0]
-              [--top-p <TOP_P>] [--seed 42]
+              --strength <S> --max-new-tokens <N> --temperature <T>
+              [--top-p <TOP_P>] --seed <SEED>
 ster extract --model <MODEL> --input <INPUT> --output <OUTPUT>
              [--revision <REVISION>] [--device cpu] [--layers all]
              [--chat-template auto|off] [--precision f32|f16|bf16]
@@ -42,7 +42,12 @@ of `ster request`: `ster request train`, `ster request optimize`,
 `ster request inspect` read the request body as one JSON document on stdin,
 where every flag above is a camelCase field, `chatTemplate` and `precision`
 included, each defaulting to what the CLI defaults to, and print NDJSON log
-events and one result event carrying the same document. The process ends with
+events and one result event carrying the same document. The numbers have no
+default on either side: `--holdout`, `--strength`, `--max-new-tokens`,
+`--temperature` and `--seed` (and `holdout`, `strength`, `maxNewTokens`,
+`temperature`, `seed`) are required, and leaving one out is refused naming it.
+`--top-p` is optional; without it generation samples the whole distribution,
+and a temperature of zero is argmax. The process ends with
 the operation; see [desktop requests](desktop-requests.md).
 
 ## Selection
@@ -54,16 +59,16 @@ choice — layer 9, method pca — which is a result with no evidence attached, 
 a chooser that publishes only its choice is asking to be trusted.
 
 The document is the artifact summary plus a `selection` object holding
-`holdout`, with `fit_pairs` and `holdout_pairs`, and `candidates`, one row per
+`holdout`, with `fraction`, `fit_pairs` and `holdout_pairs`, and `candidates`, one row per
 layer and method carrying `layer`, `method`, `holdout_accuracy`,
 `holdout_margin` and `selected`. Exactly one row has `selected` true. The rows
 stay in the order the search walked them rather than sorted by score, so two
 runs over the same layers diff line for line. The scores cost nothing to carry:
 they were computed to make the decision.
 
-The split is reported rather than assumed, because "80/20" is a ratio and what
-decides whether the ranking means anything is the two counts it produced. The
-run says them before it starts —
+The split is the caller's: `--holdout` is the fraction of the pairs held out,
+rounded to whole pairs, and what decides whether the ranking means anything is
+the two counts it produced. The run says them before it starts —
 `fitting each candidate on 3 pairs and ranking on a 1-pair holdout` — and when
 the holdout comes out at a single pair it says what that costs:
 
@@ -72,15 +77,18 @@ a one-pair holdout scores every candidate 0 or 1, so this ranking separates almo
 ```
 
 That is a fact about the input rather than a defect, so it is stated rather
-than refused: four pairs is the smallest set `optimize` accepts, and four pairs
-yield a one-pair holdout. Ranking prefers accuracy and breaks ties on margin,
+than refused. A fraction that leaves either side without a pair is refused
+before any activation is read:
+`a held-out fraction of 0.1 over 4 contrastive pairs leaves 4 pairs to fit and 0 to rank on; both need at least one`.
+A fraction outside (0, 1) is refused as
+`the held-out fraction must be above zero and below one`. Ranking prefers accuracy and breaks ties on margin,
 so on a holdout of one pair the tiebreak is doing all of the work.
 
 The published direction is then refitted on every pair, holdout included, and
 the artifact's `metadata` records that in one sentence:
 `chosen over 66 candidates on a 1-pair holdout, then refitted on all 4 pairs`.
 The split existed to rank candidates, and once the ranking is done, throwing
-away a fifth of the evidence would be paying for the measurement twice. It also
+away the held-out evidence would be paying for the measurement twice. It also
 means the `train_accuracy` and `train_margin` the artifact carries are the
 refit's numbers over the whole set rather than the holdout scores in the table:
 the table is the evidence for the choice, and the artifact's own numbers

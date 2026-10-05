@@ -55,6 +55,8 @@ pub(in crate::request) struct OptimizeRequest {
     pub(in crate::request) precision: String,
     #[serde(default = "default_layers")]
     pub(in crate::request) layers: String,
+    /// Fraction of the pairs held out to rank candidates on; required.
+    pub(in crate::request) holdout: f64,
 }
 
 impl Validate for OptimizeRequest {
@@ -106,15 +108,14 @@ pub(in crate::request) struct GenerateRequest {
     /// refuses a mismatch rather than steering the wrong residual stream.
     #[serde(default)]
     pub(in crate::request) adapter: Option<String>,
-    #[serde(default = "default_strength")]
+    /// Scale, token budget, temperature and seed are the caller's; Ster
+    /// assumes none. Temperature zero is argmax decoding.
     pub(in crate::request) strength: f64,
-    #[serde(default = "default_max_new_tokens")]
     pub(in crate::request) max_new_tokens: usize,
-    #[serde(default)]
     pub(in crate::request) temperature: f64,
+    /// Nucleus mass; absent samples from the whole distribution.
     #[serde(default)]
     pub(in crate::request) top_p: Option<f64>,
-    #[serde(default = "default_seed")]
     pub(in crate::request) seed: u64,
     /// `auto` renders the prompt through the model's own chat template when
     /// it publishes one, `off` sends raw text. An instruct checkpoint handed

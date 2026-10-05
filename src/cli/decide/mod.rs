@@ -76,6 +76,10 @@ pub(super) struct CalibrateArgs {
     /// Where the calibration artifact is written.
     #[arg(long)]
     output: PathBuf,
+    /// Equal-width confidence bins the expected calibration error is
+    /// measured over; Ster assumes none, and the artifact records it.
+    #[arg(long)]
+    ece_bins: usize,
 }
 
 pub(super) fn decide(args: DecideArgs) -> Result<()> {
@@ -123,11 +127,12 @@ pub(super) fn calibrate(args: CalibrateArgs) -> Result<()> {
         read,
         examples,
         output,
+        ece_bins,
     } = args;
     let examples = ExampleSet::load(&examples)?;
     let (mut runtime, options) = read.load()?;
     runtime.set_chat_template(read.chat_template);
-    let calibration = decide::calibrate(&runtime, &examples, options)?;
+    let calibration = decide::calibrate(&runtime, &examples, options, ece_bins)?;
     calibration.save(&output)?;
     super::answer(&calibration)?;
     Ok(())

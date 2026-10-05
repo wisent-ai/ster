@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeMap, time::Instant};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::Serialize;
 
 use crate::{
@@ -24,6 +24,8 @@ pub struct BenchmarkOptions {
     pub calibration: Option<String>,
     /// The adapter the runtime was loaded with, if any.
     pub adapter: Option<String>,
+    /// Equal-width confidence bins the ECE is measured over, as the caller stated them.
+    pub ece_bins: usize,
 }
 
 /// The document `ster decisions benchmark` writes.
@@ -70,6 +72,9 @@ const MILLISECONDS: f64 = 1000.0;
 
 /// Reads every example of `set` and scores its labels.
 pub fn benchmark(runtime: &Runtime, set: &ExampleSet, options: &BenchmarkOptions) -> Result<Benchmark> {
+    if options.ece_bins == 0 {
+        bail!("the expected calibration error needs at least one bin");
+    }
     set.validate()?;
     let count = set.examples.len();
     let mut labelled: Vec<(String, Labelled)> = Vec::new();
@@ -109,11 +114,11 @@ pub fn benchmark(runtime: &Runtime, set: &ExampleSet, options: &BenchmarkOptions
         if items.is_empty() {
             continue;
         }
-        let scored = metrics(&items, temperature);
+        let scored = metrics(&items, temperature, options.ece_bins);
         by_type.insert(name.to_owned(), TypeMetrics { questions: items.len(), accuracy: scored.accuracy, nll: scored.nll });
     }
-    let overall = metrics(&all, temperature);
-    let control = (count > 1).then(|| metrics(&shuffled, temperature));
+    let overall = metrics(&all, temperature, options.ece_bins);
+    let control = (count > 1).then(|| metrics(&shuffled, temperature, options.ece_bins));
     workflow::progress(format!(
         "{} labelled questions: accuracy {:.4}, nll {:.4}, ece {:.4}{}; {:.0} ms per example",
         all.len(),

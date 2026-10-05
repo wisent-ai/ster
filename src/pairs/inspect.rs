@@ -11,29 +11,19 @@ use crate::{
     pairs::quality::{diversity, refusal},
 };
 
-/// A pair whose two sides differ by more than this factor in characters is
-/// reported as unbalanced. Length is the confound the product documents at
-/// https://ster.wisent.com/docs/concept-contrastive-pair: when the positive
-/// side is consistently three times longer than the negative, the trained
-/// direction encodes response length, not the trait, and steering on it just
-/// makes the model verbose.
-pub const UNBALANCED_RATIO: f64 = 3.0;
-
 // MARK: - Inspection
 
+/// Every judgement threshold is the caller's; Ster assumes none.
 #[derive(Debug, Clone)]
 pub struct InspectOptions {
     pub dedupe: DedupeOptions,
     pub refusal_threshold: f32,
-}
-
-impl Default for InspectOptions {
-    fn default() -> Self {
-        Self {
-            dedupe: DedupeOptions::default(),
-            refusal_threshold: refusal::DEFAULT_THRESHOLD,
-        }
-    }
+    /// A pair whose longer side has more than this many times the other's
+    /// characters is counted as unbalanced. Length is the confound the
+    /// product documents at https://ster.wisent.com/docs/concept-contrastive-pair:
+    /// a direction trained on consistently longer positives encodes length,
+    /// not the trait.
+    pub unbalanced_ratio: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +55,8 @@ pub struct SetReport {
     pub duplicate_count: usize,
     pub refusal_count: usize,
     pub unbalanced_count: usize,
+    /// The ratio `unbalanced_count` was counted against, as the caller stated it.
+    pub unbalanced_ratio: f64,
     pub diversity: diversity::Scores,
     pub entries: Vec<EntryReport>,
 }
@@ -91,7 +83,7 @@ pub fn inspect(pairs: &PairSet, options: &InspectOptions) -> Result<SetReport> {
         let positive_chars = pair.positive.chars().count();
         let negative_chars = pair.negative.chars().count();
         let length_ratio = length_ratio(positive_chars, negative_chars);
-        if length_ratio > UNBALANCED_RATIO {
+        if length_ratio > options.unbalanced_ratio {
             unbalanced_count += 1;
         }
         entries.push(EntryReport {
@@ -121,6 +113,7 @@ pub fn inspect(pairs: &PairSet, options: &InspectOptions) -> Result<SetReport> {
         duplicate_count,
         refusal_count,
         unbalanced_count,
+        unbalanced_ratio: options.unbalanced_ratio,
         diversity,
         entries,
     })

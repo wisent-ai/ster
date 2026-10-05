@@ -16,7 +16,8 @@ use crate::{
 
 const ROWS_URL: &str = "https://datasets-server.huggingface.co/rows";
 
-/// The most rows the route returns per page.
+/// The most rows the route returns per page: the provider's own limit, "slices
+/// of 100 rows maximum", https://huggingface.co/docs/dataset-viewer/en/quick_start.
 const PAGE: usize = 100;
 
 #[derive(Debug, Clone)]

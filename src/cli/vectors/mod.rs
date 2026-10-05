@@ -68,6 +68,10 @@ pub(super) struct OptimizeArgs {
     /// --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
+    /// Fraction of the pairs held out to rank candidates on, above zero and
+    /// below one; Ster assumes none.
+    #[arg(long)]
+    holdout: f64,
 }
 
 /// `ster evaluate`
@@ -123,16 +127,18 @@ pub(super) struct GenerateArgs {
     /// is cast to it on the way in. bf16 needs --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
-    #[arg(long, default_value_t = 1.0)]
+    /// Scale on the steering vector; Ster assumes none.
+    #[arg(long)]
     strength: f64,
-    #[arg(long, default_value_t = 128)]
+    #[arg(long)]
     max_new_tokens: usize,
     /// Zero selects deterministic argmax generation.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long)]
     temperature: f64,
+    /// Nucleus mass; omitted samples from the whole distribution.
     #[arg(long)]
     top_p: Option<f64>,
-    #[arg(long, default_value_t = 42)]
+    #[arg(long)]
     seed: u64,
 }
 
@@ -212,13 +218,14 @@ pub(super) fn optimize(args: OptimizeArgs) -> Result<()> {
         layers,
         chat_template,
         precision,
+        holdout,
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let mut runtime = model.load_at(precision)?;
     let chat = runtime.set_chat_template(chat_template);
     let pair_set = PairSet::load(&pairs)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
-    let selection = workflow::optimize(&runtime, &pair_set, &layers)?;
+    let selection = workflow::optimize(&runtime, &pair_set, &layers, holdout)?;
     selection.artifact.save(&output)?;
     let mut summary = selection.summary();
     chat.annotate(&mut summary)?;

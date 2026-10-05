@@ -54,27 +54,35 @@ pub struct Candidate {
 
 /// How the pair set was cut.
 ///
-/// Reported rather than assumed, because "80/20" is a ratio and what an
-/// operator needs is the two counts it produced. A four-pair set yields a
-/// one-pair holdout, and a holdout of one pair is a coin flip dressed as a
-/// measurement — which is a fact about the input, not a defect, so it is
+/// Reported rather than assumed: what an operator needs is the two counts
+/// the stated fraction produced. A holdout of one pair is a coin flip
+/// dressed as a measurement — a fact about the input, not a defect, so it is
 /// stated rather than refused.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Holdout {
+    pub fraction: f64,
     pub fit_pairs: usize,
     pub holdout_pairs: usize,
 }
 
-/// Fewer contrastive pairs than this leave nothing to hold out for scoring.
-const MIN_OPTIMIZATION_PAIRS: usize = 4;
-
-pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<Selection> {
-    if pairs.pairs.len() < MIN_OPTIMIZATION_PAIRS {
-        bail!("optimization requires at least {MIN_OPTIMIZATION_PAIRS} contrastive pairs");
+/// Fits every candidate on the first part of `pairs` and ranks it on the
+/// held-out `holdout` fraction, rounded to whole pairs. Ster assumes no
+/// fraction; one that leaves either side without a pair is refused.
+pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize], holdout: f64) -> Result<Selection> {
+    if !(holdout > 0.0 && holdout < 1.0) {
+        bail!("the held-out fraction must be above zero and below one");
+    }
+    let total = pairs.pairs.len();
+    let holdout_pairs = (total as f64 * holdout).round() as usize;
+    if holdout_pairs == 0 || holdout_pairs >= total {
+        bail!(
+            "a held-out fraction of {holdout} over {total} contrastive pairs leaves {} pairs to fit and {holdout_pairs} to rank on; both need at least one",
+            total.saturating_sub(holdout_pairs)
+        );
     }
     let captured = capture_pairs(runtime, pairs, layers)?;
-    let split = (pairs.pairs.len() * 4 / 5).clamp(1, pairs.pairs.len() - 1);
-    let holdout = Holdout { fit_pairs: split, holdout_pairs: pairs.pairs.len() - split };
+    let split = total - holdout_pairs;
+    let holdout = Holdout { fraction: holdout, fit_pairs: split, holdout_pairs };
     progress(format!(
         "fitting each candidate on {} pairs and ranking on a {}-pair holdout",
         holdout.fit_pairs, holdout.holdout_pairs

@@ -33,9 +33,12 @@ pub struct DedupeOptions {
     pub num_bands: u32,
 }
 
-impl Default for DedupeOptions {
-    fn default() -> Self {
-        Self { threshold_bits: 3, word_ngram: 1, char_ngram: 4, num_bands: 8 }
+impl DedupeOptions {
+    /// The caller's threshold and band count, with the shingle sizes of
+    /// Wisent's `SimHashDeduper`, which this module ports: single words, and
+    /// four characters for CJK/Kana/Hangul text.
+    pub fn new(threshold_bits: u32, num_bands: u32) -> Self {
+        Self { threshold_bits, word_ngram: 1, char_ngram: 4, num_bands }
     }
 }
 

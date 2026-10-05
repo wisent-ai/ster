@@ -56,6 +56,8 @@ pub(in crate::request) struct CalibrateRequest {
     pub(in crate::request) output: String,
     #[serde(default)]
     pub(in crate::request) permutations: usize,
+    /// Equal-width confidence bins the ECE is measured over; required.
+    pub(in crate::request) ece_bins: usize,
     #[serde(default = "default_chat_template")]
     pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]

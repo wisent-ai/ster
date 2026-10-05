@@ -13,9 +13,6 @@ use regex::Regex;
 use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
-/// Score at or above which a text is treated as a refusal.
-pub const DEFAULT_THRESHOLD: f32 = 0.5;
-
 /// A family of refusal phrasing, one per alternation branch of the pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

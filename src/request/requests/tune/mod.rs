@@ -20,33 +20,26 @@ pub(in crate::request) struct TuneSftRequest {
     pub(in crate::request) examples: String,
     #[serde(default)]
     pub(in crate::request) output: String,
-    #[serde(default = "default_rank")]
+    /// Every training number is the caller's; Ster assumes none, and a body
+    /// without one is refused by name.
     pub(in crate::request) rank: usize,
-    #[serde(default = "default_alpha")]
     pub(in crate::request) alpha: f64,
     #[serde(default = "default_targets")]
     pub(in crate::request) targets: String,
     #[serde(default = "default_layers")]
     pub(in crate::request) layers: String,
-    #[serde(default = "default_epochs")]
     pub(in crate::request) epochs: usize,
-    #[serde(default = "default_learning_rate")]
     pub(in crate::request) learning_rate: f64,
-    #[serde(default = "default_accumulation")]
     pub(in crate::request) accumulation: usize,
     /// Zero starts at the full learning rate, which is what a short run wants.
     #[serde(default)]
     pub(in crate::request) warmup_steps: usize,
-    #[serde(default = "default_max_sequence")]
     pub(in crate::request) max_sequence: usize,
-    #[serde(default = "default_seed")]
     pub(in crate::request) seed: u64,
     #[serde(default = "default_chat_template")]
     pub(in crate::request) chat_template: String,
     /// Rows folded into one forward pass — examples here, pairs on the
-    /// preference operations, where a pair is two rows. One is the unbatched
-    /// pass every run recorded so far took.
-    #[serde(default = "default_batch_size")]
+    /// preference operations, where a pair is two rows.
     pub(in crate::request) batch_size: usize,
     /// The dtype the frozen base weights are mapped at: `f32`, `f16`, or
     /// `bf16`. Adapters, any head, and every optimizer moment stay in f32
@@ -78,34 +71,25 @@ pub(in crate::request) struct TuneDpoRequest {
     pub(in crate::request) pairs: String,
     #[serde(default)]
     pub(in crate::request) output: String,
-    #[serde(default = "default_rank")]
     pub(in crate::request) rank: usize,
-    #[serde(default = "default_alpha")]
     pub(in crate::request) alpha: f64,
     #[serde(default = "default_targets")]
     pub(in crate::request) targets: String,
     #[serde(default = "default_layers")]
     pub(in crate::request) layers: String,
-    #[serde(default = "default_beta")]
     pub(in crate::request) beta: f64,
     #[serde(default = "default_preference_loss")]
     pub(in crate::request) loss: String,
-    #[serde(default = "default_epochs")]
     pub(in crate::request) epochs: usize,
-    #[serde(default = "default_learning_rate")]
     pub(in crate::request) learning_rate: f64,
-    #[serde(default = "default_accumulation")]
     pub(in crate::request) accumulation: usize,
     /// Zero starts at the full learning rate, which is what a short run wants.
     #[serde(default)]
     pub(in crate::request) warmup_steps: usize,
-    #[serde(default = "default_max_sequence")]
     pub(in crate::request) max_sequence: usize,
-    #[serde(default = "default_seed")]
     pub(in crate::request) seed: u64,
     #[serde(default = "default_chat_template")]
     pub(in crate::request) chat_template: String,
-    #[serde(default = "default_batch_size")]
     pub(in crate::request) batch_size: usize,
     #[serde(default = "default_precision")]
     pub(in crate::request) precision: String,
@@ -130,30 +114,22 @@ pub(in crate::request) struct TuneRewardRequest {
     pub(in crate::request) pairs: String,
     #[serde(default)]
     pub(in crate::request) output: String,
-    #[serde(default = "default_rank")]
     pub(in crate::request) rank: usize,
-    #[serde(default = "default_alpha")]
     pub(in crate::request) alpha: f64,
     #[serde(default = "default_targets")]
     pub(in crate::request) targets: String,
     #[serde(default = "default_layers")]
     pub(in crate::request) layers: String,
-    #[serde(default = "default_epochs")]
     pub(in crate::request) epochs: usize,
-    #[serde(default = "default_learning_rate")]
     pub(in crate::request) learning_rate: f64,
-    #[serde(default = "default_accumulation")]
     pub(in crate::request) accumulation: usize,
     /// Zero starts at the full learning rate, which is what a short run wants.
     #[serde(default)]
     pub(in crate::request) warmup_steps: usize,
-    #[serde(default = "default_max_sequence")]
     pub(in crate::request) max_sequence: usize,
-    #[serde(default = "default_seed")]
     pub(in crate::request) seed: u64,
     #[serde(default = "default_chat_template")]
     pub(in crate::request) chat_template: String,
-    #[serde(default = "default_batch_size")]
     pub(in crate::request) batch_size: usize,
     #[serde(default = "default_precision")]
     pub(in crate::request) precision: String,
@@ -183,7 +159,6 @@ pub(in crate::request) struct TuneGrpoRequest {
     /// The keyword `length`, or the path to a reward artifact.
     #[serde(default = "default_reward")]
     pub(in crate::request) reward: String,
-    #[serde(default = "default_group")]
     pub(in crate::request) group: usize,
     /// Assistant turns per sampled conversation; above one, `userModel`
     /// writes the user's turns in between.
@@ -194,36 +169,25 @@ pub(in crate::request) struct TuneGrpoRequest {
     pub(in crate::request) user_model: Option<String>,
     #[serde(default)]
     pub(in crate::request) user_revision: Option<String>,
-    #[serde(default = "default_iterations")]
     pub(in crate::request) iterations: usize,
-    #[serde(default = "default_kl_beta")]
     pub(in crate::request) beta: f64,
-    #[serde(default = "default_rank")]
     pub(in crate::request) rank: usize,
-    #[serde(default = "default_alpha")]
     pub(in crate::request) alpha: f64,
     #[serde(default = "default_targets")]
     pub(in crate::request) targets: String,
     #[serde(default = "default_layers")]
     pub(in crate::request) layers: String,
-    #[serde(default = "default_learning_rate")]
     pub(in crate::request) learning_rate: f64,
-    /// One group is already `group` sequences, so a step per group is the
-    /// natural unit and the default is one rather than eight.
-    #[serde(default = "default_group_accumulation")]
+    /// Prompt groups folded into one optimizer step; one group is already
+    /// `group` sequences.
     pub(in crate::request) accumulation: usize,
     /// Zero starts at the full learning rate, which is what a short run wants.
     #[serde(default)]
     pub(in crate::request) warmup_steps: usize,
-    #[serde(default = "default_grpo_max_new_tokens")]
     pub(in crate::request) max_new_tokens: usize,
-    #[serde(default = "default_grpo_temperature")]
     pub(in crate::request) temperature: f64,
-    #[serde(default = "default_top_p")]
     pub(in crate::request) top_p: f64,
-    #[serde(default = "default_max_sequence")]
     pub(in crate::request) max_sequence: usize,
-    #[serde(default = "default_seed")]
     pub(in crate::request) seed: u64,
     #[serde(default = "default_chat_template")]
     pub(in crate::request) chat_template: String,

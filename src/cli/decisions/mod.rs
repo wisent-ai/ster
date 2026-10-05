@@ -86,12 +86,18 @@ pub(super) struct SynthesizeArgs {
     /// A Brama alias or route the writer runs on.
     #[arg(long)]
     generator_model: String,
-    /// States written per option of each question.
-    #[arg(long, default_value_t = 5)]
+    /// States written per option of each question; Ster assumes none.
+    #[arg(long)]
     per_option: usize,
-    /// Attempts allowed per state before an option is given up on.
-    #[arg(long, default_value_t = 3)]
+    /// Attempts allowed per state before an option is given up on; Ster assumes none.
+    #[arg(long)]
     retry_multiplier: usize,
+    /// Sampling temperature of the writer; above zero, or every attempt replays one state.
+    #[arg(long)]
+    temperature: f64,
+    /// The writer's token budget for one state.
+    #[arg(long)]
+    max_tokens: usize,
     #[arg(long)]
     output: PathBuf,
 }
@@ -100,10 +106,11 @@ pub(super) struct SynthesizeArgs {
 pub(super) struct SplitArgs {
     #[arg(long)]
     examples: PathBuf,
-    /// Fraction of examples held out.
-    #[arg(long, default_value_t = 0.2)]
+    /// Fraction of examples held out; Ster assumes none.
+    #[arg(long)]
     holdout: f64,
-    #[arg(long, default_value_t = 42)]
+    /// The seed of the shuffle the held-out examples are drawn from.
+    #[arg(long)]
     seed: u64,
     /// Where the training examples are written.
     #[arg(long)]
@@ -133,6 +140,10 @@ pub(super) struct BenchmarkArgs {
     /// Option orders each question is shown in; 0 is every cyclic shift.
     #[arg(long, default_value_t = 0)]
     permutations: usize,
+    /// Equal-width confidence bins the expected calibration error is
+    /// measured over; Ster assumes none, and the document records it.
+    #[arg(long)]
+    ece_bins: usize,
     /// Where the benchmark document is written.
     #[arg(long)]
     output: PathBuf,
@@ -191,6 +202,8 @@ fn synthesize(args: SynthesizeArgs) -> Result<()> {
     let options = SynthesizeOptions {
         per_option: args.per_option,
         retry_multiplier: args.retry_multiplier,
+        temperature: args.temperature,
+        max_tokens: args.max_tokens,
     };
     let (set, report) = decide::synthesize(&gateway, &schema, &options)?;
     write(&args.output, &set)?;
@@ -257,6 +270,7 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
             .adapter
             .as_deref()
             .map(|path| path.to_string_lossy().into_owned()),
+        ece_bins: args.ece_bins,
     };
     let report = decide::benchmark(&runtime, &set, &options)?;
     if let Some(parent) = args

@@ -22,8 +22,8 @@ pub(super) struct ImportArgs {
     /// Keep this many pairs, drawn with --seed; every pair when omitted.
     #[arg(long)]
     count: Option<usize>,
-    /// Seed for the drawn pairs and TruthfulQA's pick among incorrect answers.
-    #[arg(long, default_value_t = 42)]
+    /// Seed for the drawn pairs and TruthfulQA's pick among incorrect answers; Ster assumes none.
+    #[arg(long)]
     seed: u64,
     /// Trait name written on the set; defaults to the benchmark name.
     #[arg(long = "trait")]

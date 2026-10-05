@@ -20,11 +20,11 @@ pub(in crate::cli) struct SftArgs {
     /// Output LoRA adapter safetensors; the identity sidecar is written beside it.
     #[arg(long)]
     output: PathBuf,
-    /// Low-rank dimension shared by every adapter.
-    #[arg(long, default_value_t = 8)]
+    /// Low-rank dimension shared by every adapter; Ster assumes none.
+    #[arg(long)]
     rank: usize,
     /// LoRA scaling numerator; each update is scaled by alpha over rank.
-    #[arg(long, default_value_t = 16.0)]
+    #[arg(long)]
     alpha: f64,
     /// Comma-separated projections to adapt: query, key, value, output,
     /// gate, up, or down. The default query,value is the pair the LoRA
@@ -35,19 +35,19 @@ pub(in crate::cli) struct SftArgs {
     #[arg(long, default_value = "all")]
     layers: String,
     /// Passes over the example set.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long)]
     epochs: usize,
-    #[arg(long, default_value_t = 1e-4)]
+    #[arg(long)]
     learning_rate: f64,
     /// Examples folded into one optimizer step.
-    #[arg(long, default_value_t = 8)]
+    #[arg(long)]
     accumulation: usize,
     /// Steps over which the learning rate ramps up from zero.
     #[arg(long, default_value_t = 0)]
     warmup_steps: usize,
     /// Examples longer than this many tokens are skipped rather than
     /// truncated; a cut completion would teach the model to stop early.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long)]
     max_sequence: usize,
     /// auto encodes every prompt and completion through the model's own
     /// chat template when it publishes one, off encodes raw text. An
@@ -55,11 +55,9 @@ pub(in crate::cli) struct SftArgs {
     /// never be prompted in.
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
     chat_template: ChatChoice,
-    /// Examples folded into one forward pass. One is the unbatched pass
-    /// every run recorded so far took; --accumulation still counts
-    /// forwards, so a step sees up to batch-size times accumulation
-    /// examples and nothing changes at the default.
-    #[arg(long, default_value_t = 1)]
+    /// Examples folded into one forward pass; --accumulation still counts
+    /// forwards, so a step sees up to batch-size times accumulation examples.
+    #[arg(long)]
     batch_size: usize,
     /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
     /// Adapters, any head, and every optimizer moment stay in f32
@@ -67,7 +65,7 @@ pub(in crate::cli) struct SftArgs {
     /// own ulp rounds to nothing in half. bf16 needs --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
-    #[arg(long, default_value_t = 42)]
+    #[arg(long)]
     seed: u64,
 }
 

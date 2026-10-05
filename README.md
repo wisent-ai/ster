@@ -297,6 +297,9 @@ ster pairs synthesize \
   --model meta-llama/Llama-3.2-1B \
   --trait "answers only from verifiable evidence and says so when it cannot" \
   --count 20 \
+  --retry-multiplier <N> --dedupe-bits <BITS> --dedupe-bands <BANDS> \
+  --refusal-threshold <SCORE> --max-new-tokens <N> --temperature <T> \
+  --top-p <P> --seed <SEED> \
   --output pairs.json
 ```
 
@@ -304,12 +307,16 @@ ster pairs synthesize \
 Do-Not-Answer, LiveCodeBench) into a set:
 
 ```bash
-ster pairs import --benchmark truthfulqa --source TruthfulQA_en.csv --count 200 --output pairs.json
+ster pairs import --benchmark truthfulqa --source TruthfulQA_en.csv --count 200 --seed <SEED> --output pairs.json
 ```
 
-Run `ster pairs inspect --pairs pairs.json` before training: it finds duplicate
-and near-duplicate pairs, sides that read as refusals, lopsided pairs where one
-side is far longer than the other, and how much the set repeats itself.
+Run `ster pairs inspect --pairs pairs.json --dedupe-bits <BITS> --dedupe-bands
+<BANDS> --refusal-threshold <SCORE> --unbalanced-ratio <RATIO>` before
+training: it finds duplicate and near-duplicate pairs, sides that read as
+refusals, lopsided pairs where one side is more than the stated ratio longer
+than the other, and how much the set repeats itself. Ster assumes none of
+those numbers; every training, sampling and judging number in the CLI is the
+caller's to state.
 
 Train a direction for layers 12 through 19. The explicit `--pairs` below works
 for the manually created file; omit it to use the active imported set:
@@ -329,7 +336,7 @@ Generate with that direction:
 ster generate \
   --model meta-llama/Llama-3.2-1B \
   --vector truthful.ster.json \
-  --strength 1.0 \
+  --strength <S> --max-new-tokens <N> --temperature <T> --seed <SEED> \
   --prompt "Explain the result and cite only evidence you can verify."
 ```
 
@@ -349,7 +356,7 @@ non-`consolidated` weights only.
 
 ```text
 ster train      learn one vector per selected layer
-ster optimize   select method and layer on an 80/20 holdout
+ster optimize   select method and layer on a held-out fraction the caller states
 ster evaluate   measure a vector on a contrastive pair set
 ster generate   run normal or steered autoregressive generation
 ster extract    export hidden states for an arbitrary prompt set

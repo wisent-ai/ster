@@ -53,13 +53,11 @@ pub use objective::{
 
 use crate::lora;
 
-/// The cosine schedule decays to this fraction of the peak learning rate
-/// rather than to zero. LoRA runs are short; a schedule that reaches zero
-/// spends a meaningful share of its last steps not learning at all.
-const DECAY_FLOOR: f64 = 0.1;
-
-/// Linear warmup for `warmup` steps, then cosine decay from `base` down to
-/// `DECAY_FLOOR * base` over whatever steps remain.
+/// Linear warmup for `warmup` steps, then cosine decay from `base` to zero
+/// over whatever steps remain: the schedule of SGDR (Loshchilov and Hutter,
+/// 2017, with its minimum at zero) and of Hugging Face's
+/// `get_cosine_schedule_with_warmup`, so a run's learning rate is one a
+/// reader can reproduce from the paper rather than from a floor Ster chose.
 ///
 /// Warmup counts from one so that the very first step is not taken at a zero
 /// learning rate, which would waste the one step whose gradient is largest.
@@ -67,13 +65,14 @@ fn schedule(base: f64, step: usize, total: usize, warmup: usize) -> f64 {
     if step < warmup {
         return base * (step + 1) as f64 / warmup as f64;
     }
-    let floor = base * DECAY_FLOOR;
     let decaying = total.saturating_sub(warmup);
-    if decaying <= 1 {
+    if decaying == 0 {
         return base;
     }
-    let progress = ((step - warmup) as f64 / (decaying - 1) as f64).clamp(0.0, 1.0);
-    floor + (base - floor) * 0.5 * (1.0 + (std::f64::consts::PI * progress).cos())
+    // Progress over the decay counts the steps taken, as Hugging Face's does,
+    // so the last step still learns and only the step after it would be zero.
+    let progress = ((step - warmup) as f64 / decaying as f64).clamp(0.0, 1.0);
+    base * 0.5 * (1.0 + (std::f64::consts::PI * progress).cos())
 }
 
 // MARK: - Inspection

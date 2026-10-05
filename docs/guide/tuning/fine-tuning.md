@@ -13,41 +13,47 @@ that read one. It has seven subcommands:
 
 ```text
 ster tune sft --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
-              [--revision <REVISION>] [--device cpu] [--rank 8] [--alpha 16]
-              [--targets query,value] [--layers all] [--epochs 1]
-              [--learning-rate 0.0001] [--accumulation 8] [--warmup-steps 0]
-              [--max-sequence 512] [--chat-template auto|off] [--batch-size 1]
-              [--precision f32|f16|bf16] [--seed 42]
+              --rank <R> --alpha <A> --epochs <N> --learning-rate <LR>
+              --accumulation <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
+              [--revision <REVISION>] [--device cpu] [--targets query,value]
+              [--layers all] [--warmup-steps 0] [--chat-template auto|off]
+              [--precision f32|f16|bf16]
 ster tune dpo --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
-              [--revision <REVISION>] [--device cpu] [--rank 8] [--alpha 16]
-              [--targets query,value] [--layers all] [--beta 0.1]
-              [--loss dpo|ipo] [--epochs 1] [--learning-rate 0.0001]
-              [--accumulation 8] [--warmup-steps 0] [--max-sequence 512]
-              [--chat-template auto|off] [--batch-size 1]
-              [--precision f32|f16|bf16] [--seed 42]
+              --rank <R> --alpha <A> --beta <B> --epochs <N> --learning-rate <LR>
+              --accumulation <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
+              [--revision <REVISION>] [--device cpu] [--targets query,value]
+              [--layers all] [--loss dpo|ipo] [--warmup-steps 0]
+              [--chat-template auto|off] [--precision f32|f16|bf16]
 ster tune reward --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
-                 [--revision <REVISION>] [--device cpu] [--rank 8] [--alpha 16]
-                 [--targets query,value] [--layers all] [--epochs 1]
-                 [--learning-rate 0.0001] [--accumulation 8] [--warmup-steps 0]
-                 [--max-sequence 512] [--chat-template auto|off]
-                 [--batch-size 1] [--precision f32|f16|bf16] [--seed 42]
+                 --rank <R> --alpha <A> --epochs <N> --learning-rate <LR>
+                 --accumulation <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
+                 [--revision <REVISION>] [--device cpu] [--targets query,value]
+                 [--layers all] [--warmup-steps 0] [--chat-template auto|off]
+                 [--precision f32|f16|bf16]
 ster tune grpo --model <MODEL> --prompts <PROMPTS> --output <OUTPUT>
+               --group <N> --iterations <N> --beta <B> --rank <R> --alpha <A>
+               --learning-rate <LR> --accumulation <N> --max-new-tokens <N>
+               --temperature <T> --top-p <P> --max-sequence <TOKENS> --seed <SEED>
                [--revision <REVISION>] [--device cpu] [--reward length]
-               [--group 4] [--turns 1] [--user-model <MODEL>]
-               [--user-revision <REVISION>] [--iterations 1] [--beta 0.04] [--rank 8]
-               [--alpha 16] [--targets query,value] [--layers all]
-               [--learning-rate 0.0001] [--accumulation 1] [--warmup-steps 0]
-               [--max-new-tokens 64] [--temperature 0.9] [--top-p 0.95]
-               [--max-sequence 512] [--chat-template auto|off]
-               [--precision f32|f16|bf16] [--seed 42]
+               [--turns 1] [--user-model <MODEL>] [--user-revision <REVISION>]
+               [--targets query,value] [--layers all] [--warmup-steps 0]
+               [--chat-template auto|off] [--precision f32|f16|bf16]
 ster tune merge --model <MODEL> --adapter <ADAPTER> --output <DIR>
                 [--revision <REVISION>] [--device cpu]
 ster tune evaluate --model <MODEL> --examples <EXAMPLES>
+                   --max-sequence <TOKENS> --batch-size <N>
                    [--revision <REVISION>] [--device cpu] [--adapter <ADAPTER>]
-                   [--max-sequence 512] [--chat-template auto|off]
-                   [--batch-size 1] [--precision f32|f16|bf16]
+                   [--chat-template auto|off] [--precision f32|f16|bf16]
 ster tune inspect <ARTIFACT>
 ```
+
+Every training number is the caller's. Ster assumes no rank, alpha, epoch
+count, learning rate, accumulation, sequence limit, batch size, seed, beta,
+group size, iteration count, token budget, temperature or nucleus mass, so a
+command without one is a usage error naming the flag (exit 2), and the
+`tune/*` request bodies refuse a missing field by name
+(`missing field \`learningRate\``). Each run's report records the values it
+trained with.
 
 ## A run that is interrupted is lost
 
@@ -79,7 +85,7 @@ reproduces itself.
 `--batch-size` counts rows per forward: examples for `sft` and `evaluate`, pairs
 for `dpo` and `reward`, where a pair is two rows. A batch of one is one row per
 forward whatever the unit, so a preference pair's two sides go through the model
-as two separate one-row passes at the default — which is what makes the byte
+as two separate one-row passes — which is what makes the byte
 identity above hold. `--accumulation` keeps counting forwards, so a step sees up
 to `batch-size * accumulation` rows.
 
@@ -87,7 +93,10 @@ to `batch-size * accumulation` rows.
 precision work: `sft`, `dpo` and `reward` on the toy checkpoint at
 `--seed 7 --epochs 2 --layers all`, run through the pre-precision binary and
 through the current one at `--precision f32 --batch-size 1`, produce adapters
-with identical SHA-256 digests.
+with identical SHA-256 digests. Those comparisons predate the learning-rate
+schedule decaying to zero: runs recorded before it decayed to a tenth of the
+base rate, so an adapter trained today at the same settings differs from one
+of them whenever the run had steps after its warmup.
 
 ## What trains, and what does not
 
@@ -116,7 +125,7 @@ says which one.
 Three mechanics are shared and each is deliberate rather than unfinished.
 `--batch-size` sequences go through each forward pass and `--accumulation` of
 those forwards are folded into one `AdamW` step from their scaled losses, so a
-step sees up to `batch-size * accumulation` rows; the default of one row per
+step sees up to `batch-size * accumulation` rows; a batch size of one row per
 forward is what reproduces every run recorded before batching existed. A
 batched forward right-pads its rows and masks every padded key out of every
 real query, which is what makes stacking sequences of different lengths safe —
@@ -126,7 +135,9 @@ The KV cache is off while training, because the whole sequence goes through in
 one pass, because a cache would keep the previous sequence's keys and values
 inside this one's autograd graph, and because one cache cannot hold rows that
 end in different places. The learning rate ramps linearly over
-`--warmup-steps` steps and then decays on a cosine to a tenth of the base rate.
+`--warmup-steps` steps and then decays on a cosine to zero, as SGDR (Loshchilov
+and Hutter, 2017) and Hugging Face's `get_cosine_schedule_with_warmup` do; the
+progress counts steps taken, so the last step still learns.
 
 `--targets` names the projections that carry an adapter — `query`, `key`,
 `value`, `output`, `gate`, `up`, and `down` — and accepts either the short name

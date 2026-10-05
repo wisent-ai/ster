@@ -9,8 +9,8 @@ author it. The [README](../../README.md) links here from its command list.
 five subcommands:
 
 ```text
-ster pairs inspect --pairs <FILE> [--dedupe-bits 3] [--dedupe-bands 8]
-                                  [--refusal-threshold 0.5]
+ster pairs inspect --pairs <FILE> --dedupe-bits <BITS> --dedupe-bands <BANDS>
+                   --refusal-threshold <SCORE> --unbalanced-ratio <RATIO>
 ster pairs add --pairs <FILE> --positive <TEXT> --negative <TEXT> [--trait <NAME>]
 ster pairs remove --pairs <FILE> --index <N>
 ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTPUT>
@@ -18,13 +18,21 @@ ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTP
                       [--model <MODEL>] [--revision <REVISION>] [--device <DEVICE>]
                       [--chat-template auto|off] [--precision f32|f16|bf16]
                       [--trait-name <NAME>] [--opposite <TEXT>]
-                      [--retry-multiplier 3] [--dedupe-bits 3]
-                      [--dedupe-bands 8] [--refusal-threshold 0.5]
-                      [--max-new-tokens 96] [--temperature 0.9]
-                      [--top-p 0.95] [--seed 42]
+                      --retry-multiplier <N> --dedupe-bits <BITS>
+                      --dedupe-bands <BANDS> --refusal-threshold <SCORE>
+                      --max-new-tokens <N> --temperature <T>
+                      --top-p <P> --seed <SEED>
 ster pairs import --benchmark truthfulqa|dna|livecodebench --source <FILE> --output <FILE>
-                  [--examples <FILE>] [--count <N>] [--seed 42] [--trait <NAME>]
+                  [--examples <FILE>] [--count <N>] --seed <SEED> [--trait <NAME>]
 ```
+
+Every number is the caller's: Ster assumes no deduplication distance, band
+count, refusal threshold, length ratio, attempt budget, token budget,
+temperature, nucleus mass or seed, so leaving one out is a usage error that
+names the missing flag (`error: the following required arguments were not
+provided: --refusal-threshold <REFUSAL_THRESHOLD>`, exit 2). The same fields are
+required in the `pairs/inspect`, `pairs/synthesize` and `pairs/import` request
+bodies, where a missing one is refused as `missing field \`refusalThreshold\``.
 
 Each subcommand prints a pretty JSON document on stdout, as the other commands
 do, and each write leaves a pretty JSON pair set with a trailing newline. `add`
@@ -48,7 +56,7 @@ ster train --model meta-llama/Llama-3.2-1B --pairs pairs.json --output taste.ste
 
 ```text
 ster pairs import --benchmark truthfulqa|dna|livecodebench --source <FILE> --output <FILE>
-                  [--examples <FILE>] [--count <N>] [--seed 42] [--trait <NAME>]
+                  [--examples <FILE>] [--count <N>] --seed <SEED> [--trait <NAME>]
 ```
 
 Every row becomes one pair written as `pairs synthesize` writes one,
@@ -72,10 +80,10 @@ one `ster pairs add` built, one `ster pairs synthesize` generated, or one
 
 `ster pairs inspect` loads no model; every judgement it makes is textual. For
 the set it reports `trait_name`, `pair_count`, `duplicate_count`,
-`refusal_count`, `unbalanced_count`, and `diversity`. For each pair it reports
-`index`, both texts, `positive_chars` and `negative_chars`, `positive_words` and
-`negative_words`, `duplicate`, `positive_refusal` and `negative_refusal`, and
-`length_ratio`.
+`refusal_count`, `unbalanced_count`, `unbalanced_ratio`, and `diversity`. For
+each pair it reports `index`, both texts, `positive_chars` and `negative_chars`,
+`positive_words` and `negative_words`, `duplicate`, `positive_refusal` and
+`negative_refusal`, and `length_ratio`.
 
 Duplicates are found by SimHash over the normalized positive and negative text,
 with 64-bit fingerprints built from BLAKE2b feature hashes and bucketed by
@@ -95,10 +103,10 @@ refusal is a useless example because it differs from the other side along the
 refusal axis rather than along the trait axis.
 
 `length_ratio` is the longer side over the shorter side in characters, and
-`unbalanced_count` counts the pairs above 3.0. A pair whose sides differ that
-much in length teaches length instead of the trait, which is the confound to
-remove before training rather than to discover afterwards in a flattering
-margin.
+`unbalanced_count` counts the pairs above `--unbalanced-ratio`, which the report
+echoes as `unbalanced_ratio`. A pair whose sides differ that much in length
+teaches length instead of the trait, which is the confound to remove before
+training rather than to discover afterwards in a flattering margin.
 
 `diversity` reports `unique_unigrams`, `unique_bigrams`, `avg_jaccard`,
 `mean_simhash_hamming`, and `min_simhash_hamming`. Inspection measures them over
