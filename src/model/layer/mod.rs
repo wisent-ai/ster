@@ -504,6 +504,7 @@ impl Block {
                     builder.pp(match spec.form {
                         DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 | DeltaRuleForm::OlmoHybrid => "linear_attn",
                         DeltaRuleForm::Kimi => "self_attn",
+                        DeltaRuleForm::Ling => "attention",
                     }),
                     config.hidden_size,
                     config.rms_norm_eps,

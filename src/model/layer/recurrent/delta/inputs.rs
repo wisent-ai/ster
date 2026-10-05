@@ -7,7 +7,8 @@
 //!   value head; one `conv1d` covers query, key and value.
 //! * **Kimi** — separate `q_proj`, `k_proj`, `v_proj` with their own
 //!   `q_conv1d`, `k_conv1d`, `v_conv1d`; `b_proj` yields `b`; the decay input
-//!   is `f_b(f_a(x))`, one per key channel; the gate is `g_b(g_a(x))`.
+//!   is `f_b(f_a(x))`, one per key channel; the gate is `g_b(g_a(x))`. Ling
+//!   3.0's is Kimi's with full-rank `f_proj` and `g_proj`.
 //! * **OLMo Hybrid** — separate `q_proj`, `k_proj`, `v_proj` under one
 //!   `conv1d` (or OLMo-core's `q_conv1d`, `k_conv1d`, `v_conv1d`); `b_proj`
 //!   and `a_proj` yield `b` and the decay input, one per value head;
@@ -32,10 +33,11 @@ pub(super) enum Inputs {
         key: Linear,
         value: Linear,
         strength: Linear,
-        forget_down: Linear,
-        forget_up: Linear,
-        gate_down: Linear,
-        gate_up: Linear,
+        /// The decay input's projections, Kimi's `f_a_proj` then
+        /// `f_b_proj`, or Ling's one `f_proj`.
+        forget: (Option<Linear>, Linear),
+        /// The output gate's, `g_a_proj` then `g_b_proj`, or `g_proj`.
+        gate: (Option<Linear>, Linear),
     },
     OlmoHybrid {
         query: Linear,
@@ -90,16 +92,28 @@ impl Inputs {
                 taps("conv1d", 2 * keys + values)?,
                 builder.get(value_heads, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, value_heads, 1))?,
             ),
-            DeltaRuleForm::Kimi => (
+            DeltaRuleForm::Kimi | DeltaRuleForm::Ling => (
                 Self::Kimi {
                     query: linear_no_bias(hidden, keys, builder.pp("q_proj"))?,
                     key: linear_no_bias(hidden, keys, builder.pp("k_proj"))?,
                     value: linear_no_bias(hidden, values, builder.pp("v_proj"))?,
                     strength: linear_no_bias(hidden, value_heads, builder.pp("b_proj"))?,
-                    forget_down: linear_no_bias(hidden, key_dim, builder.pp("f_a_proj"))?,
-                    forget_up: linear_no_bias(key_dim, keys, builder.pp("f_b_proj"))?,
-                    gate_down: linear_no_bias(hidden, value_dim, builder.pp("g_a_proj"))?,
-                    gate_up: linear_no_bias(value_dim, values, builder.pp("g_b_proj"))?,
+                    forget: if form == DeltaRuleForm::Ling {
+                        (None, linear_no_bias(hidden, keys, builder.pp("f_proj"))?)
+                    } else {
+                        (
+                            Some(linear_no_bias(hidden, key_dim, builder.pp("f_a_proj"))?),
+                            linear_no_bias(key_dim, keys, builder.pp("f_b_proj"))?,
+                        )
+                    },
+                    gate: if form == DeltaRuleForm::Ling {
+                        (None, linear_no_bias(hidden, values, builder.pp("g_proj"))?)
+                    } else {
+                        (
+                            Some(linear_no_bias(hidden, value_dim, builder.pp("g_a_proj"))?),
+                            linear_no_bias(value_dim, values, builder.pp("g_b_proj"))?,
+                        )
+                    },
                 },
                 Tensor::cat(&[&taps("q_conv1d", keys)?, &taps("k_conv1d", keys)?, &taps("v_conv1d", values)?], 0)?,
                 builder.get(keys, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, key_heads, key_dim))?,
@@ -171,17 +185,20 @@ impl Inputs {
                         .to_dtype(DType::F32)?,
                 })
             }
-            Self::Kimi { query, key, value, strength, forget_down, forget_up, gate_down, gate_up } => Ok(Prepared {
-                mixed: Tensor::cat(&[&query.forward(hidden)?, &key.forward(hidden)?, &value.forward(hidden)?], 2)?,
-                gate: gate_up
-                    .forward(&gate_down.forward(hidden)?)?
-                    .reshape((batch, sequence, value_heads, value_dim))?,
-                strength: strength.forward(hidden)?.to_dtype(DType::F32)?,
-                decay_input: forget_up
-                    .forward(&forget_down.forward(hidden)?)?
-                    .reshape((batch, sequence, key_heads, key_dim))?
-                    .to_dtype(DType::F32)?,
-            }),
+            Self::Kimi { query, key, value, strength, forget, gate } => {
+                let through = |(down, up): &(Option<Linear>, Linear)| -> candle_core::Result<Tensor> {
+                    match down {
+                        Some(down) => up.forward(&down.forward(hidden)?),
+                        None => up.forward(hidden),
+                    }
+                };
+                Ok(Prepared {
+                    mixed: Tensor::cat(&[&query.forward(hidden)?, &key.forward(hidden)?, &value.forward(hidden)?], 2)?,
+                    gate: through(gate)?.reshape((batch, sequence, value_heads, value_dim))?,
+                    strength: strength.forward(hidden)?.to_dtype(DType::F32)?,
+                    decay_input: through(forget)?.reshape((batch, sequence, key_heads, key_dim))?.to_dtype(DType::F32)?,
+                })
+            }
             Self::OlmoHybrid { query, key, value, strength, decay, gate } => Ok(Prepared {
                 mixed: Tensor::cat(&[&query.forward(hidden)?, &key.forward(hidden)?, &value.forward(hidden)?], 2)?,
                 gate: gate.forward(hidden)?.reshape((batch, sequence, value_heads, value_dim))?,

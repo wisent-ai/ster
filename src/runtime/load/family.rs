@@ -1225,6 +1225,7 @@ pub(super) fn family(
                     layers: linear,
                     form: if qwen35 { DeltaRuleForm::Qwen35 } else { DeltaRuleForm::Qwen3Next },
                     negative_eigenvalues: false,
+                    decay_floor: None,
                 });
             }
             // Mellum is Qwen3-MoE with sliding-window layers, a rotation per
@@ -1552,6 +1553,7 @@ pub(super) fn family(
                 layers: linear,
                 form: DeltaRuleForm::OlmoHybrid,
                 negative_eigenvalues: raw.get("linear_allow_neg_eigval").and_then(Value::as_bool).unwrap_or(true),
+                decay_floor: None,
             });
             let stated_theta = |object: Option<&Value>| object.and_then(|value| value.get("rope_theta")).is_some_and(Value::is_number);
             if !stated_theta(raw.get("rope_parameters")) && !stated_theta(Some(raw)) {
@@ -2183,6 +2185,9 @@ pub(super) fn family(
                     _ => None,
                 };
             }
+            if model_type == "bailing_hybrid" {
+                step_limits(raw, ("expert_swiglu_limit_list", "share_expert_swiglu_limit_list"), layers, &mut routed, path)?;
+            }
             architecture.experts = Some(routed);
         }
         "falcon_h1" => {
@@ -2762,6 +2767,7 @@ pub(super) fn family(
                 layers: kda,
                 form: DeltaRuleForm::Kimi,
                 negative_eigenvalues: false,
+                decay_floor: None,
             });
             if flag(raw, "mla_use_nope") {
                 architecture.positions = Positions::None;
@@ -3625,9 +3631,11 @@ fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Re
 
 /// Ling 2.5's and 3.0's additions to Ling 2.0: DeepSeek's latent attention
 /// (rotating adjacent pairs under `rope_interleave`) on every
-/// `layer_group_size`-th layer, and lightning attention on the others, its
-/// heads `head_dim` wide with their first `partial_rotary_factor` share
-/// rotated by halves at the latent attention's base.
+/// `layer_group_size`-th layer, and linear attention on the others. Ling
+/// 2.5's is lightning attention, its heads `head_dim` wide with their first
+/// `partial_rotary_factor` share rotated by halves at the latent attention's
+/// base; Ling 3.0's (`BailingMoeV3ForCausalLM`, or any config stating
+/// `short_conv_kernel_size`) is Kimi Delta Attention, see [`ling_kda`].
 fn bailing_hybrid(
     raw: &Value,
     layers: usize,
@@ -3639,6 +3647,14 @@ fn bailing_hybrid(
     let Some(latent) = architecture.latent else {
         bail!("{} declares a Ling hybrid model without kv_lora_rank", path.display());
     };
+    let ling3 = raw.get("short_conv_kernel_size").is_some()
+        || raw
+            .get("architectures")
+            .and_then(Value::as_array)
+            .is_some_and(|names| names.iter().any(|name| name.as_str() == Some("BailingMoeV3ForCausalLM")));
+    if ling3 {
+        return ling_kda(raw, layers, llama, architecture, path);
+    }
     let group = whole(raw, "layer_group_size").unwrap_or(1).max(1);
     let linear = (0..layers)
         .filter(|layer| (layer + 1) % group != 0)
@@ -3679,6 +3695,75 @@ fn bailing_hybrid(
     });
     Ok(())
 }
+
+/// Ling 3.0's linear layers: Kimi Delta Attention under `attention`, with
+/// full-rank `f_proj` (the decay input, one per key channel) and `g_proj`
+/// (the output gate) where Kimi factors them, `num_attention_heads` heads of
+/// `head_dim` for query, key and value, and `short_conv_kernel_size` taps.
+/// The decay is `kda_lower_bound · sigmoid(exp(A_log) · (f + dt_bias))`
+/// under `kda_safe_gate` (vLLM's `bailing_moe_v3.py` and FLA's
+/// `naive_kda_lowerbound_gate`), Kimi's `-exp(A_log) · softplus(f +
+/// dt_bias)` otherwise. A layer is linear unless it closes a
+/// `layer_group_size` group or follows the last whole group
+/// (`_is_kda_layer`). The latent-attention layers multiply each head's
+/// output by the sigmoid of its `attention.g_proj` logit under
+/// `gated_attention_proj_granularity_type` `head_wise`.
+fn ling_kda(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+    if raw.get("no_kda_lora").and_then(Value::as_bool) == Some(false) || flag(raw, "use_kda_lora") {
+        bail!(
+            "{} factors its Kimi Delta Attention projections (no_kda_lora false or use_kda_lora); Ster implements Ling 3.0's full-rank f_proj and g_proj",
+            path.display()
+        );
+    }
+    for key in ["use_nGPT", "value_norm", "up_proj_norm", "use_mla_nope"] {
+        if flag(raw, key) {
+            bail!("{} declares {key}; Ster implements Ling 3.0 without it", path.display());
+        }
+    }
+    let Some(head_dim) = whole(raw, "head_dim") else {
+        bail!("{} declares a Ling 3.0 model without head_dim", path.display());
+    };
+    let Some(kernel) = whole(raw, "short_conv_kernel_size").filter(|kernel| *kernel > 0) else {
+        bail!("{} declares a Ling 3.0 model without short_conv_kernel_size", path.display());
+    };
+    let group = whole(raw, "layer_group_size").unwrap_or(1).max(1);
+    let whole_groups = layers / group * group;
+    let linear = (0..layers)
+        .filter(|layer| (layer + 1) % group != 0 && *layer < whole_groups)
+        .fold(0u128, |set, layer| set | (1u128 << layer));
+    let heads = llama.num_attention_heads;
+    let decay_floor = if raw.get("kda_safe_gate").and_then(Value::as_bool).unwrap_or(true) {
+        Some(number(raw, "kda_lower_bound").unwrap_or(KDA_LOWER_BOUND))
+    } else {
+        None
+    };
+    architecture.delta_rule = Some(DeltaRuleSpec {
+        key_heads: heads,
+        value_heads: heads,
+        key_dim: head_dim,
+        value_dim: head_dim,
+        kernel,
+        layers: linear,
+        form: DeltaRuleForm::Ling,
+        negative_eigenvalues: false,
+        decay_floor,
+    });
+    architecture.interleaved_rotary = raw.get("rope_interleave").and_then(Value::as_bool).unwrap_or(true);
+    architecture.head_gate = match text(raw, "gated_attention_proj_granularity_type") {
+        None => None,
+        Some("head_wise") => Some(GateFunction::Sigmoid),
+        Some(other) => bail!(
+            "{} declares gated_attention_proj_granularity_type {other:?}; Ster implements Ling 3.0's head_wise gate",
+            path.display()
+        ),
+    };
+    Ok(())
+}
+
+/// The floor Kimi Delta Attention's safe gate puts under each log-decay when
+/// a config leaves `kda_lower_bound` out (vLLM's `bailing_moe_v3.py`,
+/// `getattr(config, "kda_lower_bound", -5.0)`).
+const KDA_LOWER_BOUND: f64 = -5.0;
 
 /// MiMo-V2 (`mimo_v2_flash`, `mimo_v2`): sliding-window layers where
 /// `hybrid_layer_pattern` is one, with `swa_num_key_value_heads` key-value
@@ -4021,6 +4106,23 @@ fn step3p5(
     };
     routed.routed_scale = number(raw, "moe_router_scaling_factor");
     routed.selection_bias = flag(raw, "use_moe_router_bias").then_some("moe.router_bias");
+    step_limits(raw, ("swiglu_limits", "swiglu_limits_shared"), layers, &mut routed, path)?;
+    architecture.experts = Some(routed);
+    Ok(())
+}
+
+/// Per-layer SwiGLU clamps on the routed and shared experts (Step 3.5's
+/// `swiglu_limits` and `swiglu_limits_shared`, Ling 3.0's
+/// `expert_swiglu_limit_list` and `share_expert_swiglu_limit_list`): one
+/// entry per layer, zero or null meaning none. A dense layer's shared limit
+/// is refused, since Ster clamps expert feed-forwards only.
+fn step_limits(
+    raw: &Value,
+    (routed_key, shared_key): (&str, &str),
+    layers: usize,
+    routed: &mut MixtureOfExperts,
+    path: &Path,
+) -> Result<()> {
     let limits = |key: &str| -> Result<Vec<f64>> {
         match raw.get(key).filter(|list| !list.is_null()) {
             None => Ok(Vec::new()),
@@ -4032,19 +4134,18 @@ fn step3p5(
                 .with_context(|| format!("{} declares {key} that is not a list of numbers", path.display())),
         }
     };
-    let (routed_limits, shared_limits) = (limits("swiglu_limits")?, limits("swiglu_limits_shared")?);
+    let (routed_limits, shared_limits) = (limits(routed_key)?, limits(shared_key)?);
     if let Some(layer) = (0..layers).find(|layer| {
         routed.dense_layers & (1u128 << layer) != 0 && shared_limits.get(*layer).is_some_and(|limit| *limit != 0.0)
     }) {
         bail!(
-            "{} clamps the dense feed-forward of layer {layer} (swiglu_limits_shared); Ster clamps expert feed-forwards only",
+            "{} clamps the dense feed-forward of layer {layer} ({shared_key}); Ster clamps expert feed-forwards only",
             path.display()
         );
     }
     if routed_limits.iter().chain(&shared_limits).any(|limit| *limit != 0.0) {
         routed.swiglu_limit = Some(SwigluLimit::Step { routed: routed_limits, shared: shared_limits });
     }
-    architecture.experts = Some(routed);
     Ok(())
 }
 

@@ -69,7 +69,7 @@ impl DeltaRule {
         let (inputs, convolution, step_bias) = Inputs::load(&builder, hidden, spec)?;
         let (norm, output) = match form {
             DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 => ("norm", "out_proj"),
-            DeltaRuleForm::Kimi | DeltaRuleForm::OlmoHybrid => ("o_norm", "o_proj"),
+            DeltaRuleForm::Kimi | DeltaRuleForm::Ling | DeltaRuleForm::OlmoHybrid => ("o_norm", "o_proj"),
         };
         let eps = if form == DeltaRuleForm::OlmoHybrid { OLMO_HYBRID_NORM_EPS } else { eps };
         Ok(Self {
@@ -141,8 +141,17 @@ impl DeltaRule {
         // head and is shared like the key.
         let strength = (strength.neg()?.exp()? + 1.0)?.recip()?;
         let strength = if self.spec.negative_eigenvalues { (strength * 2.0)? } else { strength };
-        let log_decay =
-            softplus(&decay_input.broadcast_add(&self.step_bias)?)?.broadcast_mul(&self.decay)?;
+        // Ling 3.0's safe gate bounds the log-decay below by its floor:
+        // `floor · sigmoid(exp(A_log) · (input + dt_bias))`, `-decay` being
+        // `exp(A_log)`.
+        let shifted = decay_input.broadcast_add(&self.step_bias)?;
+        let log_decay = match self.spec.decay_floor {
+            Some(floor) => {
+                let scaled = shifted.broadcast_mul(&self.decay.neg()?)?;
+                ((scaled.neg()?.exp()? + 1.0)?.recip()? * floor)?
+            }
+            None => softplus(&shifted)?.broadcast_mul(&self.decay)?,
+        };
         let decay_width = log_decay.dim(3)?;
 
         let mut state = state;
@@ -177,7 +186,7 @@ impl DeltaRule {
         let gate = gate.to_dtype(DType::F32)?;
         let gate = match form {
             DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 | DeltaRuleForm::OlmoHybrid => candle_nn::ops::silu(&gate)?,
-            DeltaRuleForm::Kimi => (gate.neg()?.exp()? + 1.0)?.recip()?,
+            DeltaRuleForm::Kimi | DeltaRuleForm::Ling => (gate.neg()?.exp()? + 1.0)?.recip()?,
         };
         let gated = (normed * gate)?
             .to_dtype(dtype)?

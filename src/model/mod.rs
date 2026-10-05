@@ -513,7 +513,7 @@ pub struct StructuredSpec {
 /// `key_dim`, `value_heads` value heads of `value_dim` (each key head serving
 /// `value_heads / key_heads` of them), a causal depthwise convolution of
 /// `kernel` positions over query, key and value, on the layers in `layers`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeltaRuleSpec {
     pub key_heads: usize,
     pub value_heads: usize,
@@ -525,6 +525,11 @@ pub struct DeltaRuleSpec {
     /// OLMo Hybrid's `linear_allow_neg_eigval`: the write strength is
     /// `2 · sigmoid(b)`, so the state's update may reflect as well as shrink.
     pub negative_eigenvalues: bool,
+    /// Kimi Delta Attention's safe gate (Ling 3.0's `kda_safe_gate`): the
+    /// log-decay is `floor · sigmoid(exp(A_log) · (input + dt_bias))`, never
+    /// below this floor, in place of `-exp(A_log) · softplus(input +
+    /// dt_bias)`.
+    pub decay_floor: Option<f64>,
 }
 
 /// Which family's delta rule a layer runs.
@@ -548,6 +553,9 @@ pub enum DeltaRuleForm {
     /// per value head, a SiLU output gate from `g_proj`, `o_norm` and
     /// `o_proj`.
     OlmoHybrid,
+    /// Ling 3.0's Kimi Delta Attention (`attention`): Kimi's, with the decay
+    /// input and the output gate from full-rank `f_proj` and `g_proj`.
+    Ling,
 }
 
 /// Zamba2's shared transformer blocks: on every layer in `hybrid_layers`, a
