@@ -69,9 +69,9 @@ pub(super) struct Attention {
     /// Qwen3-Next's gate rows of `q_proj`: attention's output is multiplied
     /// by their sigmoid before the output projection.
     output_gate: Option<Linear>,
-    /// Step 3.5's `g_proj`: one logit per head, each head's output
-    /// multiplied by its sigmoid.
-    head_gate: Option<Linear>,
+    /// Step 3.5's and Laguna's `g_proj`: one logit per head, each head's
+    /// output multiplied by it through the gate function.
+    head_gate: Option<(Linear, GateFunction)>,
     /// K2-Horizon's `gate_proj` and the function its output passes through
     /// before it multiplies attention's output.
     elementwise_gate: Option<(Linear, GateFunction)>,
@@ -467,10 +467,9 @@ impl Attention {
             value_scale: architecture.value_scale,
             query_temperature: architecture.query_temperature.filter(|temperature| temperature.at(layer)),
             output_gate,
-            head_gate: if architecture.head_gate {
-                Some(projection(input, heads, false, conv1d, builder.pp("g_proj"))?)
-            } else {
-                None
+            head_gate: match architecture.head_gate {
+                Some(function) => Some((projection(input, heads, false, conv1d, builder.pp("g_proj"))?, function)),
+                None => None,
             },
             elementwise_gate: match architecture.attention_gate {
                 Some(function) => Some((projection(input, heads * value_dim, false, conv1d, builder.pp("gate_proj"))?, function)),
@@ -757,35 +756,21 @@ impl Attention {
             }
             _ => self.attend(&query, key, value, self.window, mask, index_pos, cache, mode)?,
         };
-        // Step 3.5's head-wise gate: each head's output times the sigmoid
-        // of its `g_proj` logit, composed so it has a backward pass.
+        // Step 3.5's and Laguna's head-wise gate: each head's output times
+        // its `g_proj` logit through the gate function.
         let output = match &self.head_gate {
-            Some(gate) => {
+            Some((gate, function)) => {
                 let logits = gate.forward(hidden)?.transpose(1, 2)?.unsqueeze(3)?;
-                output.broadcast_mul(&(logits.neg()?.exp()? + 1.0)?.recip()?.to_dtype(output.dtype())?)?
+                output.broadcast_mul(&gated(&logits, *function)?.to_dtype(output.dtype())?)?
             }
             None => output,
         };
         let output = output
             .transpose(1, 2)?
             .reshape((batch, sequence, self.heads * self.value_dim))?;
-        // K2-Horizon's elementwise gate: `silu(g)`, or softplus with
-        // `β = ln 2`, `log2(1 + 2^g)`, written as `max(g, 0) + log2(1 +
-        // 2^-|g|)` so it never overflows; composed so it has a backward pass.
+        // K2-Horizon's and AFMoE's elementwise gate.
         let output = match &self.elementwise_gate {
-            Some((gate, function)) => {
-                let logits = gate.forward(hidden)?;
-                let gate = match function {
-                    GateFunction::Silu => candle_nn::ops::silu(&logits)?,
-                    GateFunction::Softplus => {
-                        let tail = ((logits.abs()?.neg()? * std::f64::consts::LN_2)?.exp()? + 1.0)?.log()?;
-                        (logits.relu()? + (tail / std::f64::consts::LN_2)?)?
-                    }
-                    // sigmoid, composed so it has a backward pass.
-                    GateFunction::Sigmoid => (logits.neg()?.exp()? + 1.0)?.recip()?,
-                };
-                (output * gate)?
-            }
+            Some((gate, function)) => (output * gated(&gate.forward(hidden)?, *function)?)?,
             None => output,
         };
         // sigmoid, composed so it has a backward pass.
@@ -1048,6 +1033,23 @@ fn optional_norm(norm: Option<&Norm>, input: Tensor, pass: Pass) -> candle_core:
     match norm {
         Some(norm) => norm.forward(&input, pass),
         None => Ok(input),
+    }
+}
+
+/// A gate's logits through `function`, composed of ops that have a backward
+/// pass: `silu(g)`; softplus with `β = ln 2`, `log2(1 + 2^g)`, and plain
+/// softplus, `ln(1 + e^g)`, written as `max(g, 0) + ln(1 + e^-β|g|) / β` so
+/// neither overflows; or the sigmoid.
+fn gated(logits: &Tensor, function: GateFunction) -> candle_core::Result<Tensor> {
+    let softplus = |slope: f64| -> candle_core::Result<Tensor> {
+        let tail = ((logits.abs()?.neg()? * slope)?.exp()? + 1.0)?.log()?;
+        logits.relu()? + (tail / slope)?
+    };
+    match function {
+        GateFunction::Silu => candle_nn::ops::silu(logits),
+        GateFunction::Softplus => softplus(std::f64::consts::LN_2),
+        GateFunction::NaturalSoftplus => softplus(1.0),
+        GateFunction::Sigmoid => (logits.neg()?.exp()? + 1.0)?.recip(),
     }
 }
 

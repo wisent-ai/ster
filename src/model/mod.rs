@@ -241,10 +241,11 @@ pub struct Architecture {
     /// and then as many gate rows, and attention's output is multiplied by
     /// the gate's sigmoid before `o_proj`.
     pub output_gate: bool,
-    /// Step 3.5's head-wise gate (`use_head_wise_attn_gate`): `g_proj`
-    /// yields one logit per head, and each head's output is multiplied by
-    /// its sigmoid before `o_proj`.
-    pub head_gate: bool,
+    /// A head-wise gate: `g_proj` yields one logit per head, and each head's
+    /// output is multiplied by it through this function before `o_proj`
+    /// (Step 3.5's `use_head_wise_attn_gate`, a sigmoid; Laguna's `gating`
+    /// `per-head`, a softplus).
+    pub head_gate: Option<GateFunction>,
     /// K2-Horizon's elementwise attention gate (`attention_gate_func`):
     /// `gate_proj` of the hidden state, through this function, multiplies
     /// attention's output before `o_proj`.
@@ -703,7 +704,7 @@ impl Architecture {
             feed_forward_scales: None,
             delta_rule: None,
             output_gate: false,
-            head_gate: false,
+            head_gate: None,
             attention_gate: None,
             value_experts: None,
             query_bottleneck: None,
@@ -1146,6 +1147,8 @@ pub enum GateFunction {
     /// Softplus with `β = ln 2`: `log2(1 + 2^x)`.
     Softplus,
     Sigmoid,
+    /// Softplus, `ln(1 + e^x)` (Laguna's head gate).
+    NaturalSoftplus,
 }
 
 /// How a token's position enters the model.
@@ -1732,6 +1735,12 @@ impl Names {
         layers: "model.layers",
         final_norm: "model.norm_f",
         ..Self::NEMOTRON_H
+    };
+    /// Laguna: Llama's names, with the sliding-window layers' sink logits in
+    /// `self_attn.sink`.
+    pub const LAGUNA: Self = Self {
+        sinks: "sink",
+        ..Self::LLAMA
     };
     /// ChatGLM (`chatglm`): everything below `transformer`,
     /// `embedding.word_embeddings`, `encoder.layers.{i}` with

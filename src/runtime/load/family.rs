@@ -147,10 +147,11 @@ pub(super) enum Family {
     Afmoe,
     NemotronHPuzzle,
     ChatGlm,
+    Laguna,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 119] = [
+    pub(super) const ALL: [Self; 120] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -270,6 +271,7 @@ impl Family {
         Self::Afmoe,
         Self::NemotronHPuzzle,
         Self::ChatGlm,
+        Self::Laguna,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -399,6 +401,7 @@ impl Family {
             Self::Afmoe => "afmoe",
             Self::NemotronHPuzzle => "nemotron_h_puzzle",
             Self::ChatGlm => "chatglm",
+            Self::Laguna => "laguna",
         }
     }
 
@@ -575,6 +578,20 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     if model_type == "chatglm" {
         chatglm_keys(raw);
     }
+    // Laguna states its full-attention layers' head count as
+    // `num_attention_heads`; Ster's base count is its sliding-window
+    // layers', read from `num_attention_heads_per_layer`, and the reading
+    // gives the full-attention layers theirs.
+    if model_type == "laguna" {
+        let windowed = raw
+            .get("layer_types")
+            .and_then(Value::as_array)
+            .and_then(|kinds| kinds.iter().position(|kind| kind.as_str() == Some("sliding_attention")))
+            .and_then(|layer| raw.get("num_attention_heads_per_layer").and_then(|counts| counts.get(layer)).cloned());
+        if let (Some(heads), Some(object)) = (windowed, raw.as_object_mut()) {
+            object.insert("num_attention_heads".to_owned(), heads);
+        }
+    }
     // openPangu-Ultra-MoE leaves its router's form to its config class:
     // sigmoid scores, renormalised (`PanguUltraMoEConfig`'s
     // `norm_topk_prob=True`, `MoEGate.forward`).
@@ -745,6 +762,13 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
                 (sliding.get("rope_theta").filter(|theta| theta.is_number()).cloned(), raw.as_object_mut())
             {
                 object.entry("rope_local_base_freq").or_insert(theta);
+            }
+            // The sliding-window layers' rotated share, which a family that
+            // gives each kind its own (Laguna) reads.
+            if let (Some(share), Some(object)) =
+                (sliding.get("partial_rotary_factor").filter(|share| share.is_number()).cloned(), raw.as_object_mut())
+            {
+                object.entry("local_partial_rotary_factor").or_insert(share);
             }
         }
         // Chunked layers (Rnj-1.5) rotate by the global table, so their
@@ -2460,6 +2484,7 @@ pub(super) fn family(
         "cohere2_moe" => cohere2_moe(raw, layers, &mut architecture, path)?,
         "llama4_text" => llama4(raw, layers, &mut architecture, path)?,
         "afmoe" => afmoe(raw, layers, llama, &mut architecture, path)?,
+        "laguna" => laguna(raw, scaling, layers, llama, &mut architecture, path)?,
         "deepseek" => {
             // DeepSeek-MoE (v1): Llama's attention, rotating by halves, and
             // DeepSeek's experts — `n_routed_experts` scored by softmax and
@@ -3948,7 +3973,7 @@ fn step3p5(
     if flag(raw, "use_qk_norm") {
         architecture.query_key_norm = QueryKeyNorm::PerHead;
     }
-    architecture.head_gate = flag(raw, "use_head_wise_attn_gate");
+    architecture.head_gate = flag(raw, "use_head_wise_attn_gate").then_some(GateFunction::Sigmoid);
     if let Some(rotated) = raw.get("use_rope_layers").and_then(Value::as_array).filter(|list| !list.is_empty()) {
         if rotated.len() != layers {
             bail!("{} lists {} use_rope_layers entries for {layers} layers", path.display(), rotated.len());
@@ -4321,6 +4346,135 @@ fn cohere2_moe(raw: &Value, layers: usize, architecture: &mut Architecture, path
                 path.display()
             ),
         };
+    architecture.experts = Some(routed);
+    Ok(())
+}
+
+/// Laguna (`laguna`): Llama's block with per-head query and key norms and a
+/// per-head gate (`g_proj` through softplus under `gating` `per-head`; any
+/// other gating is refused). Its layers
+/// alternate full and `sliding_window` attention as `layer_types` lists,
+/// each kind with its own head count (`num_attention_heads_per_layer`) and
+/// rotation (`rope_parameters` per layer type: the full layers' YaRN over
+/// their `partial_rotary_factor` share, the sliding ones' plain rotation
+/// over theirs), the sliding layers with a learned sink per head
+/// (`self_attn.sink`) under `swa_attention_sink_enabled`. The layers
+/// `mlp_layer_types` calls `sparse` route over `num_experts` experts by
+/// sigmoid scores that `mlp.experts.e_score_correction_bias` moves to
+/// choose, renormalised and scaled by `moe_routed_scaling_factor`, the
+/// weights applied to the experts' input under
+/// `moe_apply_router_weight_on_input`, beside a `shared_expert`.
+fn laguna(
+    raw: &Value,
+    scaling: Option<&Value>,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
+        bail!("{} declares a Laguna model without layer_types", path.display());
+    };
+    let windowed = listed_layers(types, layers, path)?;
+    if number(raw, "moe_router_logit_softcapping").is_some_and(|cap| cap > 0.0) {
+        bail!(
+            "{} caps its router logits (moe_router_logit_softcapping); Ster implements Laguna's router without a cap",
+            path.display()
+        );
+    }
+    architecture.sliding_window = whole(raw, "sliding_window");
+    architecture.sliding_layers = windowed;
+    architecture.query_key_norm = QueryKeyNorm::PerHead;
+    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    architecture.output_bias = architecture.query_key_value_bias;
+    match raw.get("gating") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => architecture.head_gate = Some(GateFunction::NaturalSoftplus),
+        Some(Value::String(kind)) if kind == "per-head" => architecture.head_gate = Some(GateFunction::NaturalSoftplus),
+        Some(other) => bail!(
+            "{} declares gating {other}; Ster implements Laguna's per-head gate",
+            path.display()
+        ),
+    }
+    if flag(raw, "swa_attention_sink_enabled") {
+        architecture.names = Names::LAGUNA;
+        architecture.attention_sinks = windowed;
+    }
+    // Each kind's own head count, as `num_attention_heads_per_layer` lists
+    // it; the sliding-window count is the base one.
+    let full_heads = match raw.get("num_attention_heads_per_layer").and_then(Value::as_array) {
+        Some(counts) => {
+            if counts.len() != layers {
+                bail!("{} lists {} num_attention_heads_per_layer for {layers} layers", path.display(), counts.len());
+            }
+            let mut kinds = [None, None];
+            for (layer, count) in counts.iter().enumerate() {
+                let count = count.as_u64().map(|count| count as usize);
+                let slot = usize::from(windowed & (1u128 << layer) != 0);
+                match (kinds[slot], count) {
+                    (_, None) => bail!("{} lists a head count for layer {layer} that is not a whole number", path.display()),
+                    (Some(seen), Some(count)) if seen != count => bail!(
+                        "{} gives its {} layers more than one head count; Ster gives each attention kind one",
+                        path.display(),
+                        if slot == 1 { "sliding-window" } else { "full-attention" }
+                    ),
+                    (_, count) => kinds[slot] = count,
+                }
+            }
+            if kinds[1].is_some_and(|count| count != llama.num_attention_heads) {
+                bail!(
+                    "{} states num_attention_heads {} unlike its sliding-window layers' {:?}",
+                    path.display(),
+                    llama.num_attention_heads,
+                    kinds[1]
+                );
+            }
+            kinds[0]
+        }
+        None => None,
+    };
+    let head_dim = architecture.head_dim;
+    let share = |value: Option<f64>| (head_dim as f64 * value.unwrap_or(1.0)) as usize;
+    let global_rotary = share(scaling.and_then(|scaling| scaling.get("partial_rotary_factor")).and_then(Value::as_f64));
+    let local_rotary = share(number(raw, "local_partial_rotary_factor"));
+    if [global_rotary, local_rotary].iter().any(|rotated| *rotated == 0 || rotated % 2 != 0 || *rotated > head_dim) {
+        bail!(
+            "{} rotates {global_rotary} and {local_rotary} of {head_dim} components per head; each must be even, above zero and at most the head",
+            path.display()
+        );
+    }
+    architecture.rotary_dim = local_rotary;
+    architecture.rope_scaling = rope_scaling(scaling, global_rotary, raw, llama, path)?;
+    let base = f64::from(llama.rope_theta);
+    architecture.local_rope_theta = Some(number(raw, "rope_local_base_freq").unwrap_or(base) as f32);
+    architecture.global_attention = Some(GlobalAttention {
+        heads: full_heads.filter(|heads| *heads != llama.num_attention_heads),
+        head_dim,
+        key_value_heads: None,
+        rotary_dim: global_rotary,
+        key_is_value: false,
+    });
+    let mut routed = experts(
+        raw,
+        "num_experts",
+        "moe_intermediate_size",
+        true,
+        ExpertLayout::Qwen,
+        qwen_dense_layers(raw, layers, path)?,
+        path,
+    )?;
+    routed.scoring = Scoring::Sigmoid;
+    routed.selection_bias = Some("mlp.experts.e_score_correction_bias");
+    routed.routed_scale = number(raw, "moe_routed_scaling_factor");
+    routed.weight_input = flag(raw, "moe_apply_router_weight_on_input");
+    routed.shared = whole(raw, "shared_expert_intermediate_size")
+        .filter(|width| *width > 0)
+        .map(|intermediate| SharedExpert {
+            intermediate,
+            module: "mlp.shared_expert",
+            gated: false,
+            form: SharedForm::GateUpDown,
+        });
     architecture.experts = Some(routed);
     Ok(())
 }
