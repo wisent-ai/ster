@@ -131,17 +131,21 @@ impl Lightning {
                 )
             }
             LightningForm::Bailing { silu, .. } => {
-                let projected = projected.to_dtype(DType::F32)?;
                 let projected = if silu { candle_nn::ops::silu(&projected)? } else { projected };
                 let width = heads * head_dim;
-                let part = |start: usize| projected.narrow(2, start, width)?.reshape((batch, sequence, heads, head_dim));
+                let part = |start: usize| {
+                    projected.narrow(2, start, width)?.contiguous()?.reshape((batch, sequence, heads, head_dim))
+                };
                 let (query, key, value) = (part(0)?, part(width)?, part(2 * width)?);
+                // The per-head norms run at the weights' dtype, then
+                // everything widens to F32.
                 let (query, key) = match &self.query_key_norms {
                     Some((query_norm, key_norm)) => {
                         (query_norm.forward(&query, mode.pass)?, key_norm.forward(&key, mode.pass)?)
                     }
                     None => (query, key),
                 };
+                let value = value.to_dtype(DType::F32)?;
                 // The global rotation by halves, over the rotated share of
                 // each head.
                 let (cos, sin) = cache.global.angles(index_pos, sequence)?;

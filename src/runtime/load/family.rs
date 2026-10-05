@@ -130,10 +130,12 @@ pub(super) enum Family {
     GlmMoeDsa,
     Axk1,
     BailingHybrid,
+    MimoV2Flash,
+    MimoV2,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 102] = [
+    pub(super) const ALL: [Self; 104] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -236,6 +238,8 @@ impl Family {
         Self::GlmMoeDsa,
         Self::Axk1,
         Self::BailingHybrid,
+        Self::MimoV2Flash,
+        Self::MimoV2,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -348,6 +352,8 @@ impl Family {
             Self::GlmMoeDsa => "glm_moe_dsa",
             Self::Axk1 => "axk1",
             Self::BailingHybrid => "bailing_hybrid",
+            Self::MimoV2Flash => "mimo_v2_flash",
+            Self::MimoV2 => "mimo_v2",
         }
     }
 
@@ -459,8 +465,20 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
             object.insert("intermediate_size".to_owned(), Value::from(widest));
         }
     }
+    // MiMo-V2 states its full-attention layers' key-value heads as
+    // `num_key_value_heads` and its sliding-window layers' as
+    // `swa_num_key_value_heads`. Ster's base count is the sliding-window
+    // one; the full-attention count moves to `num_global_key_value_heads`.
+    if model_type.starts_with("mimo_v2") {
+        let windowed = raw.get("swa_num_key_value_heads").filter(|value| !value.is_null()).cloned();
+        let full = raw.get("num_key_value_heads").cloned();
+        if let (Some(windowed), Some(full), Some(object)) = (windowed, full, raw.as_object_mut()) {
+            object.insert("num_global_key_value_heads".to_owned(), full);
+            object.insert("num_key_value_heads".to_owned(), windowed);
+        }
+    }
     let aliases: &[(&str, &[&str])] = &[
-        ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon"]),
+        ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon", "layernorm_epsilon"]),
         ("hidden_size", &["n_embd", "n_embed", "d_model"]),
         ("num_hidden_layers", &["n_layer", "n_layers", "num_layers"]),
         ("num_attention_heads", &["n_head", "n_heads"]),
@@ -2095,7 +2113,7 @@ pub(super) fn family(
             // clamped gate `swiglu_limit` bounds.
             architecture.query_key_value_bias = true;
             architecture.output_bias = true;
-            architecture.attention_sinks = true;
+            architecture.attention_sinks = every_layer(layers, path)?;
             architecture.sliding_window = whole(raw, "sliding_window");
             let mut routed = experts(
                 raw,
@@ -2843,6 +2861,7 @@ pub(super) fn family(
                 // Transformers gives the full-attention layers their own
                 // key-value head count only under `attention_k_eq_v`.
                 key_value_heads: whole(raw, "num_global_key_value_heads").filter(|_| key_is_value),
+                rotary_dim: global_head_dim,
                 key_is_value,
             });
             architecture.rope_scaling = rope_scaling(scaling, global_head_dim, raw, llama, path)?;
@@ -2883,6 +2902,7 @@ pub(super) fn family(
                 )?);
             }
         }
+        "mimo_v2_flash" | "mimo_v2" => mimo_v2(raw, model_type, layers, llama, &mut architecture, path)?,
         other => bail!("model architecture {other:?} has no decoder in this Ster build"),
     }
     // A rotation stated per layer kind (Transformers 5's `rope_parameters`
@@ -3002,6 +3022,10 @@ fn deepseek_experts(
     let frequency = whole(raw, "moe_layer_freq").unwrap_or(1).max(1);
     let dense_layers = if raw.get("mlp_layer_types").is_some_and(Value::is_array) {
         qwen_dense_layers(raw, layers, path)?
+    } else if raw.get("moe_layer_freq").is_some_and(Value::is_array) {
+        // MiMo-V2 lists `moe_layer_freq` per layer: one for routed, zero
+        // for dense.
+        every_layer(layers, path)? & !flagged_layers(raw, "moe_layer_freq", layers, path)?
     } else {
         (0..layers)
             .filter(|layer| *layer < first_dense || layer % frequency != 0)
@@ -3395,6 +3419,72 @@ fn bailing_hybrid(
     Ok(())
 }
 
+/// MiMo-V2 (`mimo_v2_flash`, `mimo_v2`): sliding-window layers where
+/// `hybrid_layer_pattern` is one, with `swa_num_key_value_heads` key-value
+/// heads (Ster's base count; the full-attention layers'
+/// `num_key_value_heads` moves to `num_global_key_value_heads` as the config
+/// is read), a learned sink per head under `add_swa_attention_sink_bias`
+/// and their own base `swa_rope_theta`; full-attention layers carry sinks
+/// under `add_full_attention_sink_bias`. Every head's query and key are
+/// `head_dim` wide with the first `partial_rotary_factor` share rotated by
+/// halves, its value `v_head_dim` wide and multiplied by
+/// `attention_value_scale`. Query, key and value are separate, or stacked
+/// in `qkv_proj` under `attention_projection_layout` `fused_qkv`. Layers
+/// `moe_layer_freq` marks run DeepSeek-V3's routed experts.
+fn mimo_v2(
+    raw: &Value,
+    model_type: &str,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    let pairs = [
+        ("num_attention_heads", "swa_num_attention_heads"),
+        ("head_dim", "swa_head_dim"),
+        ("v_head_dim", "swa_v_head_dim"),
+    ];
+    for (full, windowed) in pairs {
+        if let (Some(stated), Some(own)) = (whole(raw, full), whole(raw, windowed)) {
+            if stated != own {
+                bail!(
+                    "{} gives its sliding-window layers {windowed} {own} and its full-attention layers {full} {stated}; Ster builds both kinds with one head count and width",
+                    path.display()
+                );
+            }
+        }
+    }
+    architecture.names = Names::MIMO_V2;
+    architecture.qkv_layout = match text(raw, "attention_projection_layout") {
+        None => QkvLayout::Separate,
+        Some("fused_qkv") => QkvLayout::Stacked,
+        Some(other) => bail!(
+            "{} declares attention_projection_layout {other:?}; Ster implements separate projections and fused_qkv",
+            path.display()
+        ),
+    };
+    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    let windowed = flagged_layers(raw, "hybrid_layer_pattern", layers, path)?;
+    architecture.sliding_layers = windowed;
+    architecture.sliding_window = whole(raw, "sliding_window_size").or_else(|| whole(raw, "sliding_window"));
+    let full = every_layer(layers, path)? & !windowed;
+    architecture.attention_sinks = if flag(raw, "add_swa_attention_sink_bias") { windowed } else { 0 }
+        | if flag(raw, "add_full_attention_sink_bias") { full } else { 0 };
+    architecture.local_rope_theta = number(raw, "swa_rope_theta")
+        .filter(|base| *base != f64::from(llama.rope_theta))
+        .map(|base| base as f32);
+    architecture.value_head_dim = whole(raw, "v_head_dim");
+    architecture.value_scale = number(raw, "attention_value_scale");
+    architecture.global_attention = Some(GlobalAttention {
+        head_dim: architecture.head_dim,
+        key_value_heads: whole(raw, "num_global_key_value_heads"),
+        rotary_dim: architecture.rotary_dim,
+        key_is_value: false,
+    });
+    architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
+    Ok(())
+}
+
 /// DeciLM rounds every feed-forward width up to a multiple of this
 /// (`_find_multiple(intermediate_size, 256)` in vLLM's `nemotron_nas.py`
 /// and the checkpoints' `modeling_decilm.py`).
@@ -3487,7 +3577,7 @@ fn granite_windows(
     architecture: &mut Architecture,
     path: &Path,
 ) -> Result<()> {
-    architecture.attention_sinks = true;
+    architecture.attention_sinks = every_layer(layers, path)?;
     architecture.sliding_window = whole(raw, "sliding_window");
     architecture.sliding_layers = match raw.get("layer_types").and_then(Value::as_array) {
         Some(types) => listed_layers(types, layers, path)?,
@@ -3624,6 +3714,27 @@ fn listed_layers(types: &[Value], layers: usize, path: &Path) -> Result<u128> {
                 "{} declares layer {layer} as {other:?}; Ster implements sliding_attention and full_attention",
                 path.display()
             ),
+        }
+    }
+    Ok(set)
+}
+
+/// A per-layer list of ones and zeros under `key` (MiMo-V2's
+/// `hybrid_layer_pattern` and `moe_layer_freq`): the layers marked one.
+fn flagged_layers(raw: &Value, key: &str, layers: usize, path: &Path) -> Result<u128> {
+    let Some(flags) = raw.get(key).and_then(Value::as_array) else {
+        bail!("{} lists no {key}", path.display());
+    };
+    if flags.len() != layers {
+        bail!("{} lists {} {key} entries for {layers} layers", path.display(), flags.len());
+    }
+    fits(layers, path)?;
+    let mut set = 0u128;
+    for (layer, flag) in flags.iter().enumerate() {
+        match flag.as_u64() {
+            Some(1) => set |= 1u128 << layer,
+            Some(0) => {}
+            _ => bail!("{} marks layer {layer} in {key} as {flag}; Ster reads 0 or 1", path.display()),
         }
     }
     Ok(set)

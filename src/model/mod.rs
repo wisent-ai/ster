@@ -152,9 +152,10 @@ pub struct Architecture {
     /// Normalise each head's query and key after the rotation (HunYuan)
     /// rather than before it.
     pub norm_after_rotary: bool,
-    /// A learned sink logit per head in every softmax (GPT-OSS's
-    /// `self_attn.sinks`).
-    pub attention_sinks: bool,
+    /// The layers whose softmax holds a learned sink logit per head
+    /// (GPT-OSS's `self_attn.sinks` on every layer, MiMo-V2's
+    /// `attention_sink_bias` on its sliding-window layers).
+    pub attention_sinks: u128,
     /// `clip_qkv`: every query, key and value component clamped to this
     /// bound (OLMo, OLMoE, DBRX).
     pub clip_qkv: Option<f64>,
@@ -214,6 +215,11 @@ pub struct Architecture {
     pub parallel_scan: Option<ParallelScan>,
     /// Falcon-H1's `key_multiplier` on every key.
     pub key_scale: Option<f64>,
+    /// MiMo-V2's `attention_value_scale` on every value.
+    pub value_scale: Option<f64>,
+    /// Each value head's width when it differs from the query and key
+    /// heads' (MiMo-V2's `v_head_dim`).
+    pub value_head_dim: Option<usize>,
     /// Falcon-H1's `mlp_multipliers`: the gate's pre-activation and the
     /// feed-forward's output are multiplied by these.
     pub feed_forward_scales: Option<(f64, f64)>,
@@ -376,15 +382,19 @@ impl SkipConnections {
     }
 }
 
-/// Gemma 4's full-attention layers: heads `head_dim` wide
-/// (`global_head_dim`), `key_value_heads` of them when the config states
-/// `num_global_key_value_heads`, and, under `key_is_value`
-/// (`attention_k_eq_v`), values taken from the key projection before its
-/// norm, with no `v_proj`.
+/// The full-attention layers' own attention shape, beside the
+/// sliding-window layers': heads `head_dim` wide (Gemma 4's
+/// `global_head_dim`), `key_value_heads` of them when the config states
+/// them apart (Gemma 4's `num_global_key_value_heads`, MiMo-V2's
+/// `num_key_value_heads` beside `swa_num_key_value_heads`), the first
+/// `rotary_dim` components of each rotated by the global table, and, under
+/// `key_is_value` (Gemma 4's `attention_k_eq_v`), values taken from the
+/// key projection before its norm, with no `v_proj`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlobalAttention {
     pub head_dim: usize,
     pub key_value_heads: Option<usize>,
+    pub rotary_dim: usize,
     pub key_is_value: bool,
 }
 
@@ -612,7 +622,7 @@ impl Architecture {
             rotary_dim: head_dim,
             query_key_norm: QueryKeyNorm::None,
             norm_after_rotary: false,
-            attention_sinks: false,
+            attention_sinks: 0,
             clip_qkv: None,
             query_key_value_bias: false,
             output_bias: false,
@@ -642,6 +652,8 @@ impl Architecture {
             lone_sublayers: None,
             parallel_scan: None,
             key_scale: None,
+            value_scale: None,
+            value_head_dim: None,
             feed_forward_scales: None,
             delta_rule: None,
             output_gate: false,
@@ -685,17 +697,22 @@ impl Architecture {
         self.layer_plans.as_ref().and_then(|plans| plans.get(layer).copied())
     }
 
-    /// The full-attention spec layer `layer` uses: Gemma 4's on a layer
-    /// that attends past any window, `None` otherwise.
+    /// The full-attention spec layer `layer` uses: Gemma 4's or MiMo-V2's
+    /// on a layer that attends past any window, `None` otherwise.
     pub fn global_at(&self, layer: usize) -> Option<GlobalAttention> {
         self.global_attention.filter(|_| self.window(layer).is_none())
     }
 
+    /// Whether layer `layer`'s softmax holds a learned sink logit per head.
+    pub fn sinks_at(&self, layer: usize) -> bool {
+        layer < 128 && self.attention_sinks & (1u128 << layer) != 0
+    }
+
     /// How many components the global rotation spans: the full-attention
-    /// heads' width under Gemma 4's `global_head_dim`, `rotary_dim`
-    /// otherwise.
+    /// layers' own rotated width under a global attention spec,
+    /// `rotary_dim` otherwise.
     pub fn global_rotary_dim(&self) -> usize {
-        self.global_attention.map_or(self.rotary_dim, |global| global.head_dim)
+        self.global_attention.map_or(self.rotary_dim, |global| global.rotary_dim)
     }
 
     /// The layer whose keys and values a Gemma 4 key-value-sharing layer
@@ -769,9 +786,12 @@ impl Architecture {
     }
 
     /// Width of one head's value: narrower than the query in latent
-    /// attention, the head width otherwise.
+    /// attention and under MiMo-V2's `v_head_dim`, the head width otherwise.
     pub fn value_dim(&self) -> usize {
-        self.latent.map_or(self.head_dim, |latent| latent.value)
+        self.latent
+            .map(|latent| latent.value)
+            .or(self.value_head_dim)
+            .unwrap_or(self.head_dim)
     }
 
     /// Where `target`'s weight lives at `layer`, or `None` when this family
@@ -801,7 +821,8 @@ impl Architecture {
             return None;
         }
         // Gemma 4's full-attention heads are wider than its sliding-window
-        // ones, so no attention projection has one shape on every layer.
+        // ones, and MiMo-V2's have fewer key-value heads, so no attention
+        // projection has one shape on every layer.
         if self.global_attention.is_some() && !feed_forward {
             return None;
         }
@@ -923,7 +944,7 @@ impl Architecture {
         }
         if self.lightning.is_some() && !targets.is_empty() {
             bail!(
-                "this model's blocks include lightning-attention mixers (MiniMax-Text-01's linear attention) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
+                "this model's blocks include lightning-attention mixers (MiniMax-Text-01's and Ling 2.5's linear attention) with no attention projection to adapt on every layer; Ster steers it but trains no adapters on it"
             );
         }
         if self.delta_rule.is_some() && !targets.is_empty() {
@@ -949,7 +970,7 @@ impl Architecture {
             let why = if self.query_bottleneck.is_some() && *target == Target::Query {
                 "its query passes a bottleneck and a norm (Step3's q_proj and inter_norm) before wq"
             } else if self.global_attention.is_some() && !feed_forward_target(*target) {
-                "its full-attention layers' heads are wider than its sliding-window layers' (Gemma 4's global_head_dim)"
+                "its full-attention layers' heads differ from its sliding-window layers' in width or key-value count (Gemma 4's global_head_dim, MiMo-V2's swa_num_key_value_heads)"
             } else if self.latent.is_some() && !feed_forward_target(*target) {
                 "its attention is latent (DeepSeek's low-rank query and key-value)"
             } else if self.experts.is_some() {
@@ -1221,6 +1242,9 @@ pub struct Names {
     /// attention block.
     pub query_norm: &'static str,
     pub key_norm: &'static str,
+    /// The per-head sink logits, below the attention block (GPT-OSS's
+    /// `sinks`).
+    pub sinks: &'static str,
     /// The prefix a multimodal checkpoint keeps the whole language model
     /// below (Gemma 3's `language_model`); empty for a text-only checkpoint.
     pub wrapper: &'static str,
@@ -1273,6 +1297,7 @@ impl Names {
         state_space: "mamba",
         query_norm: "q_norm",
         key_norm: "k_norm",
+        sinks: "sinks",
         wrapper: "",
     };
     /// Granite 4.0 without experts: its `shared_mlp` is the feed-forward,
@@ -1571,6 +1596,12 @@ impl Names {
     pub const HUNYUAN: Self = Self {
         query_norm: "query_layernorm",
         key_norm: "key_layernorm",
+        ..Self::LLAMA
+    };
+    /// MiMo-V2: Llama's names, with the sink logits in
+    /// `self_attn.attention_sink_bias`.
+    pub const MIMO_V2: Self = Self {
+        sinks: "attention_sink_bias",
         ..Self::LLAMA
     };
     /// DBRX: everything below `transformer`, `blocks.{i}` with

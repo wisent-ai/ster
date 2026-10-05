@@ -61,6 +61,8 @@ pub(super) struct Attention {
     clip_qkv: Option<f64>,
     /// Falcon-H1's `key_multiplier` on every key.
     key_scale: Option<f64>,
+    /// MiMo-V2's `attention_value_scale` on every value.
+    value_scale: Option<f64>,
     /// Qwen3-Next's gate rows of `q_proj`: attention's output is multiplied
     /// by their sigmoid before the output projection.
     output_gate: Option<Linear>,
@@ -163,8 +165,12 @@ impl Attention {
             Some(_) => heads * head_dim,
             None => architecture.attention_width(heads),
         };
-        let value_dim = if global.is_some() { head_dim } else { architecture.value_dim() };
+        let value_dim = match global {
+            Some(global) => architecture.value_head_dim.unwrap_or(global.head_dim),
+            None => architecture.value_dim(),
+        };
         let key_value_width = head_dim * key_value_heads;
+        let value_width = value_dim * key_value_heads;
         // A Gemma 4 key-value-sharing layer projects its query alone.
         let source = architecture.key_value_source(layer);
         let bias = architecture.query_key_value_bias;
@@ -259,7 +265,7 @@ impl Attention {
                 if global.is_some_and(|global| global.key_is_value) {
                     None
                 } else {
-                    Some(projection(input, key_value_width, bias, conv1d, builder.pp(names.value))?)
+                    Some(projection(input, value_width, bias, conv1d, builder.pp(names.value))?)
                 },
             ),
             // Phi-3, GPT-2 and GPT-BigCode store query, key and value as one
@@ -268,7 +274,7 @@ impl Attention {
             // site stays separate. GPT-2's `Conv1D` stores it transposed, so
             // that one is laid out once at load.
             QkvLayout::Stacked => {
-                let rows = query_width + 2 * key_value_width;
+                let rows = query_width + key_value_width + value_width;
                 let fused = builder.pp(names.fused_qkv);
                 let weight = if conv1d {
                     fused.get((input, rows), "weight")?.t()?.contiguous()?
@@ -285,7 +291,7 @@ impl Attention {
                 (
                     slice(0, query_width)?,
                     slice(query_width, key_value_width)?,
-                    Some(slice(query_width + key_value_width, key_value_width)?),
+                    Some(slice(query_width + key_value_width, value_width)?),
                 )
             }
             // GPT-NeoX, BLOOM and Falcon lay the rows out by key-value group:
@@ -422,6 +428,7 @@ impl Attention {
             alibi_root: architecture.positions == Positions::AlibiRoot,
             clip_qkv: architecture.clip_qkv,
             key_scale: architecture.key_scale,
+            value_scale: architecture.value_scale,
             output_gate,
             low_rank: None,
             query_bottleneck: match architecture.query_bottleneck {
@@ -431,11 +438,11 @@ impl Attention {
                 )),
                 None => None,
             },
-            sinks: if architecture.attention_sinks {
+            sinks: if architecture.sinks_at(layer) {
                 Some(
                     layer_builder
                         .pp(names.attention)
-                        .get(heads, "sinks")?
+                        .get(heads, names.sinks)?
                         .to_dtype(DType::F32)?
                         .reshape((1, heads, 1, 1))?,
                 )
@@ -504,10 +511,15 @@ impl Attention {
                     ),
                     None => (query, key, value),
                 };
-                // Falcon-H1 multiplies every key by `key_multiplier`.
+                // Falcon-H1 multiplies every key by `key_multiplier`, MiMo-V2
+                // every value by `attention_value_scale`.
                 let key = match self.key_scale {
                     Some(scale) => (key * scale)?,
                     None => key,
+                };
+                let value = match self.value_scale {
+                    Some(scale) => (value * scale)?,
+                    None => value,
                 };
                 // OLMo 2 normalises the whole projection before it is split
                 // into heads; every other query and key norm works per head
