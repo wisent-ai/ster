@@ -20,10 +20,10 @@ ster optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT> --holdout <FRACT
 ster evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
               [--revision <REVISION>] [--device cpu]
               [--chat-template auto|off] [--precision f32|f16|bf16]
-ster generate --model <MODEL> --prompt <PROMPT> [--vector <VECTOR>]
+ster generate --model <MODEL> --prompt <PROMPT> [--vector <VECTOR> --strength <S>]
               [--adapter <ADAPTER>] [--revision <REVISION>] [--device cpu]
               [--chat-template auto|off] [--precision f32|f16|bf16]
-              --strength <S> --max-new-tokens <N> --temperature <T>
+              --max-new-tokens <N> --temperature <T>
               [--top-p <TOP_P>] --seed <SEED>
 ster extract --model <MODEL> --input <INPUT> --output <OUTPUT>
              [--revision <REVISION>] [--device cpu] [--layers all]
@@ -43,11 +43,12 @@ of `ster request`: `ster request train`, `ster request optimize`,
 where every flag above is a camelCase field, `chatTemplate` and `precision`
 included, each defaulting to what the CLI defaults to, and print NDJSON log
 events and one result event carrying the same document. The numbers have no
-default on either side: `--holdout`, `--strength`, `--max-new-tokens`,
-`--temperature` and `--seed` (and `holdout`, `strength`, `maxNewTokens`,
-`temperature`, `seed`) are required, and leaving one out is refused naming it.
-`--top-p` is optional; without it generation samples the whole distribution,
-and a temperature of zero is argmax. The process ends with
+default on either side: `--holdout`, `--max-new-tokens`, `--temperature` and
+`--seed` (and `holdout`, `maxNewTokens`, `temperature`, `seed`) are required,
+and leaving one out is refused naming it. `--strength` (`strength`) scales a
+steering vector and exists only with one: required with `--vector`, refused
+without it. `--top-p` is optional; without it generation samples the whole
+distribution, and a temperature of zero is argmax. The process ends with
 the operation; see [desktop requests](desktop-requests.md).
 
 ## Selection
