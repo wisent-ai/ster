@@ -19,7 +19,7 @@ use tokenizers::{
         sequence::Sequence as PreTokenizerSequence,
         split::{Split, SplitPattern},
     },
-    processors::template::TemplateProcessing,
+    processors::template::{Template, TemplateProcessing},
     SplitDelimiterBehavior,
 };
 
@@ -87,10 +87,16 @@ fn plamo(path: &Path, settings: &Value) -> Result<Tokenizer> {
     if settings.get("add_bos_token").and_then(Value::as_bool) == Some(true) {
         let bos = settings.get("bos_token").and_then(Value::as_str).context("the tokenizer config adds a BOS token it does not name")?;
         let id = tokenizer.token_to_id(bos).with_context(|| format!("the BOS token {bos:?} is not in {}", path.display()))?;
+        // Built from pieces rather than the `"<bos> $A"` text form, which
+        // reads the `:` in PLaMo's `<|plamo:bos|>` as a type-id separator.
+        let template = |sequences: &[&str]| -> Result<Template> {
+            let mut pieces = vec![serde_json::json!({ "SpecialToken": { "id": bos, "type_id": 0 } })];
+            pieces.extend(sequences.iter().map(|id| serde_json::json!({ "Sequence": { "id": id, "type_id": 0 } })));
+            serde_json::from_value(Value::Array(pieces)).context("invalid BOS template")
+        };
         let processor = TemplateProcessing::builder()
-            .try_single(format!("{bos} $A"))
-            .and_then(|builder| builder.try_pair(format!("{bos} $A $B")))
-            .map_err(|error| anyhow!("invalid BOS template: {error}"))?
+            .single(template(&["A"])?)
+            .pair(template(&["A", "B"])?)
             .special_tokens(vec![(bos.to_owned(), id)])
             .build()
             .map_err(|error| anyhow!("invalid BOS template: {error}"))?;

@@ -10,6 +10,18 @@ use minijinja::{
     Error, ErrorKind, State, Value,
 };
 
+/// The source with Transformers' `{% generation %}` … `{% endgeneration %}`
+/// blocks, which mark the assistant's tokens for `return_assistant_tokens_mask`
+/// and otherwise render their body unchanged (Transformers'
+/// `AssistantTracker` extension), written as an always-true `if` so stock
+/// Jinja renders them the same, whitespace control included.
+pub(super) fn plain_generation_blocks(source: String) -> String {
+    let opening = regex::Regex::new(r"\{%(-?)\s*generation\s*(-?)%\}").expect("a fixed pattern compiles");
+    let closing = regex::Regex::new(r"\{%(-?)\s*endgeneration\s*(-?)%\}").expect("a fixed pattern compiles");
+    let source = opening.replace_all(&source, "{%${1} if true ${2}%}");
+    closing.replace_all(&source, "{%${1} endif ${2}%}").into_owned()
+}
+
 /// Hugging Face's own template globals, which stock Jinja does not have.
 ///
 /// Templates call `raise_exception` to reject a conversation they cannot

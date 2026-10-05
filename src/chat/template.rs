@@ -79,7 +79,7 @@ impl Template {
         environment.add_function("strftime_now", jinja::strftime_now);
         environment.set_unknown_method_callback(jinja::python_method);
         environment
-            .add_template_owned(TEMPLATE_NAME, source)
+            .add_template_owned(TEMPLATE_NAME, jinja::plain_generation_blocks(source))
             .map_err(|error| anyhow::anyhow!("this model's chat template does not parse: {error}"))?;
         Ok(Some(Self { environment, bos_token, eos_token }))
     }

@@ -4297,7 +4297,7 @@ fn k2_horizon(
         architecture.value_experts = Some(MixtureOfExperts {
             count,
             top_k,
-            intermediate: llama.num_key_value_heads * head_dim,
+            intermediate: llama.num_key_value_heads.unwrap_or(llama.num_attention_heads) * head_dim,
             normalize: top_k > 1,
             shared: None,
             layout: ExpertLayout::Mova,
