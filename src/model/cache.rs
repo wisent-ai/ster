@@ -25,6 +25,13 @@ pub struct Cache {
     /// key-value-sharing layers reuse, under the layer that produced them.
     /// Rewritten on every call, whether or not `kvs` keeps a history.
     pub(super) shared: Vec<Option<(Tensor, Tensor)>>,
+    /// DeepSeek Sparse Attention's indexer keys per layer, `[batch, 1,
+    /// keys, index_head_dim]` in F32, history included when the cache keeps
+    /// one.
+    pub(super) index_keys: Vec<Option<Tensor>>,
+    /// The keys the last indexed layer of this call hid, which GLM-5's
+    /// `shared` layers reuse.
+    pub(super) index_mask: Option<Tensor>,
     /// The global rotation, held in F32 whatever the weights are. See
     /// [`Cache::new`].
     pub(super) global: RotaryTable,
@@ -142,6 +149,8 @@ impl Cache {
             kvs: vec![None; config.num_hidden_layers],
             states: vec![None; config.num_hidden_layers],
             shared: vec![None; config.num_hidden_layers],
+            index_keys: vec![None; config.num_hidden_layers],
+            index_mask: None,
             global,
             local,
             long,

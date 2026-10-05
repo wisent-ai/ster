@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
-    GlobalAttention, LatentAttention, LayerPlan, LightningSpec, Loops, MixtureOfExperts, Names, NormKind, ParallelScan,
-    ParameterNorm,
+    GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningSpec, Loops, MixtureOfExperts, Names, NormKind,
+    ParallelScan, ParameterNorm,
     PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
     SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec,
 };
@@ -126,10 +126,12 @@ pub(super) enum Family {
     Nanbeige,
     IQuestLoopCoder,
     NemotronNas,
+    DeepseekV32,
+    GlmMoeDsa,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 98] = [
+    pub(super) const ALL: [Self; 100] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -228,6 +230,8 @@ impl Family {
         Self::Nanbeige,
         Self::IQuestLoopCoder,
         Self::NemotronNas,
+        Self::DeepseekV32,
+        Self::GlmMoeDsa,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -336,6 +340,8 @@ impl Family {
             Self::Nanbeige => "nanbeige",
             Self::IQuestLoopCoder => "iquestloopcoder",
             Self::NemotronNas => "nemotron-nas",
+            Self::DeepseekV32 => "deepseek_v32",
+            Self::GlmMoeDsa => "glm_moe_dsa",
         }
     }
 
@@ -2160,7 +2166,9 @@ pub(super) fn family(
         }
         // GLM-4.7-Flash (`glm4_moe_lite`) is DeepSeek-V3's latent attention
         // and router under GLM's name.
-        "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" => {
+        // DeepSeek-V3.2 and GLM-5 (`glm_moe_dsa`) add DeepSeek Sparse
+        // Attention's indexer.
+        "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" | "deepseek_v32" | "glm_moe_dsa" => {
             if architecture.latent.is_none() {
                 bail!(
                     "{} declares no kv_lora_rank; Ster implements {model_type} with its latent attention",
@@ -2183,6 +2191,9 @@ pub(super) fn family(
             }
             if raw.get("n_routed_experts").is_some_and(|count| !count.is_null()) {
                 architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
+            }
+            if matches!(model_type, "deepseek_v32" | "glm_moe_dsa") {
+                architecture.sparse_index = Some(sparse_index(raw, model_type, layers, path)?);
             }
         }
         "step3_text" => {
@@ -3001,8 +3012,8 @@ fn deepseek_experts(
         });
     // GLM-4-MoE's and Nemotron-H's routers are DeepSeek-V3's and their
     // configs leave the method out: sigmoid scores, `noaux_tc` selection.
-    let v3_default = matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "nemotron_h" | "exaone_moe");
-    let v3_router = v3_default || model_type == "deepseek_v3";
+    let v3_default = matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "glm_moe_dsa" | "nemotron_h" | "exaone_moe");
+    let v3_router = v3_default || matches!(model_type, "deepseek_v3" | "deepseek_v32");
     routed.scoring = match text(raw, "scoring_func") {
         None if v3_default => Scoring::Sigmoid,
         None | Some("softmax") => Scoring::Softmax,
@@ -3225,6 +3236,87 @@ const OLMO_HYBRID_FULL_EVERY: usize = 4;
 /// "loop_window_size", 64)`).
 const LOOP_CODER_LOOPS: usize = 2;
 const LOOP_CODER_WINDOW: usize = 64;
+
+/// DeepSeek Sparse Attention's defaults when a config leaves them out
+/// (Transformers' `DeepseekV32Config`: `index_topk` 2048, `index_head_dim`
+/// 128, `index_n_heads` 64; `GlmMoeDsaConfig` narrows the heads to 32;
+/// `index_topk_freq` 1 and `index_skip_topk_offset` 2).
+const INDEX_TOP_K: usize = 2048;
+const INDEX_HEAD_DIM: usize = 128;
+const DEEPSEEK_INDEX_HEADS: usize = 64;
+const GLM_INDEX_HEADS: usize = 32;
+const INDEX_FREQUENCY: usize = 1;
+const INDEX_SKIP_OFFSET: usize = 2;
+
+/// DeepSeek Sparse Attention's indexer from the config. GLM-5 marks each
+/// layer `full` or `shared` in `indexer_types` (or as `F` and `S` in
+/// `index_topk_pattern`), or derives it from `index_topk_freq` and
+/// `index_skip_topk_offset` as `GlmMoeDsaConfig.__post_init__` does: layer
+/// `i` indexes when `max(i − offset + 1, 0)` is a multiple of the frequency.
+fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Result<IndexerSpec> {
+    fits(layers, path)?;
+    let glm = model_type == "glm_moe_dsa";
+    let mut shared_layers = 0u128;
+    if glm {
+        let listed: Option<Vec<bool>> = match (raw.get("indexer_types"), raw.get("index_topk_pattern")) {
+            (Some(Value::Array(kinds)), _) => Some(
+                kinds
+                    .iter()
+                    .enumerate()
+                    .map(|(layer, kind)| match kind.as_str() {
+                        Some("full") => Ok(false),
+                        Some("shared") => Ok(true),
+                        other => bail!(
+                            "{} names layer {layer}'s indexer {other:?}; an indexer is full or shared",
+                            path.display()
+                        ),
+                    })
+                    .collect::<Result<_>>()?,
+            ),
+            (_, Some(Value::String(pattern))) => Some(
+                pattern
+                    .chars()
+                    .enumerate()
+                    .map(|(layer, mark)| match mark {
+                        'F' => Ok(false),
+                        'S' => Ok(true),
+                        other => bail!(
+                            "{} marks layer {layer}'s indexer {other:?} in index_topk_pattern; a mark is F or S",
+                            path.display()
+                        ),
+                    })
+                    .collect::<Result<_>>()?,
+            ),
+            _ => None,
+        };
+        let shared: Vec<bool> = match listed {
+            Some(shared) => shared,
+            None => {
+                let frequency = whole(raw, "index_topk_freq").unwrap_or(INDEX_FREQUENCY).max(1);
+                let offset = whole(raw, "index_skip_topk_offset").unwrap_or(INDEX_SKIP_OFFSET);
+                (0..layers).map(|layer| (layer + 1).saturating_sub(offset) % frequency != 0).collect()
+            }
+        };
+        if shared.len() != layers {
+            bail!("{} marks {} layers' indexers for {layers} layers", path.display(), shared.len());
+        }
+        if shared.first() == Some(&true) {
+            bail!("{} makes layer 0's indexer shared, with no earlier layer to share from", path.display());
+        }
+        shared_layers = shared
+            .iter()
+            .enumerate()
+            .filter(|(_, shared)| **shared)
+            .fold(0u128, |set, (layer, _)| set | (1u128 << layer));
+    }
+    Ok(IndexerSpec {
+        heads: whole(raw, "index_n_heads").unwrap_or(if glm { GLM_INDEX_HEADS } else { DEEPSEEK_INDEX_HEADS }),
+        head_dim: whole(raw, "index_head_dim").unwrap_or(INDEX_HEAD_DIM),
+        top_k: whole(raw, "index_topk").unwrap_or(INDEX_TOP_K),
+        interleaved: glm && raw.get("indexer_rope_interleave").and_then(Value::as_bool).unwrap_or(true),
+        shared_layers,
+    })
+}
 
 /// DeciLM rounds every feed-forward width up to a multiple of this
 /// (`_find_multiple(intermediate_size, 256)` in vLLM's `nemotron_nas.py`

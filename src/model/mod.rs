@@ -260,6 +260,8 @@ pub struct Architecture {
     pub loops: Option<Loops>,
     /// DeciLM's per-layer plan, one entry per layer.
     pub layer_plans: Option<Vec<LayerPlan>>,
+    /// DeepSeek Sparse Attention's indexer (DeepSeek-V3.2, GLM-5).
+    pub sparse_index: Option<IndexerSpec>,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -287,6 +289,27 @@ pub struct Architecture {
     /// LFM2's gated short convolution in place of attention on the layers it
     /// covers.
     pub short_convolution: Option<ShortConvolution>,
+}
+
+/// DeepSeek Sparse Attention's indexer: `heads` heads of `head_dim`
+/// (`index_n_heads`, `index_head_dim`), keeping each query's `top_k`
+/// (`index_topk`) keys, rotating adjacent pairs under `interleaved` (GLM-5's
+/// `indexer_rope_interleave`) and halves otherwise; the layers in
+/// `shared_layers` (GLM-5's `indexer_types` `shared`) have no indexer and
+/// reuse the last indexed layer's choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexerSpec {
+    pub heads: usize,
+    pub head_dim: usize,
+    pub top_k: usize,
+    pub interleaved: bool,
+    pub shared_layers: u128,
+}
+
+impl IndexerSpec {
+    pub fn shared(&self, layer: usize) -> bool {
+        layer < u128::BITS as usize && self.shared_layers & (1u128 << layer) != 0
+    }
 }
 
 /// One DeciLM layer (`block_configs`): its key-value heads, `None` for a
@@ -617,6 +640,7 @@ impl Architecture {
             skip_connections: None,
             loops: None,
             layer_plans: None,
+            sparse_index: None,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,

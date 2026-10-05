@@ -2,6 +2,8 @@
 //! rotary angles they are taken at, and the masks that hide what a position
 //! may not see.
 
+mod indexer;
+
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 use candle_transformers::models::llama::Config;
@@ -78,6 +80,10 @@ pub(super) struct Attention {
     stores_key_values: bool,
     /// IQuest-LoopCoder's gated mix on its later passes.
     loop_mix: Option<LoopMix>,
+    /// DeepSeek Sparse Attention's indexer on this layer.
+    indexer: Option<indexer::Indexer>,
+    /// A GLM-5 `shared` layer: it reuses the last indexed layer's choice.
+    index_shared: bool,
 }
 
 /// IQuest-LoopCoder's mix: on a layer past the first `physical`, the
@@ -365,6 +371,17 @@ impl Attention {
             value_dim,
             value_norm: if architecture.value_norm { Some(spec.unscaled(head_dim, &builder)?) } else { None },
             stores_key_values: architecture.stores_key_values(layer),
+            index_shared: architecture.sparse_index.is_some_and(|spec| spec.shared(layer)),
+            indexer: match (architecture.sparse_index, architecture.latent) {
+                (Some(spec), _) if spec.shared(layer) => None,
+                (Some(spec), Some(LatentAttention { query_rank: Some(rank), rotated, .. })) => {
+                    Some(indexer::Indexer::load(&builder, input, rank, rotated, spec)?)
+                }
+                (Some(_), _) => candle_core::bail!(
+                    "layer {layer}'s sparse-attention indexer reads a latent query, and this attention has no q_lora_rank"
+                ),
+                (None, _) => None,
+            },
             loop_mix: match architecture.loops.and_then(|loops| loops.gate_window.map(|window| (loops, window))) {
                 Some((loops, window)) => {
                     // `gate_projections` sits beside `layers`, below the
@@ -457,6 +474,8 @@ impl Attention {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, _) = hidden.dims3()?;
+        // The latent query, which DeepSeek Sparse Attention's indexer reads.
+        let mut latent_query = None;
         // `None` for a Gemma 4 key-value-sharing layer, which projects only
         // its query.
         let (query, key_value) = match &self.projections {
@@ -516,7 +535,8 @@ impl Attention {
                 )
             }
             Projections::Latent(latent) => {
-                let (query, key, value) = latent.forward(hidden, self.heads, self.query_adapter.as_ref(), mode)?;
+                let (query, key, value, latent) = latent.forward(hidden, self.heads, self.query_adapter.as_ref(), mode)?;
+                latent_query = latent;
                 (query, Some((key, value)))
             }
             Projections::QueryOnly { query, .. } => (
@@ -604,6 +624,34 @@ impl Attention {
                 })?
             }
         };
+        // DeepSeek Sparse Attention: past `index_topk` keys, each query sees
+        // only the keys its indexer ranks highest (a GLM-5 `shared` layer
+        // reuses the last indexed layer's choice in this call).
+        let index_hidden = match (&self.indexer, self.index_shared) {
+            (Some(indexer), _) => {
+                let Some(latent_query) = &latent_query else {
+                    candle_core::bail!("layer {layer}'s indexer reads a latent query this attention has none of");
+                };
+                let causal = match mask {
+                    Some(full) => full.squeeze(1)?,
+                    None => cache.mask(sequence, index_pos, self.window)?,
+                };
+                let hidden_keys =
+                    indexer.hidden_keys(hidden, latent_query, angles.as_ref(), &causal, layer, cache, mode)?;
+                cache.index_mask = hidden_keys.clone();
+                hidden_keys
+            }
+            (None, true) => cache.index_mask.clone(),
+            (None, false) => None,
+        };
+        let indexed_mask = match &index_hidden {
+            Some(index_hidden) => Some(match mask {
+                Some(full) => full.broadcast_maximum(index_hidden)?,
+                None => cache.mask(sequence, index_pos, self.window)?.broadcast_maximum(index_hidden)?,
+            }),
+            None => None,
+        };
+        let mask = indexed_mask.as_ref().or(mask);
         let output = match &self.loop_mix {
             // IQuest-LoopCoder's later passes mix global attention over the
             // first pass's keys and values with local attention over their
@@ -845,7 +893,7 @@ impl Latent {
         heads: usize,
         query_adapter: Option<&Adapter>,
         mode: Mode,
-    ) -> candle_core::Result<(Tensor, Tensor, Tensor)> {
+    ) -> candle_core::Result<(Tensor, Tensor, Tensor, Option<Tensor>)> {
         let (batch, sequence, _) = hidden.dims3()?;
         let LatentAttention {
             key_value_rank,
@@ -854,10 +902,14 @@ impl Latent {
             value,
             ..
         } = self.spec;
-        let query = match &self.query_down {
-            Some((down, norm)) => {
-                self.query_up.forward(&norm.forward(&down.forward(hidden)?, mode.pass)?)?
-            }
+        // The latent query `q_a_layernorm(q_a_proj(x))` is returned for
+        // DeepSeek Sparse Attention's indexer.
+        let latent_query = match &self.query_down {
+            Some((down, norm)) => Some(norm.forward(&down.forward(hidden)?, mode.pass)?),
+            None => None,
+        };
+        let query = match &latent_query {
+            Some(latent_query) => self.query_up.forward(latent_query)?,
             None => project(&self.query_up, query_adapter, hidden, mode.route)?,
         }
         .reshape((batch, sequence, heads, unrotated + rotated))?;
@@ -878,7 +930,7 @@ impl Latent {
             .reshape((batch, sequence, heads, unrotated + value))?;
         let key = Tensor::cat(&[&shared, &expanded.narrow(3, 0, unrotated)?], 3)?;
         let value = expanded.narrow(3, unrotated, value)?.contiguous()?;
-        Ok((query, key, value))
+        Ok((query, key, value, latent_query))
     }
 }
 
