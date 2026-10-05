@@ -716,7 +716,16 @@ impl Block {
             // Gemma 4's paired block norms the residual itself.
             feed_forward_norm: if architecture.side_experts.is_some() { None } else { feed_forward_norm },
             feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
-            feed_forward_output_norm,
+            feed_forward_output_norm: match feed_forward_output_norm {
+                Some(existing) => Some(existing),
+                None if architecture.routed_output_norm
+                    && architecture.experts.is_some()
+                    && architecture.routed(layer) =>
+                {
+                    Some(norm(names.feed_forward_output_norm)?)
+                }
+                None => None,
+            },
             residual_multiplier: architecture.residual_multiplier,
             parallel: architecture.parallel,
             scales: architecture.scaled_residuals.map(|scales| BlockScales {

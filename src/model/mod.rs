@@ -262,6 +262,9 @@ pub struct Architecture {
     pub layer_plans: Option<Vec<LayerPlan>>,
     /// DeepSeek Sparse Attention's indexer (DeepSeek-V3.2, GLM-5).
     pub sparse_index: Option<IndexerSpec>,
+    /// A norm over each routed layer's feed-forward output, named by
+    /// `names.feed_forward_output_norm` (A.X-K1's `post_mlp_layernorm`).
+    pub routed_output_norm: bool,
     pub activation: Activation,
     /// A norm before attention and before the feed-forward (every family but
     /// OLMo 2).
@@ -641,6 +644,7 @@ impl Architecture {
             loops: None,
             layer_plans: None,
             sparse_index: None,
+            routed_output_norm: false,
             activation: Activation::Silu,
             pre_norms: true,
             output_norms: false,
@@ -1315,6 +1319,12 @@ impl Names {
     /// `post_mlp_layernorm` over its output.
     pub const PANGU_SANDWICH: Self = Self {
         feed_forward_norm: "pre_mlp_layernorm",
+        feed_forward_output_norm: "post_mlp_layernorm",
+        ..Self::LLAMA
+    };
+    /// A.X-K1: `post_mlp_layernorm` over each routed layer's feed-forward
+    /// output.
+    pub const AXK1: Self = Self {
         feed_forward_output_norm: "post_mlp_layernorm",
         ..Self::LLAMA
     };

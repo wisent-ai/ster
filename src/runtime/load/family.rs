@@ -128,10 +128,11 @@ pub(super) enum Family {
     NemotronNas,
     DeepseekV32,
     GlmMoeDsa,
+    Axk1,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 100] = [
+    pub(super) const ALL: [Self; 101] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -232,6 +233,7 @@ impl Family {
         Self::NemotronNas,
         Self::DeepseekV32,
         Self::GlmMoeDsa,
+        Self::Axk1,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -342,6 +344,7 @@ impl Family {
             Self::NemotronNas => "nemotron-nas",
             Self::DeepseekV32 => "deepseek_v32",
             Self::GlmMoeDsa => "glm_moe_dsa",
+            Self::Axk1 => "axk1",
         }
     }
 
@@ -2168,7 +2171,7 @@ pub(super) fn family(
         // and router under GLM's name.
         // DeepSeek-V3.2 and GLM-5 (`glm_moe_dsa`) add DeepSeek Sparse
         // Attention's indexer.
-        "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" | "deepseek_v32" | "glm_moe_dsa" => {
+        "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" | "deepseek_v32" | "glm_moe_dsa" | "axk1" => {
             if architecture.latent.is_none() {
                 bail!(
                     "{} declares no kv_lora_rank; Ster implements {model_type} with its latent attention",
@@ -2194,6 +2197,12 @@ pub(super) fn family(
             }
             if matches!(model_type, "deepseek_v32" | "glm_moe_dsa") {
                 architecture.sparse_index = Some(sparse_index(raw, model_type, layers, path)?);
+            }
+            // A.X-K1 normalises each routed layer's feed-forward output by
+            // `post_mlp_layernorm` before the residual add.
+            if model_type == "axk1" {
+                architecture.names = Names::AXK1;
+                architecture.routed_output_norm = true;
             }
         }
         "step3_text" => {
@@ -3013,7 +3022,7 @@ fn deepseek_experts(
     // GLM-4-MoE's and Nemotron-H's routers are DeepSeek-V3's and their
     // configs leave the method out: sigmoid scores, `noaux_tc` selection.
     let v3_default = matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "glm_moe_dsa" | "nemotron_h" | "exaone_moe");
-    let v3_router = v3_default || matches!(model_type, "deepseek_v3" | "deepseek_v32");
+    let v3_router = v3_default || matches!(model_type, "deepseek_v3" | "deepseek_v32" | "axk1");
     routed.scoring = match text(raw, "scoring_func") {
         None if v3_default => Scoring::Sigmoid,
         None | Some("softmax") => Scoring::Softmax,
@@ -3024,6 +3033,10 @@ fn deepseek_experts(
         ),
     };
     let method = text(raw, "topk_method").unwrap_or(if v3_default { "noaux_tc" } else { "greedy" });
+    // A.X-K1's `topk_method` `none` is vLLM's grouped top-k with no
+    // selection bias, which ranks each group by its best expert: DeepSeek-V2's
+    // `group_limited_greedy`.
+    let method = if model_type == "axk1" && method == "none" { "group_limited_greedy" } else { method };
     routed.groups = match method {
         "greedy" => None,
         "group_limited_greedy" | "noaux_tc" => {

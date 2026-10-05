@@ -132,17 +132,31 @@ impl Experts {
                 };
                 // Nemotron-H's experts have no gate projection.
                 let gate = (spec.layout != ExpertLayout::NemotronH).then_some("gate_proj");
-                let experts = (0..count)
-                    .map(|expert| {
-                        Expert::load(
-                            hidden,
-                            intermediate,
-                            gate,
-                            ["up_proj", "down_proj"],
-                            block.pp("experts").pp(expert.to_string()),
-                        )
-                    })
-                    .collect::<candle_core::Result<Vec<_>>>()?;
+                let stacked = block.pp("experts");
+                // Transformers 5 saves every expert stacked: `gate_up_proj`
+                // `[experts, 2 · width, hidden]`, gate rows first, and
+                // `down_proj` `[experts, hidden, width]` (A.X-K1 and any
+                // checkpoint it writes); each expert is a view of its slice.
+                let experts = if gate.is_some() && stacked.contains_tensor("gate_up_proj") {
+                    let gate_up = stacked.get((count, 2 * intermediate, hidden), "gate_up_proj")?;
+                    let down = stacked.get((count, hidden, intermediate), "down_proj")?;
+                    (0..count)
+                        .map(|expert| -> candle_core::Result<Expert> {
+                            let rows = gate_up.get(expert)?;
+                            Ok(Expert {
+                                gate: Some(Linear::new(rows.narrow(0, 0, intermediate)?, None)),
+                                up: Linear::new(rows.narrow(0, intermediate, intermediate)?, None),
+                                down: Linear::new(down.get(expert)?, None),
+                            })
+                        })
+                        .collect::<candle_core::Result<Vec<_>>>()?
+                } else {
+                    (0..count)
+                        .map(|expert| {
+                            Expert::load(hidden, intermediate, gate, ["up_proj", "down_proj"], stacked.pp(expert.to_string()))
+                        })
+                        .collect::<candle_core::Result<Vec<_>>>()?
+                };
                 (linear_no_bias(hidden, count, block.pp(router))?, experts)
             }
             // Step3 stacks each projection of every expert in one tensor as a
