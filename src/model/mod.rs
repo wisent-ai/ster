@@ -529,6 +529,11 @@ pub enum DeltaRuleForm {
     /// Qwen3-Next's Gated DeltaNet (`linear_attn`): fused `in_proj_qkvz` and
     /// `in_proj_ba`, one decay per value head, a SiLU output gate.
     Qwen3Next,
+    /// Qwen3.5's Gated DeltaNet (`linear_attn`): Qwen3-Next's, with
+    /// `in_proj_qkv` holding every query, then every key, then every value,
+    /// and the gate, `b` and decay input in `in_proj_z`, `in_proj_b` and
+    /// `in_proj_a`.
+    Qwen35,
     /// Kimi Delta Attention (`self_attn`): separate `q_proj`, `k_proj` and
     /// `v_proj` with their own convolutions, a decay per key channel from
     /// the low-rank `f_a_proj`/`f_b_proj`, and a sigmoid output gate from

@@ -502,7 +502,7 @@ impl Block {
                 attention_norm: Some(norm(names.attention_norm)?),
                 mixer: Mixer::DeltaRule(DeltaRule::load(
                     builder.pp(match spec.form {
-                        DeltaRuleForm::Qwen3Next | DeltaRuleForm::OlmoHybrid => "linear_attn",
+                        DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 | DeltaRuleForm::OlmoHybrid => "linear_attn",
                         DeltaRuleForm::Kimi => "self_attn",
                     }),
                     config.hidden_size,

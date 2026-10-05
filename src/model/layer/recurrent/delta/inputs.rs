@@ -12,6 +12,9 @@
 //!   `conv1d` (or OLMo-core's `q_conv1d`, `k_conv1d`, `v_conv1d`); `b_proj`
 //!   and `a_proj` yield `b` and the decay input, one per value head;
 //!   `g_proj` the gate.
+//! * **Qwen3.5** — `in_proj_qkv` yields every query, then every key, then
+//!   every value under one `conv1d`; `in_proj_b` and `in_proj_a` yield `b`
+//!   and the decay input, one per value head; `in_proj_z` the gate.
 
 use candle_core::{DType, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
@@ -38,6 +41,12 @@ pub(super) enum Inputs {
         query: Linear,
         key: Linear,
         value: Linear,
+        strength: Linear,
+        decay: Linear,
+        gate: Linear,
+    },
+    Qwen35 {
+        query_key_value: Linear,
         strength: Linear,
         decay: Linear,
         gate: Linear,
@@ -114,6 +123,16 @@ impl Inputs {
                 },
                 builder.get(value_heads, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, value_heads, 1))?,
             ),
+            DeltaRuleForm::Qwen35 => (
+                Self::Qwen35 {
+                    query_key_value: linear_no_bias(hidden, 2 * keys + values, builder.pp("in_proj_qkv"))?,
+                    strength: linear_no_bias(hidden, value_heads, builder.pp("in_proj_b"))?,
+                    decay: linear_no_bias(hidden, value_heads, builder.pp("in_proj_a"))?,
+                    gate: linear_no_bias(hidden, values, builder.pp("in_proj_z"))?,
+                },
+                taps("conv1d", 2 * keys + values)?,
+                builder.get(value_heads, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, value_heads, 1))?,
+            ),
         })
     }
 
@@ -165,6 +184,15 @@ impl Inputs {
             }),
             Self::OlmoHybrid { query, key, value, strength, decay, gate } => Ok(Prepared {
                 mixed: Tensor::cat(&[&query.forward(hidden)?, &key.forward(hidden)?, &value.forward(hidden)?], 2)?,
+                gate: gate.forward(hidden)?.reshape((batch, sequence, value_heads, value_dim))?,
+                strength: strength.forward(hidden)?.to_dtype(DType::F32)?,
+                decay_input: decay
+                    .forward(hidden)?
+                    .reshape((batch, sequence, value_heads, 1))?
+                    .to_dtype(DType::F32)?,
+            }),
+            Self::Qwen35 { query_key_value, strength, decay, gate } => Ok(Prepared {
+                mixed: query_key_value.forward(hidden)?,
                 gate: gate.forward(hidden)?.reshape((batch, sequence, value_heads, value_dim))?,
                 strength: strength.forward(hidden)?.to_dtype(DType::F32)?,
                 decay_input: decay

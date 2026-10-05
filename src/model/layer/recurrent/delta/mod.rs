@@ -68,7 +68,7 @@ impl DeltaRule {
         }
         let (inputs, convolution, step_bias) = Inputs::load(&builder, hidden, spec)?;
         let (norm, output) = match form {
-            DeltaRuleForm::Qwen3Next => ("norm", "out_proj"),
+            DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 => ("norm", "out_proj"),
             DeltaRuleForm::Kimi | DeltaRuleForm::OlmoHybrid => ("o_norm", "o_proj"),
         };
         let eps = if form == DeltaRuleForm::OlmoHybrid { OLMO_HYBRID_NORM_EPS } else { eps };
@@ -176,7 +176,7 @@ impl DeltaRule {
             .broadcast_mul(&self.norm.to_dtype(DType::F32)?)?;
         let gate = gate.to_dtype(DType::F32)?;
         let gate = match form {
-            DeltaRuleForm::Qwen3Next | DeltaRuleForm::OlmoHybrid => candle_nn::ops::silu(&gate)?,
+            DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 | DeltaRuleForm::OlmoHybrid => candle_nn::ops::silu(&gate)?,
             DeltaRuleForm::Kimi => (gate.neg()?.exp()? + 1.0)?.recip()?,
         };
         let gated = (normed * gate)?

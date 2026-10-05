@@ -269,9 +269,10 @@ fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// weights sit below.
 ///
 /// Gemma 3's image-text checkpoints (`model_type` `gemma3`), Mistral 3's
-/// (`mistral3`, Ministral 3) and Llama 4's (`llama4`) nest the text decoder's config under
-/// `text_config` and its weights under `language_model`; Gemma 4's
-/// (`gemma4`, `gemma4_unified`) nest them the same way under
+/// (`mistral3`, Ministral 3) and Llama 4's (`llama4`) nest the text
+/// decoder's config under `text_config` and its weights under
+/// `language_model`; Gemma 4's (`gemma4`, `gemma4_unified`) and Qwen3.5's
+/// (`qwen3_5`, `qwen3_5_moe`) nest them the same way under
 /// `model.language_model`; Step3's (`step3_vl`) nest the config the same
 /// way and keep the text weights at the root. The vision and audio towers
 /// beside it are never
@@ -288,7 +289,7 @@ fn language_model(outer: serde_json::Value) -> (serde_json::Value, &'static str)
     ];
     let prefix = match outer.get("model_type").and_then(|value| value.as_str()) {
         Some("gemma3" | "mistral3" | "llama4") => "language_model",
-        Some("gemma4" | "gemma4_unified") => "model.language_model",
+        Some("gemma4" | "gemma4_unified" | "qwen3_5" | "qwen3_5_moe") => "model.language_model",
         Some("step3_vl") => "",
         _ => return (outer, ""),
     };

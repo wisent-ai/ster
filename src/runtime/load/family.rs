@@ -142,10 +142,12 @@ pub(super) enum Family {
     DeepseekMoe,
     Ministral3,
     Llama4Text,
+    Qwen35Text,
+    Qwen35MoeText,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 114] = [
+    pub(super) const ALL: [Self; 116] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -260,6 +262,8 @@ impl Family {
         Self::DeepseekMoe,
         Self::Ministral3,
         Self::Llama4Text,
+        Self::Qwen35Text,
+        Self::Qwen35MoeText,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -384,6 +388,8 @@ impl Family {
             Self::DeepseekMoe => "deepseek",
             Self::Ministral3 => "ministral3",
             Self::Llama4Text => "llama4_text",
+            Self::Qwen35Text => "qwen3_5_text",
+            Self::Qwen35MoeText => "qwen3_5_moe_text",
         }
     }
 
@@ -1107,7 +1113,8 @@ pub(super) fn family(
                 architecture.experts = Some(routed);
             }
         }
-        "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" | "qwen3_next" | "mimo" | "mellum" => {
+        "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" | "qwen3_next" | "mimo" | "mellum" | "qwen3_5_text"
+        | "qwen3_5_moe_text" => {
             // MiMo is Qwen2 with next-token-prediction layers
             // (`model.mtp_layers`) that a single forward never reads.
             if model_type.starts_with("qwen2") || model_type == "mimo" {
@@ -1122,12 +1129,16 @@ pub(super) fn family(
                 let from = whole(raw, "max_window_layers").unwrap_or(0);
                 architecture.sliding_layers = every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
             }
-            if model_type == "qwen3_next" {
+            // Qwen3.5 (`qwen3_5_text`, `qwen3_5_moe_text`) is Qwen3-Next with
+            // its linear attention's projections stored apart.
+            let qwen35 = model_type.starts_with("qwen3_5");
+            if model_type == "qwen3_next" || qwen35 {
                 // Qwen3-Next: norms that store their scale as an offset from
-                // one, a sigmoid gate on attention's output from `q_proj`,
-                // and gated delta-rule linear attention on every layer
-                // `layer_types` calls `linear_attention` (without it, on
-                // every layer but each `full_attention_interval`-th).
+                // one, a sigmoid gate on attention's output from `q_proj`
+                // (under `attn_output_gate`, on by default), and gated
+                // delta-rule linear attention on every layer `layer_types`
+                // calls `linear_attention` (without it, on every layer but
+                // each `full_attention_interval`-th).
                 fits(layers, path)?;
                 let linear = match raw.get("layer_types").and_then(Value::as_array) {
                     Some(types) => {
@@ -1165,7 +1176,7 @@ pub(super) fn family(
                         .with_context(|| format!("{} declares a Qwen3-Next model without {key}", path.display()))
                 };
                 architecture.norm_offset = true;
-                architecture.output_gate = true;
+                architecture.output_gate = raw.get("attn_output_gate").and_then(Value::as_bool).unwrap_or(true);
                 architecture.delta_rule = Some(DeltaRuleSpec {
                     key_heads: size("linear_num_key_heads")?,
                     value_heads: size("linear_num_value_heads")?,
@@ -1173,18 +1184,25 @@ pub(super) fn family(
                     value_dim: size("linear_value_head_dim")?,
                     kernel: size("linear_conv_kernel_dim")?,
                     layers: linear,
-                    form: DeltaRuleForm::Qwen3Next,
+                    form: if qwen35 { DeltaRuleForm::Qwen35 } else { DeltaRuleForm::Qwen3Next },
                     negative_eigenvalues: false,
                 });
             }
             // Mellum is Qwen3-MoE with sliding-window layers, a rotation per
             // layer kind, and dense layers where `mlp_layer_types` says so.
-            if model_type.ends_with("_moe") || model_type == "qwen3_next" || model_type == "mellum" {
+            if model_type.ends_with("_moe") || model_type.ends_with("_moe_text") || model_type == "qwen3_next" || model_type == "mellum" {
+                // Qwen3-Next and Qwen3.5 renormalise unless told not to
+                // (vLLM's `getattr(config, "norm_topk_prob", True)`); Qwen2-
+                // and Qwen3-MoE only when told to.
+                let normalize = raw
+                    .get("norm_topk_prob")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(model_type == "qwen3_next" || qwen35);
                 let mut routed = experts(
                     raw,
                     "num_experts",
                     "moe_intermediate_size",
-                    flag(raw, "norm_topk_prob"),
+                    normalize,
                     ExpertLayout::Qwen,
                     qwen_dense_layers(raw, layers, path)?,
                     path,
