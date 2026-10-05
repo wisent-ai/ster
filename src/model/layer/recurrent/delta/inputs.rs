@@ -77,7 +77,7 @@ impl Inputs {
         hidden: usize,
         spec: DeltaRuleSpec,
     ) -> candle_core::Result<(Self, Tensor, Tensor)> {
-        let DeltaRuleSpec { key_heads, value_heads, key_dim, value_dim, kernel, form, .. } = spec;
+        let DeltaRuleSpec { key_heads, value_heads, key_dim, value_dim, kernel, form, full_rank_gate, .. } = spec;
         let keys = key_heads * key_dim;
         let values = value_heads * value_dim;
         let taps = |name: &str, width: usize| -> candle_core::Result<Tensor> {
@@ -106,7 +106,7 @@ impl Inputs {
                             linear_no_bias(key_dim, keys, builder.pp("f_b_proj"))?,
                         )
                     },
-                    gate: if form == DeltaRuleForm::Ling {
+                    gate: if form == DeltaRuleForm::Ling || full_rank_gate {
                         (None, linear_no_bias(hidden, values, builder.pp("g_proj"))?)
                     } else {
                         (

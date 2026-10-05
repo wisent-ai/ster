@@ -12,6 +12,7 @@ use crate::lora::Adapters;
 
 use super::{
     Architecture, Cache, ForwardOutput, Mode, Positions, Readout, SteeringPlan,
+    depth::DepthMix,
     attention::padded_causal_mask,
     layer::{
         DecoderLayer, LayerInputs,
@@ -39,6 +40,8 @@ pub struct SteeringLlama {
     streams: Option<StreamProjections>,
     /// HRM-Text's starting low state (`model.z_L_init`).
     low_start: Option<Tensor>,
+    /// Kimi-K3's attention-residual mix before the final norm.
+    depth_output: Option<DepthMix>,
     final_norm: Norm,
     lm_head: Linear,
     config: Config,
@@ -232,6 +235,21 @@ impl SteeringLlama {
             Some(_) => Some(builder.get(config.hidden_size, "model.z_L_init")?),
             None => None,
         };
+        // Kimi-K3's last mix, of every block sum and the last running sum,
+        // below the model's root.
+        let depth_output = match architecture.depth_block_size {
+            Some(_) => {
+                let root = if names.root.is_empty() { builder.clone() } else { builder.pp(names.root) };
+                Some(DepthMix::load(
+                    &root,
+                    config.hidden_size,
+                    "output_attn_res_norm",
+                    "output_attn_res_proj",
+                    architecture.norm_eps,
+                )?)
+            }
+            None => None,
+        };
         Ok(Self {
             embeddings,
             positions,
@@ -241,6 +259,7 @@ impl SteeringLlama {
             ngram,
             streams,
             low_start,
+            depth_output,
             final_norm,
             lm_head,
             config,
@@ -451,6 +470,8 @@ impl SteeringLlama {
             }
             _ => None,
         };
+        // Kimi-K3's finished block sums; `hidden` is the running sum.
+        let mut blocks: Vec<Tensor> = Vec::new();
         for (index, layer) in self.layers.iter().enumerate() {
             // A pass of either stack reads the two states summed.
             if let (Some(recurrence), Some((high, low))) = (self.architecture.recurrence, &states) {
@@ -482,6 +503,9 @@ impl SteeringLlama {
                     let first = corrected.remove(0);
                     rest = Some(corrected);
                     first
+                }
+                None if self.depth_output.is_some() => {
+                    layer.forward_depth(&hidden, &mut blocks, &inputs, index_pos, index, cache, mask, mode)?
                 }
                 None => layer.forward(&hidden, &inputs, index_pos, index, cache, mask, mode)?,
             };
@@ -516,6 +540,10 @@ impl SteeringLlama {
         let hidden = match (&self.streams, &rest) {
             (Some(streams), Some(others)) => streams.join(&hidden, others)?,
             _ => hidden,
+        };
+        let hidden = match &self.depth_output {
+            Some(mix) => mix.mix(&blocks, &hidden)?,
+            None => hidden,
         };
         // HRM-Text's last pass already ended in its norm.
         let hidden = if states.is_some() { hidden } else { self.final_norm.forward(&hidden, mode.pass)? };

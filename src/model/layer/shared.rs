@@ -151,7 +151,7 @@ impl SharedInvocation {
         let intermediate = block.spec.intermediate;
         let gate = gate_up.narrow(D::Minus1, 0, intermediate)?;
         let up = gate_up.narrow(D::Minus1, intermediate, intermediate)?;
-        let output = block.down.forward(&(block.activation.apply(&gate)? * up)?)?;
+        let output = block.down.forward(&block.activation.gated(&gate, &up)?)?;
         self.output.forward(&output)
     }
 }

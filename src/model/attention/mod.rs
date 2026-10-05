@@ -490,7 +490,7 @@ impl Attention {
                     Some((Linear::new(weight, bias), function))
                 }
                 (Some(function), _) => {
-                    Some((projection(input, heads * value_dim, false, conv1d, builder.pp("gate_proj"))?, function))
+                    Some((projection(input, heads * value_dim, false, conv1d, builder.pp(names.attention_gate))?, function))
                 }
                 (None, _) => None,
             },

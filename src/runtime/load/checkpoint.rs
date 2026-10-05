@@ -222,10 +222,14 @@ fn published(info: &hf_hub::api::RepoInfo, name: &str) -> bool {
 
 /// The tokenizer file a checkpoint publishes: Transformers'
 /// `tokenizer.json`, else PLaMo's `tokenizer.jsonl`, else a
-/// `tokenizer.model` (GLM-4's tiktoken vocabulary), else the
-/// `tokenizer.json` whose absence is then reported.
+/// `tokenizer.model` (GLM-4's tiktoken vocabulary), else Kimi's
+/// `tiktoken.model`, else the `tokenizer.json` whose absence is then
+/// reported.
 fn tokenizer_file(exists: impl Fn(&str) -> bool) -> &'static str {
-    ["tokenizer.json", "tokenizer.jsonl", "tokenizer.model"].into_iter().find(|name| exists(name)).unwrap_or("tokenizer.json")
+    ["tokenizer.json", "tokenizer.jsonl", "tokenizer.model", "tiktoken.model"]
+        .into_iter()
+        .find(|name| exists(name))
+        .unwrap_or("tokenizer.json")
 }
 
 fn local_safetensors(root: &Path, layout: Layout) -> Result<Vec<PathBuf>> {

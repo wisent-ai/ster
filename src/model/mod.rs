@@ -80,6 +80,7 @@ use candle_transformers::models::llama::Config;
 mod attention;
 mod cache;
 mod decoder;
+mod depth;
 mod layer;
 
 pub use cache::Cache;
@@ -309,6 +310,12 @@ pub struct Architecture {
     /// one bidirectional block, as Transformers reads it given
     /// `token_type_ids` of ones.
     pub prefix_lm: bool,
+    /// Kimi-K3's `attn_res_block_size`: attention residuals over blocks of
+    /// this many layers, each layer's `self_attention_res_norm`,
+    /// `self_attention_res_proj`, `mlp_res_norm` and `mlp_res_proj`, and the
+    /// model's `output_attn_res_norm` and `output_attn_res_proj` before the
+    /// final norm.
+    pub depth_block_size: Option<usize>,
     /// DeciLM's per-layer plan, one entry per layer.
     pub layer_plans: Option<Vec<LayerPlan>>,
     /// DeepSeek Sparse Attention's indexer (DeepSeek-V3.2, GLM-5).
@@ -610,6 +617,9 @@ pub struct DeltaRuleSpec {
     /// below this floor, in place of `-exp(A_log) · softplus(input +
     /// dt_bias)`.
     pub decay_floor: Option<f64>,
+    /// Kimi-K3's `use_full_rank_gate`: Kimi's output gate from one full-rank
+    /// `g_proj` in place of `g_a_proj` then `g_b_proj`.
+    pub full_rank_gate: bool,
 }
 
 /// Which family's delta rule a layer runs.
@@ -813,6 +823,7 @@ impl Architecture {
             loops: None,
             recurrence: None,
             prefix_lm: false,
+            depth_block_size: None,
             layer_plans: None,
             sparse_index: None,
             routed_output_norm: false,
@@ -1323,10 +1334,34 @@ pub struct MixtureOfExperts {
     /// Llama 4: each chosen expert reads its input already multiplied by
     /// its router weight, and its output joins unweighted.
     pub weight_input: bool,
-    /// Nemotron-H's latent experts (`moe_latent_size`): the routed experts
-    /// work on `fc1_latent_proj(x)`, this wide, and their sum returns
-    /// through `fc2_latent_proj`; the router and shared experts read `x`.
-    pub latent: Option<usize>,
+    /// Latent experts: the routed experts work on a narrower projection of
+    /// `x`, and their sum returns through a projection back; the router and
+    /// shared experts read `x`.
+    pub latent: Option<LatentExperts>,
+}
+
+/// Where a mixture's latent experts read and return: Nemotron-H's
+/// `moe_latent_size` through `mixer.fc1_latent_proj` and
+/// `mixer.fc2_latent_proj`; Kimi-K3's `routed_expert_hidden_size` through
+/// `block_sparse_moe.routed_expert_down_proj`, under `latent_moe_use_norm`
+/// `routed_expert_norm`, and `routed_expert_up_proj`. Paths are below the
+/// layer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LatentExperts {
+    pub width: usize,
+    pub down: &'static str,
+    pub up: &'static str,
+    /// An RMS norm over the experts' summed output before `up`, and its
+    /// epsilon.
+    pub norm: Option<(&'static str, f64)>,
+}
+
+impl LatentExperts {
+    pub const NEMOTRON_H_DOWN: &'static str = "mixer.fc1_latent_proj";
+    pub const NEMOTRON_H_UP: &'static str = "mixer.fc2_latent_proj";
+    pub const KIMI_DOWN: &'static str = "block_sparse_moe.routed_expert_down_proj";
+    pub const KIMI_UP: &'static str = "block_sparse_moe.routed_expert_up_proj";
+    pub const KIMI_NORM: &'static str = "block_sparse_moe.routed_expert_norm";
 }
 
 /// Llama 4's attention temperature: on the layers in `layers`, each query
@@ -1491,6 +1526,9 @@ pub struct Names {
     pub fused_qkv: &'static str,
     /// The attention output projection.
     pub output: &'static str,
+    /// The elementwise attention gate's projection, below the attention
+    /// block, when it is a projection of its own.
+    pub attention_gate: &'static str,
     /// The feed-forward gate, absent from a plain feed-forward.
     pub gate: Option<&'static str>,
     pub up: &'static str,
@@ -1555,6 +1593,7 @@ impl Names {
         value: "v_proj",
         fused_qkv: "qkv_proj",
         output: "self_attn.o_proj",
+        attention_gate: "gate_proj",
         gate: Some("mlp.gate_proj"),
         up: "mlp.up_proj",
         down: "mlp.down_proj",
@@ -2088,7 +2127,7 @@ pub enum QueryKeyNorm {
 }
 
 /// The non-linearity in the feed-forward.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Activation {
     Silu,
     /// `gelu_pytorch_tanh` and `gelu_new`, which Candle's `gelu` computes.
@@ -2102,6 +2141,11 @@ pub enum Activation {
     /// xIELU (Apertus), whose parameters are each feed-forward's own
     /// (`mlp.act_fn`); the feed-forward that holds them applies it.
     Xielu,
+    /// Kimi-K3's SiTU (`situ`, `activation_situ_beta` and
+    /// `activation_situ_linear_beta`): the gate's `beta · tanh(gate / beta) ·
+    /// sigmoid(gate)` times the up projection's `linear_beta · tanh(up /
+    /// linear_beta)` (the up projection itself without a `linear_beta`).
+    Situ { beta: f64, linear_beta: Option<f64> },
 }
 
 impl Activation {
@@ -2115,7 +2159,19 @@ impl Activation {
             Self::Xielu => candle_core::bail!(
                 "xIELU takes its parameters from the feed-forward that holds them (mlp.act_fn), and this one holds none"
             ),
+            // sigmoid, composed so it has a backward pass.
+            Self::Situ { beta, .. } => ((input / beta)?.tanh()? * beta)? * (input.neg()?.exp()? + 1.0)?.recip()?,
         }
+    }
+
+    /// A gated feed-forward's product: the activated gate times the up
+    /// projection, which only SiTU transforms first.
+    pub(crate) fn gated(self, gate: &Tensor, up: &Tensor) -> candle_core::Result<Tensor> {
+        let up = match self {
+            Self::Situ { linear_beta: Some(linear_beta), .. } => ((up / linear_beta)?.tanh()? * linear_beta)?,
+            _ => up.clone(),
+        };
+        self.apply(gate)? * up
     }
 }
 

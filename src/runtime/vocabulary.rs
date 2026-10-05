@@ -1,5 +1,6 @@
 //! A checkpoint's tokenizer: Transformers' `tokenizer.json`, PLaMo's
-//! `tokenizer.jsonl` or GLM-4's tiktoken `tokenizer.model`.
+//! `tokenizer.jsonl`, GLM-4's tiktoken `tokenizer.model` or Kimi's tiktoken
+//! `tiktoken.model`.
 //!
 //! PLaMo's (`Plamo3Tokenizer` in `tokenization_plamo.py`) is one
 //! `[piece, score, kind]` row per token id, a unigram model: the split of
@@ -7,8 +8,8 @@
 //! piece covers spelled as its UTF-8 bytes (`<0xXX>`), and its control
 //! tokens and the stretches its `break_around_*` thresholds isolate never
 //! crossed by a piece. It is built here as the same `tokenizers` Unigram
-//! model with byte fallback. GLM-4's is built as a byte-level BPE (see
-//! [`glm4`]).
+//! model with byte fallback. GLM-4's and Kimi's are built as a byte-level
+//! BPE (see [`tiktoken`]).
 
 use std::{fs, path::Path};
 
@@ -26,12 +27,14 @@ use tokenizers::{
     SplitDelimiterBehavior,
 };
 
-/// The tokenizer at `path`: `tokenizer.jsonl` read as PLaMo's, anything
-/// else as Transformers' `tokenizer.json`. `tokenizer_config` supplies
-/// PLaMo's split thresholds and whether a sequence starts with its BOS.
+/// The tokenizer at `path`: `tokenizer.jsonl` read as PLaMo's, a
+/// `tokenizer.model` as GLM-4's and a `tiktoken.model` as Kimi's tiktoken
+/// vocabulary, anything else as Transformers' `tokenizer.json`.
+/// `tokenizer_config` supplies PLaMo's split thresholds, whether a sequence
+/// starts with its BOS, and the tiktoken vocabularies' special tokens.
 pub fn load(path: &Path, tokenizer_config: Option<&Path>) -> Result<Tokenizer> {
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    if name != "tokenizer.jsonl" && name != "tokenizer.model" {
+    if !matches!(name, "tokenizer.jsonl" | "tokenizer.model" | "tiktoken.model") {
         return Tokenizer::from_file(path).map_err(|error| anyhow!("failed to load tokenizer {}: {error}", path.display()));
     }
     let settings: Value = match tokenizer_config {
@@ -42,21 +45,23 @@ pub fn load(path: &Path, tokenizer_config: Option<&Path>) -> Result<Tokenizer> {
     if name == "tokenizer.jsonl" {
         return plamo(path, &settings);
     }
-    // A `tokenizer.model` is read only as GLM-4's tiktoken vocabulary; any
-    // other (SentencePiece's protobuf, another tiktoken pattern) is refused
-    // by the class its config names.
+    // A tiktoken vocabulary is read only by the classes whose split pattern
+    // Ster knows; any other (SentencePiece's protobuf, another pattern) is
+    // refused by the class its config names.
     let class = settings
         .pointer("/auto_map/AutoTokenizer/0")
         .or_else(|| settings.get("tokenizer_class"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !class.ends_with("ChatGLM4Tokenizer") {
-        bail!(
-            "{} is a tokenizer.model for {class:?}, and Ster reads a tokenizer.model only as GLM-4's (ChatGLM4Tokenizer); use a checkpoint that publishes tokenizer.json",
+    let class_name = class.rsplit('.').next().unwrap_or_default();
+    match class_name {
+        "ChatGLM4Tokenizer" => tiktoken(path, &settings, GLM4_PATTERN, 0, &GLM4_PREFIX),
+        "TikTokenTokenizer" => tiktoken(path, &settings, KIMI_PATTERN, KIMI_RESERVED_SPECIAL_TOKENS, &[]),
+        _ => bail!(
+            "{} is a tiktoken or SentencePiece vocabulary for {class:?}, and Ster reads one only as GLM-4's (ChatGLM4Tokenizer) or Kimi's (TikTokenTokenizer); use a checkpoint that publishes tokenizer.json",
             path.display()
-        );
+        ),
     }
-    glm4(path, &settings)
 }
 
 fn plamo(path: &Path, settings: &Value) -> Result<Tokenizer> {
@@ -154,14 +159,27 @@ const GLM4_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L
 /// every sequence it encodes with special tokens.
 const GLM4_PREFIX: [&str; 2] = ["[gMASK]", "<sop>"];
 
-/// GLM-4's `tokenizer.model` (`ChatGLM4Tokenizer`): a tiktoken vocabulary,
-/// one `base64(bytes) rank` line per token id, read as the byte-level BPE
-/// tiktoken runs — each piece of [`GLM4_PATTERN`] kept whole when it is a
-/// token, else merged pair by pair in rank order, the merges recovered from
-/// the ranks as Transformers' `TikTokenConverter` recovers them — with
-/// `added_tokens_decoder`'s special tokens after it and `[gMASK]<sop>`
-/// before every sequence.
-fn glm4(path: &Path, settings: &Value) -> Result<Tokenizer> {
+/// Kimi's split of text into pieces (`tokenization_kimi.py`,
+/// `TikTokenTokenizer.pat_str`); `&&` is a character class intersection,
+/// which the Oniguruma engine `tokenizers` splits with reads as tiktoken's
+/// does.
+const KIMI_PATTERN: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+/// How many special-token ids follow Kimi's ranks
+/// (`TikTokenTokenizer.num_reserved_special_tokens` in
+/// `tokenization_kimi.py`); those `added_tokens_decoder` does not name are
+/// `<|reserved_token_{id}|>`.
+const KIMI_RESERVED_SPECIAL_TOKENS: usize = 256;
+
+/// A tiktoken vocabulary (GLM-4's `tokenizer.model`, `ChatGLM4Tokenizer`;
+/// Kimi's `tiktoken.model`, `TikTokenTokenizer`): one `base64(bytes) rank`
+/// line per token id, read as the byte-level BPE tiktoken runs — each piece
+/// of `pattern` kept whole when it is a token, else merged pair by pair in
+/// rank order, the merges recovered from the ranks as Transformers'
+/// `TikTokenConverter` recovers them — with the special tokens after it:
+/// `added_tokens_decoder`'s, at least `reserved` of them, unnamed ones
+/// spelled `<|reserved_token_{id}|>`; and `prefix` before every sequence.
+fn tiktoken(path: &Path, settings: &Value, pattern: &str, reserved: usize, prefix: &[&str]) -> Result<Tokenizer> {
     use base64::Engine;
     let text = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut ranks: std::collections::HashMap<Vec<u8>, u32> = std::collections::HashMap::new();
@@ -197,9 +215,9 @@ fn glm4(path: &Path, settings: &Value) -> Result<Tokenizer> {
         .map_err(|error| anyhow!("{} is not a byte-pair vocabulary: {error}", path.display()))?;
     let mut tokenizer = Tokenizer::new(model);
     let byte_level = tokenizers::pre_tokenizers::byte_level::ByteLevel::new(false, true, false);
-    tokenizer.with_pre_tokenizer(Some(PreTokenizerSequence::new(vec![isolate(GLM4_PATTERN)?, byte_level.clone().into()])));
+    tokenizer.with_pre_tokenizer(Some(PreTokenizerSequence::new(vec![isolate(pattern)?, byte_level.clone().into()])));
     tokenizer.with_decoder(Some(byte_level));
-    let mut specials: Vec<(u64, String)> = settings
+    let given: std::collections::BTreeMap<u64, String> = settings
         .get("added_tokens_decoder")
         .and_then(Value::as_object)
         .map(|added| {
@@ -209,16 +227,27 @@ fn glm4(path: &Path, settings: &Value) -> Result<Tokenizer> {
                 .collect()
         })
         .unwrap_or_default();
-    specials.sort();
-    for (index, (id, _)) in specials.iter().enumerate() {
-        if *id != (ranks.len() + index) as u64 {
-            bail!("{} numbers its special tokens from {id}, not after its {} ranks; Ster adds them in order", path.display(), ranks.len());
-        }
+    let base = ranks.len() as u64;
+    let count = (reserved as u64).max(given.len() as u64);
+    if let Some((id, _)) = given.iter().find(|(id, _)| !(base..base + count).contains(*id)) {
+        bail!(
+            "{} numbers a special token {id}, outside the {count} ids after its {base} ranks; Ster adds them in order",
+            path.display()
+        );
     }
-    let added: Vec<AddedToken> = specials.into_iter().map(|(_, content)| AddedToken::from(content, true)).collect();
+    let mut added = Vec::new();
+    for id in base..base + count {
+        let content = match given.get(&id) {
+            Some(content) => content.clone(),
+            None => format!("<|reserved_token_{id}|>"),
+        };
+        added.push(AddedToken::from(content, true));
+    }
     tokenizer.add_special_tokens(&added);
-    let processor = prefixed(&tokenizer, &GLM4_PREFIX, path)?;
-    tokenizer.with_post_processor(Some(processor));
+    if !prefix.is_empty() {
+        let processor = prefixed(&tokenizer, prefix, path)?;
+        tokenizer.with_post_processor(Some(processor));
+    }
     Ok(tokenizer)
 }
 

@@ -68,8 +68,8 @@ fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// weights sit below.
 ///
 /// Gemma 3's image-text checkpoints (`model_type` `gemma3`), Mistral 3's
-/// (`mistral3`, Ministral 3) and Llama 4's (`llama4`) nest the text
-/// decoder's config under `text_config` and its weights under
+/// (`mistral3`, Ministral 3), Llama 4's (`llama4`) and Kimi-K3's (`kimi_k3`)
+/// nest the text decoder's config under `text_config` and its weights under
 /// `language_model`; Gemma 4's (`gemma4`, `gemma4_unified`), Qwen3.5's
 /// (`qwen3_5`, `qwen3_5_moe`), MuseGlimmer's (`muse_glimmer`) and HyperCLOVA
 /// X Vision V2's (`hyperclovax_vision_v2`) nest them the same way under
@@ -88,7 +88,7 @@ fn language_model(outer: Value) -> (Value, &'static str) {
         "quantization_config",
     ];
     let prefix = match outer.get("model_type").and_then(|value| value.as_str()) {
-        Some("gemma3" | "mistral3" | "llama4") => "language_model",
+        Some("gemma3" | "mistral3" | "llama4" | "kimi_k3") => "language_model",
         Some(
             "gemma3n" | "gemma4" | "gemma4_unified" | "qwen3_5" | "qwen3_5_moe" | "muse_glimmer" | "hyperclovax_vision_v2",
         ) => "model.language_model",

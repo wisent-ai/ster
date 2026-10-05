@@ -10,8 +10,10 @@
 use candle_core::{D, DType, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 
+use super::norm::{Norm, NormSpec};
 use crate::model::{
-    Activation, ExpertGroups, ExpertLayout, MixtureOfExperts, Scoring, SharedExpert, SharedForm, SwigluLimit,
+    Activation, ExpertGroups, ExpertLayout, LatentExperts, MixtureOfExperts, NormKind, Pass, Scoring, SharedExpert,
+    SharedForm, SwigluLimit,
 };
 
 #[derive(Debug, Clone)]
@@ -58,7 +60,7 @@ impl Expert {
                 let gate = activation.apply(&gate.forward(input)?)?.minimum(limit)?;
                 (gate * up.clamp(-limit, limit)?)?
             }
-            (Some(gate), None) => (activation.apply(&gate.forward(input)?)? * up)?,
+            (Some(gate), None) => activation.gated(&gate.forward(input)?, &up)?,
             (None, _) => activation.apply(&up)?,
         };
         match &self.down {
@@ -104,9 +106,9 @@ pub(in crate::model) struct Experts {
     activation: Activation,
     /// The routed experts' and the shared expert's clamps on this layer.
     clamps: (Option<Clamp>, Option<Clamp>),
-    /// Nemotron-H's `fc1_latent_proj` and `fc2_latent_proj`, around the
-    /// routed experts.
-    latent: Option<(Linear, Linear)>,
+    /// The latent experts' projection down, the norm over their sum, and the
+    /// projection back.
+    latent: Option<(Linear, Option<Norm>, Linear)>,
 }
 
 impl Experts {
@@ -127,10 +129,12 @@ impl Experts {
                 } else {
                     builder.pp("block_sparse_moe")
                 };
+                // Kimi-K3's latent experts work on `routed_expert_hidden_size`.
+                let width = spec.latent.map_or(hidden, |latent| latent.width);
                 let experts = (0..count)
                     .map(|expert| {
                         Expert::load(
-                            hidden,
+                            width,
                             intermediate,
                             Some("w1"),
                             ["w3", "w2"],
@@ -157,7 +161,7 @@ impl Experts {
                 // Nemotron-H's experts have no gate projection, and its
                 // latent experts work on `moe_latent_size`.
                 let gate = (spec.layout != ExpertLayout::NemotronH).then_some("gate_proj");
-                let width = spec.latent.unwrap_or(hidden);
+                let width = spec.latent.map_or(hidden, |latent| latent.width);
                 let stacked = block.pp("experts");
                 // Transformers 5 saves every expert stacked: `gate_up_proj`
                 // `[experts, 2 · width, hidden]`, gate rows first, and
@@ -421,17 +425,22 @@ impl Experts {
             Some(SwigluLimit::Step { routed, shared }) => (at(routed), at(shared)),
             None => (None, None),
         };
-        // Nemotron-H's latent projections sit beside its experts under
-        // `mixer`, with a bias when the checkpoint stores one (`mlp_bias`).
+        // Latent projections sit beside the experts, with a bias when the
+        // checkpoint stores one (Nemotron-H's `mlp_bias`).
         let latent = match spec.latent {
-            Some(width) => {
-                let block = builder.pp("mixer");
+            Some(LatentExperts { width, down, up, norm }) => {
                 let projection = |input: usize, output: usize, name: &str| -> candle_core::Result<Linear> {
-                    let module = block.pp(name);
+                    let module = builder.pp(name);
                     let bias = if module.contains_tensor("bias") { Some(module.get(output, "bias")?) } else { None };
                     Ok(Linear::new(module.get((output, input), "weight")?, bias))
                 };
-                Some((projection(hidden, width, "fc1_latent_proj")?, projection(width, hidden, "fc2_latent_proj")?))
+                let norm = match norm {
+                    Some((name, eps)) => Some(
+                        NormSpec { kind: NormKind::Rms, eps, offset: false, groups: 1 }.load(width, builder.pp(name))?,
+                    ),
+                    None => None,
+                };
+                Some((projection(hidden, width, down)?, norm, projection(width, hidden, up)?))
             }
             None => None,
         };
@@ -554,7 +563,7 @@ impl Experts {
         // read and sum in `moe_latent_size`.
         let produced_width = if self.spec.layout == ExpertLayout::Mova { self.spec.intermediate } else { width };
         let routed_input = match &self.latent {
-            Some((down, _)) => down.forward(&flat)?,
+            Some((down, _, _)) => down.forward(&flat)?,
             None => flat.clone(),
         };
         let routed_width = routed_input.dim(D::Minus1)?;
@@ -590,7 +599,11 @@ impl Experts {
             };
             output = output.index_add(&index, &produced, 0)?;
         }
-        if let Some((_, up)) = &self.latent {
+        if let Some((_, norm, up)) = &self.latent {
+            // The composed norm, so a differentiable pass keeps its backward.
+            if let Some(norm) = norm {
+                output = norm.forward(&output, Pass::Differentiable)?;
+            }
             output = up.forward(&output)?;
         }
         if let Some((shared, gate)) = &self.shared {

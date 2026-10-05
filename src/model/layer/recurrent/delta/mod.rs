@@ -76,13 +76,21 @@ impl DeltaRule {
             inputs,
             convolution,
             step_bias,
-            decay: builder
-                .get_unchecked("A_log")?
-                .flatten_all()?
-                .to_dtype(DType::F32)?
-                .exp()?
-                .neg()?
-                .reshape((1, 1, value_heads, 1))?,
+            // Kimi-K3 stores `A_log` padded past its heads (128 entries for
+            // 96 heads); the first `value_heads` are the heads' own, as
+            // vLLM's `a_log_weight_loader` reads them.
+            decay: {
+                let stored = builder.get_unchecked("A_log")?.flatten_all()?;
+                if stored.dim(0)? < value_heads {
+                    candle_core::bail!("A_log holds {} entries for {value_heads} heads", stored.dim(0)?);
+                }
+                stored
+                    .narrow(0, 0, value_heads)?
+                    .to_dtype(DType::F32)?
+                    .exp()?
+                    .neg()?
+                    .reshape((1, 1, value_heads, 1))?
+            },
             norm: builder.pp(norm).get(value_dim, "weight")?,
             eps,
             output: linear_no_bias(value_heads * value_dim, hidden, builder.pp(output))?,

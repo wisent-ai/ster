@@ -15,6 +15,7 @@ use crate::model::{
     GateFunction, GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningForm, LightningSpec, Loops, MixtureOfExperts,
     Names, NgramSpec, NormKind, ParallelScan, ParameterNorm,
     PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, QueryTemperature, Recurrence, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
+    LatentExperts,
     SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec, SwigluLimit,
 };
 
@@ -777,8 +778,15 @@ fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> 
         Some("relu2") => Ok(Activation::Relu2),
         Some("relu") => Ok(Activation::Relu),
         Some("xielu") => Ok(Activation::Xielu),
+        // Kimi-K3's: `activation_situ_beta`, one when absent or zero, and
+        // `activation_situ_linear_beta`, none when absent
+        // (`_get_situ_activation_params` in `modeling_kimi_linear.py`).
+        Some("situ") => Ok(Activation::Situ {
+            beta: number(raw, "activation_situ_beta").filter(|beta| *beta != 0.0).unwrap_or(1.0),
+            linear_beta: number(raw, "activation_situ_linear_beta"),
+        }),
         Some(other) => bail!(
-            "{} declares hidden_act {other:?} for its {model_type} feed-forward; Ster implements silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast, relu, relu2 and xielu",
+            "{} declares hidden_act {other:?} for its {model_type} feed-forward; Ster implements silu, gelu, gelu_pytorch_tanh, gelu_new, gelu_fast, relu, relu2, xielu and situ",
             path.display()
         ),
     }
@@ -1257,6 +1265,7 @@ pub(super) fn family(
                     form: if qwen35 { DeltaRuleForm::Qwen35 } else { DeltaRuleForm::Qwen3Next },
                     negative_eigenvalues: false,
                     decay_floor: None,
+                    full_rank_gate: false,
                 });
             }
             // Mellum is Qwen3-MoE with sliding-window layers, a rotation per
@@ -1585,6 +1594,7 @@ pub(super) fn family(
                 form: DeltaRuleForm::OlmoHybrid,
                 negative_eigenvalues: raw.get("linear_allow_neg_eigval").and_then(Value::as_bool).unwrap_or(true),
                 decay_floor: None,
+                full_rank_gate: false,
             });
             let stated_theta = |object: Option<&Value>| object.and_then(|value| value.get("rope_theta")).is_some_and(Value::is_number);
             if !stated_theta(raw.get("rope_parameters")) && !stated_theta(Some(raw)) {
@@ -2081,7 +2091,12 @@ pub(super) fn family(
                 routed.layout = ExpertLayout::NemotronH;
                 routed.dense_layers = every_layer(layers, path)? & !routed_layers;
                 routed.selection_bias = Some("mixer.gate.e_score_correction_bias");
-                routed.latent = whole(raw, "moe_latent_size").filter(|width| *width > 0);
+                routed.latent = whole(raw, "moe_latent_size").filter(|width| *width > 0).map(|width| LatentExperts {
+                    width,
+                    down: LatentExperts::NEMOTRON_H_DOWN,
+                    up: LatentExperts::NEMOTRON_H_UP,
+                    norm: None,
+                });
                 let shared_count = whole(raw, "n_shared_experts").unwrap_or(1).max(1);
                 routed.shared = whole(raw, "moe_shared_expert_intermediate_size")
                     .filter(|width| *width > 0)
@@ -2807,7 +2822,8 @@ pub(super) fn family(
                 layers: kda,
                 form: DeltaRuleForm::Kimi,
                 negative_eigenvalues: false,
-                decay_floor: None,
+                decay_floor: linear.get("gate_lower_bound").and_then(Value::as_f64),
+                full_rank_gate: linear.get("use_full_rank_gate").and_then(Value::as_bool).unwrap_or(false),
             });
             if flag(raw, "mla_use_nope") {
                 architecture.positions = Positions::None;
@@ -2856,7 +2872,25 @@ pub(super) fn family(
                     gated: false,
                     form: SharedForm::GateUpDown,
                 });
+            // Kimi-K3's latent experts: `routed_expert_hidden_size` wide,
+            // `routed_expert_norm` over their sum under `latent_moe_use_norm`.
+            routed.latent = whole(raw, "routed_expert_hidden_size").filter(|width| *width > 0).map(|width| LatentExperts {
+                width,
+                down: LatentExperts::KIMI_DOWN,
+                up: LatentExperts::KIMI_UP,
+                norm: flag(raw, "latent_moe_use_norm").then_some((LatentExperts::KIMI_NORM, architecture.norm_eps)),
+            });
             architecture.experts = Some(routed);
+            // Kimi-K3's `mla_use_output_gate`: attention's output times the
+            // sigmoid of `g_proj`, elementwise, before `o_proj`.
+            if flag(raw, "mla_use_output_gate") {
+                architecture.attention_gate = Some(GateFunction::Sigmoid);
+                architecture.names.attention_gate = "g_proj";
+            }
+            architecture.depth_block_size = match whole(raw, "attn_res_block_size") {
+                Some(0) => bail!("{} declares attn_res_block_size 0; a block holds at least one layer", path.display()),
+                size => size,
+            };
         }
         "gpt_neox" => {
             // Pythia and GPT-NeoX: LayerNorm with bias, a head-interleaved
@@ -3789,6 +3823,7 @@ fn ling_kda(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut 
         form: DeltaRuleForm::Ling,
         negative_eigenvalues: false,
         decay_floor,
+        full_rank_gate: true,
     });
     architecture.interleaved_rotary = raw.get("rope_interleave").and_then(Value::as_bool).unwrap_or(true);
     architecture.head_gate = match text(raw, "gated_attention_proj_granularity_type") {

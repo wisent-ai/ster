@@ -16,6 +16,7 @@ use crate::lora::{Adapter, Adapters, Target};
 use super::{
     Activation, Architecture, Cache, DeltaRuleForm, FeedForwardKind, Mode, ParallelScan, Pass, Route,
     attention::{Attention, project},
+    depth::{DepthMix, DepthMixes},
 };
 use experts::Experts;
 use norm::{Norm, NormSpec};
@@ -262,7 +263,11 @@ impl FeedForward {
                     Some((gate_scale, _)) => (gate * gate_scale)?,
                     None => gate,
                 };
-                (self.activate(&self.sparse(gate)?)? * up)?
+                let gate = self.sparse(gate)?;
+                match &self.xielu {
+                    Some(xielu) => (xielu.apply(&gate)? * up)?,
+                    None => self.activation.gated(&gate, &up)?,
+                }
             }
             None => self.activate(&up)?,
         };
@@ -364,6 +369,8 @@ pub(super) struct DecoderLayer {
     scalar: Option<Tensor>,
     /// Gemma 3n's AltUp around the block.
     altup: Option<altup::AltUp>,
+    /// Kimi-K3's attention residuals around the block.
+    depth: Option<DepthMixes>,
 }
 
 /// What every layer reads beside the hidden state: the embeddings the first
@@ -411,12 +418,59 @@ impl DecoderLayer {
             Some(streams) => Some(altup::AltUp::load(builder.pp("altup"), config.hidden_size, streams, NormSpec::of(architecture))?),
             None => None,
         };
+        let depth = match architecture.depth_block_size {
+            Some(block_size) => {
+                let mix = |norm: &str, projection: &str| {
+                    DepthMix::load(&builder, config.hidden_size, norm, projection, architecture.norm_eps)
+                };
+                Some(DepthMixes {
+                    attention: mix("self_attention_res_norm", "self_attention_res_proj")?,
+                    feed_forward: mix("mlp_res_norm", "mlp_res_proj")?,
+                    block_size,
+                })
+            }
+            None => None,
+        };
         Ok(Self {
             block: Block::load(builder, config, architecture, layer, adapters, shared)?,
             per_layer_input,
             scalar,
             altup,
+            depth,
         })
+    }
+
+    /// Kimi-K3's layer under attention residuals: `partial` is the running
+    /// sum of the current block of layers, which this layer returns with its
+    /// two sublayers' outputs added, and `blocks` the sums of the finished
+    /// blocks before it, which this layer extends when it opens a block.
+    /// Each sublayer reads the mix of `blocks` and the running sum.
+    pub(super) fn forward_depth(
+        &self,
+        partial: &Tensor,
+        blocks: &mut Vec<Tensor>,
+        inputs: &LayerInputs<'_>,
+        index_pos: usize,
+        layer: usize,
+        cache: &mut Cache,
+        mask: Option<&Tensor>,
+        mode: Mode,
+    ) -> candle_core::Result<Tensor> {
+        let Some(depth) = &self.depth else {
+            candle_core::bail!("layer {layer} has no attention residuals and was asked to run under them");
+        };
+        let input = if blocks.is_empty() { partial.clone() } else { depth.attention.mix(blocks, partial)? };
+        let mut running = Some(partial.clone());
+        if layer % depth.block_size == 0 {
+            blocks.extend(running.take());
+        }
+        let attended = self.block.mixer_output(&input, inputs.embedded, index_pos, layer, cache, mask, mode)?;
+        let running = match running {
+            Some(running) => (running + attended)?,
+            None => attended,
+        };
+        let input = depth.feed_forward.mix(blocks, &running)?;
+        running + self.block.feed_forward_output(&input, layer, mode)?
     }
 
     /// The window this layer's attention looks through, if any.
@@ -933,24 +987,7 @@ impl Block {
             return hidden + self.scaled(feed_forward_block.forward(&normed, mode)?)?;
         }
         let normed = optional_norm(self.attention_norm.as_ref(), hidden, mode.pass)?;
-        let mixed = match &self.mixer {
-            Mixer::Skip => candle_core::bail!("layer {layer} has no attention to run"),
-            Mixer::Attention(attention) => {
-                attention.forward(&normed, index_pos, layer, cache, mask, mode)?
-            }
-            Mixer::StateSpace(state_space) => state_space.forward(&normed, layer, cache)?,
-            Mixer::Structured(structured) => structured.forward(&normed, layer, cache)?,
-            Mixer::ShortConv(convolution) => convolution.forward(&normed, layer, cache)?,
-            Mixer::DeltaRule(delta) => delta.forward(&normed, layer, cache)?,
-            Mixer::Lightning(lightning) => lightning.forward(&normed, index_pos, layer, cache, mode)?,
-            Mixer::FeedForward(feed_forward) => feed_forward.forward(&normed, mode)?,
-            Mixer::Parallel(mixers) => mixers.forward(&normed, index_pos, layer, cache, mask, mode)?,
-            Mixer::Hybrid(hybrid) => {
-                let shared = hybrid.shared.forward(&normed, embedded, index_pos, layer, cache, mask, mode)?;
-                let joined = hybrid.norm.forward(&(&normed + shared)?, mode.pass)?;
-                hybrid.scan.forward(&joined, layer, cache)?
-            }
-        };
+        let mixed = self.mix(&normed, embedded, index_pos, layer, cache, mask, mode)?;
         let attention = optional_norm(self.attention_output_norm.as_ref(), &mixed, mode.pass)?;
         let Some(feed_forward_block) = &self.feed_forward else {
             return hidden + self.scaled(attention)?;
@@ -997,6 +1034,62 @@ impl Block {
             Some(multiplier) => output * multiplier,
             None => Ok(output),
         }
+    }
+
+    /// The block's mixer over its normed input.
+    fn mix(
+        &self,
+        normed: &Tensor,
+        embedded: &Tensor,
+        index_pos: usize,
+        layer: usize,
+        cache: &mut Cache,
+        mask: Option<&Tensor>,
+        mode: Mode,
+    ) -> candle_core::Result<Tensor> {
+        Ok(match &self.mixer {
+            Mixer::Skip => candle_core::bail!("layer {layer} has no attention to run"),
+            Mixer::Attention(attention) => attention.forward(normed, index_pos, layer, cache, mask, mode)?,
+            Mixer::StateSpace(state_space) => state_space.forward(normed, layer, cache)?,
+            Mixer::Structured(structured) => structured.forward(normed, layer, cache)?,
+            Mixer::ShortConv(convolution) => convolution.forward(normed, layer, cache)?,
+            Mixer::DeltaRule(delta) => delta.forward(normed, layer, cache)?,
+            Mixer::Lightning(lightning) => lightning.forward(normed, index_pos, layer, cache, mode)?,
+            Mixer::FeedForward(feed_forward) => feed_forward.forward(normed, mode)?,
+            Mixer::Parallel(mixers) => mixers.forward(normed, index_pos, layer, cache, mask, mode)?,
+            Mixer::Hybrid(hybrid) => {
+                let shared = hybrid.shared.forward(normed, embedded, index_pos, layer, cache, mask, mode)?;
+                let joined = hybrid.norm.forward(&(normed + shared)?, mode.pass)?;
+                hybrid.scan.forward(&joined, layer, cache)?
+            }
+        })
+    }
+
+    /// The first sublayer's output alone, before any residual: the norm,
+    /// the mixer and the output norm.
+    fn mixer_output(
+        &self,
+        input: &Tensor,
+        embedded: &Tensor,
+        index_pos: usize,
+        layer: usize,
+        cache: &mut Cache,
+        mask: Option<&Tensor>,
+        mode: Mode,
+    ) -> candle_core::Result<Tensor> {
+        let normed = optional_norm(self.attention_norm.as_ref(), input, mode.pass)?;
+        let mixed = self.mix(&normed, embedded, index_pos, layer, cache, mask, mode)?;
+        optional_norm(self.attention_output_norm.as_ref(), &mixed, mode.pass)
+    }
+
+    /// The feed-forward's output alone, before any residual.
+    fn feed_forward_output(&self, input: &Tensor, layer: usize, mode: Mode) -> candle_core::Result<Tensor> {
+        let Some(feed_forward_block) = &self.feed_forward else {
+            candle_core::bail!("layer {layer} has no feed-forward to run");
+        };
+        let normed = optional_norm(self.feed_forward_norm.as_ref(), input, mode.pass)?;
+        let output = feed_forward_block.forward(&normed, mode)?;
+        optional_norm(self.feed_forward_output_norm.as_ref(), &output, mode.pass)
     }
 }
 
