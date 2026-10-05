@@ -64,6 +64,8 @@ pub(super) struct Attention {
     key_scale: Option<f64>,
     /// MiMo-V2's `attention_value_scale` on every value.
     value_scale: Option<f64>,
+    /// Llama 4's query temperature, `(beta, original)`.
+    query_temperature: Option<(f64, usize)>,
     /// Qwen3-Next's gate rows of `q_proj`: attention's output is multiplied
     /// by their sigmoid before the output projection.
     output_gate: Option<Linear>,
@@ -458,6 +460,7 @@ impl Attention {
             clip_qkv: architecture.clip_qkv,
             key_scale: architecture.key_scale,
             value_scale: architecture.value_scale,
+            query_temperature: architecture.query_temperature,
             output_gate,
             head_gate: if architecture.head_gate {
                 Some(projection(input, heads, false, conv1d, builder.pp("g_proj"))?)
@@ -628,6 +631,19 @@ impl Attention {
             optional_norm(self.query_norm.as_ref(), query, mode.pass)?
         } else {
             query
+        };
+        // Llama 4's query temperature (Ministral 3's `llama_4_scaling_beta`):
+        // past every `original` positions each query is multiplied by
+        // `1 + beta · ln(1 + floor(position / original))`.
+        let query = match self.query_temperature {
+            Some((beta, original)) => {
+                let scales: Vec<f32> = (index_pos..index_pos + sequence)
+                    .map(|position| (1.0 + beta * (1.0 + (position / original.max(1)) as f64).ln()) as f32)
+                    .collect();
+                let scales = Tensor::from_vec(scales, (1, 1, sequence, 1), query.device())?.to_dtype(query.dtype())?;
+                query.broadcast_mul(&scales)?
+            }
+            None => query,
         };
         let (key, value) = match key_value {
             Some((key, value)) => {

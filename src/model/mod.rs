@@ -220,6 +220,11 @@ pub struct Architecture {
     pub key_scale: Option<f64>,
     /// MiMo-V2's `attention_value_scale` on every value.
     pub value_scale: Option<f64>,
+    /// Llama 4's query temperature, `(beta, original)`: past every
+    /// `original` positions each query is multiplied by
+    /// `1 + beta · ln(1 + floor(position / original))` (Ministral 3's
+    /// `llama_4_scaling_beta`).
+    pub query_temperature: Option<(f64, usize)>,
     /// Each value head's width when it differs from the query and key
     /// heads' (MiMo-V2's `v_head_dim`).
     pub value_head_dim: Option<usize>,
@@ -681,6 +686,7 @@ impl Architecture {
             parallel_scan: None,
             key_scale: None,
             value_scale: None,
+            query_temperature: None,
             value_head_dim: None,
             feed_forward_scales: None,
             delta_rule: None,

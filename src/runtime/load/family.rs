@@ -139,10 +139,12 @@ pub(super) enum Family {
     SarvamMoe,
     SarvamMla,
     Cohere2Moe,
+    DeepseekMoe,
+    Ministral3,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 111] = [
+    pub(super) const ALL: [Self; 113] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -254,6 +256,8 @@ impl Family {
         Self::SarvamMoe,
         Self::SarvamMla,
         Self::Cohere2Moe,
+        Self::DeepseekMoe,
+        Self::Ministral3,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -375,6 +379,8 @@ impl Family {
             Self::SarvamMoe => "sarvam_moe",
             Self::SarvamMla => "sarvam_mla",
             Self::Cohere2Moe => "cohere2_moe",
+            Self::DeepseekMoe => "deepseek",
+            Self::Ministral3 => "ministral3",
         }
     }
 
@@ -976,6 +982,34 @@ pub(super) fn family(
         architecture.activation = activation(raw, model_type, path)?;
     }
     match model_type {
+        "ministral3" => {
+            // Ministral 3 (the text decoder of `mistral3`): Mistral's block
+            // with Llama 4's query temperature, `llama_4_scaling_beta` past
+            // every `original_max_position_embeddings` positions, both
+            // stated beside its rotation (vLLM's `llama_4_scaling`).
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.output_bias = architecture.query_key_value_bias;
+            architecture.sliding_window = whole(raw, "sliding_window");
+            if architecture.sliding_window.is_some() {
+                architecture.sliding_layers = every_layer(layers, path)?;
+            }
+            let stated = |key: &str| {
+                scaling
+                    .and_then(|scaling| scaling.get(key))
+                    .or_else(|| raw.get("llama_4_scaling").and_then(|block| block.get(key)))
+                    .and_then(Value::as_f64)
+            };
+            let beta = stated("llama_4_scaling_beta").or_else(|| stated("beta"));
+            let original = stated("original_max_position_embeddings").map(|original| original as usize);
+            architecture.query_temperature = match (beta, original) {
+                (Some(beta), Some(original)) if original > 0 => Some((beta, original)),
+                (Some(_), _) => bail!(
+                    "{} states llama_4_scaling_beta without original_max_position_embeddings to count positions by",
+                    path.display()
+                ),
+                (None, _) => None,
+            };
+        }
         "llama" | "mistral" | "mixtral" | "phi3" | "phimoe" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
@@ -2329,6 +2363,14 @@ pub(super) fn family(
         "longcat_flash" => longcat_flash(raw, llama, &mut architecture, path)?,
         "sarvam_mla" => sarvam_mla(raw, layers, &mut architecture, path)?,
         "cohere2_moe" => cohere2_moe(raw, layers, &mut architecture, path)?,
+        "deepseek" => {
+            // DeepSeek-MoE (v1): Llama's attention, rotating by halves, and
+            // DeepSeek's experts — `n_routed_experts` scored by softmax and
+            // `n_shared_experts` shared ones, dense before
+            // `first_k_dense_replace` and off `moe_layer_freq`.
+            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
+        }
         "zamba2" => {
             // Zamba2: Mamba-2 layers, and on the layers `layers_block_type`
             // calls `hybrid` a shared transformer block (one of

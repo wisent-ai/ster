@@ -268,12 +268,13 @@ fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// The language model's config inside a multimodal one, and the prefix its
 /// weights sit below.
 ///
-/// Gemma 3's image-text checkpoints (`model_type` `gemma3`) nest the text
-/// decoder's config under `text_config` and its weights under
-/// `language_model`; Gemma 4's (`gemma4`, `gemma4_unified`) nest them the
-/// same way under `model.language_model`; Step3's (`step3_vl`) nest the
-/// config the same way and keep the text weights at the root. The vision
-/// and audio towers beside it are never
+/// Gemma 3's image-text checkpoints (`model_type` `gemma3`) and Mistral 3's
+/// (`mistral3`, Ministral 3) nest the text decoder's config under
+/// `text_config` and its weights under `language_model`; Gemma 4's
+/// (`gemma4`, `gemma4_unified`) nest them the same way under
+/// `model.language_model`; Step3's (`step3_vl`) nest the config the same
+/// way and keep the text weights at the root. The vision and audio towers
+/// beside it are never
 /// read. The keys the nested config leaves to the outer one
 /// (`eos_token_id`, `bos_token_id`, `tie_word_embeddings`,
 /// `quantization_config`) are copied in. Any other config is returned as it
@@ -286,7 +287,7 @@ fn language_model(outer: serde_json::Value) -> (serde_json::Value, &'static str)
         "quantization_config",
     ];
     let prefix = match outer.get("model_type").and_then(|value| value.as_str()) {
-        Some("gemma3") => "language_model",
+        Some("gemma3" | "mistral3") => "language_model",
         Some("gemma4" | "gemma4_unified") => "model.language_model",
         Some("step3_vl") => "",
         _ => return (outer, ""),
