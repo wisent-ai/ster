@@ -9,8 +9,9 @@
 //!
 //! Merging computes `W + (alpha / rank) * B @ A` once and writes the result as
 //! an ordinary checkpoint directory. The output is deliberately not a Ster
-//! format: it is `model.safetensors` beside the source's own `config.json`,
-//! `tokenizer.json`, and whichever of `tokenizer_config.json` and
+//! format: it is `model.safetensors` beside the source's own `config.json`
+//! (`consolidated.safetensors` beside `params.json` for a Mistral-format
+//! source), `tokenizer.json`, and whichever of `tokenizer_config.json` and
 //! `chat_template.jinja` the source published — which is precisely what
 //! `Runtime::load` accepts and what every other tool in the ecosystem accepts
 //! too. A merge that produced something only Ster could read would have
@@ -148,10 +149,12 @@ pub fn merge(
                 .placement(target, layer, &config)
                 .with_context(|| format!("this model has no {} projection to merge into", target.name()))?;
             // A checkpoint saved from the base model (GPT-2's `h.0…` rather
-            // than `transformer.h.0…`) carries every name without the root.
+            // than `transformer.h.0…`) carries every name without the root;
+            // Mistral's own format stores every name its own way.
+            let stored = source.layout.stored_name(&placement.tensor);
             let name = match placement.without_root() {
-                Some(rootless) if !tensors.contains_key(&placement.tensor) => rootless,
-                _ => placement.tensor.clone(),
+                Some(rootless) if !tensors.contains_key(&stored) => source.layout.stored_name(&rootless),
+                _ => stored,
             };
             let base = tensors
                 .get(&name)
@@ -202,7 +205,8 @@ pub fn merge(
     workflow::progress(format!("merged {merged} projections at scale {scale}"));
 
     fs::create_dir_all(output).with_context(|| format!("failed to create {}", output.display()))?;
-    let weights_path = output.join("model.safetensors");
+    let weights_file = source.layout.merged_weights();
+    let weights_path = output.join(weights_file);
     let flat: HashMap<String, Tensor> = tensors
         .iter()
         .map(|(name, tensor)| (name.clone(), tensor.clone()))
@@ -225,13 +229,13 @@ pub fn merge(
     // are optional because plenty of checkpoints publish neither; a base model
     // with no template merges to a directory with no template, which is the
     // same statement in the other direction.
-    let mut files = vec!["model.safetensors".to_owned()];
+    let mut files = vec![weights_file.to_owned()];
     let optional = [
         (source.tokenizer_config.as_deref(), "tokenizer_config.json"),
         (source.chat_template.as_deref(), "chat_template.jinja"),
     ];
     let required = [
-        (&source.config, "config.json"),
+        (&source.config, source.layout.config_file()),
         (&source.tokenizer, "tokenizer.json"),
     ];
     for (from, leaf) in required

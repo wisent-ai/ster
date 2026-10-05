@@ -1095,31 +1095,14 @@ pub(super) fn family(
             if architecture.sliding_window.is_some() {
                 architecture.sliding_layers = every_layer(layers, path)?;
             }
-            let stated = |key: &str| {
-                scaling
-                    .and_then(|scaling| scaling.get(key))
-                    .or_else(|| raw.get("llama_4_scaling").and_then(|block| block.get(key)))
-                    .and_then(Value::as_f64)
-            };
-            let beta = stated("llama_4_scaling_beta").or_else(|| stated("beta"));
-            let original = stated("original_max_position_embeddings").map(|original| original as usize);
-            architecture.query_temperature = match (beta, original) {
-                (Some(beta), Some(interval)) if interval > 0 => Some(QueryTemperature {
-                    beta,
-                    interval,
-                    shift: 0,
-                    layers: every_layer(layers, path)?,
-                }),
-                (Some(_), _) => bail!(
-                    "{} states llama_4_scaling_beta without original_max_position_embeddings to count positions by",
-                    path.display()
-                ),
-                (None, _) => None,
-            };
+            architecture.query_temperature = llama4_temperature(raw, scaling, layers, path)?;
         }
         "llama" | "mistral" | "mixtral" | "phi3" | "phimoe" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
+            // Mistral's own weights rotate adjacent pairs (their reading
+            // states `rope_interleave`).
+            architecture.interleaved_rotary = flag(raw, "rope_interleave");
             if model_type == "phi3" {
                 architecture.qkv_layout = QkvLayout::Stacked;
             }
@@ -2479,6 +2462,9 @@ pub(super) fn family(
             if raw.get("n_routed_experts").is_some_and(|count| !count.is_null()) {
                 architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
             }
+            // Mistral Large 3 (read from Mistral's own format) adds Llama
+            // 4's query temperature (`llama_4_scaling`).
+            architecture.query_temperature = llama4_temperature(raw, scaling, layers, path)?;
             if matches!(model_type, "deepseek_v32" | "glm_moe_dsa") {
                 architecture.sparse_index = Some(sparse_index(raw, model_type, layers, path)?);
             }
@@ -4730,6 +4716,36 @@ const LLAMA4_NOPE_INTERVAL: usize = 4;
 /// defaults, 0.1 and 8192).
 const LLAMA4_ATTENTION_SCALE: f64 = 0.1;
 const LLAMA4_FLOOR_SCALE: usize = 8192;
+
+/// Llama 4's query temperature as Ministral 3 and Mistral Large 3 state it
+/// (vLLM's `llama_4_scaling`): every query past each
+/// `original_max_position_embeddings` positions multiplied by
+/// `1 + beta · ln(1 + floor(position / original))`, the two read from the
+/// `llama_4_scaling` block or, as Transformers writes them, beside the
+/// rotation (`llama_4_scaling_beta`). None when no beta is stated.
+fn llama4_temperature(raw: &Value, scaling: Option<&Value>, layers: usize, path: &Path) -> Result<Option<QueryTemperature>> {
+    let stated = |key: &str| {
+        raw.get("llama_4_scaling")
+            .and_then(|block| block.get(key))
+            .or_else(|| scaling.and_then(|scaling| scaling.get(key)))
+            .and_then(Value::as_f64)
+    };
+    let beta = stated("llama_4_scaling_beta").or_else(|| stated("beta"));
+    let original = stated("original_max_position_embeddings").map(|original| original as usize);
+    Ok(match (beta, original) {
+        (Some(beta), Some(interval)) if interval > 0 => Some(QueryTemperature {
+            beta,
+            interval,
+            shift: 0,
+            layers: every_layer(layers, path)?,
+        }),
+        (Some(_), _) => bail!(
+            "{} states llama_4_scaling_beta without original_max_position_embeddings to count positions by",
+            path.display()
+        ),
+        (None, _) => None,
+    })
+}
 
 /// Llama 4 (`llama4_text`, also inside `llama4`): Llama's attention, the
 /// layers `no_rope_layers` marks (every fourth by default) unrotated and

@@ -13,7 +13,11 @@ use hf_hub::{Repo, RepoType, api::sync::Api};
 
 use crate::{chat, model::Architecture};
 
-use super::family::{Family, family, fill_llama_keys, take_rope_scaling};
+use super::{
+    config,
+    family::{Family, family, fill_llama_keys, take_rope_scaling},
+    mistral::{self, Layout},
+};
 
 /// A checkpoint's three files, resolved but not mapped.
 ///
@@ -35,6 +39,8 @@ pub struct Checkpoint {
     /// rather than a checkpoint to refuse.
     pub tokenizer_config: Option<PathBuf>,
     pub chat_template: Option<PathBuf>,
+    /// Whether the config and weights are Transformers' or Mistral's own.
+    pub layout: Layout,
 }
 
 impl Checkpoint {
@@ -42,9 +48,14 @@ impl Checkpoint {
     pub fn resolve(model: &str, revision: Option<&str>) -> Result<Self> {
         let local = Path::new(model);
         if local.is_dir() {
-            let config = local.join("config.json");
+            let layout = if local.join("config.json").is_file() || !local.join("params.json").is_file() {
+                Layout::Transformers
+            } else {
+                Layout::Mistral
+            };
+            let config = local.join(layout.config_file());
             let tokenizer = local.join("tokenizer.json");
-            let weights = local_safetensors(local)?;
+            let weights = local_safetensors(local, layout)?;
             require_files(&config, &tokenizer, &weights)?;
             let (tokenizer_config, chat_template) = chat::local_files(local);
             return Ok(Self {
@@ -54,6 +65,7 @@ impl Checkpoint {
                 revision: revision.map(str::to_owned),
                 tokenizer_config,
                 chat_template,
+                layout,
             });
         }
         let api = Api::new().context("failed to initialize Hugging Face Hub client")?;
@@ -66,7 +78,6 @@ impl Checkpoint {
         let info = remote
             .info()
             .with_context(|| format!("failed to read model repository {model}"))?;
-        let config = remote.get("config.json")?;
         let tokenizer = remote.get("tokenizer.json")?;
         // The two template files are fetched exactly like the three required
         // ones, but only when the repository lists them: `get` on a file a
@@ -82,15 +93,19 @@ impl Checkpoint {
             .then(|| remote.get("chat_template.jinja"))
             .transpose()
             .context("failed to download chat_template.jinja")?;
+        // A repository that publishes Mistral's own format alone (Mistral
+        // Large 3) is read from `params.json` and its consolidated weights.
+        let layout = if published(&info, "config.json") || !published(&info, "params.json") {
+            Layout::Transformers
+        } else {
+            Layout::Mistral
+        };
+        let config = remote.get(layout.config_file())?;
         let weight_names: Vec<String> = info
             .siblings
             .into_iter()
             .map(|file| file.rfilename)
-            .filter(|name| {
-                name.ends_with(".safetensors")
-                    && !name.contains("optimizer")
-                    && !name.contains("training_args")
-            })
+            .filter(|name| layout.owns(name))
             .collect();
         if weight_names.is_empty() {
             bail!("model {model} publishes no safetensors weights");
@@ -111,6 +126,7 @@ impl Checkpoint {
             revision: Some(info.sha),
             tokenizer_config,
             chat_template,
+            layout,
         })
     }
 
@@ -122,11 +138,14 @@ impl Checkpoint {
     /// decoder could not have loaded — a merge that silently produced a
     /// directory `Runtime::load` then rejects would be worse than no merge.
     pub fn decoder_config(&self) -> Result<(Config, Architecture, BTreeSet<u32>)> {
-        let bytes = fs::read(&self.config)
-            .with_context(|| format!("failed to read {}", self.config.display()))?;
-        let outer: serde_json::Value = serde_json::from_slice(&finite_literals(&bytes))
-            .with_context(|| format!("invalid model config {}", self.config.display()))?;
-        let (mut raw, wrapper) = language_model(outer);
+        let (mut raw, wrapper) = config::read(&self.config, self.layout)?;
+        // Mistral's own format leaves the end-of-sequence token to its
+        // tokenizer.
+        if let (Layout::Mistral, Some(object)) = (self.layout, raw.as_object_mut()) {
+            if let Some(eos) = mistral::end_of_sequence(self.tokenizer_config.as_deref(), &self.tokenizer) {
+                object.entry("eos_token_id").or_insert(serde_json::Value::from(eos));
+            }
+        }
         // A remote-code config may leave `model_type` to its config class
         // (LongCat-Flash-Lite); its `architectures` class then names it.
         let model_type = match raw.get("model_type").and_then(|value| value.as_str()) {
@@ -186,16 +205,11 @@ fn published(info: &hf_hub::api::RepoInfo, name: &str) -> bool {
     info.siblings.iter().any(|file| file.rfilename == name)
 }
 
-fn local_safetensors(root: &Path) -> Result<Vec<PathBuf>> {
+fn local_safetensors(root: &Path, layout: Layout) -> Result<Vec<PathBuf>> {
     let mut weights = Vec::new();
     for entry in fs::read_dir(root).with_context(|| format!("failed to list {}", root.display()))? {
         let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) == Some("safetensors")
-            && !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.contains("optimizer"))
-        {
+        if path.file_name().and_then(|name| name.to_str()).is_some_and(|name| layout.owns(name)) {
             weights.push(path);
         }
     }
@@ -222,91 +236,4 @@ fn eos_tokens(config: &LlamaConfig) -> BTreeSet<u32> {
         Some(LlamaEosToks::Multiple(tokens)) => tokens.iter().copied().collect(),
         None => BTreeSet::new(),
     }
-}
-
-/// The config with Python's non-finite float literals replaced by `null`.
-///
-/// Transformers writes configs with Python's `json`, which emits `Infinity`,
-/// `-Infinity` and `NaN` for non-finite floats (Mamba-2's unbounded
-/// `time_step_limit` is `[0.0, Infinity]`). JSON has no such tokens, so they
-/// are rewritten — outside strings only — to `null`, which every reader of
-/// such a key takes as "not stated". Bytes without them are returned as they
-/// are.
-fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    const LITERALS: [&[u8]; 3] = [b"-Infinity", b"Infinity", b"NaN"];
-    let mut output: Option<Vec<u8>> = None;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if in_string {
-            match (escaped, byte) {
-                (true, _) => escaped = false,
-                (false, b'\\') => escaped = true,
-                (false, b'"') => in_string = false,
-                _ => {}
-            }
-        } else if byte == b'"' {
-            in_string = true;
-        } else if let Some(literal) = LITERALS.iter().find(|literal| bytes[index..].starts_with(literal)) {
-            let written = output.get_or_insert_with(|| bytes[..index].to_vec());
-            written.extend_from_slice(b"null");
-            index += literal.len();
-            continue;
-        }
-        if let Some(written) = output.as_mut() {
-            written.push(byte);
-        }
-        index += 1;
-    }
-    match output {
-        Some(written) => std::borrow::Cow::Owned(written),
-        None => std::borrow::Cow::Borrowed(bytes),
-    }
-}
-
-/// The language model's config inside a multimodal one, and the prefix its
-/// weights sit below.
-///
-/// Gemma 3's image-text checkpoints (`model_type` `gemma3`), Mistral 3's
-/// (`mistral3`, Ministral 3) and Llama 4's (`llama4`) nest the text
-/// decoder's config under `text_config` and its weights under
-/// `language_model`; Gemma 4's (`gemma4`, `gemma4_unified`), Qwen3.5's
-/// (`qwen3_5`, `qwen3_5_moe`), MuseGlimmer's (`muse_glimmer`) and HyperCLOVA
-/// X Vision V2's (`hyperclovax_vision_v2`) nest them the same way under
-/// `model.language_model`, the head at the root or beside the decoder;
-/// Step3's (`step3_vl`) nest the config the same
-/// way and keep the text weights at the root. The vision and audio towers
-/// beside it are never
-/// read. The keys the nested config leaves to the outer one
-/// (`eos_token_id`, `bos_token_id`, `tie_word_embeddings`,
-/// `quantization_config`) are copied in. Any other config is returned as it
-/// is, with no prefix.
-fn language_model(outer: serde_json::Value) -> (serde_json::Value, &'static str) {
-    const INHERITED: [&str; 4] = [
-        "eos_token_id",
-        "bos_token_id",
-        "tie_word_embeddings",
-        "quantization_config",
-    ];
-    let prefix = match outer.get("model_type").and_then(|value| value.as_str()) {
-        Some("gemma3" | "mistral3" | "llama4") => "language_model",
-        Some("gemma4" | "gemma4_unified" | "qwen3_5" | "qwen3_5_moe" | "muse_glimmer" | "hyperclovax_vision_v2") => {
-            "model.language_model"
-        }
-        Some("step3_vl") => "",
-        _ => return (outer, ""),
-    };
-    let Some(mut inner) = outer.get("text_config").cloned() else {
-        return (outer, "");
-    };
-    if let Some(object) = inner.as_object_mut() {
-        for key in INHERITED {
-            if let (false, Some(value)) = (object.contains_key(key), outer.get(key)) {
-                object.insert(key.to_owned(), value.clone());
-            }
-        }
-    }
-    (inner, prefix)
 }

@@ -336,7 +336,13 @@ ster generate \
 Use an immutable Hugging Face commit with `--revision <sha>` when the artifact
 must remain reproducible across model updates. A local directory may be passed
 to `--model` when it contains `config.json`, `tokenizer.json`, and one or more
-Safetensors weight files.
+Safetensors weight files. A checkpoint in Mistral's own format — `params.json`
+and `consolidated*.safetensors` with no `config.json`, as Mistral Large 3 is
+published — is read the same way, locally or from the Hub: its config is put
+in the Transformers shape (Mistral Large 3 as `deepseek_v3` with Llama 4's
+query temperature) and its tensors are read under Mistral's names. A
+repository that publishes both formats is read from `config.json` and its
+non-`consolidated` weights only.
 
 ## CLI
 

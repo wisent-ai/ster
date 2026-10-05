@@ -20,9 +20,12 @@ use crate::{
 use super::{DeviceChoice, Runtime, device::Precision, validate_layers};
 
 mod checkpoint;
+mod config;
 mod family;
+mod mistral;
 
 pub use checkpoint::Checkpoint;
+pub use mistral::Layout;
 
 impl Runtime {
     /// Loads the frozen base model with no adapters attached, in F32.
@@ -228,6 +231,7 @@ struct BaseLoad {
     config: Config,
     architecture: Architecture,
     weights: Vec<PathBuf>,
+    layout: Layout,
     revision: Option<String>,
     eos_tokens: BTreeSet<u32>,
     chat: Option<chat::Template>,
@@ -263,6 +267,7 @@ impl BaseLoad {
             config,
             architecture,
             weights: source.weights,
+            layout: source.layout,
             revision: source.revision,
             eos_tokens,
             chat,
@@ -274,10 +279,16 @@ impl BaseLoad {
     }
 
     /// Maps the base weights read-only. Nothing here is registered in a
-    /// `VarMap`, so the base stays frozen whichever loader called it.
+    /// `VarMap`, so the base stays frozen whichever loader called it. A
+    /// Mistral-format checkpoint answers each Transformers name from its own.
     fn builder(&self) -> Result<VarBuilder<'static>> {
-        unsafe { VarBuilder::from_mmaped_safetensors(&self.weights, self.dtype, &self.device) }
-            .with_context(|| format!("failed to map {} model weight files", self.weights.len()))
+        let builder = unsafe { VarBuilder::from_mmaped_safetensors(&self.weights, self.dtype, &self.device) }
+            .with_context(|| format!("failed to map {} model weight files", self.weights.len()))?;
+        let layout = self.layout;
+        Ok(match layout {
+            Layout::Transformers => builder,
+            Layout::Mistral => builder.rename_f(move |name: &str| layout.stored_name(name)),
+        })
     }
 
     fn finish(self, model_id: &str, model: SteeringLlama) -> Runtime {
