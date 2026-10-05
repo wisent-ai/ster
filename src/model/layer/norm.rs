@@ -18,15 +18,20 @@ pub(in crate::model) struct Norm {
     bias: Option<Tensor>,
     kind: NormKind,
     eps: f64,
+    /// How many equal groups of the last axis are normalised apart
+    /// (K2-Horizon's `layernorm_num_groups`); one for a plain norm.
+    groups: usize,
 }
 
-/// What every norm of one checkpoint shares: its kind, its epsilon, and
-/// whether the stored scale is an offset from one.
+/// What every norm of one checkpoint shares: its kind, its epsilon, whether
+/// the stored scale is an offset from one, and how many equal groups a
+/// hidden-width norm splits its input into.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::model) struct NormSpec {
     pub kind: NormKind,
     pub eps: f64,
     pub offset: bool,
+    pub groups: usize,
 }
 
 impl NormSpec {
@@ -35,6 +40,7 @@ impl NormSpec {
             kind: architecture.norm,
             eps: architecture.norm_eps,
             offset: architecture.norm_offset,
+            groups: architecture.norm_groups,
         }
     }
 
@@ -57,6 +63,7 @@ impl NormSpec {
             bias: None,
             kind: self.kind,
             eps: self.eps,
+            groups: self.groups,
         })
     }
 
@@ -111,6 +118,7 @@ impl NormSpec {
             bias,
             kind: self.kind,
             eps: self.eps,
+            groups: self.groups,
         })
     }
 }
@@ -126,9 +134,11 @@ impl Norm {
     /// (candle-nn-0.11.0/src/layer_norm.rs:123-142): widen half precision to
     /// F32, subtract the mean when the kind asks, divide by the root of the
     /// mean square plus `eps`, cast back, scale, and add the bias. A per-head
-    /// weight broadcasts over the leading axes the same way.
+    /// weight broadcasts over the leading axes the same way. A grouped norm
+    /// normalises each of its equal groups of the last axis apart, then
+    /// scales the whole axis.
     pub fn forward(&self, hidden: &Tensor, pass: Pass) -> candle_core::Result<Tensor> {
-        let fused = pass == Pass::Inference && self.weight.rank() == 1 && hidden.is_contiguous();
+        let fused = pass == Pass::Inference && self.weight.rank() == 1 && hidden.is_contiguous() && self.groups == 1;
         if fused {
             match (self.kind, &self.bias) {
                 (NormKind::Rms, None) => {
@@ -145,6 +155,15 @@ impl Norm {
             DType::F16 | DType::BF16 => DType::F32,
             other => other,
         };
+        let shape = hidden.shape().clone();
+        let hidden = if self.groups > 1 {
+            let mut grouped = shape.dims().to_vec();
+            let width = grouped.pop().unwrap_or(0);
+            grouped.extend([self.groups, width / self.groups]);
+            hidden.reshape(grouped)?
+        } else {
+            hidden.clone()
+        };
         let width = hidden.dim(D::Minus1)? as f64;
         let hidden = hidden.to_dtype(internal)?;
         let hidden = match self.kind {
@@ -155,7 +174,7 @@ impl Norm {
             }
         };
         let square = (hidden.sqr()?.sum_keepdim(D::Minus1)? / width)?;
-        let normed = hidden.broadcast_div(&(square + self.eps)?.sqrt()?)?;
+        let normed = hidden.broadcast_div(&(square + self.eps)?.sqrt()?)?.reshape(shape)?;
         let scaled = normed.to_dtype(dtype)?.broadcast_mul(&self.weight)?;
         match &self.bias {
             Some(bias) => scaled.broadcast_add(bias),

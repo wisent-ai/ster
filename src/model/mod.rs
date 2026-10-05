@@ -202,6 +202,9 @@ pub struct Architecture {
     /// GLM).
     pub fused_feed_forward: bool,
     pub norm_offset: bool,
+    /// How many equal groups every hidden-width norm normalises apart
+    /// (K2-Horizon's `layernorm_num_groups`); one for a plain norm.
+    pub norm_groups: usize,
     /// What the embedding is multiplied by before the first block.
     pub embedding_multiplier: Option<f64>,
     /// What each sublayer's output is multiplied by before the residual add.
@@ -234,6 +237,14 @@ pub struct Architecture {
     /// yields one logit per head, and each head's output is multiplied by
     /// its sigmoid before `o_proj`.
     pub head_gate: bool,
+    /// K2-Horizon's elementwise attention gate (`attention_gate_func`):
+    /// `gate_proj` of the hidden state, through this function, multiplies
+    /// attention's output before `o_proj`.
+    pub attention_gate: Option<GateFunction>,
+    /// K2-Horizon's mixture of value experts (MoVA) on its routed layers: no
+    /// `v_proj`, each value the router-weighted sum of its chosen
+    /// `v_experts`' SiLU outputs.
+    pub value_experts: Option<MixtureOfExperts>,
     /// Step3's query bottleneck width (`share_q_dim`): the query is
     /// `wq(inter_norm(q_proj(x)))`.
     pub query_bottleneck: Option<usize>,
@@ -654,6 +665,7 @@ impl Architecture {
             embedding_norm: false,
             fused_feed_forward: false,
             norm_offset: false,
+            norm_groups: 1,
             embedding_multiplier: None,
             residual_multiplier: None,
             lone_sublayers: None,
@@ -665,6 +677,8 @@ impl Architecture {
             delta_rule: None,
             output_gate: false,
             head_gate: false,
+            attention_gate: None,
+            value_experts: None,
             query_bottleneck: None,
             lightning: None,
             scaled_residuals: None,
@@ -834,6 +848,11 @@ impl Architecture {
         if self.global_attention.is_some() && !feed_forward {
             return None;
         }
+        // K2-Horizon's routed layers take their value from value experts,
+        // with no `v_proj`.
+        if self.value_experts.is_some() && target == Target::Value {
+            return None;
+        }
         if let Some(latent) = self.latent {
             match target {
                 Target::Query if latent.query_rank.is_none() => {
@@ -979,6 +998,8 @@ impl Architecture {
                 "its query passes a bottleneck and a norm (Step3's q_proj and inter_norm) before wq"
             } else if self.global_attention.is_some() && !feed_forward_target(*target) {
                 "its full-attention layers' heads differ from its sliding-window layers' in count or width (Gemma 4's global_head_dim, MiMo-V2's swa_num_key_value_heads, Step 3.5's attention_other_setting)"
+            } else if self.value_experts.is_some() && *target == Target::Value {
+                "its routed layers take their value from value experts (K2-Horizon's v_experts) with no v_proj"
             } else if self.latent.is_some() && !feed_forward_target(*target) {
                 "its attention is latent (DeepSeek's low-rank query and key-value)"
             } else if self.experts.is_some() {
@@ -1058,6 +1079,14 @@ pub enum QkvLayout {
     /// The query its own tensor, key and value one tensor whose rows hold
     /// each key-value head's key, then its value (TeleChat2's `key_value`).
     PairedKeyValue,
+}
+
+/// The function K2-Horizon's attention gate passes `gate_proj` through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateFunction {
+    Silu,
+    /// Softplus with `β = ln 2`: `log2(1 + 2^x)`.
+    Softplus,
 }
 
 /// How a token's position enters the model.
@@ -1215,6 +1244,10 @@ pub enum ExpertLayout {
     /// `mlp.router.gate`, `mlp.experts.{e}.gate_proj|up_proj|down_proj`
     /// (HY V3).
     HyV3,
+    /// `self_attn.v_router`, `self_attn.v_experts.{e}`: K2-Horizon's value
+    /// experts, each one projection whose SiLU output is the value
+    /// (`intermediate` wide), with no gate or down projection.
+    Mova,
 }
 
 /// Where a family keeps its tensors. `embeddings`, `positions`,

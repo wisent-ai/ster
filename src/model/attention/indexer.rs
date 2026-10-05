@@ -46,7 +46,7 @@ impl Indexer {
         spec: IndexerSpec,
     ) -> candle_core::Result<Self> {
         let block = builder.pp("indexer");
-        let norm = NormSpec { kind: NormKind::Layer { bias: true }, eps: KEY_NORM_EPS, offset: false };
+        let norm = NormSpec { kind: NormKind::Layer { bias: true }, eps: KEY_NORM_EPS, offset: false, groups: 1 };
         Ok(Self {
             query: linear_no_bias(query_rank, spec.heads * spec.head_dim, block.pp("wq_b"))?,
             key: linear_no_bias(hidden, spec.head_dim, block.pp("wk"))?,

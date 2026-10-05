@@ -11,9 +11,10 @@ use candle_transformers::models::llama::Config;
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Architecture, Cache, LatentAttention, Mode, NormKind, Pass, Positions, QkvLayout,
+    Activation, Architecture, Cache, GateFunction, LatentAttention, Mode, NormKind, Pass, Positions, QkvLayout,
     QueryKeyNorm, Route,
     layer::{
+        experts::Experts,
         norm::{Norm, NormSpec},
         projection,
     },
@@ -69,6 +70,12 @@ pub(super) struct Attention {
     /// Step 3.5's `g_proj`: one logit per head, each head's output
     /// multiplied by its sigmoid.
     head_gate: Option<Linear>,
+    /// K2-Horizon's `gate_proj` and the function its output passes through
+    /// before it multiplies attention's output.
+    elementwise_gate: Option<(Linear, GateFunction)>,
+    /// K2-Horizon's value experts, in place of `v_proj` on its routed
+    /// layers.
+    value_experts: Option<Experts>,
     /// Step3's query bottleneck: `q_proj` down to `share_q_dim` and the RMS
     /// norm `inter_norm`, whose output the query projection (`wq`) reads in
     /// place of the hidden state.
@@ -180,12 +187,14 @@ impl Attention {
         let bias = architecture.query_key_value_bias;
         let conv1d = architecture.conv1d;
         // A LayerNorm family's query and key norms carry no bias; the others
-        // are RMS norms like the rest of the block.
+        // are RMS norms like the rest of the block. They work per head, never
+        // in the hidden width's groups.
         let spec = NormSpec {
             kind: match architecture.norm {
                 NormKind::Layer { .. } => NormKind::Layer { bias: false },
                 other => other,
             },
+            groups: 1,
             ..NormSpec::of(architecture)
         };
         let (query_norm, key_norm) = match architecture.query_key_norm {
@@ -218,6 +227,13 @@ impl Attention {
             Rotary::Global
         };
         let mut output_gate = None;
+        // K2-Horizon's value experts, on its routed layers only.
+        let value_experts = match &architecture.value_experts {
+            Some(spec) if architecture.routed(layer) => {
+                Some(Experts::load(layer_builder, input, spec, Activation::Silu, layer)?)
+            }
+            _ => None,
+        };
         let projections = if let Some(source) = source {
             Projections::QueryOnly {
                 query: projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
@@ -265,8 +281,9 @@ impl Attention {
                 )?,
                 projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
                 // Gemma 4's full-attention layers under `attention_k_eq_v`
-                // have no `v_proj`: the value is the key projection.
-                if global.is_some_and(|global| global.key_is_value) {
+                // have no `v_proj`: the value is the key projection. Nor do
+                // K2-Horizon's routed layers, whose value experts give it.
+                if global.is_some_and(|global| global.key_is_value) || value_experts.is_some() {
                     None
                 } else {
                     Some(projection(input, value_width, bias, conv1d, builder.pp(names.value))?)
@@ -439,6 +456,11 @@ impl Attention {
             } else {
                 None
             },
+            elementwise_gate: match architecture.attention_gate {
+                Some(function) => Some((projection(input, heads * value_dim, false, conv1d, builder.pp("gate_proj"))?, function)),
+                None => None,
+            },
+            value_experts,
             low_rank: None,
             query_bottleneck: match architecture.query_bottleneck {
                 Some(width) => Some((
@@ -505,10 +527,12 @@ impl Attention {
                 };
                 let key = project(key, self.key_adapter.as_ref(), hidden, mode.route)?;
                 // Gemma 4's full-attention layers under `attention_k_eq_v`
-                // take the value from the key projection, before any norm.
-                let value = match value {
-                    Some(value) => project(value, self.value_adapter.as_ref(), hidden, mode.route)?,
-                    None => key.clone(),
+                // take the value from the key projection, before any norm;
+                // K2-Horizon's routed layers from their value experts.
+                let value = match (value, &self.value_experts) {
+                    (Some(value), _) => project(value, self.value_adapter.as_ref(), hidden, mode.route)?,
+                    (None, Some(experts)) => experts.forward(hidden)?,
+                    (None, None) => key.clone(),
                 };
                 // Zamba2's per-invocation low-rank terms belong to the base
                 // model, so they apply on every route.
@@ -717,6 +741,23 @@ impl Attention {
         let output = output
             .transpose(1, 2)?
             .reshape((batch, sequence, self.heads * self.value_dim))?;
+        // K2-Horizon's elementwise gate: `silu(g)`, or softplus with
+        // `β = ln 2`, `log2(1 + 2^g)`, written as `max(g, 0) + log2(1 +
+        // 2^-|g|)` so it never overflows; composed so it has a backward pass.
+        let output = match &self.elementwise_gate {
+            Some((gate, function)) => {
+                let logits = gate.forward(hidden)?;
+                let gate = match function {
+                    GateFunction::Silu => candle_nn::ops::silu(&logits)?,
+                    GateFunction::Softplus => {
+                        let tail = ((logits.abs()?.neg()? * std::f64::consts::LN_2)?.exp()? + 1.0)?.log()?;
+                        (logits.relu()? + (tail / std::f64::consts::LN_2)?)?
+                    }
+                };
+                (output * gate)?
+            }
+            None => output,
+        };
         // sigmoid, composed so it has a backward pass.
         let output = match &self.output_gate {
             Some(gate) => output.broadcast_mul(&(gate.forward(hidden)?.neg()?.exp()? + 1.0)?.recip()?)?,

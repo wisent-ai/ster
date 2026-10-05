@@ -19,7 +19,8 @@ struct Expert {
     /// `None` in Nemotron-H's experts, which are `down(act(up))`.
     gate: Option<Linear>,
     up: Linear,
-    down: Linear,
+    /// `None` in K2-Horizon's value experts, which are `act(up)`.
+    down: Option<Linear>,
 }
 
 /// GPT-OSS's gate sharpness: the gate is `g · sigmoid(1.702 · g)`, the
@@ -60,7 +61,10 @@ impl Expert {
             (Some(gate), None) => (activation.apply(&gate.forward(input)?)? * up)?,
             (None, _) => activation.apply(&up)?,
         };
-        self.down.forward(&gated)
+        match &self.down {
+            Some(down) => down.forward(&gated),
+            None => Ok(gated),
+        }
     }
 
     /// An expert of three unbiased projections named `[gate, up, down]`, or
@@ -77,13 +81,13 @@ impl Expert {
                 .map(|gate| linear_no_bias(hidden, intermediate, builder.pp(gate)))
                 .transpose()?,
             up: linear_no_bias(hidden, intermediate, builder.pp(up))?,
-            down: linear_no_bias(intermediate, hidden, builder.pp(down))?,
+            down: Some(linear_no_bias(intermediate, hidden, builder.pp(down))?),
         })
     }
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Experts {
+pub(in crate::model) struct Experts {
     router: Linear,
     /// DeepSeek-V3's `e_score_correction_bias`, `[experts]`, read on the
     /// host: it moves which experts are chosen, never how much they weigh.
@@ -104,7 +108,7 @@ pub(super) struct Experts {
 
 impl Experts {
     /// `builder` is the layer's; `layer` picks Step 3.5's clamps.
-    pub(super) fn load(
+    pub(in crate::model) fn load(
         builder: &VarBuilder<'_>,
         hidden: usize,
         spec: &MixtureOfExperts,
@@ -161,7 +165,7 @@ impl Experts {
                             Ok(Expert {
                                 gate: Some(Linear::new(rows.narrow(0, 0, intermediate)?, None)),
                                 up: Linear::new(rows.narrow(0, intermediate, intermediate)?, None),
-                                down: Linear::new(down.get(expert)?, None),
+                                down: Some(Linear::new(down.get(expert)?, None)),
                             })
                         })
                         .collect::<candle_core::Result<Vec<_>>>()?
@@ -186,7 +190,7 @@ impl Experts {
                         Ok(Expert {
                             gate: Some(Linear::new(gate.get(expert)?, None)),
                             up: Linear::new(up.get(expert)?, None),
-                            down: Linear::new(down.get(expert)?, None),
+                            down: Some(Linear::new(down.get(expert)?, None)),
                         })
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
@@ -206,7 +210,7 @@ impl Experts {
                         Ok(Expert {
                             gate: Some(Linear::new(rows.narrow(0, 0, intermediate)?, None)),
                             up: Linear::new(rows.narrow(0, intermediate, intermediate)?, None),
-                            down: Linear::new(output.get(expert)?, None),
+                            down: Some(Linear::new(output.get(expert)?, None)),
                         })
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
@@ -237,10 +241,10 @@ impl Experts {
                         Ok(Expert {
                             gate: Some(column(0)?),
                             up: column(1)?,
-                            down: Linear::new(
+                            down: Some(Linear::new(
                                 down.get(expert)?.t()?.contiguous()?,
                                 Some(down_bias.get(expert)?),
-                            ),
+                            )),
                         })
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
@@ -261,7 +265,7 @@ impl Experts {
                         Ok(Expert {
                             gate: Some(Linear::new(rows(&gate)?, None)),
                             up: Linear::new(rows(&up)?, None),
-                            down: Linear::new(rows(&down)?.t()?.contiguous()?, None),
+                            down: Some(Linear::new(rows(&down)?.t()?.contiguous()?, None)),
                         })
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
@@ -283,7 +287,7 @@ impl Experts {
                         Ok(Expert {
                             gate: Some(Linear::new(rows.narrow(0, 0, intermediate)?, None)),
                             up: Linear::new(rows.narrow(0, intermediate, intermediate)?, None),
-                            down: Linear::new(down.get(expert)?, None),
+                            down: Some(Linear::new(down.get(expert)?, None)),
                         })
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
@@ -292,6 +296,22 @@ impl Experts {
                 let projection = router.get((count, hidden), "proj.weight")?;
                 let weight = projection.broadcast_mul(&scale.reshape((1, hidden))?)?;
                 (Linear::new(weight, None), experts)
+            }
+            // K2-Horizon's value experts: `self_attn.v_router` and one
+            // projection per expert, `self_attn.v_experts.{e}`, whose SiLU
+            // output is the value.
+            ExpertLayout::Mova => {
+                let block = builder.pp("self_attn");
+                let experts = (0..count)
+                    .map(|expert| -> candle_core::Result<Expert> {
+                        Ok(Expert {
+                            gate: None,
+                            up: linear_no_bias(hidden, intermediate, block.pp("v_experts").pp(expert.to_string()))?,
+                            down: None,
+                        })
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()?;
+                (linear_no_bias(hidden, count, block.pp("v_router"))?, experts)
             }
         };
         let shared = match spec.shared {
@@ -305,10 +325,10 @@ impl Experts {
                         Expert {
                             gate: Some(Linear::new(input.narrow(0, 0, intermediate)?, None)),
                             up: Linear::new(input.narrow(0, intermediate, intermediate)?, None),
-                            down: Linear::new(
+                            down: Some(Linear::new(
                                 block.get((hidden, intermediate), "output_linear.weight")?,
                                 None,
-                            ),
+                            )),
                         }
                     }
                     SharedForm::GateUpDown => Expert::load(
@@ -446,7 +466,7 @@ impl Experts {
     /// back into the residual stream. Every op here — `softmax` composed of
     /// `exp` and `sum`, `index_select`, `index_add`, the mask multiply — has a
     /// backward pass.
-    pub(super) fn forward(&self, hidden: &Tensor) -> candle_core::Result<Tensor> {
+    pub(in crate::model) fn forward(&self, hidden: &Tensor) -> candle_core::Result<Tensor> {
         self.forward_routed(hidden, hidden)
     }
 
@@ -480,7 +500,10 @@ impl Experts {
             Some(scales) => weights.broadcast_mul(scales)?,
             None => weights,
         };
-        let mut output = flat.zeros_like()?;
+        // K2-Horizon's value experts yield a value `intermediate` wide; every
+        // other mixture yields the hidden width.
+        let produced_width = if self.spec.layout == ExpertLayout::Mova { self.spec.intermediate } else { width };
+        let mut output = Tensor::zeros((tokens, produced_width), flat.dtype(), device)?;
         for (expert, tokens) in routed.iter().enumerate() {
             if tokens.is_empty() {
                 continue;
@@ -504,7 +527,7 @@ impl Experts {
             };
             output = (output + produced)?;
         }
-        output.reshape((batch, sequence, width))
+        output.reshape((batch, sequence, produced_width))
     }
 }
 

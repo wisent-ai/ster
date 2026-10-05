@@ -79,6 +79,7 @@ impl StateSpace {
                         kind: NormKind::Rms,
                         eps: if norm_eps > 0.0 { norm_eps } else { eps },
                         offset: false,
+                        groups: 1,
                     };
                     Some([
                         norms.load(step_rank, builder.pp("dt_layernorm"))?,

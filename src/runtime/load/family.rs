@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
-    GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningForm, LightningSpec, Loops, MixtureOfExperts,
+    GateFunction, GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningForm, LightningSpec, Loops, MixtureOfExperts,
     Names, NormKind, ParallelScan, ParameterNorm,
     PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
     SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec, SwigluLimit,
@@ -133,10 +133,11 @@ pub(super) enum Family {
     MimoV2Flash,
     MimoV2,
     Step3p5,
+    K2Horizon,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 105] = [
+    pub(super) const ALL: [Self; 106] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -242,6 +243,7 @@ impl Family {
         Self::MimoV2Flash,
         Self::MimoV2,
         Self::Step3p5,
+        Self::K2Horizon,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -357,6 +359,7 @@ impl Family {
             Self::MimoV2Flash => "mimo_v2_flash",
             Self::MimoV2 => "mimo_v2",
             Self::Step3p5 => "step3p5",
+            Self::K2Horizon => "k2_horizon",
         }
     }
 
@@ -2248,6 +2251,7 @@ pub(super) fn family(
             architecture.experts = Some(step_experts(raw, layers, path)?);
         }
         "step3p5" => step3p5(raw, layers, llama, &mut architecture, path)?,
+        "k2_horizon" => k2_horizon(raw, layers, llama, &mut architecture, path)?,
         "zamba2" => {
             // Zamba2: Mamba-2 layers, and on the layers `layers_block_type`
             // calls `hybrid` a shared transformer block (one of
@@ -3716,6 +3720,118 @@ fn per_kind(raw: &Value, key: &str, windowed: u128, layers: usize, path: &Path) 
         }
     }
     Ok((kinds[0], kinds[1]))
+}
+
+/// K2-Horizon (`k2_horizon`): Llama's block with hidden-width RMS norms
+/// over `layernorm_num_groups` equal groups, an elementwise attention gate
+/// (`self_attn.gate_proj` through `attention_gate_func`, `silu` or
+/// `softplus` with β = ln 2) and biased projections under `attention_bias`.
+/// The layers neither in `mlp_only_layers` nor off `decoder_sparse_step`
+/// route over `num_experts` experts by `router_score_func` scores that
+/// `mlp.gate.bias` moves to choose (`moe_gate_bias`), renormalised under
+/// `norm_topk_prob` and scaled by `router_scaling_factor`, beside
+/// `num_shared_experts` shared ones; under `mova_num_experts` those layers
+/// take each value from `mova_num_experts_per_tok` value experts routed the
+/// same way. A rotation narrower than the head (`rope_head_dim`, whose
+/// channels the checkpoint interleaves) and per-head query and key norms
+/// (`query_key_norm`) are refused.
+fn k2_horizon(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    let head_dim = architecture.head_dim;
+    if let Some(rotated) = whole(raw, "rope_head_dim").filter(|rotated| *rotated != head_dim) {
+        bail!(
+            "{} rotates {rotated} of {head_dim} channels per head (rope_head_dim), interleaved through the head; Ster rotates whole K2-Horizon heads only",
+            path.display()
+        );
+    }
+    if flag(raw, "query_key_norm") {
+        bail!(
+            "{} declares query_key_norm, one scale per channel of every head; Ster implements K2-Horizon without query and key norms",
+            path.display()
+        );
+    }
+    let groups = whole(raw, "layernorm_num_groups").unwrap_or(1).max(1);
+    if llama.hidden_size % groups != 0 {
+        bail!(
+            "{} splits its {} hidden channels into {groups} norm groups unevenly",
+            path.display(),
+            llama.hidden_size
+        );
+    }
+    architecture.norm_groups = groups;
+    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    architecture.output_bias = architecture.query_key_value_bias;
+    architecture.attention_gate = match text(raw, "attention_gate_func") {
+        None => None,
+        Some("silu") => Some(GateFunction::Silu),
+        Some("softplus") => Some(GateFunction::Softplus),
+        Some(other) => bail!(
+            "{} declares attention_gate_func {other:?}; Ster implements silu and softplus",
+            path.display()
+        ),
+    };
+    if whole(raw, "num_experts").unwrap_or(0) == 0 {
+        return Ok(());
+    }
+    let scoring = match text(raw, "router_score_func") {
+        None | Some("softmax") => Scoring::Softmax,
+        Some("sigmoid") => Scoring::Sigmoid,
+        Some(other) => bail!(
+            "{} declares router_score_func {other:?}; Ster implements softmax and sigmoid expert scores",
+            path.display()
+        ),
+    };
+    let biased = flag(raw, "moe_gate_bias");
+    let mut routed = experts(
+        raw,
+        "num_experts",
+        "moe_intermediate_size",
+        flag(raw, "norm_topk_prob"),
+        ExpertLayout::Qwen,
+        qwen_dense_layers(raw, layers, path)?,
+        path,
+    )?;
+    routed.scoring = scoring;
+    routed.routed_scale = number(raw, "router_scaling_factor");
+    routed.selection_bias = biased.then_some("mlp.gate.bias");
+    routed.shared = whole(raw, "num_shared_experts")
+        .filter(|shared| *shared > 0)
+        .map(|shared| SharedExpert {
+            intermediate: shared * routed.intermediate,
+            module: "mlp.shared_experts",
+            gated: false,
+            form: SharedForm::GateUpDown,
+        });
+    if let Some(count) = whole(raw, "mova_num_experts").filter(|count| *count > 0) {
+        let top_k = whole(raw, "mova_num_experts_per_tok").unwrap_or(0);
+        if top_k == 0 || top_k > count {
+            bail!(
+                "{} routes each value to {top_k} of {count} value experts (mova_num_experts_per_tok); it must be at least one and at most all of them",
+                path.display()
+            );
+        }
+        architecture.value_experts = Some(MixtureOfExperts {
+            count,
+            top_k,
+            intermediate: llama.num_key_value_heads * head_dim,
+            normalize: top_k > 1,
+            shared: None,
+            layout: ExpertLayout::Mova,
+            dense_layers: routed.dense_layers,
+            scoring,
+            groups: None,
+            selection_bias: biased.then_some("self_attn.v_router.bias"),
+            routed_scale: routed.routed_scale,
+            swiglu_limit: None,
+        });
+    }
+    architecture.experts = Some(routed);
+    Ok(())
 }
 
 /// DeciLM rounds every feed-forward width up to a multiple of this

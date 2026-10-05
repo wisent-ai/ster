@@ -1,7 +1,7 @@
 //! One decoder block: the feed-forward half, the norms around both halves,
 //! and how their outputs join the residual stream.
 
-mod experts;
+pub(super) mod experts;
 pub(super) mod norm;
 mod recurrent;
 pub(super) mod shared;
