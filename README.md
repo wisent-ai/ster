@@ -40,7 +40,7 @@ Included now:
   `olmoe`, `exaone4`, `internlm3`, `seed_oss`, `arcee`, `ernie4_5`,
   `minicpm`, `orion`, `glm`, `glm4`, `gpt_neox`, `gptj`, `gpt2`,
   `gpt_bigcode`, `opt`, `bloom`, `falcon`, `mpt`, `deepseek_v2`,
-  `deepseek_v3`, `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
+  `deepseek_v3` (also inside `kimi_k25`), `minicpm3`, `mamba`, `falcon_mamba`, `glm4_moe`,
   `internlm2`, `exaone`, `jamba`, `hunyuan_v1_dense`, `mamba2`, `bamba`,
   `gpt_oss`, `lfm2`, `ernie4_5_moe`, `dbrx`, `phimoe`, `hunyuan_v1_moe`,
   `telechat`, `lfm2_moe`, `granitemoehybrid`, `nemotron_h`, `jais2`,
