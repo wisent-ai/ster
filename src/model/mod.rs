@@ -225,11 +225,9 @@ pub struct Architecture {
     pub key_scale: Option<f64>,
     /// MiMo-V2's `attention_value_scale` on every value.
     pub value_scale: Option<f64>,
-    /// Llama 4's query temperature, `(beta, original)`: past every
-    /// `original` positions each query is multiplied by
-    /// `1 + beta · ln(1 + floor(position / original))` (Ministral 3's
-    /// `llama_4_scaling_beta`).
-    pub query_temperature: Option<(f64, usize)>,
+    /// Llama 4's query temperature on the layers it names (Llama 4's
+    /// NoPE layers, every layer of Ministral 3).
+    pub query_temperature: Option<QueryTemperature>,
     /// Each value head's width when it differs from the query and key
     /// heads' (MiMo-V2's `v_head_dim`).
     pub value_head_dim: Option<usize>,
@@ -1188,6 +1186,30 @@ pub struct MixtureOfExperts {
     /// Cohere2-MoE's `shared_expert_combination_strategy` `average`: the
     /// routed and shared experts' sum is halved.
     pub average_shared: bool,
+    /// Llama 4: each chosen expert reads its input already multiplied by
+    /// its router weight, and its output joins unweighted.
+    pub weight_input: bool,
+}
+
+/// Llama 4's attention temperature: on the layers in `layers`, each query
+/// at position `p` is multiplied by
+/// `1 + beta · ln(1 + floor((p + shift) / interval))` — Llama 4's
+/// `attn_scale`, `floor_scale` and one-based positions on its NoPE layers,
+/// Ministral 3's `llama_4_scaling_beta` and
+/// `original_max_position_embeddings` with zero-based positions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QueryTemperature {
+    pub beta: f64,
+    pub interval: usize,
+    pub shift: usize,
+    pub layers: u128,
+}
+
+impl QueryTemperature {
+    /// Whether layer `layer`'s queries are tempered.
+    pub fn at(&self, layer: usize) -> bool {
+        layer < 128 && self.layers & (1u128 << layer) != 0
+    }
 }
 
 /// How a family clamps its experts' SwiGLU.
@@ -1297,6 +1319,11 @@ pub enum ExpertLayout {
     /// experts, each one projection whose SiLU output is the value
     /// (`intermediate` wide), with no gate or down projection.
     Mova,
+    /// `feed_forward.router`, every expert stacked inputs-first in
+    /// `feed_forward.experts.gate_up_proj` (`[experts, hidden, 2 · width]`,
+    /// gate columns first) and `down_proj` (`[experts, width, hidden]`),
+    /// and `feed_forward.shared_expert` (Llama 4).
+    Llama4,
 }
 
 /// Where a family keeps its tensors. `embeddings`, `positions`,
@@ -1470,6 +1497,13 @@ impl Names {
     /// output.
     pub const AXK1: Self = Self {
         feed_forward_output_norm: "post_mlp_layernorm",
+        ..Self::LLAMA
+    };
+    /// Llama 4: the dense feed-forward is `feed_forward.{gate,up,down}_proj`.
+    pub const LLAMA4: Self = Self {
+        gate: Some("feed_forward.gate_proj"),
+        up: "feed_forward.up_proj",
+        down: "feed_forward.down_proj",
         ..Self::LLAMA
     };
     /// LongCat-Flash's first half of a stored layer: `input_layernorm.0`,
@@ -1837,6 +1871,9 @@ pub enum QueryKeyNorm {
     /// A separate norm per head, stored as one module per head (StableLM's
     /// `qk_layernorm`).
     HeadModules,
+    /// Llama 4's `use_qk_norm`: a weightless RMS norm over each head's
+    /// query and key, after the rotation, on the rotating layers only.
+    Unscaled,
 }
 
 /// The non-linearity in the feed-forward.

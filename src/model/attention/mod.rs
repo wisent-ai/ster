@@ -12,7 +12,7 @@ use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
     Activation, Architecture, Cache, GateFunction, LatentAttention, Mode, NormKind, Pass, Positions, QkvLayout,
-    QueryKeyNorm, Route,
+    QueryKeyNorm, QueryTemperature, Route,
     layer::{
         experts::Experts,
         norm::{Norm, NormSpec},
@@ -64,8 +64,8 @@ pub(super) struct Attention {
     key_scale: Option<f64>,
     /// MiMo-V2's `attention_value_scale` on every value.
     value_scale: Option<f64>,
-    /// Llama 4's query temperature, `(beta, original)`.
-    query_temperature: Option<(f64, usize)>,
+    /// Llama 4's query temperature, on this layer when it applies here.
+    query_temperature: Option<QueryTemperature>,
     /// Qwen3-Next's gate rows of `q_proj`: attention's output is multiplied
     /// by their sigmoid before the output projection.
     output_gate: Option<Linear>,
@@ -220,6 +220,11 @@ impl Attention {
                 Some(spec.load_head_modules(heads, head_dim, builder.pp("q_layernorm"))?),
                 Some(spec.load_head_modules(key_value_heads, head_dim, builder.pp("k_layernorm"))?),
             ),
+            // Llama 4 norms only the rotating layers' queries and keys.
+            QueryKeyNorm::Unscaled if architecture.rotates(layer) => {
+                (Some(spec.unscaled(head_dim, &builder)?), Some(spec.unscaled(head_dim, &builder)?))
+            }
+            QueryKeyNorm::Unscaled => (None, None),
         };
         let rotary = if !architecture.rotates(layer) {
             Rotary::None
@@ -460,7 +465,7 @@ impl Attention {
             clip_qkv: architecture.clip_qkv,
             key_scale: architecture.key_scale,
             value_scale: architecture.value_scale,
-            query_temperature: architecture.query_temperature,
+            query_temperature: architecture.query_temperature.filter(|temperature| temperature.at(layer)),
             output_gate,
             head_gate: if architecture.head_gate {
                 Some(projection(input, heads, false, conv1d, builder.pp("g_proj"))?)
@@ -632,13 +637,12 @@ impl Attention {
         } else {
             query
         };
-        // Llama 4's query temperature (Ministral 3's `llama_4_scaling_beta`):
-        // past every `original` positions each query is multiplied by
-        // `1 + beta · ln(1 + floor(position / original))`.
+        // Llama 4's query temperature: each query at position `p` times
+        // `1 + beta · ln(1 + floor((p + shift) / interval))`.
         let query = match self.query_temperature {
-            Some((beta, original)) => {
+            Some(QueryTemperature { beta, interval, shift, .. }) => {
                 let scales: Vec<f32> = (index_pos..index_pos + sequence)
-                    .map(|position| (1.0 + beta * (1.0 + (position / original.max(1)) as f64).ln()) as f32)
+                    .map(|position| (1.0 + beta * (1.0 + ((position + shift) / interval.max(1)) as f64).ln()) as f32)
                     .collect();
                 let scales = Tensor::from_vec(scales, (1, 1, sequence, 1), query.device())?.to_dtype(query.dtype())?;
                 query.broadcast_mul(&scales)?

@@ -14,7 +14,7 @@ use crate::model::{
     ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
     GateFunction, GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningForm, LightningSpec, Loops, MixtureOfExperts,
     Names, NormKind, ParallelScan, ParameterNorm,
-    PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
+    PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, QueryTemperature, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
     SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec, SwigluLimit,
 };
 
@@ -141,10 +141,11 @@ pub(super) enum Family {
     Cohere2Moe,
     DeepseekMoe,
     Ministral3,
+    Llama4Text,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 113] = [
+    pub(super) const ALL: [Self; 114] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -258,6 +259,7 @@ impl Family {
         Self::Cohere2Moe,
         Self::DeepseekMoe,
         Self::Ministral3,
+        Self::Llama4Text,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -381,6 +383,7 @@ impl Family {
             Self::Cohere2Moe => "cohere2_moe",
             Self::DeepseekMoe => "deepseek",
             Self::Ministral3 => "ministral3",
+            Self::Llama4Text => "llama4_text",
         }
     }
 
@@ -534,6 +537,21 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
                 object.insert("intermediate_size".to_owned(), dense);
             }
             object.insert("layer_norm".to_owned(), Value::Bool(layer_norm));
+        }
+    }
+    // Llama 4's `intermediate_size` is each expert's width and
+    // `intermediate_size_mlp` its dense layers', which becomes the Llama
+    // key.
+    if model_type == "llama4_text" {
+        let experts = raw.get("intermediate_size").cloned();
+        let dense = raw.get("intermediate_size_mlp").filter(|width| !width.is_null()).cloned();
+        if let Some(object) = raw.as_object_mut() {
+            if let Some(experts) = experts {
+                object.entry("moe_intermediate_size").or_insert(experts);
+            }
+            if let Some(dense) = dense {
+                object.insert("intermediate_size".to_owned(), dense);
+            }
         }
     }
     // openPangu-Ultra-MoE leaves its router's form to its config class:
@@ -1016,7 +1034,12 @@ pub(super) fn family(
             let beta = stated("llama_4_scaling_beta").or_else(|| stated("beta"));
             let original = stated("original_max_position_embeddings").map(|original| original as usize);
             architecture.query_temperature = match (beta, original) {
-                (Some(beta), Some(original)) if original > 0 => Some((beta, original)),
+                (Some(beta), Some(interval)) if interval > 0 => Some(QueryTemperature {
+                    beta,
+                    interval,
+                    shift: 0,
+                    layers: every_layer(layers, path)?,
+                }),
                 (Some(_), _) => bail!(
                     "{} states llama_4_scaling_beta without original_max_position_embeddings to count positions by",
                     path.display()
@@ -2377,6 +2400,7 @@ pub(super) fn family(
         "longcat_flash" => longcat_flash(raw, llama, &mut architecture, path)?,
         "sarvam_mla" => sarvam_mla(raw, layers, &mut architecture, path)?,
         "cohere2_moe" => cohere2_moe(raw, layers, &mut architecture, path)?,
+        "llama4_text" => llama4(raw, layers, &mut architecture, path)?,
         "deepseek" => {
             // DeepSeek-MoE (v1): Llama's attention, rotating by halves, and
             // DeepSeek's experts — `n_routed_experts` scored by softmax and
@@ -3100,6 +3124,7 @@ fn experts(
         swiglu_limit: None,
         identity_experts: 0,
         average_shared: false,
+        weight_input: false,
     })
 }
 
@@ -3975,6 +4000,7 @@ fn k2_horizon(
             swiglu_limit: None,
             identity_experts: 0,
             average_shared: false,
+            weight_input: false,
         });
     }
     architecture.experts = Some(routed);
@@ -4132,6 +4158,96 @@ fn cohere2_moe(raw: &Value, layers: usize, architecture: &mut Architecture, path
                 path.display()
             ),
         };
+    architecture.experts = Some(routed);
+    Ok(())
+}
+
+/// How often Llama 4 skips the rotation when its config lists no
+/// `no_rope_layers`: every fourth layer, counting from one (Transformers'
+/// `Llama4TextConfig`, `no_rope_layer_interval=4`).
+const LLAMA4_NOPE_INTERVAL: usize = 4;
+
+/// Llama 4's attention temperature when its config leaves it out:
+/// `attn_scale` and `floor_scale` (Transformers' `Llama4TextConfig`
+/// defaults, 0.1 and 8192).
+const LLAMA4_ATTENTION_SCALE: f64 = 0.1;
+const LLAMA4_FLOOR_SCALE: usize = 8192;
+
+/// Llama 4 (`llama4_text`, also inside `llama4`): Llama's attention, the
+/// layers `no_rope_layers` marks (every fourth by default) unrotated and
+/// attending fully, the rotating ones attending by chunks of
+/// `attention_chunk_size` with their queries and keys normed without a
+/// weight after the rotation under `use_qk_norm`; under
+/// `attn_temperature_tuning` the unrotated layers' queries at position `p`
+/// are multiplied by `1 + attn_scale · ln(1 + floor((p + 1) / floor_scale))`.
+/// The layers `moe_layers` lists (else every `interleave_moe_layer_step`-th)
+/// route each token to `num_experts_per_tok` of `num_local_experts` experts
+/// by sigmoid scores that weigh the expert's input, beside a shared expert;
+/// the others are dense, `intermediate_size_mlp` wide.
+fn llama4(raw: &Value, layers: usize, architecture: &mut Architecture, path: &Path) -> Result<()> {
+    let every = every_layer(layers, path)?;
+    architecture.names = Names::LLAMA4;
+    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    architecture.output_bias = architecture.query_key_value_bias;
+    let rotating = match raw.get("no_rope_layers").and_then(Value::as_array).filter(|flags| !flags.is_empty()) {
+        Some(flags) => {
+            if flags.len() != layers {
+                bail!("{} lists {} no_rope_layers entries for {layers} layers", path.display(), flags.len());
+            }
+            flags
+                .iter()
+                .enumerate()
+                .filter(|(_, flag)| flag.as_u64() == Some(1) || flag.as_bool() == Some(true))
+                .fold(0u128, |set, (layer, _)| set | (1u128 << layer))
+        }
+        None => (0..layers)
+            .filter(|layer| (layer + 1) % LLAMA4_NOPE_INTERVAL != 0)
+            .fold(0u128, |set, layer| set | (1u128 << layer)),
+    };
+    architecture.unrotated_layers = every & !rotating;
+    if let Some(chunk) = whole(raw, "attention_chunk_size").filter(|chunk| *chunk > 0) {
+        architecture.sliding_window = Some(chunk);
+        architecture.sliding_layers = rotating;
+        architecture.chunk_lookback = Some(0);
+    }
+    if flag(raw, "use_qk_norm") {
+        architecture.query_key_norm = QueryKeyNorm::Unscaled;
+        architecture.norm_after_rotary = true;
+    }
+    if raw.get("attn_temperature_tuning").and_then(Value::as_bool).unwrap_or(true) {
+        architecture.query_temperature = Some(QueryTemperature {
+            beta: number(raw, "attn_scale").unwrap_or(LLAMA4_ATTENTION_SCALE),
+            interval: whole(raw, "floor_scale").unwrap_or(LLAMA4_FLOOR_SCALE).max(1),
+            shift: 1,
+            layers: every & !rotating,
+        });
+    }
+    let routed_layers = match raw.get("moe_layers").and_then(Value::as_array) {
+        Some(listed) => {
+            let mut set = 0u128;
+            for entry in listed {
+                match entry.as_u64().map(|layer| layer as usize) {
+                    Some(layer) if layer < layers => set |= 1u128 << layer,
+                    _ => bail!("{} lists moe_layers entry {entry}, which names no layer below {layers}", path.display()),
+                }
+            }
+            set
+        }
+        None => {
+            let step = whole(raw, "interleave_moe_layer_step").unwrap_or(1).max(1);
+            (step - 1..layers).step_by(step).fold(0u128, |set, layer| set | (1u128 << layer))
+        }
+    };
+    let mut routed =
+        experts(raw, "num_local_experts", "moe_intermediate_size", false, ExpertLayout::Llama4, every & !routed_layers, path)?;
+    routed.scoring = Scoring::Sigmoid;
+    routed.weight_input = true;
+    routed.shared = Some(SharedExpert {
+        intermediate: routed.intermediate,
+        module: "feed_forward.shared_expert",
+        gated: false,
+        form: SharedForm::GateUpDown,
+    });
     architecture.experts = Some(routed);
     Ok(())
 }

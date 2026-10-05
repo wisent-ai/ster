@@ -316,6 +316,30 @@ impl Experts {
                     .collect::<candle_core::Result<Vec<_>>>()?;
                 (linear_no_bias(hidden, count, block.pp("v_router"))?, experts)
             }
+            // Llama 4 stacks every expert inputs-first: `gate_up_proj`
+            // `[experts, hidden, 2 · width]`, gate columns then up columns,
+            // and `down_proj` `[experts, width, hidden]`; each expert's
+            // projections are laid out once at load.
+            ExpertLayout::Llama4 => {
+                let block = builder.pp("feed_forward");
+                let stacked = block.pp("experts");
+                let gate_up = stacked.get((count, hidden, 2 * intermediate), "gate_up_proj")?;
+                let down = stacked.get((count, intermediate, hidden), "down_proj")?;
+                let experts = (0..count)
+                    .map(|expert| -> candle_core::Result<Expert> {
+                        let columns = gate_up.get(expert)?;
+                        let half = |start: usize| -> candle_core::Result<Linear> {
+                            Ok(Linear::new(columns.narrow(1, start, intermediate)?.t()?.contiguous()?, None))
+                        };
+                        Ok(Expert {
+                            gate: Some(half(0)?),
+                            up: half(intermediate)?,
+                            down: Some(Linear::new(down.get(expert)?.t()?.contiguous()?, None)),
+                        })
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()?;
+                (linear_no_bias(hidden, count, block.pp("router"))?, experts)
+            }
         };
         let shared = match spec.shared {
             Some(SharedExpert { intermediate, module, gated, form }) => {
@@ -515,15 +539,26 @@ impl Experts {
             }
             let index = Tensor::new(tokens.as_slice(), device)?;
             let inputs = flat.index_select(&index, 0)?;
+            let weight = weights
+                .index_select(&index, 0)?
+                .narrow(1, expert, 1)?
+                .to_dtype(inputs.dtype())?;
+            // Llama 4 weighs each expert's input; every other family its
+            // output.
+            let (inputs, weight) = if self.spec.weight_input {
+                (inputs.broadcast_mul(&weight)?, None)
+            } else {
+                (inputs, Some(weight))
+            };
             let produced = match self.experts.get(expert) {
                 Some(stored) => stored.forward(&inputs, self.activation, self.clamps.0)?,
                 None => inputs,
             };
-            let weight = weights
-                .index_select(&index, 0)?
-                .narrow(1, expert, 1)?
-                .to_dtype(produced.dtype())?;
-            output = output.index_add(&index, &produced.broadcast_mul(&weight)?, 0)?;
+            let produced = match weight {
+                Some(weight) => produced.broadcast_mul(&weight.to_dtype(produced.dtype())?)?,
+                None => produced,
+            };
+            output = output.index_add(&index, &produced, 0)?;
         }
         if let Some((shared, gate)) = &self.shared {
             let produced = shared.forward(&flat, self.activation, self.clamps.1)?;
