@@ -1123,12 +1123,14 @@ pub enum QkvLayout {
     PairedKeyValue,
 }
 
-/// The function K2-Horizon's attention gate passes `gate_proj` through.
+/// The function an elementwise attention gate passes `gate_proj` through:
+/// K2-Horizon's `attention_gate_func`, AFMoE's sigmoid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateFunction {
     Silu,
     /// Softplus with `β = ln 2`: `log2(1 + 2^x)`.
     Softplus,
+    Sigmoid,
 }
 
 /// How a token's position enters the model.

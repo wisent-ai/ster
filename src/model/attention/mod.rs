@@ -781,6 +781,8 @@ impl Attention {
                         let tail = ((logits.abs()?.neg()? * std::f64::consts::LN_2)?.exp()? + 1.0)?.log()?;
                         (logits.relu()? + (tail / std::f64::consts::LN_2)?)?
                     }
+                    // sigmoid, composed so it has a backward pass.
+                    GateFunction::Sigmoid => (logits.neg()?.exp()? + 1.0)?.recip()?,
                 };
                 (output * gate)?
             }
