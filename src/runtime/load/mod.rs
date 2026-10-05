@@ -277,14 +277,28 @@ impl BaseLoad {
 
     /// Maps the base weights read-only. Nothing here is registered in a
     /// `VarMap`, so the base stays frozen whichever loader called it. A
-    /// Mistral-format checkpoint answers each Transformers name from its own.
+    /// Mistral-format checkpoint answers each Transformers name from its own,
+    /// and so does a DeepSeek-V4 checkpoint in DeepSeek's own layout
+    /// (`embed`, `layers.{i}.attn.wq_a`, `ffn.experts`).
     fn builder(&self) -> Result<VarBuilder<'static>> {
         let builder = unsafe { VarBuilder::from_mmaped_safetensors(&self.weights, self.dtype, &self.device) }
             .with_context(|| format!("failed to map {} model weight files", self.weights.len()))?;
         let layout = self.layout;
-        Ok(match layout {
+        let builder = match layout {
             Layout::Transformers => builder,
             Layout::Mistral => builder.rename_f(move |name: &str| layout.stored_name(name)),
+        };
+        if self.architecture.compressed.is_none() {
+            return Ok(builder);
+        }
+        let root = ["", "model."].into_iter().find(|root| builder.contains_tensor(&format!("{root}embed.weight")));
+        Ok(match root {
+            Some(root) => {
+                let key_value_norm = if builder.contains_tensor(&format!("{root}layers.0.attn.kv_norm.weight")) { "kv_norm" } else { "norm" };
+                let names = crate::model::NativeNames { root: root.to_owned(), key_value_norm };
+                builder.rename_f(move |name: &str| names.stored(name))
+            }
+            None => builder,
         })
     }
 

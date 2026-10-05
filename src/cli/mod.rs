@@ -116,6 +116,7 @@ pub(crate) fn run() -> Result<()> {
         Command::Evaluate(args) => vectors::evaluate(args),
         Command::Generate(args) => vectors::generate(args),
         Command::Extract(args) => vectors::extract(args),
+        Command::Parity(args) => vectors::parity(args),
         Command::Inspect(args) => vectors::inspect(args),
         Command::Onboarding(args) => vectors::onboarding(args),
         Command::Decide(args) => decide::decide(args),

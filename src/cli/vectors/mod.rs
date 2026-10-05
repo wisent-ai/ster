@@ -168,6 +168,25 @@ pub(super) struct ExtractArgs {
     precision: Precision,
 }
 
+/// `ster parity`
+#[derive(Debug, clap::Args)]
+pub(super) struct ParityArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+    /// JSON file shaped as {"records": [{"tokenIds": [...] or "tokenIdsFile":
+    /// "ids.json", "hidden": "states.safetensors", "tensor": "hidden_states"}]}:
+    /// token ids and the states after the final norm another implementation
+    /// recorded for their first positions, [positions, hidden]; paths are
+    /// relative to this file and "tensor" defaults to hidden_states.
+    #[arg(long)]
+    input: PathBuf,
+    /// Dtype the base weights are mapped at: f32, f16, or bf16. The states
+    /// are compared in F32 either way; this is the width Ster computed them
+    /// in. bf16 needs --device metal.
+    #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    precision: Precision,
+}
+
 /// `ster inspect`
 #[derive(Debug, clap::Args)]
 pub(super) struct InspectArgs {
@@ -357,6 +376,12 @@ pub(super) fn extract(args: ExtractArgs) -> Result<()> {
     let layers = parse_layers(&layers, runtime.layer_count())?;
     workflow::extract(&runtime, &input, &output, &layers)?;
     println!("{}", output.display());
+    Ok(())
+}
+pub(super) fn parity(args: ParityArgs) -> Result<()> {
+    let ParityArgs { model, input, precision } = args;
+    let runtime = model.load_at(precision)?;
+    super::answer(&workflow::parity(&runtime, &input)?)?;
     Ok(())
 }
 pub(super) fn inspect(args: InspectArgs) -> Result<()> {

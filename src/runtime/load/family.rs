@@ -812,9 +812,10 @@ fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> 
 /// itself. Returns what was taken.
 ///
 /// Configs written by Transformers 5 state the rotation in one
-/// `rope_parameters` object; its `rope_theta` is read as the base and, unless
-/// its `rope_type` is `default`, the object as the scaling, never over keys
-/// the config states at the top level. Gemma 3's and 4's state one object per
+/// `rope_parameters` object; its `rope_theta` and `partial_rotary_factor` are
+/// read as the base and the rotated share and, unless its `rope_type` is
+/// `default`, the object as the scaling, never over keys the config states
+/// at the top level. Gemma 3's and 4's state one object per
 /// layer type: the `full_attention` one is the model's rotation, and the
 /// `sliding_attention` one's base is `rope_local_base_freq`.
 pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<Value>> {
@@ -860,6 +861,10 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
         if let Some(object) = raw.as_object_mut() {
             if let Some(theta) = parameters.get("rope_theta").filter(|theta| theta.is_number()) {
                 object.entry("rope_theta").or_insert_with(|| theta.clone());
+            }
+            // Transformers 5 states the rotated share of each head here too.
+            if let Some(share) = parameters.get("partial_rotary_factor").filter(|share| share.is_number()) {
+                object.entry("partial_rotary_factor").or_insert_with(|| share.clone());
             }
             let unstated = object.get("rope_scaling").map_or(true, Value::is_null);
             if scaled && unstated {
@@ -2758,7 +2763,10 @@ pub(super) fn family(
                     path.display()
                 );
             }
-            if flag(raw, "use_qk_norm") {
+            // Transformers' MiniMax-M2 always norms query and key; MiniMax's
+            // own configs say so with `use_qk_norm`, and only `false` turns
+            // it off.
+            if raw.get("use_qk_norm").and_then(Value::as_bool) != Some(false) {
                 architecture.query_key_norm = match text(raw, "qk_norm_type") {
                     None | Some("per_layer") => QueryKeyNorm::Full,
                     Some("per_head") => QueryKeyNorm::PerHead,

@@ -89,6 +89,7 @@ pub use cache::Cache;
 pub use decoder::SteeringLlama;
 
 pub(crate) use attention::ALIBI_SPAN;
+pub(crate) use deepseek4::names::NativeNames;
 use crate::lora::Target;
 
 /// How a checkpoint's decoder differs from the plain Llama block.

@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::requests::{
-    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest, TrainRequest,
+    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest, ParityRequest, TrainRequest,
 };
 
 mod decide;
@@ -130,6 +130,11 @@ pub(in crate::request) fn extract_job(request: ExtractRequest) -> Result<Value> 
     let output = Path::new(&request.output);
     workflow::extract(&runtime, input, output, &layers)?;
     Ok(json!({"path": request.output}))
+}
+
+pub(in crate::request) fn parity_job(request: ParityRequest) -> Result<Value> {
+    let runtime = request.model.load_runtime_at(&request.precision)?;
+    Ok(serde_json::to_value(workflow::parity(&runtime, Path::new(&request.input))?)?)
 }
 
 pub(in crate::request) fn inspect_job(request: InspectRequest) -> Result<Value> {

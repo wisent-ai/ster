@@ -13,6 +13,7 @@
 
 pub(super) mod attention;
 mod compressor;
+pub(crate) mod names;
 
 pub(super) use compressor::CompressorState;
 

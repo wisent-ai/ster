@@ -103,6 +103,11 @@ impl Runtime {
         self.model.config().num_hidden_layers
     }
 
+    /// The rows of the model's embedding table: every token id it reads.
+    pub fn vocab_size(&self) -> usize {
+        self.model.config().vocab_size
+    }
+
     /// The longest sequence the model was configured for
     /// (`max_position_embeddings`). Training clamps against it for the same
     /// reason `generate` does: past it the model's positions are untrained.

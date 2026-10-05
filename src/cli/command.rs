@@ -9,7 +9,7 @@ use super::decisions::DecisionsCommand;
 use super::pairs::PairsCommand;
 use super::tune::TuneCommand;
 use super::vectors::{
-    EvaluateArgs, ExtractArgs, GenerateArgs, InspectArgs, OnboardingArgs, OptimizeArgs, TrainArgs,
+    EvaluateArgs, ExtractArgs, GenerateArgs, InspectArgs, OnboardingArgs, OptimizeArgs, ParityArgs, TrainArgs,
 };
 use super::workspace::WorkspaceCommand;
 
@@ -25,6 +25,9 @@ pub(super) enum Command {
     Generate(GenerateArgs),
     /// Export hidden representations for arbitrary prompts.
     Extract(ExtractArgs),
+    /// Compare this model's states after the final norm with the ones
+    /// another implementation recorded for the same token ids.
+    Parity(ParityArgs),
     /// Summarize and validate a Ster steering artifact.
     Inspect(InspectArgs),
     /// Play conversations between a model and a simulated user and write
@@ -71,7 +74,7 @@ pub(super) enum Command {
     /// stdin, NDJSON log events and one result event on stdout, and the
     /// result's status as the exit status.
     Request {
-        /// The operation: train, optimize, evaluate, generate, extract,
+        /// The operation: train, optimize, evaluate, generate, extract, parity,
         /// inspect, decide, calibrate, workspace/import-pairs, workspace/show,
         /// workspace/select, workspace/remove, pairs/inspect, pairs/save,
         /// pairs/synthesize, or tune/sft, tune/dpo, tune/reward, tune/grpo,

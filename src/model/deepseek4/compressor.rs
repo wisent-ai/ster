@@ -11,7 +11,7 @@
 //! the call before, kept in the state. Tokens past the last whole window
 //! wait in the state for the next call.
 
-use candle_core::{D, DType, Tensor};
+use candle_core::{DType, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 
 use super::super::{

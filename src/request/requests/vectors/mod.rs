@@ -169,6 +169,25 @@ impl Validate for ExtractRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(in crate::request) struct ParityRequest {
+    #[serde(flatten)]
+    pub(in crate::request) model: ModelRequest,
+    /// The parity file `ster parity --input` reads.
+    #[serde(default)]
+    pub(in crate::request) input: String,
+    #[serde(default = "default_precision")]
+    pub(in crate::request) precision: String,
+}
+
+impl Validate for ParityRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("parity")?;
+        require(&self.input, "parity requires a parity input file".to_owned())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(in crate::request) struct InspectRequest {
     #[serde(default)]
     pub(in crate::request) artifact: String,

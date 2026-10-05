@@ -1,9 +1,10 @@
-//! The four things Ster does with a model, each in its own module: reading
-//! pairs into a steering artifact (`train`), scoring one (`evaluate`),
-//! choosing a layer and method on a holdout (`optimize`), and exporting raw
-//! representations (`extract`). This entry keeps only what all four share —
-//! the progress channel, the artifact summary every command prints, and the
-//! layer-selection parser.
+//! The things Ster does with a model, each in its own module: reading pairs
+//! into a steering artifact (`train`), scoring one (`evaluate`), choosing a
+//! layer and method on a holdout (`optimize`), exporting raw
+//! representations (`extract`), and comparing its forward pass with a
+//! reference implementation's (`parity`). This entry keeps only what they
+//! share — the progress channel, the artifact summary every command prints,
+//! and the layer-selection parser.
 
 use std::sync::Mutex;
 
@@ -14,11 +15,13 @@ use crate::artifact::SteeringArtifact;
 mod evaluate;
 mod extract;
 mod optimize;
+mod parity;
 mod train;
 
 pub use evaluate::{evaluate, EvaluationReport, LayerEvaluation};
 pub use extract::{extract, PromptSet};
 pub use optimize::{optimize, Candidate, Holdout, Selection};
+pub use parity::{parity, ParityReport};
 pub use train::train;
 
 /// Progress lines the workflows print while running. The CLI leaves the sink

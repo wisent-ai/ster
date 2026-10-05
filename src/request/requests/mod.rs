@@ -31,7 +31,7 @@ pub(super) use tune::{
     TuneRewardRequest, TuneSftRequest,
 };
 pub(super) use vectors::{
-    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest, TrainRequest,
+    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest, ParityRequest, TrainRequest,
 };
 
 /// Field-level validation before a job starts streaming. The message is the
