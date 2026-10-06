@@ -14,6 +14,7 @@ use ster::{
 
 use super::resolve_pairs;
 
+mod edit;
 mod import;
 
 #[derive(Debug, Subcommand)]
@@ -55,6 +56,19 @@ pub(super) enum PairsCommand {
         pairs: PathBuf,
         #[arg(long)]
         index: usize,
+    },
+    /// Change one pair's sides, or the set's trait name, by the index remove takes.
+    Edit {
+        #[arg(long)]
+        pairs: PathBuf,
+        #[arg(long)]
+        index: usize,
+        #[arg(long)]
+        positive: Option<String>,
+        #[arg(long)]
+        negative: Option<String>,
+        #[arg(long = "trait")]
+        trait_name: Option<String>,
     },
     /// Generate a contrastive pair set locally or with a hosted model.
     Synthesize {
@@ -206,6 +220,9 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                     "negative": removed.negative,
                 },
             }))?;
+        }
+        PairsCommand::Edit { pairs: file, index, positive, negative, trait_name } => {
+            edit::run(&file, index, positive, negative, trait_name)?
         }
         PairsCommand::Synthesize {
             generator,

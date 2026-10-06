@@ -13,6 +13,7 @@ ster pairs inspect --pairs <FILE> --dedupe-bits <BITS> --dedupe-bands <BANDS>
                    --refusal-threshold <SCORE> --unbalanced-ratio <RATIO>
 ster pairs add --pairs <FILE> --positive <TEXT> --negative <TEXT> [--trait <NAME>]
 ster pairs remove --pairs <FILE> --index <N>
+ster pairs edit --pairs <FILE> --index <N> [--positive <TEXT>] [--negative <TEXT>] [--trait <NAME>]
 ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTPUT>
                       --generator local|brama [--generator-model <ROUTE>]
                       [--model <MODEL>] [--revision <REVISION>] [--device <DEVICE>]
@@ -41,6 +42,10 @@ creates the file, and its parent directory, when it does not exist, and
 zero-based index and refuses one outside the set with `pair index {i} is outside the set's 0..{n-1} range`.
 It also refuses to remove the last pair, because a set is validated before it is
 saved: the file is left untouched and the refusal is `pair set {path} contains no pairs`.
+`edit` takes the same index and changes only the sides given, or with
+`--trait` the trait name; an edit with none of them is refused with `pairs
+edit changes nothing without --positive, --negative or --trait`, and an index
+outside the set with the same refusal `remove` gives.
 
 A pair set can also arrive from another product, and exactly one produces them:
 Preferences, Wisent's pairwise voting tool. Every choice in one of its text
