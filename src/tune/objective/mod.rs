@@ -9,7 +9,10 @@ mod reward;
 mod sft;
 
 pub use decide::{DecideOptions, DecideReport, decide};
-pub use dpo::{BipoOptions, BipoReport, DpoLoss, DpoOptions, DpoReport, bipo, dpo};
+pub use dpo::{
+    BipoOptions, BipoReport, DpoLoss, DpoOptions, DpoReport, StrengthCandidate, StrengthOptions,
+    StrengthReport, bipo, dpo, strengths,
+};
 pub use grpo::{
     GrpoIteration, GrpoOptions, GrpoReport, Reward, Rollout, UserSimulator, grpo, rollout,
 };

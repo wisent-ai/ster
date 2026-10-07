@@ -13,6 +13,8 @@ use ster::{
 
 use super::onboarding;
 
+mod strength;
+
 use super::{ModelArgs, resolve_pairs};
 
 /// `ster train`
@@ -95,6 +97,8 @@ pub(super) struct EvaluateArgs {
     /// direction in a space it was not fitted in.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
+    #[command(flatten)]
+    strength: strength::StrengthArgs,
 }
 
 /// `ster generate`
@@ -268,6 +272,7 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
         vector,
         chat_template,
         precision,
+        strength,
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let mut runtime = model.load_at(precision)?;
@@ -280,6 +285,12 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
     tune::warn_on_provenance(&vector, "direction", &runtime);
     let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
     let mut report = serde_json::to_value(report)?;
+    if let Some(selection) = strength.measure(&runtime, &pair_set, &artifact)? {
+        report
+            .as_object_mut()
+            .context("an evaluation report is a JSON object")?
+            .insert("strength".to_owned(), serde_json::to_value(selection)?);
+    }
     chat.annotate(&mut report)?;
     super::answer(&report)?;
     Ok(())
@@ -321,7 +332,10 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
             if text.trim().is_empty() {
                 anyhow::bail!("the system turn {} is empty", path.display());
             }
-            if prompt.as_deref().is_some_and(|prompt| prompt.trim().is_empty()) {
+            if prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.trim().is_empty())
+            {
                 anyhow::bail!("prompt must not be empty");
             }
             Some(text)
@@ -382,12 +396,19 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
                 .iter()
                 .enumerate()
                 .map(|(index, prompt)| {
-                    workflow::progress(format!("answering prompt {index} of {}", set.prompts.len()));
+                    workflow::progress(format!(
+                        "answering prompt {index} of {}",
+                        set.prompts.len()
+                    ));
                     Ok(serde_json::json!({ "prompt": prompt, "model_output": answer(prompt)? }))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            if let Some(parent) = output.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+            if let Some(parent) = output
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
             }
             std::fs::write(&output, serde_json::to_vec_pretty(&answers)?)
                 .with_context(|| format!("failed to write {}", output.display()))?;

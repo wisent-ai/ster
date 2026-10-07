@@ -139,6 +139,39 @@ pub(super) fn step_loss(
     })
 }
 
+/// How far the model behind the two logits moved each side away from the
+/// frozen reference: its log-probability of the chosen side minus the
+/// reference's, and the same for the rejected side, summed over tokens.
+///
+/// This is the log-ratio DPO's reward is built from, without beta and without
+/// a loss: strength selection reads it directly, because what it ranks is the
+/// movement itself.
+pub(super) fn log_ratios(
+    runtime: &Runtime,
+    scored: &Scored,
+    chosen_logits: &Tensor,
+    rejected_logits: &Tensor,
+) -> Result<(f64, f64)> {
+    let chosen = policy_log_ratio(
+        runtime,
+        chosen_logits,
+        &scored.pair.chosen,
+        scored.chosen_reference,
+        DpoLoss::Dpo,
+    )?;
+    let rejected = policy_log_ratio(
+        runtime,
+        rejected_logits,
+        &scored.pair.rejected,
+        scored.rejected_reference,
+        DpoLoss::Dpo,
+    )?;
+    Ok((
+        f64::from(chosen.to_scalar::<f32>()?),
+        f64::from(rejected.to_scalar::<f32>()?),
+    ))
+}
+
 /// The policy's log-probability of `ids` minus the reference's, normalized for
 /// the objective that will consume it.
 fn policy_log_ratio(

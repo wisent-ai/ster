@@ -47,8 +47,9 @@ pub use examples::{Example, ExampleSet};
 pub use objective::{
     BipoOptions, BipoReport, DecideOptions as DecideTuneOptions, DecideReport, DpoLoss, DpoOptions,
     DpoReport, GrpoIteration, GrpoOptions, GrpoReport, Reward, RewardHead, RewardModel,
-    RewardOptions, RewardReport, Rollout, SftOptions, SftReport, UserSimulator, bipo, decide, dpo,
-    grpo, reward, rollout, sft,
+    RewardOptions, RewardReport, Rollout, SftOptions, SftReport, StrengthCandidate,
+    StrengthOptions, StrengthReport, UserSimulator, bipo, decide, dpo, grpo, reward, rollout, sft,
+    strengths,
 };
 
 use crate::lora;

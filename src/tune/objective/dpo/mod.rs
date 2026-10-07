@@ -48,9 +48,11 @@ use crate::{artifact::PairSet, runtime::Runtime, workflow};
 mod bipo;
 mod options;
 mod scoring;
+mod strength;
 
 pub use bipo::{BipoOptions, BipoReport, bipo};
 pub use options::{DpoLoss, DpoOptions, DpoReport};
+pub use strength::{StrengthCandidate, StrengthOptions, StrengthReport, strengths};
 
 use scoring::{Preference, Scored, Summary, reference_scores, step_loss};
 

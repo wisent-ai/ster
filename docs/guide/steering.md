@@ -18,6 +18,7 @@ ster optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT> --holdout <FRACT
               [--revision <REVISION>] [--device cpu] [--layers all]
               [--chat-template auto|off] [--precision f32|f16|bf16]
 ster evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
+              [--strengths <S,S,...> --batch-size <N> --max-sequence <TOKENS>]
               [--revision <REVISION>] [--device cpu]
               [--chat-template auto|off] [--precision f32|f16|bf16]
 ster generate --model <MODEL> (--prompt <PROMPT> | --prompts <SET> --output <FILE>)
@@ -109,6 +110,45 @@ means the `train_accuracy` and `train_margin` the artifact carries are the
 refit's numbers over the whole set rather than the holdout scores in the table:
 the table is the evidence for the choice, and the artifact's own numbers
 describe the direction that was written.
+
+## Strength
+
+A direction says which way to move the residual stream; how far is a separate
+question, and `ster generate` refuses to guess it. `ster evaluate --strengths`
+answers it on pairs. Each strength named is added with the artifact to the
+frozen model, and every pair is scored twice: the steered model's
+log-probability of each side minus the unsteered model's. A pair is ordered
+when steering raised its positive side more than its negative side, and its
+shift is the difference. A strength that pushes too hard drags both sides down
+together and orders fewer pairs — the over-steering a representation score
+cannot see.
+
+```bash
+ster toy-model toy-model
+ster train --model toy-model --pairs docs/examples/pairs.json --output calm.ster.json --layers 2
+ster evaluate --model toy-model --pairs docs/examples/pairs.json --vector calm.ster.json \
+  --strengths -1,0.5,1,2,4 --batch-size 4 --max-sequence 256
+```
+
+The report gains a `strength` object: `method`, `layers`, `pairs`,
+`scored_pairs`, `skipped_long`, `selected_strength`, and `candidates`, one row
+per strength in the order given, carrying `strength`, `ordered` (the share of
+scored pairs ordered), `mean_shift` and `selected`. The choice follows
+`optimize`'s rule: the largest share ordered, the larger mean shift breaking a
+tie. Score it on pairs the artifact was not fitted on when the choice has to
+mean something beyond them.
+
+Ster names no strength, batch or sequence limit. `--batch-size` (pairs per
+forward pass) and `--max-sequence` (the longest side measured, in tokens) are
+required with `--strengths` and refused without it; a pair longer than the
+limit is skipped, counted in `skipped_long` and named on the progress stream.
+The refusals: `--strengths needs --batch-size; Ster assumes none`,
+`--strengths needs --max-sequence; Ster assumes none`,
+`strength selection needs finite strengths, not inf`,
+`strength selection requires batch size of at least one`, and the artifact
+checks generation makes (another model, another width, a layer the model
+lacks). Through `ster request evaluate` the fields are `strengths`,
+`batchSize` and `maxSequence`, with the same requirements.
 
 ## Inspection
 

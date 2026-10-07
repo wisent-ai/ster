@@ -94,42 +94,10 @@ impl Runtime {
         let prompt_len = tokens.len();
         let plan = match artifact {
             Some(artifact) => {
-                artifact.validate()?;
-                if artifact.model != self.model_id {
-                    bail!(
-                        "artifact was trained for model {:?}, current model is {:?}",
-                        artifact.model,
-                        self.model_id
-                    );
-                }
-                if artifact.hidden_size != self.hidden_size() {
-                    bail!(
-                        "artifact width {} does not match model width {}",
-                        artifact.hidden_size,
-                        self.hidden_size()
-                    );
-                }
-                validate_layers(
-                    &artifact
-                        .vectors
-                        .iter()
-                        .map(|vector| vector.layer)
-                        .collect::<Vec<_>>(),
-                    self.layer_count(),
-                )?;
                 let strength = options
                     .strength
                     .context("a steering vector needs a strength; Ster assumes none")?;
-                Some(SteeringPlan::new(
-                    artifact
-                        .vectors
-                        .iter()
-                        .map(|vector| (vector.layer, vector.values.clone())),
-                    strength,
-                    self.hidden_size(),
-                    &self.device,
-                    self.dtype,
-                )?)
+                Some(self.steering_plan(artifact, strength)?)
             }
             None => None,
         };
@@ -184,5 +152,51 @@ impl Runtime {
             tokens: sampled,
             text,
         })
+    }
+
+    /// The plan that adds `artifact`'s vectors, scaled by `strength`, to this
+    /// model's residual stream — refused when the artifact was fitted on
+    /// another model, at another width, or names a layer this model lacks.
+    ///
+    /// Generation and strength selection both steer with an artifact, so both
+    /// read it through these checks rather than each keeping its own copy.
+    pub fn steering_plan(
+        &self,
+        artifact: &SteeringArtifact,
+        strength: f64,
+    ) -> Result<SteeringPlan> {
+        artifact.validate()?;
+        if artifact.model != self.model_id {
+            bail!(
+                "artifact was trained for model {:?}, current model is {:?}",
+                artifact.model,
+                self.model_id
+            );
+        }
+        if artifact.hidden_size != self.hidden_size() {
+            bail!(
+                "artifact width {} does not match model width {}",
+                artifact.hidden_size,
+                self.hidden_size()
+            );
+        }
+        validate_layers(
+            &artifact
+                .vectors
+                .iter()
+                .map(|vector| vector.layer)
+                .collect::<Vec<_>>(),
+            self.layer_count(),
+        )?;
+        SteeringPlan::new(
+            artifact
+                .vectors
+                .iter()
+                .map(|vector| (vector.layer, vector.values.clone())),
+            strength,
+            self.hidden_size(),
+            &self.device,
+            self.dtype,
+        )
     }
 }

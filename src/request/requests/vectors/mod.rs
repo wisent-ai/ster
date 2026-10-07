@@ -82,6 +82,16 @@ pub(in crate::request) struct EvaluateRequest {
     pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]
     pub(in crate::request) precision: String,
+    /// Strengths to measure the artifact at, as `--strengths` takes them;
+    /// empty measures none.
+    #[serde(default)]
+    pub(in crate::request) strengths: Vec<f64>,
+    /// Pairs per forward pass while measuring strengths; required with them.
+    #[serde(default)]
+    pub(in crate::request) batch_size: Option<usize>,
+    /// Longest pair side measured, in tokens; required with strengths.
+    #[serde(default)]
+    pub(in crate::request) max_sequence: Option<usize>,
 }
 
 impl Validate for EvaluateRequest {
@@ -91,7 +101,24 @@ impl Validate for EvaluateRequest {
         require(
             &self.vector,
             "evaluate requires a steering artifact".to_owned(),
-        )
+        )?;
+        if self.strengths.is_empty() {
+            if self.batch_size.is_some() || self.max_sequence.is_some() {
+                return Err(
+                    "evaluate takes batchSize and maxSequence only with strengths".to_owned(),
+                );
+            }
+            return Ok(());
+        }
+        if self.batch_size.is_none() {
+            return Err("evaluate with strengths requires batchSize; Ster assumes none".to_owned());
+        }
+        if self.max_sequence.is_none() {
+            return Err(
+                "evaluate with strengths requires maxSequence; Ster assumes none".to_owned(),
+            );
+        }
+        Ok(())
     }
 }
 

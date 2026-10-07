@@ -115,6 +115,24 @@ impl Runtime {
         )
     }
 
+    /// The batched scoring pass with `steering` added to the residual stream
+    /// of the frozen model and no autograd tape: how far a fixed artifact
+    /// moves the model's log-probabilities, read without training anything.
+    pub fn forward_steered_scored_rows(
+        &self,
+        rows: &[&[u32]],
+        steering: &SteeringPlan,
+    ) -> Result<Tensor> {
+        self.forward_rows(
+            rows,
+            Some(steering),
+            Mode::score(Route::Base),
+            "a scoring forward pass needs at least one token",
+        )?
+        .logits
+        .context("this forward pass was asked for no vocabulary projection")
+    }
+
     /// The batched residual stream a reward head reads, `[batch, width,
     /// hidden]`, with no vocabulary projection.
     pub fn forward_hidden_rows(&self, rows: &[&[u32]]) -> Result<Tensor> {

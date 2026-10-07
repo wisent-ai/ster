@@ -69,6 +69,22 @@ pub(in crate::request) fn evaluate_job(request: EvaluateRequest) -> Result<Value
     tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
     let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
     let mut report = serde_json::to_value(&report)?;
+    if let (false, Some(batch), Some(max_sequence)) = (
+        request.strengths.is_empty(),
+        request.batch_size,
+        request.max_sequence,
+    ) {
+        let options = tune_lib::StrengthOptions {
+            strengths: request.strengths,
+            batch,
+            max_sequence,
+        };
+        let selection = tune_lib::strengths(&runtime, &pair_set, &artifact, &options)?;
+        report
+            .as_object_mut()
+            .context("an evaluation report is a JSON object")?
+            .insert("strength".to_owned(), serde_json::to_value(selection)?);
+    }
     chat.annotate(&mut report)?;
     Ok(report)
 }
