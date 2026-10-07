@@ -124,6 +124,8 @@ pub struct EvaluateOptions {
 #[derive(Debug, Clone, Serialize)]
 pub struct EvaluatedExample {
     pub index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
     pub prompt: String,
     pub completion: String,
     pub completion_tokens: usize,
@@ -197,7 +199,7 @@ pub fn evaluate(
     let mut encoded: Vec<(usize, Vec<u32>, usize)> = Vec::with_capacity(examples.examples.len());
     for (index, example) in examples.examples.iter().enumerate() {
         let (ids, boundary) = runtime
-            .encode_example(&example.prompt, &example.completion)
+            .encode_example(example.system.as_deref(), &example.prompt, &example.completion)
             .with_context(|| format!("example {index} could not be encoded"))?;
         if ids.len() > limit {
             skipped_long += 1;
@@ -248,6 +250,7 @@ pub fn evaluate(
                 likelihoods.push((*index, -log_likelihood));
                 entries.push(EvaluatedExample {
                     index: *index,
+                    system: examples.examples[*index].system.clone(),
                     prompt: examples.examples[*index].prompt.clone(),
                     completion: examples.examples[*index].completion.clone(),
                     completion_tokens: tokens,

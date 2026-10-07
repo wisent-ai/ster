@@ -14,7 +14,8 @@ use super::super::{note_precision, parse_adapter_layers, parse_targets};
 pub(in crate::cli) struct SftArgs {
     #[command(flatten)]
     model: ModelArgs,
-    /// JSON file shaped as {"examples": [{"prompt": "...", "completion": "..."}]}.
+    /// JSON file shaped as {"examples": [{"prompt": "...", "completion": "..."}]};
+    /// an example may add "system": "..." for the system turn it is served under.
     #[arg(long)]
     examples: PathBuf,
     /// Output LoRA adapter safetensors; the identity sidecar is written beside it.

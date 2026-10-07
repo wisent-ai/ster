@@ -64,19 +64,27 @@ impl Runtime {
     /// because the completion half is what the template added *after* the
     /// generation prompt — markers included, which is right, since the turn's
     /// end marker is a token the model must learn to emit.
-    pub fn encode_example(&self, prompt: &str, completion: &str) -> Result<(Vec<u32>, usize)> {
+    ///
+    /// `system` is the example's system turn. Raw text has no place for one,
+    /// so an example carrying it on a run without an applied template is a
+    /// refusal naming what the run decided, not a guess at the markers.
+    pub fn encode_example(&self, system: Option<&str>, prompt: &str, completion: &str) -> Result<(Vec<u32>, usize)> {
         if completion.trim().is_empty() {
             bail!("training example has an empty completion");
         }
-        let (mut ids, tail) = match self.applied_template() {
-            Some(template) => {
-                let (head, tail) = template.example(prompt, completion)?;
+        let (mut ids, tail) = match (self.applied_template(), system) {
+            (Some(template), _) => {
+                let (head, tail) = template.example(system, prompt, completion)?;
                 (
                     self.tokenize(&head, false, "prompt")?,
                     self.tokenize(&tail, false, "completion")?,
                 )
             }
-            None => (
+            (None, Some(_)) => bail!(
+                "training example has a system prompt, which only a chat template can place, and this run's chat template is {}",
+                self.chat_status.label()
+            ),
+            (None, None) => (
                 self.encode(prompt)?,
                 self.tokenize(completion, false, "completion")?,
             ),

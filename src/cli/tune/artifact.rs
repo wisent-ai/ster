@@ -36,7 +36,8 @@ pub(in crate::cli) struct MergeArgs {
 pub(in crate::cli) struct EvaluateArgs {
     #[command(flatten)]
     model: ModelArgs,
-    /// JSON file shaped as {"examples": [{"prompt": "...", "completion": "..."}]}.
+    /// JSON file shaped as {"examples": [{"prompt": "...", "completion": "..."}]};
+    /// an example may add "system": "..." for the system turn it is served under.
     #[arg(long)]
     examples: PathBuf,
     /// Frozen LoRA adapter to attach before scoring. Omit it to score the

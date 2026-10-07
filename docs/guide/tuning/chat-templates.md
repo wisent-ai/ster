@@ -62,8 +62,8 @@ fallback: under `auto` it reports `absent` and its ids are identical to `off`.
 To exercise the applied path offline, copy
 [`docs/examples/chat-template/tokenizer_config.json`](../../examples/chat-template/tokenizer_config.json)
 beside a copy of the toy model — it carries a template written in the toy's own
-vocabulary, wrapping a user turn as `question : …` and an assistant turn as
-`answer : … </s>` — and train on
+vocabulary, wrapping a system turn as `describe : …`, a user turn as `question : …`
+and an assistant turn as `answer : … </s>` — and train on
 [`docs/examples/tuning/chat-examples.json`](../../examples/tuning/chat-examples.json), whose
 prompts and completions are bare, so the markers come from the template rather
 than from the data:
@@ -71,10 +71,25 @@ than from the data:
 ```bash
 ster toy-model toy-chat-model
 cp docs/examples/chat-template/tokenizer_config.json toy-chat-model/
-ster tune evaluate --model toy-chat-model --examples docs/examples/tuning/chat-examples.json
+ster tune evaluate --model toy-chat-model --examples docs/examples/tuning/chat-examples.json \
+  --max-sequence 256 --batch-size 8
 ```
 
 The templated run reports one more completion token per example than the same
 run with `--chat-template off`: the assistant turn's `</s>`, which the loss now
 covers and previously could not.
+
+An example may carry the system turn it will be served under. Here every example of
+the chat set is given one, and the scored completion stays the same length, because
+the system turn is prompt, not target:
+
+```bash
+jq '.examples |= map(. + {system: "the sea is calm ."})' docs/examples/tuning/chat-examples.json > served.json
+ster tune evaluate --model toy-chat-model --examples served.json --max-sequence 256 --batch-size 8
+```
+
+The toy model's context is 256 positions and the set holds eight examples, so those two
+flags score every example in one pass. Giving the untemplated `toy-model` the same
+`served.json` is refused with `training example has a system prompt, which only a chat
+template can place, and this run's chat template is absent`.
 

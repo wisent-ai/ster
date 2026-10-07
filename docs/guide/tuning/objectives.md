@@ -7,7 +7,16 @@ optimization: what each one reads, what it writes, and how a run is read back.
 ## Supervised fine-tuning
 
 `--examples` reads `{"examples": [{"prompt": "…", "completion": "…"}]}`, with an
-optional `name`. Eight examples written in the toy checkpoint's own vocabulary
+optional `name`. An example may also carry `"system": "…"`, the system turn the model
+will be served with: the chat template renders it before the user turn, it belongs to
+the prompt side and is never a target, and it is what lets a model that is served
+under an instruction be trained under that same instruction. A blank `system` is
+refused with `example set <label> contains an empty system prompt`, and an example with
+a `system` on a run whose chat template is `absent` or `off` is refused with
+`training example has a system prompt, which only a chat template can place, and this
+run's chat template is <absent|off>`, because raw text has no place for a system turn.
+`ster tune evaluate` reads the same field and echoes it in each scored entry.
+Eight examples written in the toy checkpoint's own vocabulary
 are checked in as [`docs/examples/tuning/examples.json`](../../examples/tuning/examples.json),
 so a first run needs no download: `ster toy-model <DIR>` writes that checkpoint
 (a four-layer grouped-query Llama shape with seeded random weights and a

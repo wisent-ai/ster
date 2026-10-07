@@ -136,15 +136,19 @@ impl Template {
     /// the end is the completion plus whatever the template closes the turn
     /// with, normally the end-of-turn marker. That marker belongs in the loss:
     /// the model has to learn to stop.
-    pub fn example(&self, prompt: &str, completion: &str) -> Result<(String, String)> {
-        let head = self.prompt(prompt)?;
-        let full = self.render(
-            &[
-                Message { role: "user", content: prompt },
-                Message { role: "assistant", content: completion },
-            ],
-            false,
-        )?;
+    ///
+    /// `system`, when given, opens the conversation as the system turn the
+    /// model is served with; it is part of the prompt side and never a target.
+    pub fn example(&self, system: Option<&str>, prompt: &str, completion: &str) -> Result<(String, String)> {
+        if prompt.trim().is_empty() {
+            bail!("prompt must not be empty");
+        }
+        let mut turns: Vec<Message<'_>> =
+            system.map(|content| Message { role: "system", content }).into_iter().collect();
+        turns.push(Message { role: "user", content: prompt });
+        let head = self.render(&turns, true)?;
+        turns.push(Message { role: "assistant", content: completion });
+        let full = self.render(&turns, false)?;
         let agreed = common_prefix(&head, &full);
         // A template may put the content through `trim`, so the exact text is
         // tried first and the trimmed text second. Anything else — a template

@@ -10,6 +10,11 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Example {
+    /// The system turn the model is served with, when it is served with one.
+    /// Only a chat template knows where a system turn goes, so an example
+    /// carrying one is refused on a run whose template is absent or off.
+    #[serde(default)]
+    pub system: Option<String>,
     pub prompt: String,
     pub completion: String,
 }
@@ -49,6 +54,13 @@ impl ExampleSet {
             .any(|example| example.prompt.trim().is_empty() || example.completion.trim().is_empty())
         {
             bail!("example set {label} contains an empty prompt or completion");
+        }
+        if self
+            .examples
+            .iter()
+            .any(|example| example.system.as_deref().is_some_and(|system| system.trim().is_empty()))
+        {
+            bail!("example set {label} contains an empty system prompt");
         }
         Ok(())
     }
