@@ -10,7 +10,9 @@
   "platforms": {
     "darwin-arm64": {
       "runner_platform": "darwin-arm64",
-      "quality": [],
+      "quality": [
+        {"name": "fmt", "argv": ["cargo", "fmt", "--all", "--", "--check"]}
+      ],
       "build": {
         "argv": ["bash", "release/build.sh"]
       },
@@ -22,7 +24,9 @@
     },
     "linux-amd64": {
       "runner_platform": "linux-amd64",
-      "quality": [],
+      "quality": [
+        {"name": "fmt", "argv": ["cargo", "fmt", "--all", "--", "--check"]}
+      ],
       "build": {
         "argv": ["bash", "release/build.sh"]
       },
