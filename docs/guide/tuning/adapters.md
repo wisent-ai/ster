@@ -36,6 +36,33 @@ The report records `model`, `model_revision`, `adapter`, `output`, `rank`,
 `alpha`, `scale`, `targets`, `layers`, `hidden_size`, `merged_tensors`,
 `copied_tensors`, `total_tensors`, `parameters`, `dtype`, and `files`.
 
+## Exporting as a PEFT adapter
+
+`ster tune export --model <MODEL> --adapter <ADAPTER> --format peft --output <DIR>`
+keeps the adapter an adapter and writes it in the layout vLLM and `peft` load beside
+a base model: `adapter_config.json`, `adapter_model.safetensors` and the base's own
+`tokenizer.json`. Nothing is recomputed. Ster's `a: [rank, inputs]` and
+`b: [outputs, rank]`, scaled by `alpha / rank`, are PEFT's `lora_A.weight`,
+`lora_B.weight` and `lora_alpha / r`; only the names change, and each is named
+`base_model.model.<the base checkpoint's projection path>.lora_A.weight` from the same
+per-architecture placement `merge` uses. The config records `r`, `lora_alpha`,
+`target_modules` (the checkpoint's own projection names, such as `q_proj`),
+`layers_to_transform`, `base_model_name_or_path` and `revision`.
+
+An adapter for another checkpoint and a reward artifact are refused as in a merge. A
+projection the base stores fused with others or transposed has no PEFT module of its
+own and is refused with `this model stores the <target> projection fused with others,
+so PEFT has no module of its own for it; merge the adapter (ster tune merge) instead`;
+a GGUF base is refused because PEFT names a safetensors release. The report records
+`model`, `model_revision`, `adapter`, `output`, `format`, `rank`, `alpha`,
+`target_modules`, `layers`, `tensors` and `files`.
+
+```bash
+ster toy-model toy-model
+ster tune sft --model toy-model --examples docs/examples/tuning/examples.json --output calm.safetensors \
+  --rank 4 --alpha 8 --epochs 1 --learning-rate 0.01 --accumulation 1 --max-sequence 256 --batch-size 8 --seed 7
+ster tune export --model toy-model --adapter calm.safetensors --format peft --output calm-peft
+```
 
 ## Evaluation
 

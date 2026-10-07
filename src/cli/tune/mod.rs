@@ -20,6 +20,7 @@ pub(super) fn run(command: TuneCommand) -> Result<()> {
         TuneCommand::Grpo(args) => train::grpo(args),
         TuneCommand::Decide(args) => train::decide(args),
         TuneCommand::Merge(args) => artifact::merge(args),
+        TuneCommand::Export(args) => artifact::export(args),
         TuneCommand::Evaluate(args) => artifact::evaluate(args),
         TuneCommand::Inspect(args) => artifact::inspect(args),
     }

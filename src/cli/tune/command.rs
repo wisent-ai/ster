@@ -2,7 +2,7 @@
 
 use clap::Subcommand;
 
-use super::artifact::{EvaluateArgs, InspectArgs, MergeArgs};
+use super::artifact::{EvaluateArgs, ExportArgs, InspectArgs, MergeArgs};
 use super::train::{DecideArgs, DpoArgs, GrpoArgs, RewardArgs, SftArgs};
 
 #[derive(Debug, Subcommand)]
@@ -20,6 +20,9 @@ pub(in crate::cli) enum TuneCommand {
     Decide(DecideArgs),
     /// Fold a LoRA adapter into the base weights as a standalone checkpoint.
     Merge(MergeArgs),
+    /// Write a LoRA adapter as a PEFT adapter directory (adapter_config.json,
+    /// adapter_model.safetensors, the base's tokenizer.json) for vLLM and peft.
+    Export(ExportArgs),
     /// Score a checkpoint on held-out examples: loss and perplexity, no training.
     Evaluate(EvaluateArgs),
     /// Print and validate a Ster LoRA adapter artifact.

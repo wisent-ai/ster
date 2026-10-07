@@ -31,6 +31,25 @@ pub(in crate::cli) struct MergeArgs {
     output: PathBuf,
 }
 
+/// `ster tune export`
+#[derive(Debug, clap::Args)]
+pub(in crate::cli) struct ExportArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+    /// The adapter to write. It must have been trained for this exact
+    /// model, and must be a generation adapter rather than a reward model.
+    #[arg(long)]
+    adapter: PathBuf,
+    /// The layout to write. peft is the one there is: adapter_config.json
+    /// and adapter_model.safetensors named after the base checkpoint's own
+    /// projections, beside the base's tokenizer.json.
+    #[arg(long, value_parser = ["peft"])]
+    format: String,
+    /// Directory to write.
+    #[arg(long)]
+    output: PathBuf,
+}
+
 /// `ster tune evaluate`
 #[derive(Debug, clap::Args)]
 pub(in crate::cli) struct EvaluateArgs {
@@ -82,6 +101,19 @@ pub(super) fn merge(args: MergeArgs) -> Result<()> {
     // the model, so it resolves the checkpoint's files without mapping
     // them.
     let report = tune::merge(&model.model, model.revision.as_deref(), &adapter, &output)?;
+    crate::cli::answer(&json!({ "report": report }))?;
+    Ok(())
+}
+
+pub(super) fn export(args: ExportArgs) -> Result<()> {
+    let ExportArgs {
+        model,
+        adapter,
+        format: _,
+        output,
+    } = args;
+    // Like merge, export renames tensors and never runs the model.
+    let report = tune::export_peft(&model.model, model.revision.as_deref(), &adapter, &output)?;
     crate::cli::answer(&json!({ "report": report }))?;
     Ok(())
 }
