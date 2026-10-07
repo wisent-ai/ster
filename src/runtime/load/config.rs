@@ -17,7 +17,7 @@ pub(super) fn read(path: &Path, layout: Layout) -> Result<(Value, &'static str)>
     let outer: Value = serde_json::from_slice(&finite_literals(&bytes))
         .with_context(|| format!("invalid model config {}", path.display()))?;
     Ok(match layout {
-        Layout::Transformers => language_model(outer),
+        Layout::Transformers | Layout::Gguf => language_model(outer),
         Layout::Mistral => (mistral::transformers_config(outer, path)?, ""),
     })
 }
@@ -93,7 +93,7 @@ fn language_model(outer: Value) -> (Value, &'static str) {
     let prefix = match outer.get("model_type").and_then(|value| value.as_str()) {
         Some("gemma3" | "mistral3" | "llama4" | "kimi_k25" | "kimi_k3") => "language_model",
         Some(
-            "gemma3n" | "gemma4" | "gemma4_unified" | "qwen3_5" | "qwen3_5_moe" | "muse_glimmer" | "hyperclovax_vision_v2",
+            "gemma3n" | "gemma4" | "gemma4_unified" | "qwen3_5" | "qwen3_5_moe" | "muse_glimmer" | "hyperclovax_vision_v2" | "glm5_next",
         ) => "model.language_model",
         Some("step3_vl") => "",
         Some("inkling_mm_model") => "model.llm",

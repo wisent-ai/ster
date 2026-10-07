@@ -48,10 +48,17 @@ impl Checkpoint {
     pub fn resolve(model: &str, revision: Option<&str>) -> Result<Self> {
         let local = Path::new(model);
         if local.is_dir() {
-            let layout = if local.join("config.json").is_file() || !local.join("params.json").is_file() {
-                Layout::Transformers
-            } else {
+            let layout = if !local.join("config.json").is_file() && local.join("params.json").is_file() {
                 Layout::Mistral
+            } else if local_safetensors(local, Layout::Transformers)?.is_empty()
+                && !local_safetensors(local, Layout::Gguf)?.is_empty()
+            {
+                // A llama.cpp fine-tune beside its base model's config and
+                // tokenizer: no safetensors, one GGUF file (more than one is
+                // refused with their count when the weights are mapped).
+                Layout::Gguf
+            } else {
+                Layout::Transformers
             };
             let config = local.join(layout.config_file());
             let tokenizer = local.join(tokenizer_file(|name| local.join(name).is_file()));
@@ -252,7 +259,7 @@ fn require_files(config: &Path, tokenizer: &Path, weights: &[PathBuf]) -> Result
         bail!("tokenizer is missing: {}", tokenizer.display());
     }
     if weights.is_empty() {
-        bail!("model directory contains no safetensors weights");
+        bail!("model directory contains no safetensors or GGUF weights");
     }
     Ok(())
 }

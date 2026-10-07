@@ -40,7 +40,11 @@ use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor};
 use serde::Serialize;
 
-use crate::{lora, runtime::Checkpoint, workflow};
+use crate::{
+    lora,
+    runtime::{Checkpoint, Layout},
+    workflow,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MergeReport {
@@ -99,6 +103,14 @@ pub fn merge(
     }
 
     let source = Checkpoint::resolve(model, revision)?;
+    // A merge writes the base's own tensors back with the delta folded in; a
+    // GGUF base holds quantized tensors, and writing them dequantized would
+    // publish a model of another size and precision under the base's name.
+    if source.layout == Layout::Gguf {
+        bail!(
+            "{model} is a GGUF checkpoint; an adapter is merged into safetensors weights only. Run the adapter on it unmerged (--adapter), or merge into the base model's safetensors release"
+        );
+    }
     let (config, architecture, _) = source.decoder_config()?;
     architecture.check_targets(&artifact.targets, &config)?;
     if artifact.hidden_size != config.hidden_size {

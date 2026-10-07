@@ -17,6 +17,9 @@ pub enum Layout {
     Transformers,
     /// `params.json`, `consolidated*.safetensors` and Mistral's tensor names.
     Mistral,
+    /// `config.json` and the base model's tokenizer beside one `*.gguf` file
+    /// holding llama.cpp's tensor names (`super::gguf`).
+    Gguf,
 }
 
 /// The context a Mistral config without `max_position_embeddings` gets
@@ -35,24 +38,29 @@ impl Layout {
     /// The config file this layout reads.
     pub fn config_file(self) -> &'static str {
         match self {
-            Self::Transformers => "config.json",
+            Self::Transformers | Self::Gguf => "config.json",
             Self::Mistral => "params.json",
         }
     }
 
     /// The weight file a merge writes, named so the merged directory
-    /// resolves under the same layout.
+    /// resolves under the same layout. A GGUF base is refused by the merge
+    /// before it gets here: the merge writes the base's tensors back as
+    /// safetensors, and a GGUF holds quantized ones.
     pub fn merged_weights(self) -> &'static str {
         match self {
-            Self::Transformers => "model.safetensors",
+            Self::Transformers | Self::Gguf => "model.safetensors",
             Self::Mistral => "consolidated.safetensors",
         }
     }
 
-    /// Whether a published safetensors file holds this layout's weights. A
-    /// repository may publish both layouts (Mistral 7B v0.3); each reads its
-    /// own files only, so the weights are never mapped twice.
+    /// Whether a published weight file holds this layout's weights. A
+    /// repository may publish both safetensors layouts (Mistral 7B v0.3);
+    /// each reads its own files only, so the weights are never mapped twice.
     pub fn owns(self, file_name: &str) -> bool {
+        if self == Self::Gguf {
+            return file_name.ends_with(".gguf");
+        }
         let consolidated = file_name.starts_with("consolidated");
         file_name.ends_with(".safetensors")
             && !file_name.contains("optimizer")
@@ -66,6 +74,7 @@ impl Layout {
         match self {
             Self::Transformers => name.to_owned(),
             Self::Mistral => stored_name(name),
+            Self::Gguf => super::gguf::stored_name(name),
         }
     }
 }

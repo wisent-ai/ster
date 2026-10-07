@@ -351,7 +351,11 @@ published — is read the same way, locally or from the Hub: its config is put
 in the Transformers shape (Mistral Large 3 as `deepseek_v3` with Llama 4's
 query temperature) and its tensors are read under Mistral's names. A
 repository that publishes both formats is read from `config.json` and its
-non-`consolidated` weights only.
+non-`consolidated` weights only. A local directory holding one `.gguf` file
+and no safetensors — a llama.cpp fine-tune beside its base model's
+`config.json` and tokenizer — runs on Ster's own decoder: each tensor is read
+under llama.cpp's name, dequantized at `--precision` and given to the decoder
+under its Transformers name, so steering and capture work on it too.
 
 ## CLI
 

@@ -23,7 +23,7 @@ mod vocabulary;
 
 pub use device::{DeviceChoice, Precision};
 pub use infer::{Completion, GenerationOptions};
-pub use load::Checkpoint;
+pub use load::{Checkpoint, Layout};
 
 use load::projection_widths;
 

@@ -22,6 +22,7 @@ use super::{DeviceChoice, Runtime, device::Precision, validate_layers};
 mod checkpoint;
 mod config;
 mod family;
+mod gguf;
 mod mistral;
 
 pub use checkpoint::Checkpoint;
@@ -281,12 +282,24 @@ impl BaseLoad {
     /// and so does a DeepSeek-V4 checkpoint in DeepSeek's own layout
     /// (`embed`, `layers.{i}.attn.wq_a`, `ffn.experts`).
     fn builder(&self) -> Result<VarBuilder<'static>> {
-        let builder = unsafe { VarBuilder::from_mmaped_safetensors(&self.weights, self.dtype, &self.device) }
-            .with_context(|| format!("failed to map {} model weight files", self.weights.len()))?;
         let layout = self.layout;
         let builder = match layout {
-            Layout::Transformers => builder,
-            Layout::Mistral => builder.rename_f(move |name: &str| layout.stored_name(name)),
+            // One GGUF file: each tensor is dequantized at this run's dtype
+            // under the Transformers name the decoder asks for.
+            Layout::Gguf => {
+                let [file] = self.weights.as_slice() else {
+                    bail!("a GGUF checkpoint is one .gguf file; this one lists {}", self.weights.len());
+                };
+                VarBuilder::from_backend(Box::new(gguf::GgufWeights::open(file)?), self.dtype, self.device.clone())
+            }
+            Layout::Transformers | Layout::Mistral => {
+                let mapped = unsafe { VarBuilder::from_mmaped_safetensors(&self.weights, self.dtype, &self.device) }
+                    .with_context(|| format!("failed to map {} model weight files", self.weights.len()))?;
+                match layout {
+                    Layout::Mistral => mapped.rename_f(move |name: &str| layout.stored_name(name)),
+                    _ => mapped,
+                }
+            }
         };
         if self.architecture.compressed.is_none() {
             return Ok(builder);
