@@ -102,8 +102,17 @@ pub(super) struct EvaluateArgs {
 pub(super) struct GenerateArgs {
     #[command(flatten)]
     model: ModelArgs,
-    #[arg(long)]
-    prompt: String,
+    /// The one prompt to answer; the answer is printed.
+    #[arg(long, required_unless_present = "prompts", conflicts_with = "prompts")]
+    prompt: Option<String>,
+    /// A prompt set ({"prompts": ["..."]}) to answer one after the other
+    /// with the model loaded once; the answers are written to --output.
+    #[arg(long, requires = "output")]
+    prompts: Option<PathBuf>,
+    /// JSON file a --prompts run writes: one {"prompt", "model_output"} per
+    /// prompt, in the set's order.
+    #[arg(long, requires = "prompts")]
+    output: Option<PathBuf>,
     /// File whose text is the system turn the prompt is answered under. It is
     /// rendered by the model's own chat template, so it needs one: with the
     /// template absent or `--chat-template off` it is refused.
@@ -279,6 +288,8 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
     let GenerateArgs {
         model,
         prompt,
+        prompts,
+        output,
         system,
         vector,
         adapter,
@@ -310,13 +321,16 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
             if text.trim().is_empty() {
                 anyhow::bail!("the system turn {} is empty", path.display());
             }
-            if prompt.trim().is_empty() {
+            if prompt.as_deref().is_some_and(|prompt| prompt.trim().is_empty()) {
                 anyhow::bail!("prompt must not be empty");
             }
             Some(text)
         }
         None => None,
     };
+    // A prompt set is read before the weights too, so a malformed or empty
+    // set is refused before the checkpoint is paid for.
+    let prompt_set = prompts.as_deref().map(ster::PromptSet::load).transpose()?;
     // An adapter rewrites the projections themselves, so it is
     // attached while the weights are mapped rather than applied per
     // token the way a steering vector is.
@@ -341,25 +355,49 @@ pub(super) fn generate(args: GenerateArgs) -> Result<()> {
         top_p,
         seed,
     };
-    let generated = match system.as_deref() {
-        Some(system) => {
-            let context = runtime.encode_conversation(&[
-                ster::chat::Message {
-                    role: "system",
-                    content: system,
-                },
-                ster::chat::Message {
-                    role: "user",
-                    content: &prompt,
-                },
-            ])?;
-            runtime
-                .sample_tokens(context, artifact.as_ref(), options)?
-                .text
-        }
-        None => runtime.generate(&prompt, artifact.as_ref(), options)?,
+    let answer = |prompt: &str| -> Result<String> {
+        Ok(match system.as_deref() {
+            Some(system) => {
+                let context = runtime.encode_conversation(&[
+                    ster::chat::Message {
+                        role: "system",
+                        content: system,
+                    },
+                    ster::chat::Message {
+                        role: "user",
+                        content: prompt,
+                    },
+                ])?;
+                runtime
+                    .sample_tokens(context, artifact.as_ref(), options)?
+                    .text
+            }
+            None => runtime.generate(prompt, artifact.as_ref(), options)?,
+        })
     };
-    println!("{generated}");
+    match (prompt_set, output) {
+        (Some(set), Some(output)) => {
+            let answers = set
+                .prompts
+                .iter()
+                .enumerate()
+                .map(|(index, prompt)| {
+                    workflow::progress(format!("answering prompt {index} of {}", set.prompts.len()));
+                    Ok(serde_json::json!({ "prompt": prompt, "model_output": answer(prompt)? }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if let Some(parent) = output.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::write(&output, serde_json::to_vec_pretty(&answers)?)
+                .with_context(|| format!("failed to write {}", output.display()))?;
+            println!("{}", output.display());
+        }
+        _ => {
+            let prompt = prompt.context("ster generate needs --prompt or --prompts")?;
+            println!("{}", answer(&prompt)?);
+        }
+    }
     Ok(())
 }
 pub(super) fn extract(args: ExtractArgs) -> Result<()> {

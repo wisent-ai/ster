@@ -20,7 +20,8 @@ ster optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT> --holdout <FRACT
 ster evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
               [--revision <REVISION>] [--device cpu]
               [--chat-template auto|off] [--precision f32|f16|bf16]
-ster generate --model <MODEL> --prompt <PROMPT> [--vector <VECTOR> --strength <S>]
+ster generate --model <MODEL> (--prompt <PROMPT> | --prompts <SET> --output <FILE>)
+              [--vector <VECTOR> --strength <S>] [--system <FILE>]
               [--adapter <ADAPTER>] [--revision <REVISION>] [--device cpu]
               [--chat-template auto|off] [--precision f32|f16|bf16]
               --max-new-tokens <N> --temperature <T>
@@ -50,6 +51,20 @@ steering vector and exists only with one: required with `--vector`, refused
 without it. `--top-p` is optional; without it generation samples the whole
 distribution, and a temperature of zero is argmax. The process ends with
 the operation; see [desktop requests](desktop-requests.md).
+
+`ster generate --prompts <SET> --output <FILE>` answers a whole prompt set
+(`{"prompts": ["…"]}`, as [`docs/examples/prompts.json`](../examples/prompts.json)) with
+the model loaded once and writes one `{"prompt", "model_output"}` per prompt, in the
+set's order, to `--output`, then prints its path; every other flag means what it means
+for one prompt. `--prompt` and `--prompts` exclude each other, `--output` goes with
+`--prompts` only, and an empty set is refused with `prompt set contains no prompts`
+before any weight is mapped. A steered sweep is one run per strength:
+
+```bash
+ster toy-model toy-model
+ster generate --model toy-model --prompts docs/examples/prompts.json --output answers.json \
+  --max-new-tokens 16 --temperature 0 --seed 7
+```
 
 ## Selection
 

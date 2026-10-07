@@ -14,10 +14,10 @@
 # a refused one) go to the run's report.txt; a failed check stops the run
 # (set -e) after naming itself there.
 #
-# Usage: tests/tuning/system_turn.sh   (STER selects the binary, default target/debug/ster)
+# Usage: STER=target/debug/ster tests/tuning/system_turn.sh
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:?set STER to the ster binary under test, e.g. STER=target/debug/ster}
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/tuning/$RUN"
 REPORT="$ROOT/report.txt"
