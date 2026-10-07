@@ -45,12 +45,14 @@ use super::super::{
 };
 use crate::{artifact::PairSet, runtime::Runtime, workflow};
 
+mod bipo;
 mod options;
 mod scoring;
 
+pub use bipo::{BipoOptions, BipoReport, bipo};
 pub use options::{DpoLoss, DpoOptions, DpoReport};
 
-use scoring::{Scored, Summary, reference_scores, step_loss};
+use scoring::{Preference, Scored, Summary, reference_scores, step_loss};
 
 /// Trains the adapters `varmap` owns to prefer each pair's positive side.
 ///
@@ -156,7 +158,8 @@ pub fn dpo(
                     let scored = &encoded[slot];
                     let chosen = &read[position * 2];
                     let rejected = &read[position * 2 + 1];
-                    let value = step_loss(runtime, scored, chosen, rejected, options)
+                    let preference = Preference { loss: options.loss, beta: options.beta };
+                    let value = step_loss(runtime, scored, chosen, rejected, preference)
                         .with_context(|| {
                             format!("pair {} produced no usable loss", scored.pair.index)
                         })?;

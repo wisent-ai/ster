@@ -3,7 +3,7 @@
 use clap::Subcommand;
 
 use super::artifact::{EvaluateArgs, ExportArgs, InspectArgs, MergeArgs};
-use super::train::{DecideArgs, DpoArgs, GrpoArgs, RewardArgs, SftArgs};
+use super::train::{BipoArgs, DecideArgs, DpoArgs, GrpoArgs, RewardArgs, SftArgs};
 
 #[derive(Debug, Subcommand)]
 pub(in crate::cli) enum TuneCommand {
@@ -11,6 +11,9 @@ pub(in crate::cli) enum TuneCommand {
     Sft(SftArgs),
     /// Train LoRA adapters to prefer one side of each contrastive pair.
     Dpo(DpoArgs),
+    /// Learn one steering vector by bi-directional preference optimization
+    /// (BiPO): +v prefers each pair's positive side, -v its negative side.
+    Bipo(BipoArgs),
     /// Train a scalar reward head that ranks the two sides of each pair.
     Reward(RewardArgs),
     /// Optimize the policy against a reward, using a sampled group as baseline.

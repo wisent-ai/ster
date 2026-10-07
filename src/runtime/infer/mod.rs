@@ -4,7 +4,7 @@
 use anyhow::{bail, Context, Result};
 use candle_core::Tensor;
 
-use crate::model::{Cache, ForwardOutput, Mode, Route};
+use crate::model::{Cache, ForwardOutput, Mode, Route, SteeringPlan};
 
 use super::{validate_layers, Runtime};
 
@@ -71,6 +71,15 @@ impl Runtime {
         self.row_logits(rows, Mode::TRAIN, "a training forward pass needs at least one token")
     }
 
+    /// The same differentiable batched pass with `steering` added to the
+    /// residual stream, so a loss over the logits reaches a steering vector
+    /// the plan was built over (`SteeringPlan::from_tensors`).
+    pub fn forward_steered_rows(&self, rows: &[&[u32]], steering: &SteeringPlan) -> Result<Tensor> {
+        self.forward_rows(rows, Some(steering), Mode::TRAIN, "a training forward pass needs at least one token")?
+            .logits
+            .context("this forward pass was asked for no vocabulary projection")
+    }
+
     /// The same batched pass with no autograd tape, routed through the policy
     /// or the frozen reference exactly as `forward_scored` routes one.
     pub fn forward_scored_rows(&self, rows: &[&[u32]], route: Route) -> Result<Tensor> {
@@ -81,7 +90,7 @@ impl Runtime {
     /// hidden]`, with no vocabulary projection.
     pub fn forward_hidden_rows(&self, rows: &[&[u32]]) -> Result<Tensor> {
         Ok(self
-            .forward_rows(rows, Mode::REWARD, "a reward forward pass needs at least one token")?
+            .forward_rows(rows, None, Mode::REWARD, "a reward forward pass needs at least one token")?
             .hidden)
     }
 
@@ -146,7 +155,7 @@ impl Runtime {
 
     /// The batched equivalent, which must produce logits too.
     fn row_logits(&self, rows: &[&[u32]], mode: Mode, empty: &str) -> Result<Tensor> {
-        self.forward_rows(rows, mode, empty)?
+        self.forward_rows(rows, None, mode, empty)?
             .logits
             .context("this forward pass was asked for no vocabulary projection")
     }
@@ -175,7 +184,7 @@ impl Runtime {
     /// places. Filler is token zero, which is never read — `forward_batch`
     /// masks every padded key out of every real query — and is chosen only
     /// because it is the one id every vocabulary has.
-    fn forward_rows(&self, rows: &[&[u32]], mode: Mode, empty: &str) -> Result<ForwardOutput> {
+    fn forward_rows(&self, rows: &[&[u32]], steering: Option<&SteeringPlan>, mode: Mode, empty: &str) -> Result<ForwardOutput> {
         if rows.is_empty() || rows.iter().any(|row| row.is_empty()) {
             bail!("{empty}");
         }
@@ -188,7 +197,7 @@ impl Runtime {
         }
         let input = Tensor::from_vec(flat, (rows.len(), width), &self.device)?;
         let mut cache = self.cache(false)?;
-        Ok(self.model.forward_batch(&input, &lengths, &mut cache, None, mode)?)
+        Ok(self.model.forward_batch(&input, &lengths, &mut cache, steering, mode)?)
     }
 
     /// The hidden states one prompt produces at the requested layers.

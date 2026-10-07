@@ -22,7 +22,7 @@ pub use pairs::{SetReport, SynthesisOptions, SynthesisReport};
 pub use representation::TrainingMethod;
 pub use runtime::{Checkpoint, Completion, DeviceChoice, GenerationOptions, Precision, Runtime};
 pub use tune::{
-    DecideReport, DecideTuneOptions, DpoLoss, DpoOptions, DpoReport, EvaluateOptions, EvaluateReport,
+    BipoOptions, BipoReport, DecideReport, DecideTuneOptions, DpoLoss, DpoOptions, DpoReport, EvaluateOptions, EvaluateReport,
     EvaluatedExample, ExampleSet, GrpoIteration, GrpoOptions, GrpoReport, MergeReport, Reward,
     RewardHead, RewardModel, RewardOptions, RewardReport, SftOptions, SftReport, UserSimulator,
 };

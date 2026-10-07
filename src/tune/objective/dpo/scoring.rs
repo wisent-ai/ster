@@ -10,7 +10,7 @@ use super::super::super::{
     batch,
     preflight::{EncodedPair, sequence_logprob, softplus},
 };
-use super::{DpoLoss, DpoOptions};
+use super::DpoLoss;
 
 /// One tokenized pair with the frozen reference's opinion of both sides.
 pub(super) struct Scored {
@@ -82,6 +82,15 @@ pub(super) struct Step {
     pub(super) rejected_reward: f64,
 }
 
+/// The preference loss one step takes and its beta. `beta` is signed: BiPO
+/// asks the policy with `-v` to prefer the rejected side, which is the same
+/// loss with beta negated.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Preference {
+    pub(super) loss: DpoLoss,
+    pub(super) beta: f64,
+}
+
 /// One pair's contribution: two scored rows, one margin, one loss.
 ///
 /// The logits arrive already read out of whatever forward produced them, so
@@ -92,21 +101,21 @@ pub(super) fn step_loss(
     scored: &Scored,
     chosen_logits: &Tensor,
     rejected_logits: &Tensor,
-    options: &DpoOptions,
+    options: Preference,
 ) -> Result<Step> {
     let chosen = policy_log_ratio(
         runtime,
         chosen_logits,
         &scored.pair.chosen,
         scored.chosen_reference,
-        options,
+        options.loss,
     )?;
     let rejected = policy_log_ratio(
         runtime,
         rejected_logits,
         &scored.pair.rejected,
         scored.rejected_reference,
-        options,
+        options.loss,
     )?;
     let margin = (&chosen - &rejected)?;
     let tensor = match options.loss {
@@ -137,11 +146,11 @@ fn policy_log_ratio(
     logits: &Tensor,
     ids: &[u32],
     reference: f64,
-    options: &DpoOptions,
+    loss: DpoLoss,
 ) -> Result<Tensor> {
     let policy = sequence_logprob(logits, ids, 1, runtime.device())?;
     let ratio = (policy - reference)?;
-    if options.loss.length_normalized() {
+    if loss.length_normalized() {
         // `sequence_logprob` scores every token after the begin-of-sequence
         // marker, so that is the count the mean divides by.
         return Ok((ratio / (ids.len() - 1) as f64)?);

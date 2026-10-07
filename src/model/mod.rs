@@ -2467,6 +2467,38 @@ impl SteeringPlan {
         })
     }
 
+    /// A plan over tensors the caller already holds, cast to the model's
+    /// `dtype`. The cast and the decoder's `vector * strength` both record
+    /// backward nodes, so a plan built over a trainable variable carries the
+    /// loss's gradient back to it — which is what a steering vector learned
+    /// by optimization (`ster tune bipo`) needs and `new`'s copy of plain
+    /// values cannot give.
+    pub fn from_tensors(
+        vectors: impl IntoIterator<Item = (usize, Tensor)>,
+        strength: f64,
+        hidden_size: usize,
+        dtype: DType,
+    ) -> Result<Self> {
+        let mut tensors = BTreeMap::new();
+        for (layer, tensor) in vectors {
+            if tensor.dims() != [hidden_size] {
+                bail!(
+                    "layer {layer} steering vector shape {:?} does not match model width {hidden_size}",
+                    tensor.dims()
+                );
+            }
+            tensors.insert(layer, tensor.to_dtype(dtype)?);
+        }
+        if tensors.is_empty() {
+            bail!("steering plan contains no vectors");
+        }
+        Ok(Self {
+            vectors: tensors,
+            strength,
+            hidden_size,
+        })
+    }
+
     fn vector(&self, layer: usize) -> Option<&Tensor> {
         self.vectors.get(&layer)
     }

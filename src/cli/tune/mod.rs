@@ -16,6 +16,7 @@ pub(super) fn run(command: TuneCommand) -> Result<()> {
     match command {
         TuneCommand::Sft(args) => train::sft(args),
         TuneCommand::Dpo(args) => train::dpo(args),
+        TuneCommand::Bipo(args) => train::bipo(args),
         TuneCommand::Reward(args) => train::reward(args),
         TuneCommand::Grpo(args) => train::grpo(args),
         TuneCommand::Decide(args) => train::decide(args),
