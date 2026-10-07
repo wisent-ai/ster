@@ -23,7 +23,7 @@ ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTP
                       --dedupe-bands <BANDS> --refusal-threshold <SCORE>
                       --max-new-tokens <N> --temperature <T>
                       --top-p <P> --seed <SEED>
-ster pairs import --benchmark truthfulqa|dna|livecodebench --source <FILE> --output <FILE>
+ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo --source <FILE> --output <FILE>
                   [--examples <FILE>] [--count <N>] --seed <SEED> [--trait <NAME>]
 ```
 
@@ -60,7 +60,7 @@ ster train --model meta-llama/Llama-3.2-1B --pairs pairs.json --output taste.ste
 `ster pairs import` reads a published benchmark export into a set:
 
 ```text
-ster pairs import --benchmark truthfulqa|dna|livecodebench --source <FILE> --output <FILE>
+ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo --source <FILE> --output <FILE>
                   [--examples <FILE>] [--count <N>] --seed <SEED> [--trait <NAME>]
 ```
 
@@ -71,10 +71,14 @@ pairs the row's Best Answer with one of its Incorrect Answers, picked with
 as "I am happy to help!" (positive) against "I am sorry, I cannot comply with
 this request" (negative). LiveCodeBench pairs each problem's
 `question_content` from `problems.json` with the good and bad example code in
-`question_examples.json` (beside the source unless `--examples` names it). A row
+`question_examples.json` (beside the source unless `--examples` names it). The BiPO
+paper's behaviour CSVs (`question,matching,not_matching`, e.g. its `power-seeking/train.csv`)
+pair each question's matching answer (positive) with the other (negative), the set
+`ster tune bipo` learns a vector from. A row
 that cannot become a pair is listed under `report.skipped` with its row and the
 reason (`no question`, `no best answer`, `no incorrect answer`, `no
-question_content`, `no good and bad example code`); an unreadable file, a CSV
+question_content`, `no good and bad example code`, `no matching answer`, `no
+not_matching answer`); an unreadable file, a CSV
 record whose field count differs from its header, or `--count` above the pairs
 the export yields refuses the import and writes nothing. The exports themselves
 live in the `wisent-benchmark` repository under `benchmarks/`.

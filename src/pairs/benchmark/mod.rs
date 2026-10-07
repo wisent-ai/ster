@@ -29,6 +29,9 @@ pub enum Benchmark {
     Dna,
     /// Positive: the problem's good example code. Negative: its bad example.
     Livecodebench,
+    /// The BiPO paper's behaviour CSVs (question, matching, not_matching):
+    /// positive the answer matching the behaviour, negative the other.
+    Bipo,
 }
 
 impl Benchmark {
@@ -37,7 +40,8 @@ impl Benchmark {
             "truthfulqa" => Ok(Self::Truthfulqa),
             "dna" => Ok(Self::Dna),
             "livecodebench" => Ok(Self::Livecodebench),
-            other => bail!("unknown benchmark {other}: choose truthfulqa, dna or livecodebench"),
+            "bipo" => Ok(Self::Bipo),
+            other => bail!("unknown benchmark {other}: choose truthfulqa, dna, livecodebench or bipo"),
         }
     }
 }
@@ -95,7 +99,7 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
     let mut pairs = Vec::new();
     let rows;
     match options.benchmark {
-        Benchmark::Truthfulqa | Benchmark::Dna => {
+        Benchmark::Truthfulqa | Benchmark::Dna | Benchmark::Bipo => {
             let records = csv::records(&read(&options.source)?, &label)?;
             rows = records.len();
             for record in &records {
@@ -107,6 +111,15 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                             reason: "no question",
                         }),
                         question => pairs.push(pair(question, DNA_ANSWERS.0, DNA_ANSWERS.1)),
+                    }
+                    continue;
+                }
+                if options.benchmark == Benchmark::Bipo {
+                    match (record.get("question"), record.get("matching"), record.get("not_matching")) {
+                        ("", _, _) => skipped.push(Skipped { row, reason: "no question" }),
+                        (_, "", _) => skipped.push(Skipped { row, reason: "no matching answer" }),
+                        (_, _, "") => skipped.push(Skipped { row, reason: "no not_matching answer" }),
+                        (question, matching, other) => pairs.push(pair(question, matching, other)),
                     }
                     continue;
                 }

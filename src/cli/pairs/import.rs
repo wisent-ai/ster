@@ -9,10 +9,11 @@ use ster::pairs::benchmark::{self, Benchmark, ImportOptions};
 
 #[derive(Debug, Args)]
 pub(super) struct ImportArgs {
-    /// Which export SOURCE is: truthfulqa, dna or livecodebench.
+    /// Which export SOURCE is: truthfulqa, dna, livecodebench or bipo.
     #[arg(long)]
     benchmark: String,
-    /// The export: TruthfulQA_en.csv, DnA_en.csv or LiveCodeBench problems.json.
+    /// The export: TruthfulQA_en.csv, DnA_en.csv, LiveCodeBench problems.json,
+    /// or one of the BiPO paper's behaviour CSVs (question,matching,not_matching).
     #[arg(long)]
     source: PathBuf,
     /// LiveCodeBench good/bad example code; defaults to question_examples.json
