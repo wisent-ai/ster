@@ -50,23 +50,36 @@ impl AltUp {
     /// `tanh(modality_router(router_norm(x) / hidden_size))`, one weight per
     /// stream, in F32.
     fn modalities(&self, active: &Tensor, pass: Pass) -> candle_core::Result<Tensor> {
-        let routed = self.router.forward(&(self.router_norm.forward(active, pass)? / self.hidden as f64)?)?;
+        let routed = self
+            .router
+            .forward(&(self.router_norm.forward(active, pass)? / self.hidden as f64)?)?;
         routed.to_dtype(DType::F32)?.tanh()
     }
 
     /// Every stream's prediction: stream `i` plus `Σ_j C[i, j] · stream j`,
     /// `C` the `[streams, streams]` coefficients the first stream routes to.
-    pub(in crate::model) fn predict(&self, streams: &[Tensor], pass: Pass) -> candle_core::Result<Vec<Tensor>> {
+    pub(in crate::model) fn predict(
+        &self,
+        streams: &[Tensor],
+        pass: Pass,
+    ) -> candle_core::Result<Vec<Tensor>> {
         let (batch, sequence, _) = streams[0].dims3()?;
         let coefficients = self
             .prediction
-            .forward(&self.modalities(&streams[0], pass)?.to_dtype(streams[0].dtype())?)?
+            .forward(
+                &self
+                    .modalities(&streams[0], pass)?
+                    .to_dtype(streams[0].dtype())?,
+            )?
             .reshape((batch, sequence, self.streams, self.streams))?;
         (0..self.streams)
             .map(|row| {
                 let mut prediction = streams[row].clone();
                 for (column, stream) in streams.iter().enumerate() {
-                    let coefficient = coefficients.narrow(2, row, 1)?.narrow(3, column, 1)?.squeeze(3)?;
+                    let coefficient = coefficients
+                        .narrow(2, row, 1)?
+                        .narrow(3, column, 1)?
+                        .squeeze(3)?;
                     prediction = (prediction + stream.broadcast_mul(&coefficient)?)?;
                 }
                 Ok(prediction)
@@ -83,12 +96,17 @@ impl AltUp {
         pass: Pass,
     ) -> candle_core::Result<Vec<Tensor>> {
         let innovation = (activated - &predictions[0])?;
-        let coefficients =
-            (self.correction.forward(&self.modalities(activated, pass)?.to_dtype(activated.dtype())?)? + 1.0)?;
+        let coefficients = (self.correction.forward(
+            &self
+                .modalities(activated, pass)?
+                .to_dtype(activated.dtype())?,
+        )? + 1.0)?;
         predictions
             .iter()
             .enumerate()
-            .map(|(stream, prediction)| prediction + innovation.broadcast_mul(&coefficients.narrow(2, stream, 1)?)?)
+            .map(|(stream, prediction)| {
+                prediction + innovation.broadcast_mul(&coefficients.narrow(2, stream, 1)?)?
+            })
             .collect()
     }
 
@@ -108,7 +126,12 @@ pub(in crate::model) struct Laurel {
 }
 
 impl Laurel {
-    pub(in crate::model) fn load(builder: VarBuilder<'_>, hidden: usize, rank: usize, norms: NormSpec) -> candle_core::Result<Self> {
+    pub(in crate::model) fn load(
+        builder: VarBuilder<'_>,
+        hidden: usize,
+        rank: usize,
+        norms: NormSpec,
+    ) -> candle_core::Result<Self> {
         Ok(Self {
             left: linear_no_bias(hidden, rank, builder.pp("linear_left"))?,
             right: linear_no_bias(rank, hidden, builder.pp("linear_right"))?,
@@ -116,8 +139,15 @@ impl Laurel {
         })
     }
 
-    pub(in crate::model) fn forward(&self, normed: &Tensor, pass: Pass) -> candle_core::Result<Tensor> {
-        normed + self.norm.forward(&self.right.forward(&self.left.forward(normed)?)?, pass)?
+    pub(in crate::model) fn forward(
+        &self,
+        normed: &Tensor,
+        pass: Pass,
+    ) -> candle_core::Result<Tensor> {
+        normed
+            + self
+                .norm
+                .forward(&self.right.forward(&self.left.forward(normed)?)?, pass)?
     }
 }
 
@@ -132,21 +162,37 @@ pub(in crate::model) struct StreamProjections {
 }
 
 impl StreamProjections {
-    pub(in crate::model) fn load(builder: &VarBuilder<'_>, hidden: usize, streams: usize) -> candle_core::Result<Self> {
+    pub(in crate::model) fn load(
+        builder: &VarBuilder<'_>,
+        hidden: usize,
+        streams: usize,
+    ) -> candle_core::Result<Self> {
         let all = |name: &str| -> candle_core::Result<Vec<Linear>> {
-            (0..streams - 1).map(|index| linear_no_bias(hidden, hidden, builder.pp(format!("{name}.{index}")))).collect()
+            (0..streams - 1)
+                .map(|index| linear_no_bias(hidden, hidden, builder.pp(format!("{name}.{index}"))))
+                .collect()
         };
-        Ok(Self { into: all("altup_projections")?, out: all("altup_unembed_projections")? })
+        Ok(Self {
+            into: all("altup_projections")?,
+            out: all("altup_unembed_projections")?,
+        })
     }
 
     /// The extra streams the first one starts beside.
     pub(in crate::model) fn spread(&self, first: &Tensor) -> candle_core::Result<Vec<Tensor>> {
-        self.into.iter().map(|projection| matched(&projection.forward(first)?, first)).collect()
+        self.into
+            .iter()
+            .map(|projection| matched(&projection.forward(first)?, first))
+            .collect()
     }
 
     /// The streams joined back into one: each extra stream projected out and
     /// matched to the first's magnitude, then all averaged.
-    pub(in crate::model) fn join(&self, first: &Tensor, rest: &[Tensor]) -> candle_core::Result<Tensor> {
+    pub(in crate::model) fn join(
+        &self,
+        first: &Tensor,
+        rest: &[Tensor],
+    ) -> candle_core::Result<Tensor> {
         let mut sum = first.clone();
         for (projection, stream) in self.out.iter().zip(rest) {
             sum = (sum + matched(&projection.forward(stream)?, first)?)?;
@@ -158,6 +204,10 @@ impl StreamProjections {
 /// `stream` rescaled to the root-mean-square of `target`, per position.
 fn matched(stream: &Tensor, target: &Tensor) -> candle_core::Result<Tensor> {
     let target_magnitude = target.sqr()?.mean_keepdim(D::Minus1)?.sqrt()?;
-    let magnitude = stream.sqr()?.mean_keepdim(D::Minus1)?.maximum(MAGNITUDE_FLOOR)?.sqrt()?;
+    let magnitude = stream
+        .sqr()?
+        .mean_keepdim(D::Minus1)?
+        .maximum(MAGNITUDE_FLOOR)?
+        .sqrt()?;
     stream.broadcast_mul(&(target_magnitude / magnitude)?)
 }

@@ -10,15 +10,15 @@
 
 use std::collections::HashMap;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::artifact::ContrastivePair;
 
 mod fingerprint;
 
-pub use fingerprint::{hamming, normalize, simhash64};
 use fingerprint::SIMHASH_BIT_WIDTH;
+pub use fingerprint::{hamming, normalize, simhash64};
 
 /// Knobs for fingerprinting and bucketing.
 #[derive(Debug, Clone, Copy)]
@@ -38,7 +38,12 @@ impl DedupeOptions {
     /// Wisent's `SimHashDeduper`, which this module ports: single words, and
     /// four characters for CJK/Kana/Hangul text.
     pub fn new(threshold_bits: u32, num_bands: u32) -> Self {
-        Self { threshold_bits, word_ngram: 1, char_ngram: 4, num_bands }
+        Self {
+            threshold_bits,
+            word_ngram: 1,
+            char_ngram: 4,
+            num_bands,
+        }
     }
 }
 
@@ -96,8 +101,11 @@ impl Index {
         options.validate()?;
         let band_size = SIMHASH_BIT_WIDTH / options.num_bands;
         // A single band covers the whole word, and `1u64 << 64` would overflow.
-        let band_mask =
-            if band_size >= SIMHASH_BIT_WIDTH { u64::MAX } else { (1u64 << band_size) - 1 };
+        let band_mask = if band_size >= SIMHASH_BIT_WIDTH {
+            u64::MAX
+        } else {
+            (1u64 << band_size) - 1
+        };
         Ok(Self {
             options,
             band_size,
@@ -114,8 +122,10 @@ impl Index {
             return Some(Duplicate::Exact { of: *of });
         }
 
-        let fingerprint =
-            simhash64(&[pair.positive.as_str(), pair.negative.as_str()], self.options);
+        let fingerprint = simhash64(
+            &[pair.positive.as_str(), pair.negative.as_str()],
+            self.options,
+        );
 
         let mut candidates: Vec<usize> = Vec::new();
         for band in 0..self.options.num_bands as usize {
@@ -140,7 +150,10 @@ impl Index {
         for candidate in candidates {
             let distance = hamming(fingerprint, self.fingerprints[candidate]);
             if distance <= self.options.threshold_bits {
-                return Some(Duplicate::Near { of: candidate, distance });
+                return Some(Duplicate::Near {
+                    of: candidate,
+                    distance,
+                });
             }
         }
 
@@ -174,7 +187,10 @@ impl Index {
 /// Indices carried in the returned `Duplicate`s are positions in `pairs`, not
 /// positions in the kept subsequence, so a report can point straight at the
 /// offending entry the operator is looking at.
-pub fn classify(pairs: &[ContrastivePair], options: DedupeOptions) -> Result<Vec<Option<Duplicate>>> {
+pub fn classify(
+    pairs: &[ContrastivePair],
+    options: DedupeOptions,
+) -> Result<Vec<Option<Duplicate>>> {
     let mut index = Index::new(options)?;
     let mut kept_to_input: Vec<usize> = Vec::with_capacity(pairs.len());
     let mut verdicts: Vec<Option<Duplicate>> = Vec::with_capacity(pairs.len());
@@ -185,13 +201,17 @@ pub fn classify(pairs: &[ContrastivePair], options: DedupeOptions) -> Result<Vec
                 verdicts.push(None);
             }
             Some(Duplicate::Exact { of }) => {
-                verdicts.push(Some(Duplicate::Exact { of: kept_to_input[of] }));
+                verdicts.push(Some(Duplicate::Exact {
+                    of: kept_to_input[of],
+                }));
             }
             Some(Duplicate::Near { of, distance }) => {
-                verdicts.push(Some(Duplicate::Near { of: kept_to_input[of], distance }));
+                verdicts.push(Some(Duplicate::Near {
+                    of: kept_to_input[of],
+                    distance,
+                }));
             }
         }
     }
     Ok(verdicts)
 }
-

@@ -62,7 +62,13 @@ impl Compressor {
             key_value: linear_no_bias(hidden, series * width, builder.pp("kv_proj"))?,
             gate: linear_no_bias(hidden, series * width, builder.pp("gate_proj"))?,
             position_bias: builder.get((rate, series * width), "position_bias")?,
-            norm: NormSpec { kind: NormKind::Rms, eps, offset: false, groups: 1 }.load(width, builder.pp("kv_norm"))?,
+            norm: NormSpec {
+                kind: NormKind::Rms,
+                eps,
+                offset: false,
+                groups: 1,
+            }
+            .load(width, builder.pp("kv_norm"))?,
             rate,
             width,
             overlapping,
@@ -88,12 +94,20 @@ impl Compressor {
         let key_value = self.key_value.forward(hidden)?;
         let gate = self.gate.forward(hidden)?;
         let keep = cache.use_kv_cache;
-        let mut state = if keep { cache.compressors.remove(&(layer, self.slot)).unwrap_or_default() } else { CompressorState::default() };
+        let mut state = if keep {
+            cache
+                .compressors
+                .remove(&(layer, self.slot))
+                .unwrap_or_default()
+        } else {
+            CompressorState::default()
+        };
         let first = state.count * self.rate;
         let (key_value, gate) = match state.pending.take() {
-            Some((pending_kv, pending_gate)) => {
-                (Tensor::cat(&[&pending_kv, &key_value], 1)?, Tensor::cat(&[&pending_gate, &gate], 1)?)
-            }
+            Some((pending_kv, pending_gate)) => (
+                Tensor::cat(&[&pending_kv, &key_value], 1)?,
+                Tensor::cat(&[&pending_gate, &gate], 1)?,
+            ),
             None => (key_value, gate),
         };
         let length = key_value.dim(1)?;
@@ -109,16 +123,22 @@ impl Compressor {
             let series = if self.overlapping { 2 } else { 1 };
             let shape = (batch, windows, self.rate, series * self.width);
             let key_value = key_value.narrow(1, 0, usable)?.reshape(shape)?;
-            let gate = gate.narrow(1, 0, usable)?.reshape(shape)?.broadcast_add(&self.position_bias)?;
+            let gate = gate
+                .narrow(1, 0, usable)?
+                .reshape(shape)?
+                .broadcast_add(&self.position_bias)?;
             let (slots_kv, slots_gate) = if self.overlapping {
                 self.overlapped(&key_value, &gate, keep.then_some(&mut state))?
             } else {
                 (key_value, gate)
             };
-            let weights = candle_nn::ops::softmax(&slots_gate.to_dtype(DType::F32)?, 2)?.to_dtype(slots_kv.dtype())?;
+            let weights = candle_nn::ops::softmax(&slots_gate.to_dtype(DType::F32)?, 2)?
+                .to_dtype(slots_kv.dtype())?;
             let pooled = (slots_kv * weights)?.sum(2)?;
             let normed = self.norm.forward(&pooled, pass)?;
-            let positions: Vec<usize> = (0..windows).map(|window| first + window * self.rate).collect();
+            let positions: Vec<usize> = (0..windows)
+                .map(|window| first + window * self.rate)
+                .collect();
             let (cos, sin) = rotation.angles_at(&positions)?;
             let rotated = rotate_trailing(&normed.unsqueeze(1)?, &cos, &sin, pass)?.squeeze(1)?;
             state.entries = Some(match state.entries.take() {
@@ -155,8 +175,14 @@ impl Compressor {
             Some(state) => {
                 let prior = state.overlap.take();
                 state.overlap = Some((
-                    first_kv.narrow(1, windows - 1, 1)?.squeeze(1)?.contiguous()?,
-                    first_gate.narrow(1, windows - 1, 1)?.squeeze(1)?.contiguous()?,
+                    first_kv
+                        .narrow(1, windows - 1, 1)?
+                        .squeeze(1)?
+                        .contiguous()?,
+                    first_gate
+                        .narrow(1, windows - 1, 1)?
+                        .squeeze(1)?
+                        .contiguous()?,
                 ));
                 prior
             }
@@ -165,8 +191,17 @@ impl Compressor {
         let (prior_kv, prior_gate) = match prior {
             Some((kv, gate)) => (kv.unsqueeze(1)?, gate.unsqueeze(1)?),
             None => (
-                Tensor::zeros((batch, 1, rate, width), key_value.dtype(), key_value.device())?,
-                Tensor::full(f32::NEG_INFINITY, (batch, 1, rate, width), key_value.device())?.to_dtype(gate.dtype())?,
+                Tensor::zeros(
+                    (batch, 1, rate, width),
+                    key_value.dtype(),
+                    key_value.device(),
+                )?,
+                Tensor::full(
+                    f32::NEG_INFINITY,
+                    (batch, 1, rate, width),
+                    key_value.device(),
+                )?
+                .to_dtype(gate.dtype())?,
             ),
         };
         let earlier = |prior: &Tensor, series: &Tensor| -> candle_core::Result<Tensor> {
@@ -176,8 +211,20 @@ impl Compressor {
                 Ok(prior.clone())
             }
         };
-        let slots_kv = Tensor::cat(&[&earlier(&prior_kv, &first_kv)?, &key_value.narrow(3, width, width)?], 2)?;
-        let slots_gate = Tensor::cat(&[&earlier(&prior_gate, &first_gate)?, &gate.narrow(3, width, width)?], 2)?;
+        let slots_kv = Tensor::cat(
+            &[
+                &earlier(&prior_kv, &first_kv)?,
+                &key_value.narrow(3, width, width)?,
+            ],
+            2,
+        )?;
+        let slots_gate = Tensor::cat(
+            &[
+                &earlier(&prior_gate, &first_gate)?,
+                &gate.narrow(3, width, width)?,
+            ],
+            2,
+        )?;
         Ok((slots_kv.contiguous()?, slots_gate.contiguous()?))
     }
 }
@@ -245,7 +292,10 @@ impl Indexer {
         pass: Pass,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, _) = hidden.dims3()?;
-        let keys = self.compressor.entries(hidden, layer, cache, rotation, pass)?.to_dtype(DType::F32)?;
+        let keys = self
+            .compressor
+            .entries(hidden, layer, cache, rotation, pass)?
+            .to_dtype(DType::F32)?;
         let entries = keys.dim(1)?;
         let rate = self.compressor.rate();
         let device = hidden.device();
@@ -258,11 +308,14 @@ impl Indexer {
         let (cos, sin) = rotation.angles(index_pos, sequence)?;
         let queries = rotate_trailing(&queries, &cos, &sin, pass)?.to_dtype(DType::F32)?;
         // `[batch, heads, sequence, entries]`, then summed over heads.
-        let scores = (queries.broadcast_matmul(&keys.unsqueeze(1)?.transpose(2, 3)?.contiguous()?)?.relu()?
+        let scores = (queries
+            .broadcast_matmul(&keys.unsqueeze(1)?.transpose(2, 3)?.contiguous()?)?
+            .relu()?
             / (self.head_dim as f64).sqrt())?;
-        let weights = (self.weights.forward(hidden)?.to_dtype(DType::F32)? / (self.heads as f64).sqrt())?
-            .transpose(1, 2)?
-            .unsqueeze(3)?;
+        let weights = (self.weights.forward(hidden)?.to_dtype(DType::F32)?
+            / (self.heads as f64).sqrt())?
+        .transpose(1, 2)?
+        .unsqueeze(3)?;
         let scores = scores.broadcast_mul(&weights)?.sum(1)?.to_vec3::<f32>()?;
         let mut hidden_entries = vec![1u8; batch * sequence * entries];
         for (row_batch, rows) in scores.iter().enumerate() {

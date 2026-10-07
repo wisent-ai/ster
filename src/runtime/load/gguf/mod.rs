@@ -23,8 +23,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use candle_core::{quantized::gguf_file, DType, Device, Shape, Tensor};
-use candle_nn::{var_builder::SimpleBackend, Init};
+use candle_core::{DType, Device, Shape, Tensor, quantized::gguf_file};
+use candle_nn::{Init, var_builder::SimpleBackend};
 
 /// One GGUF file, its header read once, its tensors read on demand.
 pub struct GgufWeights {
@@ -35,28 +35,49 @@ pub struct GgufWeights {
 
 impl GgufWeights {
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("failed to open GGUF weights {}", path.display()))?;
+        let file = File::open(path)
+            .with_context(|| format!("failed to open GGUF weights {}", path.display()))?;
         let mut reader = BufReader::new(file);
         let content = gguf_file::Content::read(&mut reader)
             .with_context(|| format!("{} is not a GGUF file Ster can read", path.display()))?;
-        Ok(Self { path: path.to_owned(), content, reader: Mutex::new(reader) })
+        Ok(Self {
+            path: path.to_owned(),
+            content,
+            reader: Mutex::new(reader),
+        })
     }
 
     /// The tensor the decoder names `name`, dequantized on `device`.
     fn load(&self, name: &str, device: &Device) -> candle_core::Result<Tensor> {
         let stored = stored_name(name);
         let Ok(mut reader) = self.reader.lock() else {
-            candle_core::bail!("the reader of {} was left broken by an earlier failed read", self.path.display());
+            candle_core::bail!(
+                "the reader of {} was left broken by an earlier failed read",
+                self.path.display()
+            );
         };
-        let quantized = self.content.tensor(&mut *reader, &stored, device).map_err(|error| {
-            candle_core::Error::Msg(format!("{} holds no {stored} (asked for as {name}): {error}", self.path.display()))
-        })?;
+        let quantized = self
+            .content
+            .tensor(&mut *reader, &stored, device)
+            .map_err(|error| {
+                candle_core::Error::Msg(format!(
+                    "{} holds no {stored} (asked for as {name}): {error}",
+                    self.path.display()
+                ))
+            })?;
         quantized.dequantize(device)
     }
 }
 
 impl SimpleBackend for GgufWeights {
-    fn get(&self, shape: Shape, name: &str, _: Init, dtype: DType, device: &Device) -> candle_core::Result<Tensor> {
+    fn get(
+        &self,
+        shape: Shape,
+        name: &str,
+        _: Init,
+        dtype: DType,
+        device: &Device,
+    ) -> candle_core::Result<Tensor> {
         let tensor = self.load(name, device)?;
         if tensor.shape() != &shape {
             candle_core::bail!(
@@ -70,7 +91,12 @@ impl SimpleBackend for GgufWeights {
         tensor.to_dtype(dtype)
     }
 
-    fn get_unchecked(&self, name: &str, dtype: DType, device: &Device) -> candle_core::Result<Tensor> {
+    fn get_unchecked(
+        &self,
+        name: &str,
+        dtype: DType,
+        device: &Device,
+    ) -> candle_core::Result<Tensor> {
         self.load(name, device)?.to_dtype(dtype)
     }
 
@@ -88,7 +114,10 @@ pub fn stored_name(name: &str) -> String {
         "lm_head.weight" => return "output.weight".to_owned(),
         _ => {}
     }
-    let Some((layer, inner)) = name.strip_prefix("model.layers.").and_then(|rest| rest.split_once('.')) else {
+    let Some((layer, inner)) = name
+        .strip_prefix("model.layers.")
+        .and_then(|rest| rest.split_once('.'))
+    else {
         return name.to_owned();
     };
     let Some((module, leaf)) = inner.rsplit_once('.') else {

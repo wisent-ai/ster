@@ -84,15 +84,29 @@ pub struct BipoReport {
 /// Refuses a run whose settings cannot train: each refusal names its setting.
 fn validate(options: &BipoOptions, layers: usize) -> Result<()> {
     if options.layer >= layers {
-        bail!("layer {} is outside the model's {layers} layers", options.layer);
+        bail!(
+            "layer {} is outside the model's {layers} layers",
+            options.layer
+        );
     }
-    for (name, value) in [("beta", options.beta), ("strength", options.strength), ("learning rate", options.learning_rate)] {
+    for (name, value) in [
+        ("beta", options.beta),
+        ("strength", options.strength),
+        ("learning rate", options.learning_rate),
+    ] {
         // A normal, positive float: finite, not zero, not subnormal.
         if !(value.is_normal() && value.is_sign_positive()) {
-            bail!("bi-directional preference optimization requires a finite {name} above zero, not {value}");
+            bail!(
+                "bi-directional preference optimization requires a finite {name} above zero, not {value}"
+            );
         }
     }
-    for (name, value) in [("epochs", options.epochs), ("accumulation", options.accumulation), ("batch size", options.batch), ("sequence limit", options.max_sequence)] {
+    for (name, value) in [
+        ("epochs", options.epochs),
+        ("accumulation", options.accumulation),
+        ("batch size", options.batch),
+        ("sequence limit", options.max_sequence),
+    ] {
         if NonZeroUsize::new(value).is_none() {
             bail!("bi-directional preference optimization requires {name} of at least one");
         }
@@ -103,7 +117,11 @@ fn validate(options: &BipoOptions, layers: usize) -> Result<()> {
 /// Learns the steering vector at `options.layer` that makes the model prefer
 /// each pair's chosen side when added and its rejected side when subtracted,
 /// and returns it as a steering artifact with the run's report.
-pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result<(SteeringArtifact, BipoReport)> {
+pub fn bipo(
+    runtime: &Runtime,
+    pairs: &PairSet,
+    options: &BipoOptions,
+) -> Result<(SteeringArtifact, BipoReport)> {
     validate(options, runtime.layer_count())?;
     pairs.validate(&pair_set_label(pairs))?;
     let mut encoded: Vec<Scored> = encode_pairs(runtime, pairs, options.max_sequence)?
@@ -114,7 +132,8 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
     reference_scores(runtime, &mut encoded, options.batch)?;
 
     let hidden = runtime.hidden_size();
-    let vector = Var::zeros(hidden, DType::F32, runtime.device()).context("failed to create the steering vector")?;
+    let vector = Var::zeros(hidden, DType::F32, runtime.device())
+        .context("failed to create the steering vector")?;
     let mut optimizer = AdamW::new(
         vec![vector.clone()],
         ParamsAdamW {
@@ -129,7 +148,8 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
         .map(|scored| scored.pair.chosen.len().max(scored.pair.rejected.len()))
         .collect();
     let scale = batch::divisor(options.batch, options.accumulation);
-    let steps_per_epoch = batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation);
+    let steps_per_epoch =
+        batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation);
     let total_steps = steps_per_epoch * options.epochs;
     let mut order: Vec<usize> = encoded.iter().enumerate().map(|(slot, _)| slot).collect();
     let mut losses: Vec<f32> = Vec::with_capacity(total_steps);
@@ -141,9 +161,17 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
         let mut rng = StdRng::seed_from_u64(options.seed + epoch as u64);
         order.shuffle(&mut rng);
         let mut summary = Summary::default();
-        for (index, plan) in batch::plan(&order, &lengths, options.batch, options.accumulation).into_iter().enumerate() {
+        for (index, plan) in batch::plan(&order, &lengths, options.batch, options.accumulation)
+            .into_iter()
+            .enumerate()
+        {
             let step = epoch * steps_per_epoch + index;
-            optimizer.set_learning_rate(schedule(options.learning_rate, step, total_steps, options.warmup_steps));
+            optimizer.set_learning_rate(schedule(
+                options.learning_rate,
+                step,
+                total_steps,
+                options.warmup_steps,
+            ));
             let mut summed: Option<Tensor> = None;
             let mut pair_losses: Vec<f64> = Vec::with_capacity(plan.units);
             for forward in &plan.forwards {
@@ -153,21 +181,42 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
                 } else {
                     (options.strength, options.beta)
                 };
-                let steering = SteeringPlan::from_tensors([(options.layer, vector.as_tensor().clone())], strength, hidden, runtime.dtype())?;
+                let steering = SteeringPlan::from_tensors(
+                    [(options.layer, vector.as_tensor().clone())],
+                    strength,
+                    hidden,
+                    runtime.dtype(),
+                )?;
                 let mut rows: Vec<&[u32]> = Vec::new();
                 for &slot in forward {
                     rows.push(&encoded[slot].pair.chosen);
                     rows.push(&encoded[slot].pair.rejected);
                 }
                 let sides = rows.len() / forward.len();
-                let read = batch::read_rows(&rows, options.batch, sides, |pass| runtime.forward_steered_rows(pass, &steering))?;
+                let read = batch::read_rows(&rows, options.batch, sides, |pass| {
+                    runtime.forward_steered_rows(pass, &steering)
+                })?;
                 for (&slot, logits) in forward.iter().zip(read.chunks_exact(sides)) {
                     let [chosen, rejected] = logits else {
-                        bail!("a preference pair read back {} rows instead of a chosen and a rejected side", logits.len());
+                        bail!(
+                            "a preference pair read back {} rows instead of a chosen and a rejected side",
+                            logits.len()
+                        );
                     };
                     let scored = &encoded[slot];
-                    let value = step_loss(runtime, scored, chosen, rejected, Preference { loss: options.loss, beta })
-                        .with_context(|| format!("pair {} produced no usable loss", scored.pair.index))?;
+                    let value = step_loss(
+                        runtime,
+                        scored,
+                        chosen,
+                        rejected,
+                        Preference {
+                            loss: options.loss,
+                            beta,
+                        },
+                    )
+                    .with_context(|| {
+                        format!("pair {} produced no usable loss", scored.pair.index)
+                    })?;
                     pair_losses.push(value.loss);
                     summary.record(&value);
                     let scaled = (value.tensor / scale)?;
@@ -180,7 +229,9 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
             let Some(summed) = summed else {
                 bail!("an accumulation group contained no pairs");
             };
-            optimizer.backward_step(&summed).context("failed to backpropagate the accumulated loss")?;
+            optimizer
+                .backward_step(&summed)
+                .context("failed to backpropagate the accumulated loss")?;
             let mean = (pair_losses.iter().sum::<f64>() / plan.units as f64) as f32;
             losses.push(mean);
             workflow::progress(format!(

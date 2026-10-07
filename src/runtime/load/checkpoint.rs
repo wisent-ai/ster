@@ -48,18 +48,19 @@ impl Checkpoint {
     pub fn resolve(model: &str, revision: Option<&str>) -> Result<Self> {
         let local = Path::new(model);
         if local.is_dir() {
-            let layout = if !local.join("config.json").is_file() && local.join("params.json").is_file() {
-                Layout::Mistral
-            } else if local_safetensors(local, Layout::Transformers)?.is_empty()
-                && !local_safetensors(local, Layout::Gguf)?.is_empty()
-            {
-                // A llama.cpp fine-tune beside its base model's config and
-                // tokenizer: no safetensors, one GGUF file (more than one is
-                // refused with their count when the weights are mapped).
-                Layout::Gguf
-            } else {
-                Layout::Transformers
-            };
+            let layout =
+                if !local.join("config.json").is_file() && local.join("params.json").is_file() {
+                    Layout::Mistral
+                } else if local_safetensors(local, Layout::Transformers)?.is_empty()
+                    && !local_safetensors(local, Layout::Gguf)?.is_empty()
+                {
+                    // A llama.cpp fine-tune beside its base model's config and
+                    // tokenizer: no safetensors, one GGUF file (more than one is
+                    // refused with their count when the weights are mapped).
+                    Layout::Gguf
+                } else {
+                    Layout::Transformers
+                };
             let config = local.join(layout.config_file());
             let tokenizer = local.join(tokenizer_file(|name| local.join(name).is_file()));
             let weights = local_safetensors(local, layout)?;
@@ -153,8 +154,12 @@ impl Checkpoint {
         // Mistral's own format leaves the end-of-sequence token to its
         // tokenizer.
         if let (Layout::Mistral, Some(object)) = (self.layout, raw.as_object_mut()) {
-            if let Some(eos) = mistral::end_of_sequence(self.tokenizer_config.as_deref(), &self.tokenizer) {
-                object.entry("eos_token_id").or_insert(serde_json::Value::from(eos));
+            if let Some(eos) =
+                mistral::end_of_sequence(self.tokenizer_config.as_deref(), &self.tokenizer)
+            {
+                object
+                    .entry("eos_token_id")
+                    .or_insert(serde_json::Value::from(eos));
             }
         }
         let (model_type, found) = supported(&raw, &self.config)?;
@@ -203,10 +208,16 @@ impl Checkpoint {
 fn supported(raw: &serde_json::Value, path: &Path) -> Result<(String, Family)> {
     let model_type = match raw.get("model_type").and_then(|value| value.as_str()) {
         Some(stated) => stated.to_owned(),
-        None => Family::of_architectures(raw).map(Family::model_type).unwrap_or("").to_owned(),
+        None => Family::of_architectures(raw)
+            .map(Family::model_type)
+            .unwrap_or("")
+            .to_owned(),
     };
     let Some(found) = Family::of(&model_type) else {
-        let families: Vec<&str> = Family::ALL.iter().map(|family| family.model_type()).collect();
+        let families: Vec<&str> = Family::ALL
+            .iter()
+            .map(|family| family.model_type())
+            .collect();
         bail!(
             "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face checkpoint whose model_type is one of {}",
             families.join(", ")
@@ -233,17 +244,26 @@ fn published(info: &hf_hub::api::RepoInfo, name: &str) -> bool {
 /// `tiktoken.model`, else the `tokenizer.json` whose absence is then
 /// reported.
 fn tokenizer_file(exists: impl Fn(&str) -> bool) -> &'static str {
-    ["tokenizer.json", "tokenizer.jsonl", "tokenizer.model", "tiktoken.model"]
-        .into_iter()
-        .find(|name| exists(name))
-        .unwrap_or("tokenizer.json")
+    [
+        "tokenizer.json",
+        "tokenizer.jsonl",
+        "tokenizer.model",
+        "tiktoken.model",
+    ]
+    .into_iter()
+    .find(|name| exists(name))
+    .unwrap_or("tokenizer.json")
 }
 
 fn local_safetensors(root: &Path, layout: Layout) -> Result<Vec<PathBuf>> {
     let mut weights = Vec::new();
     for entry in fs::read_dir(root).with_context(|| format!("failed to list {}", root.display()))? {
         let path = entry?.path();
-        if path.file_name().and_then(|name| name.to_str()).is_some_and(|name| layout.owns(name)) {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| layout.owns(name))
+        {
             weights.push(path);
         }
     }

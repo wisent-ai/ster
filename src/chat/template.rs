@@ -1,16 +1,12 @@
 //! A checkpoint's chat template: reading it out of the files the checkpoint
 //! publishes, compiling it once, and rendering turns through it.
 
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::Path,
-};
+use std::{collections::BTreeMap, fs, path::Path};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use minijinja::Environment;
 
-use super::{jinja, Message};
+use super::{Message, jinja};
 
 /// The name the template is compiled under; it appears in engine errors, so it
 /// reads as the thing the operator would name.
@@ -37,11 +33,14 @@ impl Template {
     /// where newer repositories do. The standalone file wins when both exist,
     /// which is the precedence `transformers` itself uses — a repository that
     /// carries both left the JSON copy behind for older readers.
-    pub fn load(tokenizer_config: Option<&Path>, chat_template: Option<&Path>) -> Result<Option<Self>> {
+    pub fn load(
+        tokenizer_config: Option<&Path>,
+        chat_template: Option<&Path>,
+    ) -> Result<Option<Self>> {
         let config = match tokenizer_config {
             Some(path) => {
-                let bytes = fs::read(path)
-                    .with_context(|| format!("failed to read {}", path.display()))?;
+                let bytes =
+                    fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
                 let value: serde_json::Value = serde_json::from_slice(&bytes)
                     .with_context(|| format!("invalid tokenizer config {}", path.display()))?;
                 Some(value)
@@ -61,8 +60,12 @@ impl Template {
         let Some(source) = source else {
             return Ok(None);
         };
-        let bos_token = config.as_ref().and_then(|config| token_text(config, "bos_token"));
-        let eos_token = config.as_ref().and_then(|config| token_text(config, "eos_token"));
+        let bos_token = config
+            .as_ref()
+            .and_then(|config| token_text(config, "bos_token"));
+        let eos_token = config
+            .as_ref()
+            .and_then(|config| token_text(config, "eos_token"));
         // A template that writes `bos_token` into its output and is handed no
         // value for it renders a sequence with no begin-of-sequence marker at
         // all — every token shifted one position off what the model was
@@ -70,7 +73,9 @@ impl Template {
         // silent failure this module exists to prevent, so it is a refusal.
         for (name, value) in [("bos_token", &bos_token), ("eos_token", &eos_token)] {
             if value.is_none() && source.contains(name) {
-                bail!("this model's chat template uses {name}, but its tokenizer config declares none");
+                bail!(
+                    "this model's chat template uses {name}, but its tokenizer config declares none"
+                );
             }
         }
         let mut environment = Environment::new();
@@ -80,8 +85,14 @@ impl Template {
         environment.set_unknown_method_callback(jinja::python_method);
         environment
             .add_template_owned(TEMPLATE_NAME, jinja::plain_generation_blocks(source))
-            .map_err(|error| anyhow::anyhow!("this model's chat template does not parse: {error}"))?;
-        Ok(Some(Self { environment, bos_token, eos_token }))
+            .map_err(|error| {
+                anyhow::anyhow!("this model's chat template does not parse: {error}")
+            })?;
+        Ok(Some(Self {
+            environment,
+            bos_token,
+            eos_token,
+        }))
     }
 
     /// Renders `messages`, optionally followed by the marker that opens the
@@ -89,9 +100,7 @@ impl Template {
     pub fn render(&self, messages: &[Message<'_>], add_generation_prompt: bool) -> Result<String> {
         let messages: Vec<BTreeMap<&str, &str>> = messages
             .iter()
-            .map(|message| {
-                BTreeMap::from([("role", message.role), ("content", message.content)])
-            })
+            .map(|message| BTreeMap::from([("role", message.role), ("content", message.content)]))
             .collect();
         let context = minijinja::context! {
             messages => messages,
@@ -102,7 +111,9 @@ impl Template {
         self.environment
             .get_template(TEMPLATE_NAME)
             .and_then(|template| template.render(context))
-            .map_err(|error| anyhow::anyhow!("this model's chat template failed to render: {error}"))
+            .map_err(|error| {
+                anyhow::anyhow!("this model's chat template failed to render: {error}")
+            })
     }
 
     /// One prompt as a user turn, ending exactly where the assistant's own
@@ -111,7 +122,13 @@ impl Template {
         if prompt.trim().is_empty() {
             bail!("prompt must not be empty");
         }
-        self.render(&[Message { role: "user", content: prompt }], true)
+        self.render(
+            &[Message {
+                role: "user",
+                content: prompt,
+            }],
+            true,
+        )
     }
 
     /// A training example split at the boundary the loss starts from: the
@@ -139,15 +156,31 @@ impl Template {
     ///
     /// `system`, when given, opens the conversation as the system turn the
     /// model is served with; it is part of the prompt side and never a target.
-    pub fn example(&self, system: Option<&str>, prompt: &str, completion: &str) -> Result<(String, String)> {
+    pub fn example(
+        &self,
+        system: Option<&str>,
+        prompt: &str,
+        completion: &str,
+    ) -> Result<(String, String)> {
         if prompt.trim().is_empty() {
             bail!("prompt must not be empty");
         }
-        let mut turns: Vec<Message<'_>> =
-            system.map(|content| Message { role: "system", content }).into_iter().collect();
-        turns.push(Message { role: "user", content: prompt });
+        let mut turns: Vec<Message<'_>> = system
+            .map(|content| Message {
+                role: "system",
+                content,
+            })
+            .into_iter()
+            .collect();
+        turns.push(Message {
+            role: "user",
+            content: prompt,
+        });
         let head = self.render(&turns, true)?;
-        turns.push(Message { role: "assistant", content: completion });
+        turns.push(Message {
+            role: "assistant",
+            content: completion,
+        });
         let full = self.render(&turns, false)?;
         let agreed = common_prefix(&head, &full);
         // A template may put the content through `trim`, so the exact text is
@@ -183,7 +216,13 @@ impl Template {
         if text.trim().is_empty() {
             bail!("prompt must not be empty");
         }
-        self.render(&[Message { role: "assistant", content: text }], false)
+        self.render(
+            &[Message {
+                role: "assistant",
+                content: text,
+            }],
+            false,
+        )
     }
 }
 
@@ -230,9 +269,7 @@ fn embedded_template(config: &serde_json::Value) -> Result<Option<String>> {
 fn token_text(config: &serde_json::Value, key: &str) -> Option<String> {
     match config.get(key)? {
         serde_json::Value::String(text) => Some(text.clone()),
-        serde_json::Value::Object(object) => {
-            object.get("content")?.as_str().map(str::to_owned)
-        }
+        serde_json::Value::Object(object) => object.get("content")?.as_str().map(str::to_owned),
         _ => None,
     }
 }

@@ -89,7 +89,12 @@ pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<()> {
         seed,
     } = args;
     let pairs = resolve_pairs(pairs)?;
-    let mut runtime = Runtime::load_at(&model.model, model.revision.as_deref(), model.device, precision)?;
+    let mut runtime = Runtime::load_at(
+        &model.model,
+        model.revision.as_deref(),
+        model.device,
+        precision,
+    )?;
     let chat = runtime.set_chat_template(chat_template)?;
     let pair_set = PairSet::load(&pairs)?;
     let options = BipoOptions {

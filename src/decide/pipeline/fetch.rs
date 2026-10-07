@@ -5,12 +5,12 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    decide::{Example, ExampleSet, Question, Request, MAX_OPTIONS},
+    decide::{Example, ExampleSet, MAX_OPTIONS, Question, Request},
     workflow,
 };
 
@@ -71,7 +71,11 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
     let mut offset = options.offset;
     while rows < options.count {
         let length = PAGE.min(options.count - rows);
-        workflow::progress(format!("fetching rows {offset}..{} of {}", offset + length, options.dataset));
+        workflow::progress(format!(
+            "fetching rows {offset}..{} of {}",
+            offset + length,
+            options.dataset
+        ));
         let page = read_page(&agent, options, offset, length)?;
         if names.is_none() {
             names = Some(class_names(&page, &options.label_field)?);
@@ -84,9 +88,16 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
         for entry in &page_rows {
             rows += 1;
             let row = &entry["row"];
-            let text = row[&options.text_field].as_str().unwrap_or_default().trim().to_owned();
+            let text = row[&options.text_field]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
             let label = match &row[&options.label_field] {
-                Value::Number(number) => number.as_u64().and_then(|index| classes.get(index as usize)).cloned(),
+                Value::Number(number) => number
+                    .as_u64()
+                    .and_then(|index| classes.get(index as usize))
+                    .cloned(),
                 Value::String(name) => classes.contains(name).then(|| name.clone()),
                 _ => None,
             };
@@ -102,7 +113,10 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
         }
     }
     if examples.is_empty() {
-        bail!("no row of {} carried both a text and a known label", options.dataset);
+        bail!(
+            "no row of {} carried both a text and a known label",
+            options.dataset
+        );
     }
     let set = ExampleSet { examples };
     set.validate()?;
@@ -115,17 +129,27 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
         rows,
         examples: set.examples.len(),
         skipped,
-        label_counts: set.examples.iter().fold(BTreeMap::new(), |mut counts, example| {
-            for answer in example.answers.values() {
-                *counts.entry(answer.as_str().unwrap_or_default().to_owned()).or_insert(0) += 1;
-            }
-            counts
-        }),
+        label_counts: set
+            .examples
+            .iter()
+            .fold(BTreeMap::new(), |mut counts, example| {
+                for answer in example.answers.values() {
+                    *counts
+                        .entry(answer.as_str().unwrap_or_default().to_owned())
+                        .or_insert(0) += 1;
+                }
+                counts
+            }),
     };
     Ok((set, report))
 }
 
-fn read_page(agent: &ureq::Agent, options: &FetchOptions, offset: usize, length: usize) -> Result<Value> {
+fn read_page(
+    agent: &ureq::Agent,
+    options: &FetchOptions,
+    offset: usize,
+    length: usize,
+) -> Result<Value> {
     let response = agent
         .get(ROWS_URL)
         .query("dataset", &options.dataset)
@@ -142,39 +166,61 @@ fn read_page(agent: &ureq::Agent, options: &FetchOptions, offset: usize, length:
                 .ok()
                 .and_then(|value| value["error"].as_str().map(str::to_owned))
                 .unwrap_or(body);
-            bail!("the datasets server answered {status} for {}: {sentence}", options.dataset);
+            bail!(
+                "the datasets server answered {status} for {}: {sentence}",
+                options.dataset
+            );
         }
         Err(ureq::Error::Transport(transport)) => {
             bail!("failed to reach the datasets server: {}", transport.kind());
         }
     };
-    let text = response.into_string().context("failed to read the datasets server's page")?;
+    let text = response
+        .into_string()
+        .context("failed to read the datasets server's page")?;
     serde_json::from_str(&text).context("the datasets server returned a page that is not JSON")
 }
 
 /// The class names of `label_field`, from the page's feature list.
 fn class_names(page: &Value, label_field: &str) -> Result<Vec<String>> {
-    let features = page["features"].as_array().context("the page carries no features")?;
+    let features = page["features"]
+        .as_array()
+        .context("the page carries no features")?;
     let feature = features
         .iter()
         .find(|feature| feature["name"].as_str() == Some(label_field))
         .with_context(|| format!("the dataset has no column named '{label_field}'"))?;
     let names: Vec<String> = feature["type"]["names"]
         .as_array()
-        .map(|names| names.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
     if names.len() < 2 {
         bail!("column '{label_field}' is not a class label with at least two named classes");
     }
     if names.len() > MAX_OPTIONS {
-        bail!("column '{label_field}' has {} classes; Ster labels at most {MAX_OPTIONS}", names.len());
+        bail!(
+            "column '{label_field}' has {} classes; Ster labels at most {MAX_OPTIONS}",
+            names.len()
+        );
     }
     Ok(names)
 }
 
 fn example(options: &FetchOptions, classes: &[String], text: String, label: String) -> Example {
-    let criteria: BTreeMap<String, Value> = classes.iter().map(|name| (name.clone(), Value::Null)).collect();
-    let question = Question::Choice { instructions: Value::String(options.instructions.clone()), criteria };
+    let criteria: BTreeMap<String, Value> = classes
+        .iter()
+        .map(|name| (name.clone(), Value::Null))
+        .collect();
+    let question = Question::Choice {
+        instructions: Value::String(options.instructions.clone()),
+        criteria,
+    };
     Example {
         request: Request {
             state: Value::String(text),

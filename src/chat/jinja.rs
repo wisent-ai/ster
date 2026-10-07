@@ -6,8 +6,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use minijinja::{
-    value::{from_args, ValueKind},
     Error, ErrorKind, State, Value,
+    value::{ValueKind, from_args},
 };
 
 /// The source with Transformers' `{% generation %}` … `{% endgeneration %}`
@@ -16,10 +16,14 @@ use minijinja::{
 /// `AssistantTracker` extension), written as an always-true `if` so stock
 /// Jinja renders them the same, whitespace control included.
 pub(super) fn plain_generation_blocks(source: String) -> String {
-    let opening = regex::Regex::new(r"\{%(-?)\s*generation\s*(-?)%\}").expect("a fixed pattern compiles");
-    let closing = regex::Regex::new(r"\{%(-?)\s*endgeneration\s*(-?)%\}").expect("a fixed pattern compiles");
+    let opening =
+        regex::Regex::new(r"\{%(-?)\s*generation\s*(-?)%\}").expect("a fixed pattern compiles");
+    let closing =
+        regex::Regex::new(r"\{%(-?)\s*endgeneration\s*(-?)%\}").expect("a fixed pattern compiles");
     let source = opening.replace_all(&source, "{%${1} if true ${2}%}");
-    closing.replace_all(&source, "{%${1} endif ${2}%}").into_owned()
+    closing
+        .replace_all(&source, "{%${1} endif ${2}%}")
+        .into_owned()
 }
 
 /// Hugging Face's own template globals, which stock Jinja does not have.
@@ -41,7 +45,12 @@ pub(super) fn raise_exception(message: String) -> Result<Value, Error> {
 pub(super) fn strftime_now(format: String) -> Result<Value, Error> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::new(ErrorKind::InvalidOperation, "the system clock is before 1970"))?
+        .map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidOperation,
+                "the system clock is before 1970",
+            )
+        })?
         .as_secs() as i64;
     let days = seconds.div_euclid(86_400);
     let time = seconds.rem_euclid(86_400);
@@ -50,11 +59,27 @@ pub(super) fn strftime_now(format: String) -> Result<Value, Error> {
     let weekday = (days + 4).rem_euclid(7) as usize;
     let year_day = days - days_from_civil(year, 1, 1) + 1;
     const MONTHS: [&str; 12] = [
-        "January", "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
     const DAYS: [&str; 7] = [
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
     ];
     let mut out = String::with_capacity(format.len() + 8);
     let mut chars = format.chars();
@@ -71,7 +96,10 @@ pub(super) fn strftime_now(format: String) -> Result<Value, Error> {
             other => (true, other),
         };
         let Some(directive) = directive else {
-            return Err(Error::new(ErrorKind::InvalidOperation, "strftime format ends in a bare %"));
+            return Err(Error::new(
+                ErrorKind::InvalidOperation,
+                "strftime format ends in a bare %",
+            ));
         };
         match directive {
             '%' => out.push('%'),
@@ -99,7 +127,11 @@ pub(super) fn strftime_now(format: String) -> Result<Value, Error> {
 }
 
 fn two(value: i64, pad: bool) -> String {
-    if pad { format!("{value:02}") } else { value.to_string() }
+    if pad {
+        format!("{value:02}")
+    } else {
+        value.to_string()
+    }
 }
 
 // The calendar arithmetic below counts years in 400-year eras of 146 097 days, starting each year in
@@ -115,23 +147,40 @@ const MONTHS_FROM_MARCH_TO_DECEMBER: i64 = 10;
 /// algorithm, exact for every year this will ever be handed.
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let shifted = days + EPOCH_OFFSET_DAYS;
-    let era = if shifted >= 0 { shifted } else { shifted - (DAYS_PER_ERA - 1) } / DAYS_PER_ERA;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - (DAYS_PER_ERA - 1)
+    } / DAYS_PER_ERA;
     let day_of_era = shifted - era * DAYS_PER_ERA;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / (DAYS_PER_ERA - 1)) / 365;
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524
+        - day_of_era / (DAYS_PER_ERA - 1))
+        / 365;
     let year = year_of_era + era * YEARS_PER_ERA;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let shifted_month = (5 * day_of_year + 2) / 153;
     let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
-    let month = if shifted_month < MONTHS_FROM_MARCH_TO_DECEMBER { shifted_month + MARCH } else { shifted_month - (MONTHS_PER_YEAR - MARCH) } as u32;
+    let month = if shifted_month < MONTHS_FROM_MARCH_TO_DECEMBER {
+        shifted_month + MARCH
+    } else {
+        shifted_month - (MONTHS_PER_YEAR - MARCH)
+    } as u32;
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - (YEARS_PER_ERA - 1) } / YEARS_PER_ERA;
+    let era = if year >= 0 {
+        year
+    } else {
+        year - (YEARS_PER_ERA - 1)
+    } / YEARS_PER_ERA;
     let year_of_era = year - era * YEARS_PER_ERA;
-    let shifted_month = if month > 2 { month as i64 - MARCH } else { month as i64 + (MONTHS_PER_YEAR - MARCH) };
+    let shifted_month = if month > 2 {
+        month as i64 - MARCH
+    } else {
+        month as i64 + (MONTHS_PER_YEAR - MARCH)
+    };
     let day_of_year = (153 * shifted_month + 2) / 5 + day as i64 - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * DAYS_PER_ERA + day_of_era - EPOCH_OFFSET_DAYS
@@ -155,9 +204,12 @@ pub(super) fn python_method(
     let unknown = || Error::from(ErrorKind::UnknownMethod);
     if let Some(text) = value.as_str() {
         let argument = |index: usize| -> Result<&str, Error> {
-            args.get(index)
-                .and_then(Value::as_str)
-                .ok_or_else(|| Error::new(ErrorKind::InvalidOperation, format!("{method} expects a string argument")))
+            args.get(index).and_then(Value::as_str).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidOperation,
+                    format!("{method} expects a string argument"),
+                )
+            })
         };
         return match method {
             "strip" | "lstrip" | "rstrip" => {
@@ -185,10 +237,12 @@ pub(super) fn python_method(
             "startswith" => Ok(Value::from(text.starts_with(argument(0)?))),
             "endswith" => Ok(Value::from(text.ends_with(argument(0)?))),
             "replace" => Ok(Value::from(text.replace(argument(0)?, argument(1)?))),
-            "split" => Ok(Value::from_iter(match args.first().and_then(Value::as_str) {
-                Some(separator) => text.split(separator).map(Value::from).collect::<Vec<_>>(),
-                None => text.split_whitespace().map(Value::from).collect(),
-            })),
+            "split" => Ok(Value::from_iter(
+                match args.first().and_then(Value::as_str) {
+                    Some(separator) => text.split(separator).map(Value::from).collect::<Vec<_>>(),
+                    None => text.split_whitespace().map(Value::from).collect(),
+                },
+            )),
             "splitlines" => Ok(Value::from_iter(text.lines().map(Value::from))),
             _ => Err(unknown()),
         };
@@ -235,7 +289,10 @@ fn title_case(text: &str) -> String {
 fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars.flat_map(char::to_lowercase)).collect(),
+        Some(first) => first
+            .to_uppercase()
+            .chain(chars.flat_map(char::to_lowercase))
+            .collect(),
         None => String::new(),
     }
 }

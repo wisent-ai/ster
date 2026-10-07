@@ -8,7 +8,7 @@ use serde::Serialize;
 use super::{
     calibration::RAW_TEMPERATURE,
     prompt::LABELS,
-    request::{text_of, Question},
+    request::{Question, text_of},
 };
 
 /// The confidence of a distribution with nothing to be uncertain between: a
@@ -19,14 +19,20 @@ const CERTAIN: f64 = 1.0;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Answer {
-    Choice { choice: String, probabilities: BTreeMap<String, f64>, confidence: f64 },
+    Choice {
+        choice: String,
+        probabilities: BTreeMap<String, f64>,
+        confidence: f64,
+    },
     Score {
         score: f64,
         legend: BTreeMap<usize, String>,
         probabilities: BTreeMap<usize, f64>,
         confidence: f64,
     },
-    Noul { noul: f64 },
+    Noul {
+        noul: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,7 +55,11 @@ impl Usage {
     /// The cost of `forward_passes` sequences before any of them has run;
     /// `input_tokens` is added as each row is read.
     pub fn for_passes(forward_passes: usize) -> Self {
-        Self { input_tokens: 0, forward_passes, output_tokens: GENERATED_TOKENS }
+        Self {
+            input_tokens: 0,
+            forward_passes,
+            output_tokens: GENERATED_TOKENS,
+        }
     }
 }
 
@@ -97,7 +107,12 @@ impl Explanation {
             .zip(logits.per_order())
             .map(|(order, probabilities)| Order {
                 letters: (0..order.len())
-                    .map(|option| LABELS[order.iter().position(|&shown| shown == option).expect("every option is shown once")])
+                    .map(|option| {
+                        LABELS[order
+                            .iter()
+                            .position(|&shown| shown == option)
+                            .expect("every option is shown once")]
+                    })
                     .collect(),
                 probabilities,
             })
@@ -143,7 +158,11 @@ impl QuestionLogits {
     /// `temperature`, through one softmax. Temperature scales the whole
     /// distribution's sharpness and never changes which option wins.
     pub fn probabilities(&self, temperature: f64) -> Vec<f64> {
-        let scores: Vec<f32> = self.log_scores().into_iter().map(|value| value as f32).collect();
+        let scores: Vec<f32> = self
+            .log_scores()
+            .into_iter()
+            .map(|value| value as f32)
+            .collect();
         softmax(&scores, temperature)
     }
 
@@ -151,12 +170,18 @@ impl QuestionLogits {
     /// canonical option order, which is what an operator reads to see how
     /// much of an answer was the letter and how much was the content.
     pub fn per_order(&self) -> Vec<Vec<f64>> {
-        self.rows.iter().map(|row| softmax(row, RAW_TEMPERATURE)).collect()
+        self.rows
+            .iter()
+            .map(|row| softmax(row, RAW_TEMPERATURE))
+            .collect()
     }
 }
 
 pub fn softmax(logits: &[f32], temperature: f64) -> Vec<f64> {
-    log_softmax_at(logits, temperature).into_iter().map(f64::exp).collect()
+    log_softmax_at(logits, temperature)
+        .into_iter()
+        .map(f64::exp)
+        .collect()
 }
 
 fn log_softmax(logits: &[f32]) -> Vec<f64> {
@@ -164,7 +189,10 @@ fn log_softmax(logits: &[f32]) -> Vec<f64> {
 }
 
 fn log_softmax_at(logits: &[f32], temperature: f64) -> Vec<f64> {
-    let scaled: Vec<f64> = logits.iter().map(|&value| f64::from(value) / temperature).collect();
+    let scaled: Vec<f64> = logits
+        .iter()
+        .map(|&value| f64::from(value) / temperature)
+        .collect();
     let max = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let total: f64 = scaled.iter().map(|value| (value - max).exp()).sum();
     let normalizer = max + total.ln();
@@ -176,7 +204,11 @@ fn log_softmax_at(logits: &[f32], temperature: f64) -> Vec<f64> {
 pub fn log_sum_exp(values: impl Iterator<Item = f32>) -> f32 {
     let values: Vec<f32> = values.collect();
     let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    max + values.iter().map(|value| (value - max).exp()).sum::<f32>().ln()
+    max + values
+        .iter()
+        .map(|value| (value - max).exp())
+        .sum::<f32>()
+        .ln()
 }
 
 /// How peaked a distribution is, from `0` (uniform) to `1` (all on one
@@ -199,7 +231,13 @@ pub fn argmax(probabilities: &[f64]) -> usize {
     probabilities
         .iter()
         .enumerate()
-        .fold(0, |best, (index, &value)| if value > probabilities[best] { index } else { best })
+        .fold(0, |best, (index, &value)| {
+            if value > probabilities[best] {
+                index
+            } else {
+                best
+            }
+        })
 }
 
 impl Answer {
@@ -211,7 +249,11 @@ impl Answer {
                 let choice = names[argmax(&probabilities)].clone();
                 let confidence = confidence(&probabilities);
                 let probabilities = names.into_iter().cloned().zip(probabilities).collect();
-                Self::Choice { choice, probabilities, confidence }
+                Self::Choice {
+                    choice,
+                    probabilities,
+                    confidence,
+                }
             }
             Question::Score { criteria, .. } => {
                 let score = probabilities
@@ -226,9 +268,16 @@ impl Answer {
                     .map(|(level, description)| (level, text_of(description)))
                     .collect();
                 let probabilities = probabilities.into_iter().enumerate().collect();
-                Self::Score { score, legend, probabilities, confidence }
+                Self::Score {
+                    score,
+                    legend,
+                    probabilities,
+                    confidence,
+                }
             }
-            Question::Noul { .. } => Self::Noul { noul: probabilities[0] },
+            Question::Noul { .. } => Self::Noul {
+                noul: probabilities[0],
+            },
         }
     }
 }

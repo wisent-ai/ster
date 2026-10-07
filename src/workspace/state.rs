@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub(super) const WORKSPACE_SCHEMA: &str = "ster.workspace.v1";
@@ -60,8 +60,12 @@ pub(super) fn load_state() -> Result<WorkspaceState> {
 pub(super) fn save_state(state: &WorkspaceState) -> Result<()> {
     let path = state_path()?;
     let parent = path.parent().context("Ster workspace path has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create Ster workspace directory {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create Ster workspace directory {}",
+            parent.display()
+        )
+    })?;
     let mut bytes = serde_json::to_vec_pretty(state)?;
     bytes.push(b'\n');
     atomic_write(&path, &bytes)
@@ -97,8 +101,10 @@ fn state_path() -> Result<PathBuf> {
     if let Some(root) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(root).join("ster/workspace.json"));
     }
-    let home = std::env::var_os("HOME").filter(|value| !value.is_empty()).context(
-        "HOME is unavailable; set HOME or XDG_DATA_HOME before importing a Ster pair set",
-    )?;
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .context(
+            "HOME is unavailable; set HOME or XDG_DATA_HOME before importing a Ster pair set",
+        )?;
     Ok(PathBuf::from(home).join(".local/share/ster/workspace.json"))
 }

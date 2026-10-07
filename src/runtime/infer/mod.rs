@@ -1,12 +1,12 @@
 //! Running the model: one forward pass per shape a caller needs, and the
 //! hidden states a steering direction is read from.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::Tensor;
 
 use crate::model::{Cache, ForwardOutput, Mode, Route, SteeringPlan};
 
-use super::{validate_layers, Runtime};
+use super::{Runtime, validate_layers};
 
 mod generate;
 
@@ -15,7 +15,11 @@ pub use generate::{Completion, GenerationOptions};
 impl Runtime {
     /// One differentiable forward over `ids`, returning logits `[1, n, vocab]`.
     pub fn forward_train(&self, ids: &[u32]) -> Result<Tensor> {
-        self.logits(ids, Mode::TRAIN, "a training forward pass needs at least one token")
+        self.logits(
+            ids,
+            Mode::TRAIN,
+            "a training forward pass needs at least one token",
+        )
     }
 
     /// One non-differentiable forward over `ids`, returning logits `[1, n, vocab]`.
@@ -32,7 +36,11 @@ impl Runtime {
     /// the adapter variables would record a graph whose rope, softmax and
     /// norm nodes have no backward pass. That caller wants `forward_train`.
     pub fn forward_scored(&self, ids: &[u32], route: Route) -> Result<Tensor> {
-        self.logits(ids, Mode::score(route), "a scoring forward pass needs at least one token")
+        self.logits(
+            ids,
+            Mode::score(route),
+            "a scoring forward pass needs at least one token",
+        )
     }
 
     /// One differentiable forward over `ids`, returning the residual stream
@@ -44,7 +52,11 @@ impl Runtime {
     /// only to throw the result away.
     pub fn forward_hidden(&self, ids: &[u32]) -> Result<Tensor> {
         Ok(self
-            .forward_once(ids, Mode::REWARD, "a reward forward pass needs at least one token")?
+            .forward_once(
+                ids,
+                Mode::REWARD,
+                "a reward forward pass needs at least one token",
+            )?
             .hidden)
     }
 
@@ -56,7 +68,11 @@ impl Runtime {
     /// kernels and records nothing.
     pub fn forward_hidden_scored(&self, ids: &[u32]) -> Result<Tensor> {
         Ok(self
-            .forward_once(ids, Mode::JUDGE, "a scoring forward pass needs at least one token")?
+            .forward_once(
+                ids,
+                Mode::JUDGE,
+                "a scoring forward pass needs at least one token",
+            )?
             .hidden)
     }
 
@@ -68,29 +84,47 @@ impl Runtime {
     /// own length, which is the same offset convention a single-sequence
     /// forward already hands back.
     pub fn forward_train_rows(&self, rows: &[&[u32]]) -> Result<Tensor> {
-        self.row_logits(rows, Mode::TRAIN, "a training forward pass needs at least one token")
+        self.row_logits(
+            rows,
+            Mode::TRAIN,
+            "a training forward pass needs at least one token",
+        )
     }
 
     /// The same differentiable batched pass with `steering` added to the
     /// residual stream, so a loss over the logits reaches a steering vector
     /// the plan was built over (`SteeringPlan::from_tensors`).
     pub fn forward_steered_rows(&self, rows: &[&[u32]], steering: &SteeringPlan) -> Result<Tensor> {
-        self.forward_rows(rows, Some(steering), Mode::TRAIN, "a training forward pass needs at least one token")?
-            .logits
-            .context("this forward pass was asked for no vocabulary projection")
+        self.forward_rows(
+            rows,
+            Some(steering),
+            Mode::TRAIN,
+            "a training forward pass needs at least one token",
+        )?
+        .logits
+        .context("this forward pass was asked for no vocabulary projection")
     }
 
     /// The same batched pass with no autograd tape, routed through the policy
     /// or the frozen reference exactly as `forward_scored` routes one.
     pub fn forward_scored_rows(&self, rows: &[&[u32]], route: Route) -> Result<Tensor> {
-        self.row_logits(rows, Mode::score(route), "a scoring forward pass needs at least one token")
+        self.row_logits(
+            rows,
+            Mode::score(route),
+            "a scoring forward pass needs at least one token",
+        )
     }
 
     /// The batched residual stream a reward head reads, `[batch, width,
     /// hidden]`, with no vocabulary projection.
     pub fn forward_hidden_rows(&self, rows: &[&[u32]]) -> Result<Tensor> {
         Ok(self
-            .forward_rows(rows, None, Mode::REWARD, "a reward forward pass needs at least one token")?
+            .forward_rows(
+                rows,
+                None,
+                Mode::REWARD,
+                "a reward forward pass needs at least one token",
+            )?
             .hidden)
     }
 
@@ -110,7 +144,11 @@ impl Runtime {
     /// An empty prefix is allowed and means every suffix is a whole prompt;
     /// an empty suffix is not, since there would be no position of its own
     /// to read.
-    pub fn next_token_logits_after(&self, prefix: &[u32], suffixes: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
+    pub fn next_token_logits_after(
+        &self,
+        prefix: &[u32],
+        suffixes: &[&[u32]],
+    ) -> Result<Vec<Vec<f32>>> {
         if suffixes.is_empty() || suffixes.iter().any(|suffix| suffix.is_empty()) {
             bail!("a decision forward pass needs at least one token");
         }
@@ -173,7 +211,9 @@ impl Runtime {
         }
         let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
         let mut cache = self.cache(false)?;
-        Ok(self.model.forward_pass(&input, 0, &mut cache, None, &[], mode)?)
+        Ok(self
+            .model
+            .forward_pass(&input, 0, &mut cache, None, &[], mode)?)
     }
 
     /// The body every batched forward shares: many right-padded sequences, no
@@ -184,7 +224,13 @@ impl Runtime {
     /// places. Filler is token zero, which is never read — `forward_batch`
     /// masks every padded key out of every real query — and is chosen only
     /// because it is the one id every vocabulary has.
-    fn forward_rows(&self, rows: &[&[u32]], steering: Option<&SteeringPlan>, mode: Mode, empty: &str) -> Result<ForwardOutput> {
+    fn forward_rows(
+        &self,
+        rows: &[&[u32]],
+        steering: Option<&SteeringPlan>,
+        mode: Mode,
+        empty: &str,
+    ) -> Result<ForwardOutput> {
         if rows.is_empty() || rows.iter().any(|row| row.is_empty()) {
             bail!("{empty}");
         }
@@ -197,7 +243,9 @@ impl Runtime {
         }
         let input = Tensor::from_vec(flat, (rows.len(), width), &self.device)?;
         let mut cache = self.cache(false)?;
-        Ok(self.model.forward_batch(&input, &lengths, &mut cache, steering, mode)?)
+        Ok(self
+            .model
+            .forward_batch(&input, &lengths, &mut cache, steering, mode)?)
     }
 
     /// The hidden states one prompt produces at the requested layers.

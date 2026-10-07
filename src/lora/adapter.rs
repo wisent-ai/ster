@@ -3,12 +3,12 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Init, VarMap};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
-use super::{artifact::Artifact, Spec, Target, Widths};
+use super::{Spec, Target, Widths, artifact::Artifact};
 
 /// `count` draws from a normal distribution with mean zero and the given
 /// standard deviation, taken from `rng` so the sequence is the seed's.
@@ -45,7 +45,10 @@ impl Adapter {
     /// The on-disk names of the two factors. This string is the artifact's contract.
     pub fn tensor_names(layer: usize, target: Target) -> (String, String) {
         let target = target.name();
-        (format!("layers.{layer}.{target}.a"), format!("layers.{layer}.{target}.b"))
+        (
+            format!("layers.{layer}.{target}.a"),
+            format!("layers.{layer}.{target}.b"),
+        )
     }
 
     /// The low-rank update for `xs`, shaped `[batch, sequence, in]`.
@@ -125,7 +128,9 @@ impl Adapters {
         dtype: DType,
     ) -> Result<Self> {
         if spec.layers.is_empty() {
-            bail!("adapter spec names no layers; resolve it against the model before building adapters");
+            bail!(
+                "adapter spec names no layers; resolve it against the model before building adapters"
+            );
         }
         if spec.targets.is_empty() {
             bail!(
@@ -149,7 +154,13 @@ impl Adapters {
                 let (outputs, inputs) = target.widths(widths);
                 let (a_name, b_name) = Adapter::tensor_names(layer, *target);
                 let a = varmap
-                    .get((spec.rank, inputs), &a_name, Init::Const(0.0), dtype, device)
+                    .get(
+                        (spec.rank, inputs),
+                        &a_name,
+                        Init::Const(0.0),
+                        dtype,
+                        device,
+                    )
                     .with_context(|| format!("failed to create adapter tensor {a_name}"))?;
                 let draw = normal_draw(&mut rng, spec.rank * inputs, 1.0 / spec.rank as f64);
                 let seeded = Tensor::from_vec(draw, (spec.rank, inputs), device)
@@ -164,7 +175,13 @@ impl Adapters {
                     .set(&seeded)
                     .with_context(|| format!("failed to initialise adapter tensor {a_name}"))?;
                 let b = varmap
-                    .get((outputs, spec.rank), &b_name, Init::Const(0.0), dtype, device)
+                    .get(
+                        (outputs, spec.rank),
+                        &b_name,
+                        Init::Const(0.0),
+                        dtype,
+                        device,
+                    )
                     .with_context(|| format!("failed to create adapter tensor {b_name}"))?;
                 entries.insert((layer, *target), Adapter { a, b, scale });
             }

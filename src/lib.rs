@@ -15,15 +15,17 @@ pub mod workspace;
 pub use artifact::{ContrastivePair, PairSet, SteeringArtifact};
 pub use chat::{Choice as ChatChoice, Status as ChatStatus};
 pub use decide::{
-    Calibration, Options as DecideOptions, Request as DecideRequest, Response as DecideResponse, RAW_TEMPERATURE,
+    Calibration, Options as DecideOptions, RAW_TEMPERATURE, Request as DecideRequest,
+    Response as DecideResponse,
 };
 pub use lora::{Spec as LoraSpec, Target as LoraTarget};
 pub use pairs::{SetReport, SynthesisOptions, SynthesisReport};
 pub use representation::TrainingMethod;
 pub use runtime::{Checkpoint, Completion, DeviceChoice, GenerationOptions, Precision, Runtime};
 pub use tune::{
-    BipoOptions, BipoReport, DecideReport, DecideTuneOptions, DpoLoss, DpoOptions, DpoReport, EvaluateOptions, EvaluateReport,
-    EvaluatedExample, ExampleSet, GrpoIteration, GrpoOptions, GrpoReport, MergeReport, Reward,
-    RewardHead, RewardModel, RewardOptions, RewardReport, SftOptions, SftReport, UserSimulator,
+    BipoOptions, BipoReport, DecideReport, DecideTuneOptions, DpoLoss, DpoOptions, DpoReport,
+    EvaluateOptions, EvaluateReport, EvaluatedExample, ExampleSet, GrpoIteration, GrpoOptions,
+    GrpoReport, MergeReport, Reward, RewardHead, RewardModel, RewardOptions, RewardReport,
+    SftOptions, SftReport, UserSimulator,
 };
 pub use workflow::PromptSet;

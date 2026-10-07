@@ -131,8 +131,8 @@ impl Gateway {
         let text = response
             .into_string()
             .context("failed to read Brama's completion body")?;
-        let value: Value =
-            serde_json::from_str(&text).context("Brama returned a completion body that is not JSON")?;
+        let value: Value = serde_json::from_str(&text)
+            .context("Brama returned a completion body that is not JSON")?;
         let content = value
             .get("choices")
             .and_then(Value::as_array)
@@ -184,10 +184,7 @@ fn is_loopback(base: &str) -> bool {
     let Some(authority) = base.strip_prefix("http://") else {
         return false;
     };
-    let host = authority
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
+    let host = authority.split(['/', '?', '#']).next().unwrap_or_default();
     // Strip the port, but not the colons inside a bracketed IPv6 literal.
     let host = match host.strip_prefix('[') {
         Some(rest) => rest.split(']').next().unwrap_or_default(),
@@ -223,15 +220,13 @@ fn bearer() -> Result<String> {
 /// host, and saying so plus a bounded excerpt is more useful than pretending
 /// the envelope was there.
 fn refusal(status: u16, body: &str) -> anyhow::Error {
-    let message = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
+    let message = serde_json::from_str::<Value>(body).ok().and_then(|value| {
+        value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
     match message {
         Some(message) => anyhow::anyhow!("brama refused the completion: {status} {message}"),
         None => anyhow::anyhow!(

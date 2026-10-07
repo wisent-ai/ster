@@ -8,10 +8,10 @@
 
 use std::{fs, path::Path};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use super::answer::{argmax, QuestionLogits};
+use super::answer::{QuestionLogits, argmax};
 
 pub const SCHEMA: &str = "ster-calibration/1";
 
@@ -75,13 +75,19 @@ impl Calibration {
             );
         }
         if !(calibration.temperature.is_finite() && calibration.temperature > 0.0) {
-            bail!("calibration {} has a temperature that is not a positive number", path.display());
+            bail!(
+                "calibration {} has a temperature that is not a positive number",
+                path.display()
+            );
         }
         Ok(calibration)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
@@ -188,7 +194,11 @@ fn golden_section(at: &impl Fn(f64) -> f64, mut low: f64, mut high: f64) -> f64 
 fn nll(labelled: &[Labelled], temperature: f64) -> f64 {
     labelled
         .iter()
-        .map(|item| -item.logits.probabilities(temperature)[item.truth].max(f64::MIN_POSITIVE).ln())
+        .map(|item| {
+            -item.logits.probabilities(temperature)[item.truth]
+                .max(f64::MIN_POSITIVE)
+                .ln()
+        })
         .sum::<f64>()
         / labelled.len() as f64
 }
@@ -218,5 +228,11 @@ pub fn metrics(labelled: &[Labelled], temperature: f64, ece_bins: usize) -> Metr
             (count / total) * (confidence_sum / count - hit_sum / count).abs()
         })
         .sum();
-    Metrics { temperature, nll: nll(labelled, temperature), ece, ece_bins: Some(ece_bins), accuracy: correct as f64 / total }
+    Metrics {
+        temperature,
+        nll: nll(labelled, temperature),
+        ece,
+        ece_bins: Some(ece_bins),
+        accuracy: correct as f64 / total,
+    }
 }

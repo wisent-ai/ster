@@ -62,7 +62,10 @@ impl PairSet {
         self.validate(&path.display().to_string())?;
         // `Path::parent` yields an empty path for a bare file name; creating that
         // directory fails, so only create a parent that actually names one.
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }

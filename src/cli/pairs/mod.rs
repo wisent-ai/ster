@@ -221,9 +221,13 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
                 },
             }))?;
         }
-        PairsCommand::Edit { pairs: file, index, positive, negative, trait_name } => {
-            edit::run(&file, index, positive, negative, trait_name)?
-        }
+        PairsCommand::Edit {
+            pairs: file,
+            index,
+            positive,
+            negative,
+            trait_name,
+        } => edit::run(&file, index, positive, negative, trait_name)?,
         PairsCommand::Synthesize {
             generator,
             generator_model,

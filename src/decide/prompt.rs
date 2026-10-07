@@ -3,7 +3,7 @@
 //! a language model prefers some letters over others regardless of what they
 //! label, and showing every option under every letter is what cancels that.
 
-use super::request::{text_of, Question, Request};
+use super::request::{Question, Request, text_of};
 
 /// The answer letters, in the order options are listed.
 pub const LABELS: [&str; 26] = [
@@ -19,15 +19,28 @@ pub const LABELS: [&str; 26] = [
 /// shifts, and one shift is a single pass with no correction. There are never
 /// more shifts than options, since the shifts repeat after that.
 pub fn orders(count: usize, requested: usize) -> Vec<Vec<usize>> {
-    let shifts = if requested == 0 { count } else { requested.min(count) };
+    let shifts = if requested == 0 {
+        count
+    } else {
+        requested.min(count)
+    };
     (0..shifts)
-        .map(|shift| (0..count).map(|position| (position + shift) % count).collect())
+        .map(|shift| {
+            (0..count)
+                .map(|position| (position + shift) % count)
+                .collect()
+        })
         .collect()
 }
 
 /// The prompt for one question with its options in `order`: position `j`
 /// under letter `j` shows option `order[j]`.
-pub fn render(request: &Request, question: &Question, options: &[String], order: &[usize]) -> String {
+pub fn render(
+    request: &Request,
+    question: &Question,
+    options: &[String],
+    order: &[usize],
+) -> String {
     let mut prompt = String::with_capacity(512);
     prompt.push_str(
         "Decide the question below about the state. Reply with the letter of the one option that fits best.\n\nState:\n",

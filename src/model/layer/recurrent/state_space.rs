@@ -61,18 +61,42 @@ impl StateSpace {
         } = *spec;
         let convolution = builder.pp("conv1d");
         Ok(Self {
-            input: projection(hidden, 2 * inner, projection_bias, false, builder.pp("in_proj"))?,
-            convolution: convolution.get((inner, 1, kernel), "weight")?.reshape((inner, kernel))?,
+            input: projection(
+                hidden,
+                2 * inner,
+                projection_bias,
+                false,
+                builder.pp("in_proj"),
+            )?,
+            convolution: convolution
+                .get((inner, 1, kernel), "weight")?
+                .reshape((inner, kernel))?,
             convolution_bias: if convolution_bias {
                 Some(convolution.get(inner, "bias")?)
             } else {
                 None
             },
-            parameters: projection(inner, step_rank + 2 * state, false, false, builder.pp("x_proj"))?,
+            parameters: projection(
+                inner,
+                step_rank + 2 * state,
+                false,
+                false,
+                builder.pp("x_proj"),
+            )?,
             step: projection(step_rank, inner, true, false, builder.pp("dt_proj"))?,
-            decay: builder.get((inner, state), "A_log")?.to_dtype(DType::F32)?.exp()?.neg()?,
+            decay: builder
+                .get((inner, state), "A_log")?
+                .to_dtype(DType::F32)?
+                .exp()?
+                .neg()?,
             skip: builder.get(inner, "D")?.to_dtype(DType::F32)?,
-            output: projection(inner, hidden, projection_bias, false, builder.pp("out_proj"))?,
+            output: projection(
+                inner,
+                hidden,
+                projection_bias,
+                false,
+                builder.pp("out_proj"),
+            )?,
             parameter_norms: match spec.parameter_norm {
                 ParameterNorm::Weighted(norm_eps) => {
                     let norms = NormSpec {
@@ -120,10 +144,17 @@ impl StateSpace {
 
         // The causal depthwise convolution, continued from the inputs the
         // previous call ended on.
-        let saved = if cache.use_kv_cache { cache.states[layer].clone() } else { None };
+        let saved = if cache.use_kv_cache {
+            cache.states[layer].clone()
+        } else {
+            None
+        };
         let (history, scan) = match saved {
             Some((history, scan)) => (Some(history), scan),
-            None => (None, Tensor::zeros((batch, inner, state), DType::F32, hidden.device())?),
+            None => (
+                None,
+                Tensor::zeros((batch, inner, state), DType::F32, hidden.device())?,
+            ),
         };
         let (convolved, next_history) = causal_convolution(
             &stream.transpose(1, 2)?,
@@ -132,10 +163,15 @@ impl StateSpace {
             self.convolution_bias.as_ref(),
             kernel,
         )?;
-        let stream = candle_nn::ops::silu(&convolved)?.transpose(1, 2)?.contiguous()?;
+        let stream = candle_nn::ops::silu(&convolved)?
+            .transpose(1, 2)?
+            .contiguous()?;
 
         // The step size and the input and output matrices, per token.
-        let parameters = self.parameters.forward(&stream.to_dtype(dtype)?)?.to_dtype(DType::F32)?;
+        let parameters = self
+            .parameters
+            .forward(&stream.to_dtype(dtype)?)?
+            .to_dtype(DType::F32)?;
         let normalise = |part: Tensor, which: usize| -> candle_core::Result<Tensor> {
             match (parameter_norm, &self.parameter_norms) {
                 (ParameterNorm::Bare(eps), _) => bare_rms(&part, eps),
@@ -150,7 +186,12 @@ impl StateSpace {
         let step = normalise(parameters.narrow(2, 0, step_rank)?, 0)?;
         let input_matrix = normalise(parameters.narrow(2, step_rank, state)?, 1)?;
         let output_matrix = normalise(parameters.narrow(2, step_rank + state, state)?, 2)?;
-        let step = softplus(&self.step.forward(&step.to_dtype(dtype)?)?.to_dtype(DType::F32)?)?;
+        let step = softplus(
+            &self
+                .step
+                .forward(&step.to_dtype(dtype)?)?
+                .to_dtype(DType::F32)?,
+        )?;
 
         // The selective scan: state ← exp(Δ·A) ⊙ state + Δ·B·x, y = state·C + D·x.
         let mut scan = scan;
@@ -203,7 +244,8 @@ pub(super) fn causal_convolution(
         convolved = (convolved + padded.narrow(2, tap, sequence)?.broadcast_mul(&weight)?)?;
     }
     if let Some(bias) = bias {
-        convolved = convolved.broadcast_add(&bias.to_dtype(DType::F32)?.reshape((1, channels, 1))?)?;
+        convolved =
+            convolved.broadcast_add(&bias.to_dtype(DType::F32)?.reshape((1, channels, 1))?)?;
     }
     let next = padded.narrow(2, sequence, kernel - 1)?.contiguous()?;
     Ok((convolved, next))
@@ -260,7 +302,11 @@ impl ShortConv {
         let gate_in = projected.narrow(2, 0, width)?;
         let gate_out = projected.narrow(2, width, width)?;
         let stream = projected.narrow(2, 2 * width, width)?;
-        let saved = if cache.use_kv_cache { cache.states[layer].clone() } else { None };
+        let saved = if cache.use_kv_cache {
+            cache.states[layer].clone()
+        } else {
+            None
+        };
         let (convolved, next_history) = causal_convolution(
             &(gate_in * stream)?.transpose(1, 2)?,
             saved.map(|(history, _)| history),

@@ -7,11 +7,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor};
 use serde::{Deserialize, Serialize};
 
-use super::{adapter::Adapter, Target};
+use super::{Target, adapter::Adapter};
 
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 
@@ -87,7 +87,10 @@ impl Artifact {
         self.validate()?;
         // `Path::parent` yields an empty path for a bare file name; creating that
         // directory fails, so only create a parent that actually names one.
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
@@ -158,7 +161,10 @@ impl Artifact {
             );
         }
         if self.product != "ster" {
-            bail!("adapter artifact belongs to product {:?}, not Ster", self.product);
+            bail!(
+                "adapter artifact belongs to product {:?}, not Ster",
+                self.product
+            );
         }
         if self.rank == 0 {
             bail!("adapter artifact declares rank 0, which stores nothing");
@@ -239,11 +245,17 @@ impl Artifact {
 fn check_factor(name: &str, tensor: &Tensor, axis: usize, expected: usize) -> Result<()> {
     let dims = tensor.dims();
     if dims.len() != 2 {
-        bail!("adapter tensor {name} has {} dimensions, expected 2", dims.len());
+        bail!(
+            "adapter tensor {name} has {} dimensions, expected 2",
+            dims.len()
+        );
     }
     if dims[axis] != expected {
         let axis_name = if axis == 0 { "rows" } else { "columns" };
-        bail!("adapter tensor {name} has {} {axis_name}, expected {expected}", dims[axis]);
+        bail!(
+            "adapter tensor {name} has {} {axis_name}, expected {expected}",
+            dims[axis]
+        );
     }
     Ok(())
 }

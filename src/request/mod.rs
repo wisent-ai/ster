@@ -29,7 +29,7 @@ use std::io::{self, Read, Write};
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::workflow;
 

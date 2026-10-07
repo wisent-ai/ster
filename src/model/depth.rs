@@ -29,9 +29,19 @@ impl DepthMix {
         projection: &str,
         eps: f64,
     ) -> candle_core::Result<Self> {
-        let scale = builder.pp(norm).get(hidden, "weight")?.to_dtype(DType::F32)?;
-        let row = builder.pp(projection).get((1, hidden), "weight")?.to_dtype(DType::F32)?.squeeze(0)?;
-        Ok(Self { weight: (scale * row)?, eps })
+        let scale = builder
+            .pp(norm)
+            .get(hidden, "weight")?
+            .to_dtype(DType::F32)?;
+        let row = builder
+            .pp(projection)
+            .get((1, hidden), "weight")?
+            .to_dtype(DType::F32)?
+            .squeeze(0)?;
+        Ok(Self {
+            weight: (scale * row)?,
+            eps,
+        })
     }
 
     /// The softmax mix of `blocks` and `partial`, each `[batch, sequence,
@@ -46,7 +56,10 @@ impl DepthMix {
         let scores = normed.broadcast_mul(&self.weight)?.sum(D::Minus1)?;
         // softmax over the stored sums, composed so it has a backward pass.
         let probabilities = candle_nn::ops::softmax(&scores, D::Minus1)?.unsqueeze(D::Minus1)?;
-        values.broadcast_mul(&probabilities)?.sum(2)?.to_dtype(dtype)
+        values
+            .broadcast_mul(&probabilities)?
+            .sum(2)?
+            .to_dtype(dtype)
     }
 }
 

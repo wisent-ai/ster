@@ -71,7 +71,13 @@ impl Structured {
             builder.get(heads.heads, name)?.to_dtype(DType::F32)
         };
         Ok(Self {
-            input: projection(hidden, projected, projection_bias, false, builder.pp("in_proj"))?,
+            input: projection(
+                hidden,
+                projected,
+                projection_bias,
+                false,
+                builder.pp("in_proj"),
+            )?,
             convolution: convolution
                 .get((channels, 1, kernel), "weight")?
                 .reshape((channels, kernel))?,
@@ -106,7 +112,13 @@ impl Structured {
                 None => None,
             },
             eps,
-            output: projection(inner, hidden, projection_bias, false, builder.pp("out_proj"))?,
+            output: projection(
+                inner,
+                hidden,
+                projection_bias,
+                false,
+                builder.pp("out_proj"),
+            )?,
             spec: *spec,
             heads,
         })
@@ -150,11 +162,17 @@ impl Structured {
         };
         let gate = projected.narrow(2, 0, inner)?;
         let mixed = projected.narrow(2, inner, channels)?;
-        let step = projected.narrow(2, inner + channels, heads)?.to_dtype(DType::F32)?;
+        let step = projected
+            .narrow(2, inner + channels, heads)?
+            .to_dtype(DType::F32)?;
 
         // The causal depthwise convolution over `x`, `B` and `C`, continued
         // from the inputs the previous call ended on.
-        let saved = if cache.use_kv_cache { cache.states[layer].clone() } else { None };
+        let saved = if cache.use_kv_cache {
+            cache.states[layer].clone()
+        } else {
+            None
+        };
         let (history, scan) = match saved {
             Some((history, scan)) => (Some(history), scan),
             None => (
@@ -169,7 +187,9 @@ impl Structured {
             self.convolution_bias.as_ref(),
             kernel,
         )?;
-        let mixed = candle_nn::ops::silu(&convolved)?.transpose(1, 2)?.contiguous()?;
+        let mixed = candle_nn::ops::silu(&convolved)?
+            .transpose(1, 2)?
+            .contiguous()?;
         let stream = mixed.narrow(2, 0, inner)?;
         let input_matrix = mixed.narrow(2, inner, groups * state)?;
         let output_matrix = mixed.narrow(2, inner + groups * state, groups * state)?;
@@ -196,7 +216,9 @@ impl Structured {
         let mut outputs = Vec::with_capacity(sequence);
         for position in 0..sequence {
             let delta = step.i((.., position, ..))?;
-            let token = stream.i((.., position, ..))?.reshape((batch, heads, head_dim))?;
+            let token = stream
+                .i((.., position, ..))?
+                .reshape((batch, heads, head_dim))?;
             let written = by_head(input_matrix.i((.., position, ..))?)?;
             let read = by_head(output_matrix.i((.., position, ..))?)?;
             let decay = delta

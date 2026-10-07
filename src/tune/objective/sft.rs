@@ -99,7 +99,11 @@ pub fn sft(
     let mut skipped_long = 0usize;
     for (index, example) in examples.examples.iter().enumerate() {
         let (ids, boundary) = runtime
-            .encode_example(example.system.as_deref(), &example.prompt, &example.completion)
+            .encode_example(
+                example.system.as_deref(),
+                &example.prompt,
+                &example.completion,
+            )
             .with_context(|| format!("example {index} could not be encoded"))?;
         if ids.len() > limit {
             skipped_long += 1;

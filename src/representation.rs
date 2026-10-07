@@ -115,7 +115,12 @@ fn pca_direction(positive: &[Vec<f32>], negative: &[Vec<f32>], iterations: usize
     let mean = mean_rows(&differences);
     let centered: Vec<Vec<f32>> = differences
         .iter()
-        .map(|row| row.iter().zip(&mean).map(|(value, mean)| value - mean).collect())
+        .map(|row| {
+            row.iter()
+                .zip(&mean)
+                .map(|(value, mean)| value - mean)
+                .collect()
+        })
         .collect();
     let mut vector = normalize_or_basis(mean.clone());
     for _ in 0..iterations {
@@ -204,7 +209,10 @@ fn normalize_or_basis(mut vector: Vec<f32>) -> Vec<f32> {
 }
 
 fn dot(left: &[f32], right: &[f32]) -> f32 {
-    left.iter().zip(right).map(|(left, right)| left * right).sum()
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum()
 }
 
 fn sigmoid(value: f32) -> f32 {

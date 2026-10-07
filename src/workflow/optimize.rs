@@ -1,12 +1,12 @@
 //! Choosing a layer and a method on pairs the candidate was not fitted on,
 //! and publishing every score the choice was made from.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::{
     artifact::{LayerVector, PairSet, SteeringArtifact},
-    representation::{evaluate_direction, train_direction, TrainingMethod},
+    representation::{TrainingMethod, evaluate_direction, train_direction},
     runtime::Runtime,
 };
 
@@ -68,7 +68,12 @@ pub struct Holdout {
 /// Fits every candidate on the first part of `pairs` and ranks it on the
 /// held-out `holdout` fraction, rounded to whole pairs. Ster assumes no
 /// fraction; one that leaves either side without a pair is refused.
-pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize], holdout: f64) -> Result<Selection> {
+pub fn optimize(
+    runtime: &Runtime,
+    pairs: &PairSet,
+    layers: &[usize],
+    holdout: f64,
+) -> Result<Selection> {
     if !(holdout > 0.0 && holdout < 1.0) {
         bail!("the held-out fraction must be above zero and below one");
     }
@@ -82,7 +87,11 @@ pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize], holdout: f
     }
     let captured = capture_pairs(runtime, pairs, layers)?;
     let split = total - holdout_pairs;
-    let holdout = Holdout { fraction: holdout, fit_pairs: split, holdout_pairs };
+    let holdout = Holdout {
+        fraction: holdout,
+        fit_pairs: split,
+        holdout_pairs,
+    };
     progress(format!(
         "fitting each candidate on {} pairs and ranking on a {}-pair holdout",
         holdout.fit_pairs, holdout.holdout_pairs
@@ -92,13 +101,20 @@ pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize], holdout: f
             "a one-pair holdout scores every candidate 0 or 1, so this ranking separates almost nothing; add pairs to make the choice mean something".to_owned(),
         );
     }
-    let methods = [TrainingMethod::Caa, TrainingMethod::Pca, TrainingMethod::Logistic];
+    let methods = [
+        TrainingMethod::Caa,
+        TrainingMethod::Pca,
+        TrainingMethod::Logistic,
+    ];
     let mut candidates = Vec::with_capacity(layers.len() * methods.len());
     let mut best: Option<(f32, f32, usize, TrainingMethod)> = None;
     for &layer_index in layers {
-        let layer = captured.get(&layer_index).expect("requested layer is captured");
+        let layer = captured
+            .get(&layer_index)
+            .expect("requested layer is captured");
         for method in methods {
-            let direction = train_direction(&layer.positive[..split], &layer.negative[..split], method)?;
+            let direction =
+                train_direction(&layer.positive[..split], &layer.negative[..split], method)?;
             let (accuracy, margin) = evaluate_direction(
                 &layer.positive[split..],
                 &layer.negative[split..],
@@ -128,9 +144,12 @@ pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize], holdout: f
     // The published direction is refitted on every pair, holdout included: the
     // split existed to rank candidates, and once the ranking is done, throwing
     // away a fifth of the evidence would be paying for the measurement twice.
-    let selected = captured.get(&layer_index).expect("selected layer is captured");
+    let selected = captured
+        .get(&layer_index)
+        .expect("selected layer is captured");
     let direction = train_direction(&selected.positive, &selected.negative, method)?;
-    let (accuracy, margin) = evaluate_direction(&selected.positive, &selected.negative, &direction)?;
+    let (accuracy, margin) =
+        evaluate_direction(&selected.positive, &selected.negative, &direction)?;
     let mut artifact = SteeringArtifact::new(
         runtime.model_id.clone(),
         runtime.revision.clone(),
@@ -155,5 +174,9 @@ pub fn optimize(runtime: &Runtime, pairs: &PairSet, layers: &[usize], holdout: f
             pairs.pairs.len()
         ),
     );
-    Ok(Selection { artifact, holdout, candidates })
+    Ok(Selection {
+        artifact,
+        holdout,
+        candidates,
+    })
 }

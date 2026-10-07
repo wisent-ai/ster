@@ -1,7 +1,7 @@
 //! Where a run computes and in what precision: the two operator words, and
 //! what each resolves to on this machine.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use candle_core::{DType, Device};
 
 #[derive(Debug, Clone, Copy)]
@@ -26,15 +26,29 @@ impl DeviceChoice {
             Self::Cpu => Ok(Device::Cpu),
             Self::Metal => {
                 #[cfg(feature = "metal")]
-                { anyhow::Context::context(Device::new_metal(0), "failed to initialize Metal device") }
+                {
+                    anyhow::Context::context(
+                        Device::new_metal(0),
+                        "failed to initialize Metal device",
+                    )
+                }
                 #[cfg(not(feature = "metal"))]
-                { bail!("this Ster binary was built without the metal feature") }
+                {
+                    bail!("this Ster binary was built without the metal feature")
+                }
             }
             Self::Cuda => {
                 #[cfg(feature = "cuda")]
-                { anyhow::Context::context(Device::new_cuda(0), "failed to initialize CUDA device") }
+                {
+                    anyhow::Context::context(
+                        Device::new_cuda(0),
+                        "failed to initialize CUDA device",
+                    )
+                }
                 #[cfg(not(feature = "cuda"))]
-                { bail!("this Ster binary was built without the cuda feature") }
+                {
+                    bail!("this Ster binary was built without the cuda feature")
+                }
             }
         }
     }

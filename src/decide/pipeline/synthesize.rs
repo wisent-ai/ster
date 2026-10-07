@@ -13,13 +13,13 @@ use std::{
     path::Path,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     brama::Gateway,
-    decide::{request::text_of, Example, ExampleSet, Question, Request},
+    decide::{Example, ExampleSet, Question, Request, request::text_of},
     workflow,
 };
 
@@ -43,8 +43,12 @@ impl Schema {
         if schema.questions.is_empty() {
             bail!("a decision schema needs at least one question");
         }
-        Request { state: Value::String("schema".to_owned()), model: None, questions: schema.questions.clone() }
-            .validate()?;
+        Request {
+            state: Value::String("schema".to_owned()),
+            model: None,
+            questions: schema.questions.clone(),
+        }
+        .validate()?;
         Ok(schema)
     }
 }
@@ -78,7 +82,11 @@ pub struct SynthesizeReport {
 
 /// Writes `per_option` states for every option of every question through
 /// `gateway`, each labelled with the option it was written for.
-pub fn synthesize(gateway: &Gateway, schema: &Schema, options: &SynthesizeOptions) -> Result<(ExampleSet, SynthesizeReport)> {
+pub fn synthesize(
+    gateway: &Gateway,
+    schema: &Schema,
+    options: &SynthesizeOptions,
+) -> Result<(ExampleSet, SynthesizeReport)> {
     if options.per_option == 0 {
         bail!("synthesis needs at least one state per option");
     }
@@ -162,17 +170,32 @@ fn targets(question: &Question) -> Vec<(String, String)> {
             .iter()
             .map(|(name, description)| {
                 let description = text_of(description);
-                (name.clone(), if description.trim().is_empty() { name.clone() } else { format!("{name}: {description}") })
+                (
+                    name.clone(),
+                    if description.trim().is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{name}: {description}")
+                    },
+                )
             })
             .collect(),
-        Question::Score { criteria, .. } => {
-            criteria.iter().enumerate().map(|(level, text)| (level.to_string(), text_of(text))).collect()
-        }
+        Question::Score { criteria, .. } => criteria
+            .iter()
+            .enumerate()
+            .map(|(level, text)| (level.to_string(), text_of(text)))
+            .collect(),
         Question::Noul { criteria, .. } => {
             let criteria = criteria.clone().unwrap_or_default();
             vec![
-                ("yes".to_owned(), text_of(&criteria.yes.unwrap_or(Value::String("yes".to_owned())))),
-                ("no".to_owned(), text_of(&criteria.no.unwrap_or(Value::String("no".to_owned())))),
+                (
+                    "yes".to_owned(),
+                    text_of(&criteria.yes.unwrap_or(Value::String("yes".to_owned()))),
+                ),
+                (
+                    "no".to_owned(),
+                    text_of(&criteria.no.unwrap_or(Value::String("no".to_owned()))),
+                ),
             ]
         }
     }

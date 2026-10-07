@@ -159,13 +159,20 @@ pub fn merge(
             // projection; the update lands on the rows that projection owns.
             let placement = architecture
                 .placement(target, layer, &config)
-                .with_context(|| format!("this model has no {} projection to merge into", target.name()))?;
+                .with_context(|| {
+                    format!(
+                        "this model has no {} projection to merge into",
+                        target.name()
+                    )
+                })?;
             // A checkpoint saved from the base model (GPT-2's `h.0…` rather
             // than `transformer.h.0…`) carries every name without the root;
             // Mistral's own format stores every name its own way.
             let stored = source.layout.stored_name(&placement.tensor);
             let name = match placement.without_root() {
-                Some(rootless) if !tensors.contains_key(&stored) => source.layout.stored_name(&rootless),
+                Some(rootless) if !tensors.contains_key(&stored) => {
+                    source.layout.stored_name(&rootless)
+                }
                 _ => stored,
             };
             let base = tensors
@@ -190,7 +197,11 @@ pub fn merge(
             // GPT-2's `Conv1D` stores `[inputs, outputs]`; the update is laid
             // out `[outputs, inputs]`, so the base is turned to match and back.
             let widened = base.to_dtype(DType::F32)?;
-            let widened = if placement.transposed { widened.t()? } else { widened };
+            let widened = if placement.transposed {
+                widened.t()?
+            } else {
+                widened
+            };
             let updated = match &placement.blocks {
                 None => widened + &delta,
                 Some(blocks) => blocks.iter().try_fold(widened, |sum, (row, from, rows)| {
@@ -248,7 +259,14 @@ pub fn merge(
     ];
     let required = [
         (&source.config, source.layout.config_file()),
-        (&source.tokenizer, source.tokenizer.file_name().and_then(|name| name.to_str()).unwrap_or("tokenizer.json")),
+        (
+            &source.tokenizer,
+            source
+                .tokenizer
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("tokenizer.json"),
+        ),
     ];
     for (from, leaf) in required
         .into_iter()

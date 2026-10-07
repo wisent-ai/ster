@@ -104,7 +104,11 @@ pub fn inspect(pairs: &PairSet, options: &InspectOptions) -> Result<SetReport> {
     // Diversity reads the positive side only: the two sides of a pair are
     // near-copies of each other by construction, so scoring both would report
     // the contrast as repetition.
-    let positives: Vec<String> = pairs.pairs.iter().map(|pair| pair.positive.clone()).collect();
+    let positives: Vec<String> = pairs
+        .pairs
+        .iter()
+        .map(|pair| pair.positive.clone())
+        .collect();
     let diversity = diversity::compute(&positives);
 
     Ok(SetReport {
@@ -126,7 +130,10 @@ fn flag(text: &str, threshold: f32) -> Option<RefusalFlag> {
     }
     Some(RefusalFlag {
         score: scored.score,
-        family: scored.family.map(|family| family.name().to_owned()).unwrap_or_default(),
+        family: scored
+            .family
+            .map(|family| family.name().to_owned())
+            .unwrap_or_default(),
         snippet: scored.snippet,
     })
 }

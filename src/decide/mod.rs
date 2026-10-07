@@ -21,9 +21,9 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
-use crate::{workflow, Runtime};
+use crate::{Runtime, workflow};
 
 mod answer;
 mod calibration;
@@ -34,10 +34,11 @@ mod request;
 pub use answer::{Answer, Explanation, Order, QuestionLogits, Response, Usage};
 pub use calibration::{Calibration, Labelled, Metrics, RAW_TEMPERATURE};
 pub use pipeline::{
-    benchmark, fetch, import_jsonl, split, synthesize, Benchmark, BenchmarkOptions, FetchOptions, FetchReport,
-    ImportReport, Latency, Schema, SynthesizeOptions, SynthesizeReport, TypeMetrics,
+    Benchmark, BenchmarkOptions, FetchOptions, FetchReport, ImportReport, Latency, Schema,
+    SynthesizeOptions, SynthesizeReport, TypeMetrics, benchmark, fetch, import_jsonl, split,
+    synthesize,
 };
-pub use request::{Example, ExampleSet, NoulCriteria, Question, Request, MAX_OPTIONS};
+pub use request::{Example, ExampleSet, MAX_OPTIONS, NoulCriteria, Question, Request};
 
 /// How a decision run reads the model.
 #[derive(Debug, Clone, Copy)]
@@ -64,7 +65,9 @@ pub fn decide(
             .questions
             .iter()
             .zip(&logits)
-            .map(|((id, question), logits)| (id.clone(), Explanation::new(question.options(), logits)))
+            .map(|((id, question), logits)| {
+                (id.clone(), Explanation::new(question.options(), logits))
+            })
             .collect()
     });
     let answers = request
@@ -73,7 +76,10 @@ pub fn decide(
         .zip(logits)
         .map(|((id, question), logits)| {
             let probabilities = logits.probabilities(options.temperature);
-            (id.clone(), Answer::from_probabilities(question, probabilities))
+            (
+                id.clone(),
+                Answer::from_probabilities(question, probabilities),
+            )
         })
         .collect();
     Ok(Response {
@@ -101,7 +107,12 @@ pub fn decide(
 /// from the options and the letters alone scores the same on both, and no
 /// temperature can make that honest. One example gives nothing to pair
 /// against, so the control is absent below two.
-pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options, ece_bins: usize) -> Result<Calibration> {
+pub fn calibrate(
+    runtime: &Runtime,
+    examples: &ExampleSet,
+    options: Options,
+    ece_bins: usize,
+) -> Result<Calibration> {
     if ece_bins == 0 {
         bail!("the expected calibration error needs at least one bin");
     }
@@ -111,10 +122,17 @@ pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options, ece
     let mut shuffled = Vec::new();
     for (index, example) in examples.examples.iter().enumerate() {
         workflow::progress(format!("reading example {} of {count}", index + 1));
-        labelled.extend(labelled_logits(runtime, example, &example.request.state, options)?);
+        labelled.extend(labelled_logits(
+            runtime,
+            example,
+            &example.request.state,
+            options,
+        )?);
         if count > 1 {
             for (id, question) in &example.request.questions {
-                let Some(answer) = example.answers.get(id) else { continue };
+                let Some(answer) = example.answers.get(id) else {
+                    continue;
+                };
                 let other = control_state(examples, index, id);
                 let one = Example {
                     request: Request {
@@ -140,7 +158,10 @@ pub fn calibrate(runtime: &Runtime, examples: &ExampleSet, options: Options, ece
         before.ece,
         after.ece,
         after.accuracy,
-        control.map_or(String::new(), |control| format!(" against {:.4} on shuffled states", control.accuracy))
+        control.map_or(String::new(), |control| format!(
+            " against {:.4} on shuffled states",
+            control.accuracy
+        ))
     ));
     Ok(Calibration {
         schema: calibration::SCHEMA.to_owned(),
@@ -195,7 +216,12 @@ pub fn control_state<'a>(set: &'a ExampleSet, index: usize, id: &str) -> &'a ser
     let own = set.examples[index].answers.get(id);
     let other = (1..count)
         .map(|step| &set.examples[(index + step) % count])
-        .find(|other| other.answers.get(id).is_some_and(|answer| Some(answer) != own))
+        .find(|other| {
+            other
+                .answers
+                .get(id)
+                .is_some_and(|answer| Some(answer) != own)
+        })
         .unwrap_or(&set.examples[(index + 1) % count]);
     &other.request.state
 }
@@ -236,7 +262,11 @@ pub fn render_rows(
                     runtime.context_length()
                 );
             }
-            rows.push(Row { question: index, order, ids });
+            rows.push(Row {
+                question: index,
+                order,
+                ids,
+            });
         }
     }
     Ok((rows, labels))
@@ -270,8 +300,11 @@ fn question_logits(
         usage.input_tokens - shared
     ));
     let distributions = runtime.next_token_logits_after(&rows[0].ids[..shared], &suffixes)?;
-    let mut logits: Vec<QuestionLogits> =
-        request.questions.iter().map(|_| QuestionLogits::default()).collect();
+    let mut logits: Vec<QuestionLogits> = request
+        .questions
+        .iter()
+        .map(|_| QuestionLogits::default())
+        .collect();
     for (row, vocabulary) in rows.iter().zip(distributions) {
         let mut canonical = vec![0f32; row.order.len()];
         for (position, &option) in row.order.iter().enumerate() {
@@ -292,7 +325,13 @@ fn shared_prefix(rows: &[Row]) -> usize {
     let first = &rows[0].ids;
     let longest = rows
         .iter()
-        .map(|row| row.ids.iter().zip(first).take_while(|(a, b)| a == b).count())
+        .map(|row| {
+            row.ids
+                .iter()
+                .zip(first)
+                .take_while(|(a, b)| a == b)
+                .count()
+        })
         .min()
         .unwrap_or(0);
     let shortest = rows.iter().map(|row| row.ids.len()).min().unwrap_or(0);

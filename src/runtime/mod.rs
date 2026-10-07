@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use candle_core::{DType, Device};
 use tokenizers::Tokenizer;
 
@@ -59,7 +59,6 @@ pub struct Runtime {
 }
 
 impl Runtime {
-
     /// The projection widths an adapter has to match: the residual width,
     /// the attention width, one key or value projection, and the feed
     /// forward. Grouped-query attention makes the key and value width smaller
@@ -114,8 +113,6 @@ impl Runtime {
     pub fn context_length(&self) -> usize {
         self.model.config().max_position_embeddings
     }
-
-
 }
 
 pub(super) fn validate_layers(layers: &[usize], count: usize) -> Result<()> {
@@ -123,8 +120,10 @@ pub(super) fn validate_layers(layers: &[usize], count: usize) -> Result<()> {
         bail!("at least one layer is required");
     }
     if let Some(layer) = layers.iter().copied().find(|layer| *layer >= count) {
-        bail!("layer {layer} is outside the model's 0..{} range", count.saturating_sub(1));
+        bail!(
+            "layer {layer} is outside the model's 0..{} range",
+            count.saturating_sub(1)
+        );
     }
     Ok(())
 }
-

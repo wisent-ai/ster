@@ -24,13 +24,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 mod jinja;
 mod template;
 
 pub use template::Template;
-
 
 /// Whether a run applies the model's own chat template.
 ///
@@ -91,8 +90,12 @@ impl Status {
     /// encodes raw text rather than inventing markers the model never saw.
     pub fn sentence(self) -> &'static str {
         match self {
-            Self::Applied => "applying the model's own chat template to every prompt and completion",
-            Self::Absent => "this model publishes no chat template, so prompts and completions are encoded as raw text",
+            Self::Applied => {
+                "applying the model's own chat template to every prompt and completion"
+            }
+            Self::Absent => {
+                "this model publishes no chat template, so prompts and completions are encoded as raw text"
+            }
             Self::Off => "chat template off, so prompts and completions are encoded as raw text",
         }
     }
@@ -106,7 +109,10 @@ impl Status {
         report
             .as_object_mut()
             .context("a run report must be a JSON object to record its chat template")?
-            .insert("chat_template".to_owned(), serde_json::Value::from(self.label()));
+            .insert(
+                "chat_template".to_owned(),
+                serde_json::Value::from(self.label()),
+            );
         Ok(())
     }
 }
@@ -118,7 +124,6 @@ pub struct Message<'a> {
     pub content: &'a str,
 }
 
-
 /// The two files a checkpoint may carry its template in, resolved beside the
 /// three files Ster already resolves.
 ///
@@ -128,5 +133,8 @@ pub struct Message<'a> {
 pub fn local_files(root: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
     let config = root.join("tokenizer_config.json");
     let template = root.join("chat_template.jinja");
-    (config.is_file().then_some(config), template.is_file().then_some(template))
+    (
+        config.is_file().then_some(config),
+        template.is_file().then_some(template),
+    )
 }

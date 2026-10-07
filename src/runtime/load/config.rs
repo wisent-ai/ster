@@ -47,7 +47,10 @@ fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
             }
         } else if byte == b'"' {
             in_string = true;
-        } else if let Some(literal) = LITERALS.iter().find(|literal| bytes[index..].starts_with(literal)) {
+        } else if let Some(literal) = LITERALS
+            .iter()
+            .find(|literal| bytes[index..].starts_with(literal))
+        {
             let written = output.get_or_insert_with(|| bytes[..index].to_vec());
             written.extend_from_slice(b"null");
             index += literal.len();
@@ -93,7 +96,14 @@ fn language_model(outer: Value) -> (Value, &'static str) {
     let prefix = match outer.get("model_type").and_then(|value| value.as_str()) {
         Some("gemma3" | "mistral3" | "llama4" | "kimi_k25" | "kimi_k3") => "language_model",
         Some(
-            "gemma3n" | "gemma4" | "gemma4_unified" | "qwen3_5" | "qwen3_5_moe" | "muse_glimmer" | "hyperclovax_vision_v2" | "glm5_next",
+            "gemma3n"
+            | "gemma4"
+            | "gemma4_unified"
+            | "qwen3_5"
+            | "qwen3_5_moe"
+            | "muse_glimmer"
+            | "hyperclovax_vision_v2"
+            | "glm5_next",
         ) => "model.language_model",
         Some("step3_vl") => "",
         Some("inkling_mm_model") => "model.llm",
@@ -128,7 +138,9 @@ fn inkling_text(inner: &mut Value) {
     let Some(object) = inner.as_object_mut() else {
         return;
     };
-    object.entry("model_type").or_insert_with(|| Value::from("inkling_text"));
+    object
+        .entry("model_type")
+        .or_insert_with(|| Value::from("inkling_text"));
     if let Some(dense) = object.remove("dense_intermediate_size") {
         if let Some(experts) = object.insert("intermediate_size".to_owned(), dense) {
             object.entry("moe_intermediate_size").or_insert(experts);

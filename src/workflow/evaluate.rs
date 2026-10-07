@@ -1,7 +1,7 @@
 //! Scoring a steering artifact against pairs: how well each layer's
 //! direction orders the two sides it was meant to separate.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::{
@@ -29,9 +29,16 @@ pub fn evaluate(
     let captured = capture_pairs(runtime, pairs, &layers)?;
     let mut reports = Vec::with_capacity(artifact.vectors.len());
     for vector in &artifact.vectors {
-        let layer = captured.get(&vector.layer).expect("requested layer is captured");
-        let (accuracy, margin) = evaluate_direction(&layer.positive, &layer.negative, &vector.values)?;
-        reports.push(LayerEvaluation { layer: vector.layer, accuracy, margin });
+        let layer = captured
+            .get(&vector.layer)
+            .expect("requested layer is captured");
+        let (accuracy, margin) =
+            evaluate_direction(&layer.positive, &layer.negative, &vector.values)?;
+        reports.push(LayerEvaluation {
+            layer: vector.layer,
+            accuracy,
+            margin,
+        });
     }
     Ok(EvaluationReport {
         model: artifact.model.clone(),

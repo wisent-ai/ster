@@ -68,7 +68,12 @@ impl Runtime {
     /// `system` is the example's system turn. Raw text has no place for one,
     /// so an example carrying it on a run without an applied template is a
     /// refusal naming what the run decided, not a guess at the markers.
-    pub fn encode_example(&self, system: Option<&str>, prompt: &str, completion: &str) -> Result<(Vec<u32>, usize)> {
+    pub fn encode_example(
+        &self,
+        system: Option<&str>,
+        prompt: &str,
+        completion: &str,
+    ) -> Result<(Vec<u32>, usize)> {
         if completion.trim().is_empty() {
             bail!("training example has an empty completion");
         }

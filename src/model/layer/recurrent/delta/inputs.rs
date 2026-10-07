@@ -77,20 +77,43 @@ impl Inputs {
         hidden: usize,
         spec: DeltaRuleSpec,
     ) -> candle_core::Result<(Self, Tensor, Tensor)> {
-        let DeltaRuleSpec { key_heads, value_heads, key_dim, value_dim, kernel, form, full_rank_gate, .. } = spec;
+        let DeltaRuleSpec {
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel,
+            form,
+            full_rank_gate,
+            ..
+        } = spec;
         let keys = key_heads * key_dim;
         let values = value_heads * value_dim;
         let taps = |name: &str, width: usize| -> candle_core::Result<Tensor> {
-            builder.pp(name).get((width, 1, kernel), "weight")?.reshape((width, kernel))
+            builder
+                .pp(name)
+                .get((width, 1, kernel), "weight")?
+                .reshape((width, kernel))
         };
         Ok(match form {
             DeltaRuleForm::Qwen3Next => (
                 Self::Qwen3Next {
-                    query_key_value_gate: linear_no_bias(hidden, 2 * keys + 2 * values, builder.pp("in_proj_qkvz"))?,
-                    strength_decay: linear_no_bias(hidden, 2 * value_heads, builder.pp("in_proj_ba"))?,
+                    query_key_value_gate: linear_no_bias(
+                        hidden,
+                        2 * keys + 2 * values,
+                        builder.pp("in_proj_qkvz"),
+                    )?,
+                    strength_decay: linear_no_bias(
+                        hidden,
+                        2 * value_heads,
+                        builder.pp("in_proj_ba"),
+                    )?,
                 },
                 taps("conv1d", 2 * keys + values)?,
-                builder.get(value_heads, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, value_heads, 1))?,
+                builder
+                    .get(value_heads, "dt_bias")?
+                    .to_dtype(DType::F32)?
+                    .reshape((1, 1, value_heads, 1))?,
             ),
             DeltaRuleForm::Kimi | DeltaRuleForm::Ling => (
                 Self::Kimi {
@@ -115,8 +138,18 @@ impl Inputs {
                         )
                     },
                 },
-                Tensor::cat(&[&taps("q_conv1d", keys)?, &taps("k_conv1d", keys)?, &taps("v_conv1d", values)?], 0)?,
-                builder.get(keys, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, key_heads, key_dim))?,
+                Tensor::cat(
+                    &[
+                        &taps("q_conv1d", keys)?,
+                        &taps("k_conv1d", keys)?,
+                        &taps("v_conv1d", values)?,
+                    ],
+                    0,
+                )?,
+                builder
+                    .get(keys, "dt_bias")?
+                    .to_dtype(DType::F32)?
+                    .reshape((1, 1, key_heads, key_dim))?,
             ),
             DeltaRuleForm::OlmoHybrid => (
                 Self::OlmoHybrid {
@@ -133,45 +166,81 @@ impl Inputs {
                 if builder.contains_tensor("conv1d.weight") {
                     taps("conv1d", 2 * keys + values)?
                 } else {
-                    Tensor::cat(&[&taps("q_conv1d", keys)?, &taps("k_conv1d", keys)?, &taps("v_conv1d", values)?], 0)?
+                    Tensor::cat(
+                        &[
+                            &taps("q_conv1d", keys)?,
+                            &taps("k_conv1d", keys)?,
+                            &taps("v_conv1d", values)?,
+                        ],
+                        0,
+                    )?
                 },
-                builder.get(value_heads, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, value_heads, 1))?,
+                builder
+                    .get(value_heads, "dt_bias")?
+                    .to_dtype(DType::F32)?
+                    .reshape((1, 1, value_heads, 1))?,
             ),
             DeltaRuleForm::Qwen35 => (
                 Self::Qwen35 {
-                    query_key_value: linear_no_bias(hidden, 2 * keys + values, builder.pp("in_proj_qkv"))?,
+                    query_key_value: linear_no_bias(
+                        hidden,
+                        2 * keys + values,
+                        builder.pp("in_proj_qkv"),
+                    )?,
                     strength: linear_no_bias(hidden, value_heads, builder.pp("in_proj_b"))?,
                     decay: linear_no_bias(hidden, value_heads, builder.pp("in_proj_a"))?,
                     gate: linear_no_bias(hidden, values, builder.pp("in_proj_z"))?,
                 },
                 taps("conv1d", 2 * keys + values)?,
-                builder.get(value_heads, "dt_bias")?.to_dtype(DType::F32)?.reshape((1, 1, value_heads, 1))?,
+                builder
+                    .get(value_heads, "dt_bias")?
+                    .to_dtype(DType::F32)?
+                    .reshape((1, 1, value_heads, 1))?,
             ),
         })
     }
 
-    pub(super) fn prepare(&self, hidden: &Tensor, spec: DeltaRuleSpec) -> candle_core::Result<Prepared> {
+    pub(super) fn prepare(
+        &self,
+        hidden: &Tensor,
+        spec: DeltaRuleSpec,
+    ) -> candle_core::Result<Prepared> {
         let (batch, sequence, _) = hidden.dims3()?;
-        let DeltaRuleSpec { key_heads, value_heads, key_dim, value_dim, .. } = spec;
+        let DeltaRuleSpec {
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            ..
+        } = spec;
         let shared = value_heads / key_heads;
         match self {
-            Self::Qwen3Next { query_key_value_gate, strength_decay } => {
+            Self::Qwen3Next {
+                query_key_value_gate,
+                strength_decay,
+            } => {
                 let per_head = 2 * key_dim + 2 * shared * value_dim;
                 let projected = query_key_value_gate
                     .forward(hidden)?
                     .reshape((batch, sequence, key_heads, per_head))?;
-                let part = |start: usize, width: usize, flat: usize| -> candle_core::Result<Tensor> {
-                    projected.narrow(3, start, width)?.reshape((batch, sequence, flat))
-                };
+                let part =
+                    |start: usize, width: usize, flat: usize| -> candle_core::Result<Tensor> {
+                        projected
+                            .narrow(3, start, width)?
+                            .reshape((batch, sequence, flat))
+                    };
                 let query = part(0, key_dim, key_heads * key_dim)?;
                 let key = part(key_dim, key_dim, key_heads * key_dim)?;
                 let value = part(2 * key_dim, shared * value_dim, value_heads * value_dim)?;
                 let gate = projected
                     .narrow(3, 2 * key_dim + shared * value_dim, shared * value_dim)?
                     .reshape((batch, sequence, value_heads, value_dim))?;
-                let strength_decay = strength_decay
-                    .forward(hidden)?
-                    .reshape((batch, sequence, key_heads, 2 * shared))?;
+                let strength_decay = strength_decay.forward(hidden)?.reshape((
+                    batch,
+                    sequence,
+                    key_heads,
+                    2 * shared,
+                ))?;
                 Ok(Prepared {
                     mixed: Tensor::cat(&[&query, &key, &value], 2)?,
                     gate,
@@ -185,32 +254,72 @@ impl Inputs {
                         .to_dtype(DType::F32)?,
                 })
             }
-            Self::Kimi { query, key, value, strength, forget, gate } => {
-                let through = |(down, up): &(Option<Linear>, Linear)| -> candle_core::Result<Tensor> {
-                    match down {
-                        Some(down) => up.forward(&down.forward(hidden)?),
-                        None => up.forward(hidden),
-                    }
-                };
+            Self::Kimi {
+                query,
+                key,
+                value,
+                strength,
+                forget,
+                gate,
+            } => {
+                let through =
+                    |(down, up): &(Option<Linear>, Linear)| -> candle_core::Result<Tensor> {
+                        match down {
+                            Some(down) => up.forward(&down.forward(hidden)?),
+                            None => up.forward(hidden),
+                        }
+                    };
                 Ok(Prepared {
-                    mixed: Tensor::cat(&[&query.forward(hidden)?, &key.forward(hidden)?, &value.forward(hidden)?], 2)?,
+                    mixed: Tensor::cat(
+                        &[
+                            &query.forward(hidden)?,
+                            &key.forward(hidden)?,
+                            &value.forward(hidden)?,
+                        ],
+                        2,
+                    )?,
                     gate: through(gate)?.reshape((batch, sequence, value_heads, value_dim))?,
                     strength: strength.forward(hidden)?.to_dtype(DType::F32)?,
-                    decay_input: through(forget)?.reshape((batch, sequence, key_heads, key_dim))?.to_dtype(DType::F32)?,
+                    decay_input: through(forget)?
+                        .reshape((batch, sequence, key_heads, key_dim))?
+                        .to_dtype(DType::F32)?,
                 })
             }
-            Self::OlmoHybrid { query, key, value, strength, decay, gate } => Ok(Prepared {
-                mixed: Tensor::cat(&[&query.forward(hidden)?, &key.forward(hidden)?, &value.forward(hidden)?], 2)?,
-                gate: gate.forward(hidden)?.reshape((batch, sequence, value_heads, value_dim))?,
+            Self::OlmoHybrid {
+                query,
+                key,
+                value,
+                strength,
+                decay,
+                gate,
+            } => Ok(Prepared {
+                mixed: Tensor::cat(
+                    &[
+                        &query.forward(hidden)?,
+                        &key.forward(hidden)?,
+                        &value.forward(hidden)?,
+                    ],
+                    2,
+                )?,
+                gate: gate
+                    .forward(hidden)?
+                    .reshape((batch, sequence, value_heads, value_dim))?,
                 strength: strength.forward(hidden)?.to_dtype(DType::F32)?,
                 decay_input: decay
                     .forward(hidden)?
                     .reshape((batch, sequence, value_heads, 1))?
                     .to_dtype(DType::F32)?,
             }),
-            Self::Qwen35 { query_key_value, strength, decay, gate } => Ok(Prepared {
+            Self::Qwen35 {
+                query_key_value,
+                strength,
+                decay,
+                gate,
+            } => Ok(Prepared {
                 mixed: query_key_value.forward(hidden)?,
-                gate: gate.forward(hidden)?.reshape((batch, sequence, value_heads, value_dim))?,
+                gate: gate
+                    .forward(hidden)?
+                    .reshape((batch, sequence, value_heads, value_dim))?,
                 strength: strength.forward(hidden)?.to_dtype(DType::F32)?,
                 decay_input: decay
                     .forward(hidden)?

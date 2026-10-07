@@ -27,5 +27,5 @@ mod inspect;
 mod synthesis;
 
 pub use generator::Generator;
-pub use inspect::{inspect, EntryReport, InspectOptions, RefusalFlag, SetReport};
-pub use synthesis::{synthesize, SynthesisOptions, SynthesisReport};
+pub use inspect::{EntryReport, InspectOptions, RefusalFlag, SetReport, inspect};
+pub use synthesis::{SynthesisOptions, SynthesisReport, synthesize};

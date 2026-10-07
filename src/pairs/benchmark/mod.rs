@@ -13,8 +13,8 @@ mod csv;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
-use rand::{rngs::StdRng, seq::IndexedRandom, SeedableRng};
+use anyhow::{Context, Result, bail};
+use rand::{SeedableRng, rngs::StdRng, seq::IndexedRandom};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -41,7 +41,9 @@ impl Benchmark {
             "dna" => Ok(Self::Dna),
             "livecodebench" => Ok(Self::Livecodebench),
             "bipo" => Ok(Self::Bipo),
-            other => bail!("unknown benchmark {other}: choose truthfulqa, dna, livecodebench or bipo"),
+            other => {
+                bail!("unknown benchmark {other}: choose truthfulqa, dna, livecodebench or bipo")
+            }
         }
     }
 }
@@ -115,10 +117,23 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                     continue;
                 }
                 if options.benchmark == Benchmark::Bipo {
-                    match (record.get("question"), record.get("matching"), record.get("not_matching")) {
-                        ("", _, _) => skipped.push(Skipped { row, reason: "no question" }),
-                        (_, "", _) => skipped.push(Skipped { row, reason: "no matching answer" }),
-                        (_, _, "") => skipped.push(Skipped { row, reason: "no not_matching answer" }),
+                    match (
+                        record.get("question"),
+                        record.get("matching"),
+                        record.get("not_matching"),
+                    ) {
+                        ("", _, _) => skipped.push(Skipped {
+                            row,
+                            reason: "no question",
+                        }),
+                        (_, "", _) => skipped.push(Skipped {
+                            row,
+                            reason: "no matching answer",
+                        }),
+                        (_, _, "") => skipped.push(Skipped {
+                            row,
+                            reason: "no not_matching answer",
+                        }),
                         (question, matching, other) => pairs.push(pair(question, matching, other)),
                     }
                     continue;

@@ -4,7 +4,7 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -34,10 +34,16 @@ pub struct Request {
 pub enum Question {
     /// One option out of a named set. `criteria` maps option name to a
     /// description, or `null` when the name says enough.
-    Choice { instructions: Value, criteria: BTreeMap<String, Value> },
+    Choice {
+        instructions: Value,
+        criteria: BTreeMap<String, Value>,
+    },
     /// A position on an ordered scale. `criteria` is the levels in order;
     /// level `i` is the `i`th entry.
-    Score { instructions: Value, criteria: Vec<Value> },
+    Score {
+        instructions: Value,
+        criteria: Vec<Value>,
+    },
     /// A yes/no judgement, optionally with what each side means.
     Noul {
         instructions: Value,
@@ -103,8 +109,9 @@ impl Request {
                             criteria.len()
                         );
                     }
-                    if let Some(index) =
-                        criteria.iter().position(|level| text_of(level).trim().is_empty())
+                    if let Some(index) = criteria
+                        .iter()
+                        .position(|level| text_of(level).trim().is_empty())
                     {
                         bail!("score question '{id}' has an empty description at level {index}");
                     }

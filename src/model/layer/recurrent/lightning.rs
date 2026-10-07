@@ -64,7 +64,12 @@ impl Lightning {
         spec: LightningSpec,
         norms: NormSpec,
     ) -> candle_core::Result<Self> {
-        let LightningSpec { heads, head_dim, form, .. } = spec;
+        let LightningSpec {
+            heads,
+            head_dim,
+            form,
+            ..
+        } = spec;
         let width = heads * head_dim;
         let base = 2f64.powf(-SLOPE_EXPONENT_SPAN / heads as f64);
         let span = match form {
@@ -114,7 +119,12 @@ impl Lightning {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, _) = hidden.dims3()?;
-        let LightningSpec { heads, head_dim, form, .. } = self.spec;
+        let LightningSpec {
+            heads,
+            head_dim,
+            form,
+            ..
+        } = self.spec;
         let dtype = hidden.dtype();
         let projected = self.query_key_value.forward(hidden)?;
         // MiniMax lays each head's query, key and value side by side; Ling
@@ -131,18 +141,26 @@ impl Lightning {
                 )
             }
             LightningForm::Bailing { silu, .. } => {
-                let projected = if silu { candle_nn::ops::silu(&projected)? } else { projected };
+                let projected = if silu {
+                    candle_nn::ops::silu(&projected)?
+                } else {
+                    projected
+                };
                 let width = heads * head_dim;
                 let part = |start: usize| {
-                    projected.narrow(2, start, width)?.contiguous()?.reshape((batch, sequence, heads, head_dim))
+                    projected
+                        .narrow(2, start, width)?
+                        .contiguous()?
+                        .reshape((batch, sequence, heads, head_dim))
                 };
                 let (query, key, value) = (part(0)?, part(width)?, part(2 * width)?);
                 // The per-head norms run at the weights' dtype, then
                 // everything widens to F32.
                 let (query, key) = match &self.query_key_norms {
-                    Some((query_norm, key_norm)) => {
-                        (query_norm.forward(&query, mode.pass)?, key_norm.forward(&key, mode.pass)?)
-                    }
+                    Some((query_norm, key_norm)) => (
+                        query_norm.forward(&query, mode.pass)?,
+                        key_norm.forward(&key, mode.pass)?,
+                    ),
                     None => (query, key),
                 };
                 let value = value.to_dtype(DType::F32)?;
@@ -150,18 +168,33 @@ impl Lightning {
                 // each head.
                 let (cos, sin) = cache.global.angles(index_pos, sequence)?;
                 let rotate = |input: Tensor| -> candle_core::Result<Tensor> {
-                    apply_rotary(&input.transpose(1, 2)?.contiguous()?, &cos, &sin, DType::F32, mode.pass, false)?
-                        .transpose(1, 2)
+                    apply_rotary(
+                        &input.transpose(1, 2)?.contiguous()?,
+                        &cos,
+                        &sin,
+                        DType::F32,
+                        mode.pass,
+                        false,
+                    )?
+                    .transpose(1, 2)
                 };
                 let query = (rotate(query)? / (head_dim as f64).sqrt())?;
                 (query, rotate(key)?, value)
             }
         };
 
-        let saved = if cache.use_kv_cache { cache.states[layer].clone() } else { None };
+        let saved = if cache.use_kv_cache {
+            cache.states[layer].clone()
+        } else {
+            None
+        };
         let mut state = match saved {
             Some((_, state)) => state,
-            None => Tensor::zeros((batch, heads, head_dim, head_dim), DType::F32, hidden.device())?,
+            None => Tensor::zeros(
+                (batch, heads, head_dim, head_dim),
+                DType::F32,
+                hidden.device(),
+            )?,
         };
         let mut outputs = Vec::with_capacity(sequence);
         for position in 0..sequence {

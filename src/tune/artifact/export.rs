@@ -23,7 +23,11 @@ use candle_core::{Device, Tensor};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::{lora, runtime::{Checkpoint, Layout}, workflow};
+use crate::{
+    lora,
+    runtime::{Checkpoint, Layout},
+    workflow,
+};
 
 /// The prefix PEFT puts before every adapted module's checkpoint path.
 const PEFT_ROOT: &str = "base_model.model";
@@ -83,25 +87,36 @@ pub fn export_peft(
         for &target in &artifact.targets {
             let placement = architecture
                 .placement(target, layer, &config)
-                .with_context(|| format!("this model has no {} projection to export", target.name()))?;
+                .with_context(|| {
+                    format!("this model has no {} projection to export", target.name())
+                })?;
             if placement.blocks.is_some() || placement.transposed {
                 bail!(
                     "this model stores the {} projection {} with others, so PEFT has no module of its own for it; merge the adapter (ster tune merge) instead",
                     target.name(),
-                    if placement.transposed { "transposed" } else { "fused" }
+                    if placement.transposed {
+                        "transposed"
+                    } else {
+                        "fused"
+                    }
                 );
             }
-            let module = placement
-                .tensor
-                .strip_suffix(".weight")
-                .with_context(|| format!("checkpoint tensor {} is not a projection weight", placement.tensor))?;
+            let module = placement.tensor.strip_suffix(".weight").with_context(|| {
+                format!(
+                    "checkpoint tensor {} is not a projection weight",
+                    placement.tensor
+                )
+            })?;
             let (a_name, b_name) = lora::Adapter::tensor_names(layer, target);
             for (factor, name) in [("lora_A", &a_name), ("lora_B", &b_name)] {
                 let tensor = artifact
                     .tensors
                     .get(name)
                     .with_context(|| format!("adapter artifact is missing tensor {name}"))?;
-                tensors.insert(format!("{PEFT_ROOT}.{module}.{factor}.weight"), tensor.contiguous()?);
+                tensors.insert(
+                    format!("{PEFT_ROOT}.{module}.{factor}.weight"),
+                    tensor.contiguous()?,
+                );
             }
             let leaf = module.rsplit('.').next().unwrap_or(module).to_owned();
             if !modules.contains(&leaf) {
@@ -114,7 +129,10 @@ pub fn export_peft(
     let weights = output.join("adapter_model.safetensors");
     candle_core::safetensors::save(&tensors, &weights)
         .with_context(|| format!("failed to write {}", weights.display()))?;
-    let model_revision = source.revision.clone().or_else(|| artifact.model_revision.clone());
+    let model_revision = source
+        .revision
+        .clone()
+        .or_else(|| artifact.model_revision.clone());
     let adapter_config = json!({
         "peft_type": "LORA",
         "task_type": "CAUSAL_LM",
@@ -134,12 +152,24 @@ pub fn export_peft(
     // base's own copy keeps the pair from drifting to another tokenizer.
     let tokenizer = output.join("tokenizer.json");
     fs::copy(&source.tokenizer, &tokenizer).with_context(|| {
-        format!("failed to copy {} to {}", source.tokenizer.display(), tokenizer.display())
+        format!(
+            "failed to copy {} to {}",
+            source.tokenizer.display(),
+            tokenizer.display()
+        )
     })?;
-    let files = ["adapter_model.safetensors", "adapter_config.json", "tokenizer.json"]
-        .map(str::to_owned)
-        .to_vec();
-    workflow::progress(format!("wrote {} to {}", files.join(", "), output.display()));
+    let files = [
+        "adapter_model.safetensors",
+        "adapter_config.json",
+        "tokenizer.json",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    workflow::progress(format!(
+        "wrote {} to {}",
+        files.join(", "),
+        output.display()
+    ));
     Ok(ExportReport {
         model: model.to_owned(),
         model_revision,

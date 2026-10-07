@@ -61,8 +61,16 @@ impl SharedBlock {
             )?,
             attention_norm: norm.load(spec.attention_input, builder.pp("input_layernorm"))?,
             feed_forward_norm: norm.load(hidden, builder.pp("pre_ff_layernorm"))?,
-            gate_up: linear_no_bias(hidden, 2 * spec.intermediate, builder.pp("feed_forward.gate_up_proj"))?,
-            down: linear_no_bias(spec.intermediate, hidden, builder.pp("feed_forward.down_proj"))?,
+            gate_up: linear_no_bias(
+                hidden,
+                2 * spec.intermediate,
+                builder.pp("feed_forward.gate_up_proj"),
+            )?,
+            down: linear_no_bias(
+                spec.intermediate,
+                hidden,
+                builder.pp("feed_forward.down_proj"),
+            )?,
             activation: architecture.activation,
             spec,
         })
@@ -90,13 +98,14 @@ impl SharedInvocation {
         slot: usize,
     ) -> candle_core::Result<Self> {
         let spec = block.spec;
-        let low_rank = |list: VarBuilder<'_>, input: usize, output: usize| -> candle_core::Result<LowRank> {
-            let entry = list.pp(slot.to_string());
-            Ok(LowRank {
-                down: linear_no_bias(input, spec.rank, entry.pp("0"))?,
-                up: linear_no_bias(spec.rank, output, entry.pp("1"))?,
-            })
-        };
+        let low_rank =
+            |list: VarBuilder<'_>, input: usize, output: usize| -> candle_core::Result<LowRank> {
+                let entry = list.pp(slot.to_string());
+                Ok(LowRank {
+                    down: linear_no_bias(input, spec.rank, entry.pp("0"))?,
+                    up: linear_no_bias(spec.rank, output, entry.pp("1"))?,
+                })
+            };
         let attention = block.attention.clone();
         let attention = if spec.attention_adapters {
             let projections = block_builder.pp("self_attn");
@@ -119,7 +128,10 @@ impl SharedInvocation {
             None
         };
         Ok(Self {
-            block: SharedBlock { attention, ..block.clone() },
+            block: SharedBlock {
+                attention,
+                ..block.clone()
+            },
             gate_up_low_rank,
             output: linear_no_bias(hidden, hidden, layer_builder.pp("linear"))?,
         })
@@ -141,7 +153,9 @@ impl SharedInvocation {
         let block = &self.block;
         let joined = Tensor::cat(&[hidden, embedded], D::Minus1)?;
         let normed = block.attention_norm.forward(&joined, mode.pass)?;
-        let attended = block.attention.forward(&normed, index_pos, layer, cache, mask, mode)?;
+        let attended = block
+            .attention
+            .forward(&normed, index_pos, layer, cache, mask, mode)?;
         let normed = block.feed_forward_norm.forward(&attended, mode.pass)?;
         let gate_up = block.gate_up.forward(&normed)?;
         let gate_up = match &self.gate_up_low_rank {

@@ -5,10 +5,7 @@ use anyhow::{Context, Result, bail};
 use candle_core::Tensor;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 
-use crate::{
-    artifact::SteeringArtifact,
-    model::SteeringPlan,
-};
+use crate::{artifact::SteeringArtifact, model::SteeringPlan};
 
 use super::super::{Runtime, validate_layers};
 

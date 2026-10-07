@@ -6,8 +6,9 @@ use serde::Deserialize;
 use crate::decide::Request;
 
 use super::{
+    ModelRequest, Validate,
     defaults::{default_chat_template, default_precision},
-    require, ModelRequest, Validate,
+    require,
 };
 
 #[derive(Debug, Deserialize)]

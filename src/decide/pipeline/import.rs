@@ -4,11 +4,11 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::decide::{Example, ExampleSet, Question, Request, MAX_OPTIONS};
+use crate::decide::{Example, ExampleSet, MAX_OPTIONS, Question, Request};
 
 #[derive(Debug, Deserialize)]
 struct JsonlRow {
@@ -30,14 +30,19 @@ pub struct ImportReport {
 /// names the question every example asks and `instructions` is what it asks;
 /// the row's options become the choice's options, in the row's order, and its
 /// label index becomes the answer.
-pub fn import_jsonl(path: &Path, question_id: &str, instructions: &str) -> Result<(ExampleSet, ImportReport)> {
+pub fn import_jsonl(
+    path: &Path,
+    question_id: &str,
+    instructions: &str,
+) -> Result<(ExampleSet, ImportReport)> {
     if question_id.trim().is_empty() {
         bail!("an imported question needs an id");
     }
     if instructions.trim().is_empty() {
         bail!("an imported question needs instructions");
     }
-    let text = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut examples = Vec::new();
     let mut rejected = Vec::new();
     let mut rows = 0usize;
@@ -50,7 +55,9 @@ pub fn import_jsonl(path: &Path, question_id: &str, instructions: &str) -> Resul
         let row: JsonlRow = match serde_json::from_str(line) {
             Ok(row) => row,
             Err(error) => {
-                rejected.push(format!("line {line_number}: not a context/options/label row: {error}"));
+                rejected.push(format!(
+                    "line {line_number}: not a context/options/label row: {error}"
+                ));
                 continue;
             }
         };
@@ -58,16 +65,25 @@ pub fn import_jsonl(path: &Path, question_id: &str, instructions: &str) -> Resul
             rejected.push(format!("line {line_number}: {sentence}"));
             continue;
         }
-        let criteria: BTreeMap<String, Value> =
-            row.options.iter().map(|option| (option.trim().to_owned(), Value::Null)).collect();
-        let question = Question::Choice { instructions: Value::String(instructions.to_owned()), criteria };
+        let criteria: BTreeMap<String, Value> = row
+            .options
+            .iter()
+            .map(|option| (option.trim().to_owned(), Value::Null))
+            .collect();
+        let question = Question::Choice {
+            instructions: Value::String(instructions.to_owned()),
+            criteria,
+        };
         examples.push(Example {
             request: Request {
                 state: Value::String(row.context),
                 model: None,
                 questions: BTreeMap::from([(question_id.to_owned(), question)]),
             },
-            answers: BTreeMap::from([(question_id.to_owned(), Value::String(row.options[row.label].trim().to_owned()))]),
+            answers: BTreeMap::from([(
+                question_id.to_owned(),
+                Value::String(row.options[row.label].trim().to_owned()),
+            )]),
         });
     }
     if examples.is_empty() {
@@ -75,7 +91,12 @@ pub fn import_jsonl(path: &Path, question_id: &str, instructions: &str) -> Resul
     }
     let set = ExampleSet { examples };
     set.validate()?;
-    let report = ImportReport { source: path.display().to_string(), rows, examples: set.examples.len(), rejected };
+    let report = ImportReport {
+        source: path.display().to_string(),
+        rows,
+        examples: set.examples.len(),
+        rejected,
+    };
     Ok((set, report))
 }
 
@@ -87,7 +108,10 @@ fn check(row: &JsonlRow) -> Result<(), String> {
         return Err("a row needs at least two options".to_owned());
     }
     if row.options.len() > MAX_OPTIONS {
-        return Err(format!("a row has {} options; Ster labels at most {MAX_OPTIONS}", row.options.len()));
+        return Err(format!(
+            "a row has {} options; Ster labels at most {MAX_OPTIONS}",
+            row.options.len()
+        ));
     }
     if row.options.iter().any(|option| option.trim().is_empty()) {
         return Err("an option is empty".to_owned());
@@ -97,7 +121,11 @@ fn check(row: &JsonlRow) -> Result<(), String> {
         return Err("two options carry the same text".to_owned());
     }
     if row.label >= row.options.len() {
-        return Err(format!("the label {} names no option of {}", row.label, row.options.len()));
+        return Err(format!(
+            "the label {} names no option of {}",
+            row.label,
+            row.options.len()
+        ));
     }
     Ok(())
 }

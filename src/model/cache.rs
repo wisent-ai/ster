@@ -101,7 +101,10 @@ impl Cache {
             RopeScaling::None => (RotaryTable::new(global, 1.0, device)?, None),
             RopeScaling::Linear(factor) => (
                 RotaryTable::new(
-                    global.into_iter().map(|frequency| frequency / factor).collect(),
+                    global
+                        .into_iter()
+                        .map(|frequency| frequency / factor)
+                        .collect(),
                     1.0,
                     device,
                 )?,
@@ -115,7 +118,11 @@ impl Cache {
                 long_attention,
             } => {
                 let rescaled = |factors: &[f32]| -> Vec<f32> {
-                    global.iter().zip(factors).map(|(frequency, factor)| frequency / factor).collect()
+                    global
+                        .iter()
+                        .zip(factors)
+                        .map(|(frequency, factor)| frequency / factor)
+                        .collect()
                 };
                 let short = RotaryTable::new(rescaled(short), *short_attention, device)?;
                 let long = RotaryTable::new(rescaled(long), *long_attention, device)?;
@@ -149,7 +156,13 @@ impl Cache {
                     global
                         .into_iter()
                         .enumerate()
-                        .map(|(pair, frequency)| if pair < *rotated { frequency / factor } else { 0.0 })
+                        .map(|(pair, frequency)| {
+                            if pair < *rotated {
+                                frequency / factor
+                            } else {
+                                0.0
+                            }
+                        })
                         .collect(),
                     1.0,
                     device,
@@ -222,7 +235,12 @@ impl Cache {
 /// chunks (`chunk_lookback`), `window` is the chunk size and `key` lies in
 /// a chunk more than `chunk_lookback` chunks before the query's (Llama 4's
 /// chunked attention looks back none, Rnj-1's one).
-pub(super) fn hidden_key(query: usize, key: usize, window: Option<usize>, chunk_lookback: Option<usize>) -> bool {
+pub(super) fn hidden_key(
+    query: usize,
+    key: usize,
+    window: Option<usize>,
+    chunk_lookback: Option<usize>,
+) -> bool {
     if key > query {
         return true;
     }
@@ -262,7 +280,10 @@ impl RotaryTable {
         if self.magnitude == 1.0 {
             return Ok((angles.cos()?, angles.sin()?));
         }
-        Ok(((angles.cos()? * self.magnitude)?, (angles.sin()? * self.magnitude)?))
+        Ok((
+            (angles.cos()? * self.magnitude)?,
+            (angles.sin()? * self.magnitude)?,
+        ))
     }
 
     /// `cos` and `sin` of each of `positions` times every frequency,
@@ -275,7 +296,10 @@ impl RotaryTable {
         if self.magnitude == 1.0 {
             return Ok((angles.cos()?, angles.sin()?));
         }
-        Ok(((angles.cos()? * self.magnitude)?, (angles.sin()? * self.magnitude)?))
+        Ok((
+            (angles.cos()? * self.magnitude)?,
+            (angles.sin()? * self.magnitude)?,
+        ))
     }
 }
 
@@ -310,10 +334,18 @@ pub(super) fn yarn_frequencies(
         rotary_dim as f32 * (original as f32 / (turns * 2.0 * PI)).ln() / (2.0 * theta.ln())
     };
     let (low, high) = (correction(beta_fast), correction(beta_slow));
-    let (low, high) = if truncate { (low.floor(), high.ceil()) } else { (low, high) };
+    let (low, high) = if truncate {
+        (low.floor(), high.ceil())
+    } else {
+        (low, high)
+    };
     let low = low.max(0.0);
     let high = high.min(rotary_dim as f32 - 1.0);
-    let high = if high == low { high + YARN_RAMP_WIDENING } else { high };
+    let high = if high == low {
+        high + YARN_RAMP_WIDENING
+    } else {
+        high
+    };
     base.iter()
         .enumerate()
         .map(|(index, frequency)| {

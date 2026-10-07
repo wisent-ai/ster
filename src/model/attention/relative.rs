@@ -54,8 +54,16 @@ impl RelativeAttention {
         let sliding = spec.sliding_layers >> layer & 1 == 1;
         let shape = if sliding { spec.sliding } else { spec.full };
         let block = builder.pp("attn");
-        let (queries, keys) = (shape.heads * shape.head_dim, shape.key_value_heads * shape.head_dim);
-        let norm = NormSpec { kind: NormKind::Rms, eps, offset: false, groups: 1 };
+        let (queries, keys) = (
+            shape.heads * shape.head_dim,
+            shape.key_value_heads * shape.head_dim,
+        );
+        let norm = NormSpec {
+            kind: NormKind::Rms,
+            eps,
+            offset: false,
+            groups: 1,
+        };
         Ok(Self {
             query: linear_no_bias(hidden, queries, block.pp("wq_du"))?,
             key: linear_no_bias(hidden, keys, block.pp("wk_dv"))?,
@@ -67,7 +75,10 @@ impl RelativeAttention {
             output_conv: ResidualConv::load(builder, "attn_sconv", hidden, spec.kernel, 2)?,
             query_norm: norm.load(shape.head_dim, block.pp("q_norm"))?,
             key_norm: norm.load(shape.head_dim, block.pp("k_norm"))?,
-            profiles: block.pp("rel_logits_proj").get((spec.profiles, shape.extent), "proj")?.to_dtype(DType::F32)?,
+            profiles: block
+                .pp("rel_logits_proj")
+                .get((spec.profiles, shape.extent), "proj")?
+                .to_dtype(DType::F32)?,
             heads: shape.heads,
             key_value_heads: shape.key_value_heads,
             head_dim: shape.head_dim,
@@ -97,11 +108,22 @@ impl RelativeAttention {
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, _) = normed.dims3()?;
         let dtype = normed.dtype();
-        let heads = |input: Tensor, count: usize| input.reshape((batch, sequence, count, self.head_dim));
-        let query = self.query_norm.forward(&heads(self.query.forward(normed)?, self.heads)?, mode.pass)?;
-        let key = self.key_conv.forward(&self.key.forward(normed)?, layer, cache)?;
-        let key = self.key_norm.forward(&heads(key, self.key_value_heads)?, mode.pass)?;
-        let value = heads(self.value_conv.forward(&self.value.forward(normed)?, layer, cache)?, self.key_value_heads)?;
+        let heads =
+            |input: Tensor, count: usize| input.reshape((batch, sequence, count, self.head_dim));
+        let query = self
+            .query_norm
+            .forward(&heads(self.query.forward(normed)?, self.heads)?, mode.pass)?;
+        let key = self
+            .key_conv
+            .forward(&self.key.forward(normed)?, layer, cache)?;
+        let key = self
+            .key_norm
+            .forward(&heads(key, self.key_value_heads)?, mode.pass)?;
+        let value = heads(
+            self.value_conv
+                .forward(&self.value.forward(normed)?, layer, cache)?,
+            self.key_value_heads,
+        )?;
         let mut key = key.transpose(1, 2)?.contiguous()?;
         let mut value = value.transpose(1, 2)?.contiguous()?;
         if cache.use_kv_cache {
@@ -119,7 +141,10 @@ impl RelativeAttention {
                 return Ok(input);
             }
             let (batch, groups, keys, width) = input.dims4()?;
-            input.unsqueeze(2)?.expand((batch, groups, repeats, keys, width))?.reshape((batch, groups * repeats, keys, width))
+            input
+                .unsqueeze(2)?
+                .expand((batch, groups, repeats, keys, width))?
+                .reshape((batch, groups * repeats, keys, width))
         };
         let query = query.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
         let key = repeat(key)?.to_dtype(DType::F32)?;
@@ -132,7 +157,12 @@ impl RelativeAttention {
             .forward(normed)?
             .to_dtype(DType::F32)?
             .reshape((batch, sequence, self.heads, self.profile_count))?
-            .matmul(&self.profiles.broadcast_left((batch, sequence))?.contiguous()?)?
+            .matmul(
+                &self
+                    .profiles
+                    .broadcast_left((batch, sequence))?
+                    .contiguous()?,
+            )?
             .transpose(1, 2)?
             .contiguous()?;
         let mut indices = Vec::with_capacity(sequence * total);
@@ -151,12 +181,16 @@ impl RelativeAttention {
             .broadcast_as((batch, self.heads, sequence, total))?
             .contiguous()?;
         let inside = Tensor::from_vec(inside, (1, 1, sequence, total), device)?;
-        let bias = relative.gather(&indices, D::Minus1)?.broadcast_mul(&inside)?;
+        let bias = relative
+            .gather(&indices, D::Minus1)?
+            .broadcast_mul(&inside)?;
         let scores = (scores + bias)?;
         let scores = match self.log_scaling {
             Some((alpha, floor)) => {
                 let scales: Vec<f32> = (index_pos..index_pos + sequence)
-                    .map(|position| (1.0 + alpha * ((position + 1) as f64 / floor).max(1.0).ln()) as f32)
+                    .map(|position| {
+                        (1.0 + alpha * ((position + 1) as f64 / floor).max(1.0).ln()) as f32
+                    })
                     .collect();
                 scores.broadcast_mul(&Tensor::from_vec(scales, (1, 1, sequence, 1), device)?)?
             }
@@ -164,7 +198,9 @@ impl RelativeAttention {
         };
         let hidden = match mask {
             Some(mask) => mask.broadcast_as(scores.shape())?.to_dtype(DType::U8)?,
-            None => cache.mask(sequence, index_pos, self.window)?.broadcast_as(scores.shape())?,
+            None => cache
+                .mask(sequence, index_pos, self.window)?
+                .broadcast_as(scores.shape())?,
         };
         let floor = Tensor::new(f32::NEG_INFINITY, device)?.broadcast_as(scores.shape())?;
         let scores = hidden.where_cond(&floor, &scores)?;
@@ -177,6 +213,7 @@ impl RelativeAttention {
             .transpose(1, 2)?
             .reshape((batch, sequence, self.heads * self.head_dim))?
             .to_dtype(dtype)?;
-        self.output_conv.forward(&self.output.forward(&attended)?, layer, cache)
+        self.output_conv
+            .forward(&self.output.forward(&attended)?, layer, cache)
     }
 }

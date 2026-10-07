@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::Runtime;
@@ -14,7 +14,11 @@ pub fn extract(runtime: &Runtime, input: &Path, output: &Path, layers: &[usize])
     let prompts = PromptSet::load(input)?;
     let mut records = Vec::with_capacity(prompts.prompts.len());
     for (index, prompt) in prompts.prompts.iter().enumerate() {
-        progress(format!("extracting prompt {}/{}", index + 1, prompts.prompts.len()));
+        progress(format!(
+            "extracting prompt {}/{}",
+            index + 1,
+            prompts.prompts.len()
+        ));
         let activations = runtime.activations(prompt, layers)?;
         records.push(ActivationRecord {
             prompt: prompt.clone(),
@@ -49,8 +53,7 @@ pub struct PromptSet {
 
 impl PromptSet {
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes =
-            fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         let value: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid prompt JSON in {}", path.display()))?;
         if value.prompts.is_empty() {

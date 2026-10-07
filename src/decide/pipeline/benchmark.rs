@@ -5,13 +5,14 @@
 
 use std::{collections::BTreeMap, time::Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::{
     decide::{
-        calibration::{metrics, Metrics},
-        control_state, question_logits, ExampleSet, Labelled, Options, Question, Request,
+        ExampleSet, Labelled, Options, Question, Request,
+        calibration::{Metrics, metrics},
+        control_state, question_logits,
     },
     runtime::Runtime,
     workflow,
@@ -71,7 +72,11 @@ pub struct Latency {
 const MILLISECONDS: f64 = 1000.0;
 
 /// Reads every example of `set` and scores its labels.
-pub fn benchmark(runtime: &Runtime, set: &ExampleSet, options: &BenchmarkOptions) -> Result<Benchmark> {
+pub fn benchmark(
+    runtime: &Runtime,
+    set: &ExampleSet,
+    options: &BenchmarkOptions,
+) -> Result<Benchmark> {
     if options.ece_bins == 0 {
         bail!("the expected calibration error needs at least one bin");
     }
@@ -89,7 +94,9 @@ pub fn benchmark(runtime: &Runtime, set: &ExampleSet, options: &BenchmarkOptions
         timed += clock.elapsed().as_secs_f64();
         input_tokens += usage.input_tokens;
         for ((id, question), logits) in request.questions.iter().zip(logits) {
-            let truth = question.truth_index(&example.answers[id]).expect("validated label");
+            let truth = question
+                .truth_index(&example.answers[id])
+                .expect("validated label");
             labelled.push((kind(question).to_owned(), Labelled { logits, truth }));
         }
         if count > 1 {
@@ -100,8 +107,13 @@ pub fn benchmark(runtime: &Runtime, set: &ExampleSet, options: &BenchmarkOptions
                     questions: BTreeMap::from([(id.clone(), question.clone())]),
                 };
                 let (logits, _) = question_logits(runtime, &control, options.read)?;
-                let truth = question.truth_index(&example.answers[id]).expect("validated label");
-                shuffled.push(Labelled { logits: logits.into_iter().next().expect("one question"), truth });
+                let truth = question
+                    .truth_index(&example.answers[id])
+                    .expect("validated label");
+                shuffled.push(Labelled {
+                    logits: logits.into_iter().next().expect("one question"),
+                    truth,
+                });
             }
         }
     }
@@ -109,13 +121,23 @@ pub fn benchmark(runtime: &Runtime, set: &ExampleSet, options: &BenchmarkOptions
     let all: Vec<Labelled> = labelled.iter().map(|(_, item)| item.clone()).collect();
     let mut by_type = BTreeMap::new();
     for name in ["choice", "score", "noul"] {
-        let items: Vec<Labelled> =
-            labelled.iter().filter(|(kind, _)| kind == name).map(|(_, item)| item.clone()).collect();
+        let items: Vec<Labelled> = labelled
+            .iter()
+            .filter(|(kind, _)| kind == name)
+            .map(|(_, item)| item.clone())
+            .collect();
         if items.is_empty() {
             continue;
         }
         let scored = metrics(&items, temperature, options.ece_bins);
-        by_type.insert(name.to_owned(), TypeMetrics { questions: items.len(), accuracy: scored.accuracy, nll: scored.nll });
+        by_type.insert(
+            name.to_owned(),
+            TypeMetrics {
+                questions: items.len(),
+                accuracy: scored.accuracy,
+                nll: scored.nll,
+            },
+        );
     }
     let overall = metrics(&all, temperature, options.ece_bins);
     let control = (count > 1).then(|| metrics(&shuffled, temperature, options.ece_bins));
@@ -125,7 +147,10 @@ pub fn benchmark(runtime: &Runtime, set: &ExampleSet, options: &BenchmarkOptions
         overall.accuracy,
         overall.nll,
         overall.ece,
-        control.map_or(String::new(), |control| format!(", {:.4} on shuffled states", control.accuracy)),
+        control.map_or(String::new(), |control| format!(
+            ", {:.4} on shuffled states",
+            control.accuracy
+        )),
         timed * MILLISECONDS / count as f64
     ));
     Ok(Benchmark {

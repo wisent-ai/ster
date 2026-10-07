@@ -1,6 +1,6 @@
 //! The two flag parsers every adapter-training request shares.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::{lora, workflow::parse_layers};
 

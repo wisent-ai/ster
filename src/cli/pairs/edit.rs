@@ -8,14 +8,23 @@ use anyhow::{Result, bail};
 use serde_json::json;
 use ster::PairSet;
 
-pub(super) fn run(file: &Path, index: usize, positive: Option<String>, negative: Option<String>, trait_name: Option<String>) -> Result<()> {
+pub(super) fn run(
+    file: &Path,
+    index: usize,
+    positive: Option<String>,
+    negative: Option<String>,
+    trait_name: Option<String>,
+) -> Result<()> {
     if positive.is_none() && negative.is_none() && trait_name.is_none() {
         bail!("pairs edit changes nothing without --positive, --negative or --trait");
     }
     let mut pair_set = PairSet::load(file)?;
     let count = pair_set.pairs.len();
     let Some(pair) = pair_set.pairs.get_mut(index) else {
-        bail!("pair index {index} is outside the set: {} holds {count} pair(s), indexed from 0", file.display());
+        bail!(
+            "pair index {index} is outside the set: {} holds {count} pair(s), indexed from 0",
+            file.display()
+        );
     };
     if let Some(positive) = positive {
         pair.positive = positive;

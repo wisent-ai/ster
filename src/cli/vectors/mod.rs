@@ -379,7 +379,11 @@ pub(super) fn extract(args: ExtractArgs) -> Result<()> {
     Ok(())
 }
 pub(super) fn parity(args: ParityArgs) -> Result<()> {
-    let ParityArgs { model, input, precision } = args;
+    let ParityArgs {
+        model,
+        input,
+        precision,
+    } = args;
     let runtime = model.load_at(precision)?;
     super::answer(&workflow::parity(&runtime, &input)?)?;
     Ok(())

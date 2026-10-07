@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 /// One record keyed by its header name, with its one-based record number.
 pub(super) struct Record {

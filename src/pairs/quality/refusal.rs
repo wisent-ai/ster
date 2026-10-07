@@ -93,8 +93,7 @@ pub struct Score {
 /// Up to two short filler words between the negation and the action verb, so
 /// "i cannot really help" hits the same branch as "i cannot help".
 const FILLER: &str = r"(?:\b\w{1,15}\b\s+){0,2}";
-const NEG_MODAL: &str =
-    r"(?:can(?:\s*not)?|can't|won't|will\s+not|should(?:\s*not)?|shouldn't|must(?:\s*not)?|mustn't)";
+const NEG_MODAL: &str = r"(?:can(?:\s*not)?|can't|won't|will\s+not|should(?:\s*not)?|shouldn't|must(?:\s*not)?|mustn't)";
 const AM: &str = r"(?:i\s+(?:am|['']m))";
 const I: &str = r"\bi\b";
 const I_M: &str = r"(?:i['']m)";
@@ -211,7 +210,11 @@ static REFUSAL_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub fn score(text: &str) -> Score {
     let normalized = text.nfkc().collect::<String>();
     let Some(captures) = REFUSAL_RE.captures(normalized.trim()) else {
-        return Score { score: 0.0, family: None, snippet: String::new() };
+        return Score {
+            score: 0.0,
+            family: None,
+            snippet: String::new(),
+        };
     };
 
     let mut best: Option<Family> = None;
@@ -243,7 +246,10 @@ pub fn score(text: &str) -> Score {
     Score {
         score: (best_weight + bonus).min(1.0),
         family: best,
-        snippet: captures.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+        snippet: captures
+            .get(0)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default(),
     }
 }
 

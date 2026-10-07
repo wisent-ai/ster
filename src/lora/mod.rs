@@ -11,14 +11,14 @@
 //! read back from is in `artifact`. What stays here is the shape an operator
 //! asks for: which projections carry adapters, and at what rank.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 mod adapter;
 mod artifact;
 
 pub use adapter::{Adapter, Adapters};
-pub use artifact::{Artifact, Kind, ARTIFACT_SCHEMA_VERSION, REWARD_HEAD_TENSOR};
+pub use artifact::{ARTIFACT_SCHEMA_VERSION, Artifact, Kind, REWARD_HEAD_TENSOR};
 
 /// The widths a model's projections have, which an adapter's factors must
 /// match: the residual stream, the query projection, the attention output
@@ -39,9 +39,7 @@ pub struct Widths {
 /// `Ord` is derived because [`Adapters`] keys a [`BTreeMap`] by
 /// `(layer, target)`, which is what makes adapter construction — and therefore
 /// the sequence of draws from the random initialiser — reproducible for a seed.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Target {
     Query,
@@ -152,7 +150,10 @@ impl Spec {
             bail!("adapter rank 0 trains nothing; choose a rank of at least 1");
         }
         if !self.alpha.is_finite() || self.alpha <= 0.0 {
-            bail!("adapter alpha {} is not a positive finite number", self.alpha);
+            bail!(
+                "adapter alpha {} is not a positive finite number",
+                self.alpha
+            );
         }
         if self.targets.is_empty() {
             bail!(
@@ -166,9 +167,7 @@ impl Spec {
         }
         for layer in &self.layers {
             if *layer >= layer_count {
-                bail!(
-                    "adapter spec names layer {layer}, but the model has {layer_count} layers"
-                );
+                bail!("adapter spec names layer {layer}, but the model has {layer_count} layers");
             }
         }
         Ok(())

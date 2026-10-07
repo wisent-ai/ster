@@ -22,11 +22,23 @@ use super::compressor::{Compressor, Indexer, closed_entries};
 
 /// Rotates the trailing `2 · cos.dim(1)` channels of `input` `[batch,
 /// heads, sequence, head_dim]` pair by pair; the rest pass through.
-pub(super) fn rotate_trailing(input: &Tensor, cos: &Tensor, sin: &Tensor, pass: Pass) -> candle_core::Result<Tensor> {
+pub(super) fn rotate_trailing(
+    input: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    pass: Pass,
+) -> candle_core::Result<Tensor> {
     let head_dim = input.dim(3)?;
     let rotary = 2 * cos.dim(1)?;
     let dtype = input.dtype();
-    let rotated = apply_rotary(&input.narrow(3, head_dim - rotary, rotary)?, cos, sin, dtype, pass, true)?;
+    let rotated = apply_rotary(
+        &input.narrow(3, head_dim - rotary, rotary)?,
+        cos,
+        sin,
+        dtype,
+        pass,
+        true,
+    )?;
     if rotary == head_dim {
         return Ok(rotated);
     }
@@ -72,18 +84,36 @@ impl CompressedAttention {
     ) -> candle_core::Result<Self> {
         let block = builder.pp("self_attn");
         let at = |set: u128| set >> layer & 1 == 1;
-        let rms = NormSpec { kind: NormKind::Rms, eps, offset: false, groups: 1 };
+        let rms = NormSpec {
+            kind: NormKind::Rms,
+            eps,
+            offset: false,
+            groups: 1,
+        };
         let width = spec.heads * spec.head_dim;
         let (reach, theta) = if at(spec.sparse_layers) {
             let compressor = block.pp("compressor");
             (
                 Reach::Sparse(
-                    Compressor::load(&compressor, hidden, spec.head_dim, spec.sparse_rate, true, eps, 0)?,
+                    Compressor::load(
+                        &compressor,
+                        hidden,
+                        spec.head_dim,
+                        spec.sparse_rate,
+                        true,
+                        eps,
+                        0,
+                    )?,
                     Box::new(Indexer::load(
                         &compressor.pp("indexer"),
                         hidden,
                         spec.query_rank,
-                        (spec.index_heads, spec.index_head_dim, spec.index_top_k, spec.sparse_rate),
+                        (
+                            spec.index_heads,
+                            spec.index_head_dim,
+                            spec.index_top_k,
+                            spec.sparse_rate,
+                        ),
                         eps,
                     )?),
                 ),
@@ -92,7 +122,15 @@ impl CompressedAttention {
         } else if at(spec.heavy_layers) {
             let compressor = block.pp("compressor");
             (
-                Reach::Heavy(Compressor::load(&compressor, hidden, spec.head_dim, spec.heavy_rate, false, eps, 0)?),
+                Reach::Heavy(Compressor::load(
+                    &compressor,
+                    hidden,
+                    spec.head_dim,
+                    spec.heavy_rate,
+                    false,
+                    eps,
+                    0,
+                )?),
                 spec.compress_theta,
             )
         } else {
@@ -123,7 +161,10 @@ impl CompressedAttention {
                 .get((groups * spec.output_rank, width / groups), "weight")?
                 .reshape((groups, spec.output_rank, width / groups))?,
             output_up: linear_no_bias(groups * spec.output_rank, hidden, block.pp("o_b_proj"))?,
-            sinks: block.get(spec.heads, "sinks")?.to_dtype(DType::F32)?.reshape((1, spec.heads, 1, 1))?,
+            sinks: block
+                .get(spec.heads, "sinks")?
+                .to_dtype(DType::F32)?
+                .reshape((1, spec.heads, 1, 1))?,
             reach,
             rotation: RotaryTable::new(frequencies, 1.0, builder.device())?,
             heads: spec.heads,
@@ -152,10 +193,20 @@ impl CompressedAttention {
         let dtype = normed.dtype();
         let device = normed.device();
         let (cos, sin) = self.rotation.angles(index_pos, sequence)?;
-        let latent = self.query_norm.forward(&self.query_down.forward(normed)?, mode.pass)?;
-        let query = self.query_up.forward(&latent)?.reshape((batch, sequence, self.heads, self.head_dim))?;
+        let latent = self
+            .query_norm
+            .forward(&self.query_down.forward(normed)?, mode.pass)?;
+        let query = self.query_up.forward(&latent)?.reshape((
+            batch,
+            sequence,
+            self.heads,
+            self.head_dim,
+        ))?;
         let variance = query.to_dtype(DType::F32)?.sqr()?.mean_keepdim(D::Minus1)?;
-        let query = query.to_dtype(DType::F32)?.broadcast_div(&(variance + self.eps)?.sqrt()?)?.to_dtype(dtype)?;
+        let query = query
+            .to_dtype(DType::F32)?
+            .broadcast_div(&(variance + self.eps)?.sqrt()?)?
+            .to_dtype(dtype)?;
         let query = rotate_trailing(&query.transpose(1, 2)?.contiguous()?, &cos, &sin, mode.pass)?;
         let key = self
             .key_value_norm
@@ -172,11 +223,15 @@ impl CompressedAttention {
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let query = query.to_dtype(DType::F32)?;
         let key = key.to_dtype(DType::F32)?;
-        let negative = |shape: &candle_core::Shape| Tensor::new(f32::NEG_INFINITY, device)?.broadcast_as(shape.clone());
+        let negative = |shape: &candle_core::Shape| {
+            Tensor::new(f32::NEG_INFINITY, device)?.broadcast_as(shape.clone())
+        };
         let scores = (query.broadcast_matmul(&key.transpose(2, 3)?.contiguous()?)? * scale)?;
         let hidden = match mask {
             Some(mask) => mask.broadcast_as(scores.shape())?.to_dtype(DType::U8)?,
-            None => cache.mask(sequence, index_pos, Some(self.window))?.broadcast_as(scores.shape())?,
+            None => cache
+                .mask(sequence, index_pos, Some(self.window))?
+                .broadcast_as(scores.shape())?,
         };
         let scores = hidden.where_cond(&negative(scores.shape())?, &scores)?;
         // The compressed entries closed before each query, `[batch, 1,
@@ -184,14 +239,29 @@ impl CompressedAttention {
         let compressed = match &self.reach {
             Reach::Window => None,
             Reach::Heavy(compressor) => {
-                let entries = compressor.entries(normed, layer, cache, &self.rotation, mode.pass)?;
+                let entries =
+                    compressor.entries(normed, layer, cache, &self.rotation, mode.pass)?;
                 let count = entries.dim(1)?;
                 let hidden = closed_entries(index_pos, sequence, count, compressor.rate(), device)?;
-                Some((entries, hidden.broadcast_as((batch, sequence, count))?.contiguous()?))
+                Some((
+                    entries,
+                    hidden
+                        .broadcast_as((batch, sequence, count))?
+                        .contiguous()?,
+                ))
             }
             Reach::Sparse(compressor, indexer) => {
-                let entries = compressor.entries(normed, layer, cache, &self.rotation, mode.pass)?;
-                let hidden = indexer.hidden_entries(normed, &latent, index_pos, layer, cache, &self.rotation, mode.pass)?;
+                let entries =
+                    compressor.entries(normed, layer, cache, &self.rotation, mode.pass)?;
+                let hidden = indexer.hidden_entries(
+                    normed,
+                    &latent,
+                    index_pos,
+                    layer,
+                    cache,
+                    &self.rotation,
+                    mode.pass,
+                )?;
                 if hidden.dim(2)? != entries.dim(1)? {
                     candle_core::bail!(
                         "layer {layer}'s indexer ranked {} entries and its compressor holds {}",
@@ -205,9 +275,13 @@ impl CompressedAttention {
         let compressed = match compressed {
             Some((entries, hidden)) if entries.dim(1)? > 0 => {
                 let entries = entries.to_dtype(DType::F32)?.unsqueeze(1)?;
-                let scores = (query.broadcast_matmul(&entries.transpose(2, 3)?.contiguous()?)? * scale)?;
+                let scores =
+                    (query.broadcast_matmul(&entries.transpose(2, 3)?.contiguous()?)? * scale)?;
                 let hidden = hidden.unsqueeze(1)?.broadcast_as(scores.shape())?;
-                Some((entries, hidden.where_cond(&negative(scores.shape())?, &scores)?))
+                Some((
+                    entries,
+                    hidden.where_cond(&negative(scores.shape())?, &scores)?,
+                ))
             }
             _ => None,
         };
@@ -215,7 +289,11 @@ impl CompressedAttention {
         if let Some((_, scores)) = &compressed {
             logits.push(scores.clone());
         }
-        logits.push(self.sinks.broadcast_as((batch, self.heads, sequence, 1))?.contiguous()?);
+        logits.push(
+            self.sinks
+                .broadcast_as((batch, self.heads, sequence, 1))?
+                .contiguous()?,
+        );
         let logits = Tensor::cat(&logits, 3)?;
         let probabilities = match mode.pass {
             Pass::Inference => candle_nn::ops::softmax_last_dim(&logits.contiguous()?)?,
@@ -224,17 +302,30 @@ impl CompressedAttention {
         let mut output = probabilities.narrow(3, 0, total)?.broadcast_matmul(&key)?;
         if let Some((entries, _)) = &compressed {
             let count = entries.dim(2)?;
-            output = (output + probabilities.narrow(3, total, count)?.broadcast_matmul(entries)?)?;
+            output = (output
+                + probabilities
+                    .narrow(3, total, count)?
+                    .broadcast_matmul(entries)?)?;
         }
         // Undo the rotation the values carry, at the query's position.
         let output = rotate_trailing(&output, &cos, &sin.neg()?, mode.pass)?;
         let grouped = output
             .transpose(1, 2)?
-            .reshape((batch * sequence, self.groups, self.heads * self.head_dim / self.groups))?
+            .reshape((
+                batch * sequence,
+                self.groups,
+                self.heads * self.head_dim / self.groups,
+            ))?
             .transpose(0, 1)?
             .contiguous()?;
         let projected = grouped
-            .matmul(&self.output_down.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?)?
+            .matmul(
+                &self
+                    .output_down
+                    .to_dtype(DType::F32)?
+                    .transpose(1, 2)?
+                    .contiguous()?,
+            )?
             .transpose(0, 1)?
             .reshape((batch, sequence, ()))?
             .to_dtype(dtype)?;

@@ -9,7 +9,8 @@ use super::decisions::DecisionsCommand;
 use super::pairs::PairsCommand;
 use super::tune::TuneCommand;
 use super::vectors::{
-    EvaluateArgs, ExtractArgs, GenerateArgs, InspectArgs, OnboardingArgs, OptimizeArgs, ParityArgs, TrainArgs,
+    EvaluateArgs, ExtractArgs, GenerateArgs, InspectArgs, OnboardingArgs, OptimizeArgs, ParityArgs,
+    TrainArgs,
 };
 use super::workspace::WorkspaceCommand;
 

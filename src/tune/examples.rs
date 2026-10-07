@@ -55,11 +55,12 @@ impl ExampleSet {
         {
             bail!("example set {label} contains an empty prompt or completion");
         }
-        if self
-            .examples
-            .iter()
-            .any(|example| example.system.as_deref().is_some_and(|system| system.trim().is_empty()))
-        {
+        if self.examples.iter().any(|example| {
+            example
+                .system
+                .as_deref()
+                .is_some_and(|system| system.trim().is_empty())
+        }) {
             bail!("example set {label} contains an empty system prompt");
         }
         Ok(())

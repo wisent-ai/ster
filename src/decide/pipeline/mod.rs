@@ -9,7 +9,7 @@
 //! the held-out set. Every step reads and writes the one labelled-decision
 //! document `ster calibrate` already reads, so nothing is converted twice.
 
-use rand::{seq::SliceRandom, rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 use super::request::ExampleSet;
 
@@ -18,10 +18,10 @@ mod fetch;
 mod import;
 mod synthesize;
 
-pub use benchmark::{benchmark, Benchmark, BenchmarkOptions, Latency, TypeMetrics};
-pub use fetch::{fetch, FetchOptions, FetchReport};
-pub use import::{import_jsonl, ImportReport};
-pub use synthesize::{synthesize, Schema, SynthesizeOptions, SynthesizeReport};
+pub use benchmark::{Benchmark, BenchmarkOptions, Latency, TypeMetrics, benchmark};
+pub use fetch::{FetchOptions, FetchReport, fetch};
+pub use import::{ImportReport, import_jsonl};
+pub use synthesize::{Schema, SynthesizeOptions, SynthesizeReport, synthesize};
 
 /// Splits `set` into a training and a held-out set, `holdout` being the
 /// fraction held out, after a shuffle seeded by `seed`.
@@ -34,13 +34,17 @@ pub fn split(set: &ExampleSet, holdout: f64, seed: u64) -> (ExampleSet, ExampleS
     let mut order: Vec<usize> = (0..set.examples.len()).collect();
     order.shuffle(&mut StdRng::seed_from_u64(seed));
     let total = order.len();
-    let held = ((total as f64 * holdout).round() as usize).clamp(usize::from(total > 1), total.saturating_sub(1));
+    let held = ((total as f64 * holdout).round() as usize)
+        .clamp(usize::from(total > 1), total.saturating_sub(1));
     let (held_out, training) = order.split_at(held);
     let pick = |indices: &[usize]| ExampleSet {
         examples: {
             let mut sorted = indices.to_vec();
             sorted.sort_unstable();
-            sorted.into_iter().map(|index| set.examples[index].clone()).collect()
+            sorted
+                .into_iter()
+                .map(|index| set.examples[index].clone())
+                .collect()
         },
     };
     (pick(training), pick(held_out))

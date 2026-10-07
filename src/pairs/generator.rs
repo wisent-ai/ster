@@ -39,7 +39,12 @@ impl Generator<'_> {
     /// the provider behind the route owns its own sampler — so a hosted run is
     /// not reproducible from `--seed`, and the running dedupe is what keeps
     /// repeated draws out of the set.
-    pub(super) fn generate(&self, prompt: &str, options: &SynthesisOptions, call: u64) -> Result<String> {
+    pub(super) fn generate(
+        &self,
+        prompt: &str,
+        options: &SynthesisOptions,
+        call: u64,
+    ) -> Result<String> {
         let text = match self {
             Self::Local(runtime) => {
                 let generation = GenerationOptions {

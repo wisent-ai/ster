@@ -49,7 +49,8 @@ impl Runtime {
     ) -> Result<Self> {
         let base = BaseLoad::resolve(model, revision, device, precision)?;
         let builder = base.builder()?;
-        let model_impl = SteeringLlama::load(builder, base.config.clone(), base.architecture.clone())?;
+        let model_impl =
+            SteeringLlama::load(builder, base.config.clone(), base.architecture.clone())?;
         Ok(base.finish(model, model_impl))
     }
 
@@ -148,7 +149,8 @@ impl Runtime {
             );
         }
         validate_layers(&artifact.layers, base.config.num_hidden_layers)?;
-        base.architecture.check_targets(&artifact.targets, &base.config)?;
+        base.architecture
+            .check_targets(&artifact.targets, &base.config)?;
         let adapters = lora::Adapters::from_artifact(&artifact, &base.device, base.dtype)?;
         let builder = base.builder()?;
         let model_impl = SteeringLlama::load_with_adapters(
@@ -198,17 +200,13 @@ impl Runtime {
     ) -> Result<(Self, VarMap)> {
         let base = BaseLoad::resolve(model, revision, device, precision)?;
         spec.validate(base.config.num_hidden_layers)?;
-        base.architecture.check_targets(&spec.targets, &base.config)?;
+        base.architecture
+            .check_targets(&spec.targets, &base.config)?;
         let spec = spec.resolved(base.config.num_hidden_layers);
         let widths = projection_widths(&base.config, &base.architecture);
         let varmap = VarMap::new();
-        let adapters = lora::Adapters::fresh(
-            &spec,
-            &varmap,
-            widths,
-            &base.device,
-            base.param_dtype,
-        )?;
+        let adapters =
+            lora::Adapters::fresh(&spec, &varmap, widths, &base.device, base.param_dtype)?;
         let builder = base.builder()?;
         let model_impl = SteeringLlama::load_with_adapters(
             builder,
@@ -259,7 +257,8 @@ impl BaseLoad {
         // A template that does not compile is kept as its refusal, raised
         // only by a run that asks for the template.
         let chat = source.chat().map_err(|error| format!("{error:#}"));
-        let tokenizer = super::vocabulary::load(&source.tokenizer, source.tokenizer_config.as_deref())?;
+        let tokenizer =
+            super::vocabulary::load(&source.tokenizer, source.tokenizer_config.as_deref())?;
         Ok(Self {
             tokenizer,
             config,
@@ -288,13 +287,24 @@ impl BaseLoad {
             // under the Transformers name the decoder asks for.
             Layout::Gguf => {
                 let [file] = self.weights.as_slice() else {
-                    bail!("a GGUF checkpoint is one .gguf file; this one lists {}", self.weights.len());
+                    bail!(
+                        "a GGUF checkpoint is one .gguf file; this one lists {}",
+                        self.weights.len()
+                    );
                 };
-                VarBuilder::from_backend(Box::new(gguf::GgufWeights::open(file)?), self.dtype, self.device.clone())
+                VarBuilder::from_backend(
+                    Box::new(gguf::GgufWeights::open(file)?),
+                    self.dtype,
+                    self.device.clone(),
+                )
             }
             Layout::Transformers | Layout::Mistral => {
-                let mapped = unsafe { VarBuilder::from_mmaped_safetensors(&self.weights, self.dtype, &self.device) }
-                    .with_context(|| format!("failed to map {} model weight files", self.weights.len()))?;
+                let mapped = unsafe {
+                    VarBuilder::from_mmaped_safetensors(&self.weights, self.dtype, &self.device)
+                }
+                .with_context(|| {
+                    format!("failed to map {} model weight files", self.weights.len())
+                })?;
                 match layout {
                     Layout::Mistral => mapped.rename_f(move |name: &str| layout.stored_name(name)),
                     _ => mapped,
@@ -304,11 +314,21 @@ impl BaseLoad {
         if self.architecture.compressed.is_none() {
             return Ok(builder);
         }
-        let root = ["", "model."].into_iter().find(|root| builder.contains_tensor(&format!("{root}embed.weight")));
+        let root = ["", "model."]
+            .into_iter()
+            .find(|root| builder.contains_tensor(&format!("{root}embed.weight")));
         Ok(match root {
             Some(root) => {
-                let key_value_norm = if builder.contains_tensor(&format!("{root}layers.0.attn.kv_norm.weight")) { "kv_norm" } else { "norm" };
-                let names = crate::model::NativeNames { root: root.to_owned(), key_value_norm };
+                let key_value_norm =
+                    if builder.contains_tensor(&format!("{root}layers.0.attn.kv_norm.weight")) {
+                        "kv_norm"
+                    } else {
+                        "norm"
+                    };
+                let names = crate::model::NativeNames {
+                    root: root.to_owned(),
+                    key_value_norm,
+                };
                 builder.rename_f(move |name: &str| names.stored(name))
             }
             None => builder,

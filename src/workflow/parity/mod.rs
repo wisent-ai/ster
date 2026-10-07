@@ -80,8 +80,10 @@ pub struct ParityReport {
 }
 
 pub fn parity(runtime: &Runtime, input: &Path) -> Result<ParityReport> {
-    let set: ParitySet = serde_json::from_slice(&fs::read(input).with_context(|| format!("failed to read {}", input.display()))?)
-        .with_context(|| format!("invalid parity JSON in {}", input.display()))?;
+    let set: ParitySet = serde_json::from_slice(
+        &fs::read(input).with_context(|| format!("failed to read {}", input.display()))?,
+    )
+    .with_context(|| format!("invalid parity JSON in {}", input.display()))?;
     if set.records.is_empty() {
         bail!("{} lists no records to compare", input.display());
     }
@@ -90,7 +92,11 @@ pub fn parity(runtime: &Runtime, input: &Path) -> Result<ParityReport> {
     let mut records = Vec::with_capacity(set.records.len());
     let mut totals = Totals::default();
     for (index, record) in set.records.iter().enumerate() {
-        progress(format!("comparing record {}/{}", index + 1, set.records.len()));
+        progress(format!(
+            "comparing record {}/{}",
+            index + 1,
+            set.records.len()
+        ));
         let ids = token_ids(record, &base, index)?;
         if let Some(id) = ids.iter().find(|id| **id as usize >= vocabulary) {
             bail!("record {index} holds token id {id}, past the model's {vocabulary} tokens");
@@ -99,12 +105,21 @@ pub fn parity(runtime: &Runtime, input: &Path) -> Result<ParityReport> {
         let reference = reference_states(&base.join(&record.hidden), tensor)?;
         let (positions, width) = reference.dims2()?;
         if positions > ids.len() {
-            bail!("record {index}'s reference holds {positions} positions for {} tokens", ids.len());
+            bail!(
+                "record {index}'s reference holds {positions} positions for {} tokens",
+                ids.len()
+            );
         }
-        let ours = runtime.forward_hidden_scored(&ids)?.squeeze(0)?.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+        let ours = runtime
+            .forward_hidden_scored(&ids)?
+            .squeeze(0)?
+            .to_dtype(DType::F32)?
+            .to_device(&Device::Cpu)?;
         let (_, ours_width) = ours.dims2()?;
         if ours_width != width {
-            bail!("record {index}'s reference states are {width} wide and this model's {ours_width}");
+            bail!(
+                "record {index}'s reference states are {width} wide and this model's {ours_width}"
+            );
         }
         let ours = ours.narrow(0, 0, positions)?.to_vec2::<f32>()?;
         let theirs = reference.to_vec2::<f32>()?;
@@ -113,7 +128,11 @@ pub fn parity(runtime: &Runtime, input: &Path) -> Result<ParityReport> {
             record_totals.add(mine, reference);
         }
         totals.merge(&record_totals);
-        records.push(ParityRecord { hidden: record.hidden.clone(), tokens: ids.len(), measure: record_totals.measure() });
+        records.push(ParityRecord {
+            hidden: record.hidden.clone(),
+            tokens: ids.len(),
+            measure: record_totals.measure(),
+        });
     }
     Ok(ParityReport {
         model: runtime.model_id.clone(),
@@ -128,10 +147,14 @@ fn token_ids(record: &ParityInput, base: &Path, index: usize) -> Result<Vec<u32>
         (Some(ids), None) => ids.clone(),
         (None, Some(file)) => {
             let path: PathBuf = base.join(file);
-            serde_json::from_slice(&fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?)
-                .with_context(|| format!("{} is not a JSON list of token ids", path.display()))?
+            serde_json::from_slice(
+                &fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?,
+            )
+            .with_context(|| format!("{} is not a JSON list of token ids", path.display()))?
         }
-        (Some(_), Some(_)) => bail!("record {index} names both tokenIds and tokenIdsFile; give one"),
+        (Some(_), Some(_)) => {
+            bail!("record {index} names both tokenIds and tokenIdsFile; give one")
+        }
         (None, None) => bail!("record {index} names neither tokenIds nor tokenIdsFile"),
     };
     if ids.is_empty() {
@@ -142,17 +165,24 @@ fn token_ids(record: &ParityInput, base: &Path, index: usize) -> Result<Vec<u32>
 
 /// The reference states, `[positions, hidden]` in F32.
 fn reference_states(path: &Path, tensor: &str) -> Result<Tensor> {
-    let tensors = candle_core::safetensors::load(path, &Device::Cpu).with_context(|| format!("failed to read {}", path.display()))?;
+    let tensors = candle_core::safetensors::load(path, &Device::Cpu)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     let Some(states) = tensors.get(tensor) else {
         let mut names: Vec<&String> = tensors.keys().collect();
         names.sort();
-        bail!("{} holds no tensor {tensor:?}; it holds {names:?}", path.display());
+        bail!(
+            "{} holds no tensor {tensor:?}; it holds {names:?}",
+            path.display()
+        );
     };
     let states = states.to_dtype(DType::F32)?;
     match states.dims() {
         [_, _] => Ok(states),
         [1, _, _] => Ok(states.squeeze(0)?),
-        other => bail!("{}'s {tensor:?} is {other:?}; Ster compares [positions, hidden] states", path.display()),
+        other => bail!(
+            "{}'s {tensor:?} is {other:?}; Ster compares [positions, hidden] states",
+            path.display()
+        ),
     }
 }
 
@@ -181,10 +211,15 @@ impl Totals {
         self.positions += 1;
         self.difference_squares += difference;
         self.reference_squares += norm_reference;
-        self.worst_relative = self.worst_relative.max(ratio(difference.sqrt(), norm_reference.sqrt()));
+        self.worst_relative = self
+            .worst_relative
+            .max(ratio(difference.sqrt(), norm_reference.sqrt()));
         let cosine = ratio(dot, (norm_mine * norm_reference).sqrt());
         self.cosine_sum += cosine;
-        self.smallest_cosine = Some(self.smallest_cosine.map_or(cosine, |smallest| smallest.min(cosine)));
+        self.smallest_cosine = Some(
+            self.smallest_cosine
+                .map_or(cosine, |smallest| smallest.min(cosine)),
+        );
     }
 
     fn merge(&mut self, other: &Self) {
@@ -203,10 +238,17 @@ impl Totals {
     fn measure(&self) -> ParityMeasure {
         ParityMeasure {
             positions: self.positions,
-            relative_error: ratio(self.difference_squares.sqrt(), self.reference_squares.sqrt()),
+            relative_error: ratio(
+                self.difference_squares.sqrt(),
+                self.reference_squares.sqrt(),
+            ),
             worst_position_relative_error: self.worst_relative,
             largest_difference: self.largest,
-            mean_cosine: if self.positions == 0 { 0.0 } else { self.cosine_sum / self.positions as f64 },
+            mean_cosine: if self.positions == 0 {
+                0.0
+            } else {
+                self.cosine_sum / self.positions as f64
+            },
             smallest_cosine: self.smallest_cosine.unwrap_or(0.0),
         }
     }

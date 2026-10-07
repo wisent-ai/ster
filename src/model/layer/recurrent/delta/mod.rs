@@ -60,7 +60,13 @@ impl DeltaRule {
         eps: f64,
         spec: DeltaRuleSpec,
     ) -> candle_core::Result<Self> {
-        let DeltaRuleSpec { key_heads, value_heads, value_dim, form, .. } = spec;
+        let DeltaRuleSpec {
+            key_heads,
+            value_heads,
+            value_dim,
+            form,
+            ..
+        } = spec;
         if key_heads == 0 || value_heads % key_heads != 0 {
             candle_core::bail!(
                 "{value_heads} value heads cannot be shared evenly among {key_heads} key heads"
@@ -69,9 +75,15 @@ impl DeltaRule {
         let (inputs, convolution, step_bias) = Inputs::load(&builder, hidden, spec)?;
         let (norm, output) = match form {
             DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 => ("norm", "out_proj"),
-            DeltaRuleForm::Kimi | DeltaRuleForm::Ling | DeltaRuleForm::OlmoHybrid => ("o_norm", "o_proj"),
+            DeltaRuleForm::Kimi | DeltaRuleForm::Ling | DeltaRuleForm::OlmoHybrid => {
+                ("o_norm", "o_proj")
+            }
         };
-        let eps = if form == DeltaRuleForm::OlmoHybrid { OLMO_HYBRID_NORM_EPS } else { eps };
+        let eps = if form == DeltaRuleForm::OlmoHybrid {
+            OLMO_HYBRID_NORM_EPS
+        } else {
+            eps
+        };
         Ok(Self {
             inputs,
             convolution,
@@ -82,7 +94,10 @@ impl DeltaRule {
             decay: {
                 let stored = builder.get_unchecked("A_log")?.flatten_all()?;
                 if stored.dim(0)? < value_heads {
-                    candle_core::bail!("A_log holds {} entries for {value_heads} heads", stored.dim(0)?);
+                    candle_core::bail!(
+                        "A_log holds {} entries for {value_heads} heads",
+                        stored.dim(0)?
+                    );
                 }
                 stored
                     .narrow(0, 0, value_heads)?
@@ -108,15 +123,32 @@ impl DeltaRule {
         cache: &mut Cache,
     ) -> candle_core::Result<Tensor> {
         let (batch, sequence, _) = hidden.dims3()?;
-        let DeltaRuleSpec { key_heads, value_heads, key_dim, value_dim, kernel, form, .. } = self.spec;
+        let DeltaRuleSpec {
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel,
+            form,
+            ..
+        } = self.spec;
         let shared = value_heads / key_heads;
         let dtype = hidden.dtype();
         let device = hidden.device();
-        let Prepared { mixed, gate, strength, decay_input } = self.inputs.prepare(hidden, self.spec)?;
+        let Prepared {
+            mixed,
+            gate,
+            strength,
+            decay_input,
+        } = self.inputs.prepare(hidden, self.spec)?;
 
         // The causal depthwise convolution and SiLU over query, key and
         // value, continued from the inputs the previous call ended on.
-        let saved = if cache.use_kv_cache { cache.states[layer].clone() } else { None };
+        let saved = if cache.use_kv_cache {
+            cache.states[layer].clone()
+        } else {
+            None
+        };
         let (history, state) = match saved {
             Some((history, state)) => (Some(history), state),
             None => (
@@ -124,9 +156,16 @@ impl DeltaRule {
                 Tensor::zeros((batch, value_heads, key_dim, value_dim), DType::F32, device)?,
             ),
         };
-        let (convolved, next_history) =
-            causal_convolution(&mixed.transpose(1, 2)?, history, &self.convolution, None, kernel)?;
-        let mixed = candle_nn::ops::silu(&convolved)?.transpose(1, 2)?.contiguous()?;
+        let (convolved, next_history) = causal_convolution(
+            &mixed.transpose(1, 2)?,
+            history,
+            &self.convolution,
+            None,
+            kernel,
+        )?;
+        let mixed = candle_nn::ops::silu(&convolved)?
+            .transpose(1, 2)?
+            .contiguous()?;
         let keys = key_heads * key_dim;
         // Each key head's query and key serve its `shared` value heads.
         let by_value_head = |flat: Tensor| -> candle_core::Result<Tensor> {
@@ -148,7 +187,11 @@ impl DeltaRule {
         // and log-decay `g`; Kimi's per-key-channel decay belongs to its key
         // head and is shared like the key.
         let strength = (strength.neg()?.exp()? + 1.0)?.recip()?;
-        let strength = if self.spec.negative_eigenvalues { (strength * 2.0)? } else { strength };
+        let strength = if self.spec.negative_eigenvalues {
+            (strength * 2.0)?
+        } else {
+            strength
+        };
         // Ling 3.0's safe gate bounds the log-decay below by its floor:
         // `floor · sigmoid(exp(A_log) · (input + dt_bias))`, `-decay` being
         // `exp(A_log)`.
@@ -168,17 +211,24 @@ impl DeltaRule {
             let query_t = query.i((.., position, .., ..))?;
             let key_t = key.i((.., position, .., ..))?;
             let value_t = value.i((.., position, .., ..))?;
-            let decay_t = log_decay
-                .i((.., position, .., ..))?
-                .exp()?
-                .reshape((batch, value_heads, decay_width, 1))?;
-            let strength_t = strength.i((.., position, ..))?.reshape((batch, value_heads, 1))?;
+            let decay_t = log_decay.i((.., position, .., ..))?.exp()?.reshape((
+                batch,
+                value_heads,
+                decay_width,
+                1,
+            ))?;
+            let strength_t = strength
+                .i((.., position, ..))?
+                .reshape((batch, value_heads, 1))?;
             state = state.broadcast_mul(&decay_t)?;
             // What the state already recalls for this key, and the
             // delta-rule correction toward the value.
             let recalled = state.broadcast_mul(&key_t.unsqueeze(3)?)?.sum(2)?;
             let correction = (value_t - recalled)?.broadcast_mul(&strength_t)?;
-            state = (state + key_t.unsqueeze(3)?.broadcast_mul(&correction.unsqueeze(2)?)?)?;
+            state = (state
+                + key_t
+                    .unsqueeze(3)?
+                    .broadcast_mul(&correction.unsqueeze(2)?)?)?;
             outputs.push(state.broadcast_mul(&query_t.unsqueeze(3)?)?.sum(2)?);
         }
         let read = Tensor::stack(&outputs, 1)?;
@@ -193,12 +243,16 @@ impl DeltaRule {
             .broadcast_mul(&self.norm.to_dtype(DType::F32)?)?;
         let gate = gate.to_dtype(DType::F32)?;
         let gate = match form {
-            DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 | DeltaRuleForm::OlmoHybrid => candle_nn::ops::silu(&gate)?,
+            DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 | DeltaRuleForm::OlmoHybrid => {
+                candle_nn::ops::silu(&gate)?
+            }
             DeltaRuleForm::Kimi | DeltaRuleForm::Ling => (gate.neg()?.exp()? + 1.0)?.recip()?,
         };
-        let gated = (normed * gate)?
-            .to_dtype(dtype)?
-            .reshape((batch, sequence, value_heads * value_dim))?;
+        let gated = (normed * gate)?.to_dtype(dtype)?.reshape((
+            batch,
+            sequence,
+            value_heads * value_dim,
+        ))?;
         self.output.forward(&gated)
     }
 }

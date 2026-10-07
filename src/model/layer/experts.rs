@@ -12,8 +12,8 @@ use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 
 use super::norm::{Norm, NormSpec};
 use crate::model::{
-    Activation, ExpertGroups, ExpertLayout, LatentExperts, MixtureOfExperts, NormKind, Pass, Scoring, SharedExpert,
-    SharedForm, SwigluLimit,
+    Activation, ExpertGroups, ExpertLayout, LatentExperts, MixtureOfExperts, NormKind, Pass,
+    Scoring, SharedExpert, SharedForm, SwigluLimit,
 };
 
 #[derive(Debug, Clone)]
@@ -175,7 +175,11 @@ impl Experts {
                     ExpertLayout::DeepseekV4 => Some("w1"),
                     _ => Some("gate_proj"),
                 };
-                let names = if spec.layout == ExpertLayout::DeepseekV4 { ["w3", "w2"] } else { ["up_proj", "down_proj"] };
+                let names = if spec.layout == ExpertLayout::DeepseekV4 {
+                    ["w3", "w2"]
+                } else {
+                    ["up_proj", "down_proj"]
+                };
                 let width = spec.latent.map_or(hidden, |latent| latent.width);
                 let stacked = block.pp("experts");
                 // Transformers 5 saves every expert stacked: `gate_up_proj`
@@ -198,12 +202,21 @@ impl Experts {
                 } else {
                     (0..count)
                         .map(|expert| {
-                            Expert::load(width, intermediate, gate, names, stacked.pp(expert.to_string()))
+                            Expert::load(
+                                width,
+                                intermediate,
+                                gate,
+                                names,
+                                stacked.pp(expert.to_string()),
+                            )
                         })
                         .collect::<candle_core::Result<Vec<_>>>()?
                 };
                 // LongCat-Flash's router also scores its identity experts.
-                (linear_no_bias(hidden, count + spec.identity_experts, block.pp(router))?, experts)
+                (
+                    linear_no_bias(hidden, count + spec.identity_experts, block.pp(router))?,
+                    experts,
+                )
             }
             // Step3 stacks each projection of every expert in one tensor as a
             // projection stores it; each expert is a view of its slice.
@@ -241,7 +254,10 @@ impl Experts {
                         })
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
-                (linear_no_bias(hidden, count, block.pp("router").pp("layer"))?, experts)
+                (
+                    linear_no_bias(hidden, count, block.pp("router").pp("layer"))?,
+                    experts,
+                )
             }
             // GPT-OSS stacks every expert inputs-first: `gate_up_proj`
             // `[experts, hidden, 2 * intermediate]` with gate and up columns
@@ -251,8 +267,10 @@ impl Experts {
             ExpertLayout::GptOss => {
                 let block = builder.pp("mlp");
                 let experts_block = block.pp("experts");
-                let gate_up = experts_block.get((count, hidden, 2 * intermediate), "gate_up_proj")?;
-                let gate_up_bias = experts_block.get((count, 2 * intermediate), "gate_up_proj_bias")?;
+                let gate_up =
+                    experts_block.get((count, hidden, 2 * intermediate), "gate_up_proj")?;
+                let gate_up_bias =
+                    experts_block.get((count, 2 * intermediate), "gate_up_proj_bias")?;
                 let down = experts_block.get((count, intermediate, hidden), "down_proj")?;
                 let down_bias = experts_block.get((count, hidden), "down_proj_bias")?;
                 let experts = (0..count)
@@ -275,7 +293,10 @@ impl Experts {
                         })
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
-                (candle_nn::linear(hidden, count, block.pp("router"))?, experts)
+                (
+                    candle_nn::linear(hidden, count, block.pp("router"))?,
+                    experts,
+                )
             }
             // DBRX stacks every expert's rows: `w1` (gate) and `v1` (up) are
             // `[experts · width, hidden]` as a projection stores them, and
@@ -288,7 +309,8 @@ impl Experts {
                 let (gate, up, down) = (stacked("w1")?, stacked("v1")?, stacked("w2")?);
                 let experts = (0..count)
                     .map(|expert| -> candle_core::Result<Expert> {
-                        let rows = |tensor: &Tensor| tensor.narrow(0, expert * intermediate, intermediate);
+                        let rows =
+                            |tensor: &Tensor| tensor.narrow(0, expert * intermediate, intermediate);
                         Ok(Expert {
                             gate: Some(Linear::new(rows(&gate)?, None)),
                             up: Linear::new(rows(&up)?, None),
@@ -296,7 +318,10 @@ impl Experts {
                         })
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
-                (linear_no_bias(hidden, count, block.pp("router").pp("layer"))?, experts)
+                (
+                    linear_no_bias(hidden, count, block.pp("router").pp("layer"))?,
+                    experts,
+                )
             }
             // Gemma 4 stacks every expert's gate rows above its up rows in
             // `experts.gate_up_proj` `[experts, 2 · width, hidden]` and keeps
@@ -333,12 +358,19 @@ impl Experts {
                     .map(|expert| -> candle_core::Result<Expert> {
                         Ok(Expert {
                             gate: None,
-                            up: linear_no_bias(hidden, intermediate, block.pp("v_experts").pp(expert.to_string()))?,
+                            up: linear_no_bias(
+                                hidden,
+                                intermediate,
+                                block.pp("v_experts").pp(expert.to_string()),
+                            )?,
                             down: None,
                         })
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
-                (linear_no_bias(hidden, count, block.pp("v_router"))?, experts)
+                (
+                    linear_no_bias(hidden, count, block.pp("v_router"))?,
+                    experts,
+                )
             }
             // Llama 4 stacks every expert inputs-first: `gate_up_proj`
             // `[experts, hidden, 2 · width]`, gate columns then up columns,
@@ -353,7 +385,10 @@ impl Experts {
                     .map(|expert| -> candle_core::Result<Expert> {
                         let columns = gate_up.get(expert)?;
                         let half = |start: usize| -> candle_core::Result<Linear> {
-                            Ok(Linear::new(columns.narrow(1, start, intermediate)?.t()?.contiguous()?, None))
+                            Ok(Linear::new(
+                                columns.narrow(1, start, intermediate)?.t()?.contiguous()?,
+                                None,
+                            ))
                         };
                         Ok(Expert {
                             gate: Some(half(0)?),
@@ -366,7 +401,12 @@ impl Experts {
             }
         };
         let shared = match spec.shared {
-            Some(SharedExpert { intermediate, module, gated, form }) => {
+            Some(SharedExpert {
+                intermediate,
+                module,
+                gated,
+                form,
+            }) => {
                 let block = builder.pp(module);
                 let expert = match form {
                     // Granite 4.0's `shared_mlp`: gate rows then up rows in
@@ -394,7 +434,11 @@ impl Experts {
                     }
                 };
                 let gate = if gated {
-                    Some(linear_no_bias(hidden, 1, builder.pp("mlp").pp("shared_expert_gate"))?)
+                    Some(linear_no_bias(
+                        hidden,
+                        1,
+                        builder.pp("mlp").pp("shared_expert_gate"),
+                    )?)
                 } else {
                     None
                 };
@@ -405,7 +449,10 @@ impl Experts {
         // DeepSeek stores the bias as `[experts]`, ERNIE as `[1, experts]`;
         // either flattens to one score per expert. A hash layer chooses by
         // token id and stores none.
-        let selection_bias = match spec.selection_bias.filter(|_| spec.hash_layers >> layer & 1 == 0) {
+        let selection_bias = match spec
+            .selection_bias
+            .filter(|_| spec.hash_layers >> layer & 1 == 0)
+        {
             Some(tensor) => {
                 let bias = builder
                     .get_unchecked(tensor)?
@@ -414,10 +461,7 @@ impl Experts {
                     .to_vec1::<f32>()?;
                 let routes = count + spec.identity_experts;
                 if bias.len() != routes {
-                    candle_core::bail!(
-                        "{tensor} holds {} scores for {routes} experts",
-                        bias.len()
-                    );
+                    candle_core::bail!("{tensor} holds {} scores for {routes} experts", bias.len());
                 }
                 Some(bias)
             }
@@ -435,42 +479,86 @@ impl Experts {
             None
         };
         // Step 3.5 states a limit per layer, zero meaning none.
-        let at = |limits: &[f64]| limits.get(layer).copied().filter(|limit| *limit != 0.0).map(Clamp::Step);
+        let at = |limits: &[f64]| {
+            limits
+                .get(layer)
+                .copied()
+                .filter(|limit| *limit != 0.0)
+                .map(Clamp::Step)
+        };
         let clamps = match &spec.swiglu_limit {
             Some(SwigluLimit::GptOss(limit)) => (Some(Clamp::GptOss(*limit)), None),
             Some(SwigluLimit::Step { routed, shared }) => (at(routed), at(shared)),
-            Some(SwigluLimit::Inner(limit)) => (Some(Clamp::Inner(*limit)), Some(Clamp::Inner(*limit))),
+            Some(SwigluLimit::Inner(limit)) => {
+                (Some(Clamp::Inner(*limit)), Some(Clamp::Inner(*limit)))
+            }
             None => (None, None),
         };
         // Latent projections sit beside the experts, with a bias when the
         // checkpoint stores one (Nemotron-H's `mlp_bias`).
         let latent = match spec.latent {
-            Some(LatentExperts { width, down, up, norm }) => {
-                let projection = |input: usize, output: usize, name: &str| -> candle_core::Result<Linear> {
-                    let module = builder.pp(name);
-                    let bias = if module.contains_tensor("bias") { Some(module.get(output, "bias")?) } else { None };
-                    Ok(Linear::new(module.get((output, input), "weight")?, bias))
-                };
+            Some(LatentExperts {
+                width,
+                down,
+                up,
+                norm,
+            }) => {
+                let projection =
+                    |input: usize, output: usize, name: &str| -> candle_core::Result<Linear> {
+                        let module = builder.pp(name);
+                        let bias = if module.contains_tensor("bias") {
+                            Some(module.get(output, "bias")?)
+                        } else {
+                            None
+                        };
+                        Ok(Linear::new(module.get((output, input), "weight")?, bias))
+                    };
                 let norm = match norm {
                     Some((name, eps)) => Some(
-                        NormSpec { kind: NormKind::Rms, eps, offset: false, groups: 1 }.load(width, builder.pp(name))?,
+                        NormSpec {
+                            kind: NormKind::Rms,
+                            eps,
+                            offset: false,
+                            groups: 1,
+                        }
+                        .load(width, builder.pp(name))?,
                     ),
                     None => None,
                 };
-                Some((projection(hidden, width, down)?, norm, projection(width, hidden, up)?))
+                Some((
+                    projection(hidden, width, down)?,
+                    norm,
+                    projection(width, hidden, up)?,
+                ))
             }
             None => None,
         };
         let hash = if spec.hash_layers >> layer & 1 == 1 {
-            let block = builder.pp(if spec.layout == ExpertLayout::DeepseekV4 { "mlp" } else { "block_sparse_moe" });
+            let block = builder.pp(if spec.layout == ExpertLayout::DeepseekV4 {
+                "mlp"
+            } else {
+                "block_sparse_moe"
+            });
             let table = block.pp("gate").get_unchecked("tid2eid")?;
             let (_, width) = table.dims2()?;
             if width != spec.top_k {
-                candle_core::bail!("layer {layer}'s mlp.gate.tid2eid lists {width} experts per token, not {}", spec.top_k);
+                candle_core::bail!(
+                    "layer {layer}'s mlp.gate.tid2eid lists {width} experts per token, not {}",
+                    spec.top_k
+                );
             }
-            let flat = table.to_dtype(DType::I64)?.flatten_all()?.to_vec1::<i64>()?;
-            if let Some(bad) = flat.iter().find(|expert| !(0..count as i64).contains(*expert)) {
-                candle_core::bail!("layer {layer}'s mlp.gate.tid2eid names expert {bad}, outside 0 to {}", count - 1);
+            let flat = table
+                .to_dtype(DType::I64)?
+                .flatten_all()?
+                .to_vec1::<i64>()?;
+            if let Some(bad) = flat
+                .iter()
+                .find(|expert| !(0..count as i64).contains(*expert))
+            {
+                candle_core::bail!(
+                    "layer {layer}'s mlp.gate.tid2eid names expert {bad}, outside 0 to {}",
+                    count - 1
+                );
             }
             Some(flat.into_iter().map(|expert| expert as u32).collect())
         } else {
@@ -497,14 +585,23 @@ impl Experts {
     fn choose(&self, scores: &[f32]) -> Vec<usize> {
         let count = scores.len();
         let ranked: Vec<f32> = match &self.selection_bias {
-            Some(bias) => scores.iter().zip(bias).map(|(score, bias)| score + bias).collect(),
+            Some(bias) => scores
+                .iter()
+                .zip(bias)
+                .map(|(score, bias)| score + bias)
+                .collect(),
             None => scores.to_vec(),
         };
         let descending = |values: &[f32], items: &mut Vec<usize>| {
             items.sort_by(|left, right| values[*right].total_cmp(&values[*left]));
         };
         let mut allowed: Vec<usize> = (0..count).collect();
-        if let Some(ExpertGroups { groups, chosen_groups, rank_by_top_two }) = self.spec.groups {
+        if let Some(ExpertGroups {
+            groups,
+            chosen_groups,
+            rank_by_top_two,
+        }) = self.spec.groups
+        {
             let size = count / groups;
             let group_score = |group: usize| -> f32 {
                 let mut members: Vec<f32> = ranked[group * size..(group + 1) * size].to_vec();
@@ -530,7 +627,12 @@ impl Experts {
     /// experts]` — or, on a hash layer, the experts `ids`' rows of
     /// `tid2eid` name — zero elsewhere and renormalised when the family
     /// does; every chosen token is listed under its expert in `routed`.
-    fn ranked(&self, scores: Tensor, routed: &mut [Vec<u32>], ids: Option<&[u32]>) -> candle_core::Result<Tensor> {
+    fn ranked(
+        &self,
+        scores: Tensor,
+        routed: &mut [Vec<u32>],
+        ids: Option<&[u32]>,
+    ) -> candle_core::Result<Tensor> {
         let (tokens, count) = scores.dims2()?;
         let host = scores.to_vec2::<f32>()?;
         let mut mask = vec![0f32; tokens * count];
@@ -538,7 +640,10 @@ impl Experts {
             let chosen: Vec<usize> = match (&self.hash, ids) {
                 (Some(table), Some(ids)) => {
                     let Some(&id) = ids.get(token) else {
-                        candle_core::bail!("hash routing was given {} token ids for {tokens} tokens", ids.len());
+                        candle_core::bail!(
+                            "hash routing was given {} token ids for {tokens} tokens",
+                            ids.len()
+                        );
                     };
                     let start = id as usize * self.spec.top_k;
                     let Some(row) = table.get(start..start + self.spec.top_k) else {
@@ -546,7 +651,9 @@ impl Experts {
                     };
                     row.iter().map(|expert| *expert as usize).collect()
                 }
-                (Some(_), None) => candle_core::bail!("this layer routes by token id (tid2eid) and was given no token ids"),
+                (Some(_), None) => candle_core::bail!(
+                    "this layer routes by token id (tid2eid) and was given no token ids"
+                ),
                 (None, _) => self.choose(row),
             };
             for expert in chosen {
@@ -577,18 +684,31 @@ impl Experts {
 
     /// [`Experts::forward`] with the ids of the tokens `hidden` holds, which
     /// a hash layer chooses its experts by.
-    pub(in crate::model) fn forward_ids(&self, hidden: &Tensor, ids: Option<&[u32]>) -> candle_core::Result<Tensor> {
+    pub(in crate::model) fn forward_ids(
+        &self,
+        hidden: &Tensor,
+        ids: Option<&[u32]>,
+    ) -> candle_core::Result<Tensor> {
         self.route(hidden, hidden, ids)
     }
 
     /// [`Experts::forward`] with the router reading `router_input` rather
     /// than the experts' input (Gemma 4's router reads the residual through
     /// a scale-free norm, its experts through `pre_feedforward_layernorm_2`).
-    pub(super) fn forward_routed(&self, router_input: &Tensor, hidden: &Tensor) -> candle_core::Result<Tensor> {
+    pub(super) fn forward_routed(
+        &self,
+        router_input: &Tensor,
+        hidden: &Tensor,
+    ) -> candle_core::Result<Tensor> {
         self.route(router_input, hidden, None)
     }
 
-    fn route(&self, router_input: &Tensor, hidden: &Tensor, ids: Option<&[u32]>) -> candle_core::Result<Tensor> {
+    fn route(
+        &self,
+        router_input: &Tensor,
+        hidden: &Tensor,
+        ids: Option<&[u32]>,
+    ) -> candle_core::Result<Tensor> {
         let (batch, sequence, width) = hidden.dims3()?;
         let tokens = batch * sequence;
         let flat = hidden.reshape((tokens, width))?;
@@ -601,9 +721,15 @@ impl Experts {
             .to_dtype(DType::F32)?;
         let mut routed: Vec<Vec<u32>> = vec![Vec::new(); count];
         let weights = match self.spec.scoring {
-            Scoring::Softmax => self.ranked(candle_nn::ops::softmax(&logits, D::Minus1)?, &mut routed, ids)?,
+            Scoring::Softmax => self.ranked(
+                candle_nn::ops::softmax(&logits, D::Minus1)?,
+                &mut routed,
+                ids,
+            )?,
             // sigmoid, composed so it has a backward pass.
-            Scoring::Sigmoid => self.ranked((logits.neg()?.exp()? + 1.0)?.recip()?, &mut routed, ids)?,
+            Scoring::Sigmoid => {
+                self.ranked((logits.neg()?.exp()? + 1.0)?.recip()?, &mut routed, ids)?
+            }
             Scoring::SparseMixer { jitter } => {
                 sparse_mixer(&logits, self.spec.top_k, jitter, &mut routed)?
             }
@@ -625,14 +751,25 @@ impl Experts {
         // K2-Horizon's value experts yield a value `intermediate` wide; every
         // other mixture yields the hidden width. Nemotron-H's latent experts
         // read and sum in `moe_latent_size`.
-        let produced_width = if self.spec.layout == ExpertLayout::Mova { self.spec.intermediate } else { width };
+        let produced_width = if self.spec.layout == ExpertLayout::Mova {
+            self.spec.intermediate
+        } else {
+            width
+        };
         let routed_input = match &self.latent {
             Some((down, _, _)) => down.forward(&flat)?,
             None => flat.clone(),
         };
         let routed_width = routed_input.dim(D::Minus1)?;
         let mut output = Tensor::zeros(
-            (tokens, if self.latent.is_some() { routed_width } else { produced_width }),
+            (
+                tokens,
+                if self.latent.is_some() {
+                    routed_width
+                } else {
+                    produced_width
+                },
+            ),
             flat.dtype(),
             device,
         )?;
@@ -674,8 +811,9 @@ impl Experts {
             let produced = shared.forward(&flat, self.activation, self.clamps.1)?;
             let produced = match gate {
                 // sigmoid, composed so it has a backward pass.
-                Some(gate) => produced
-                    .broadcast_mul(&(gate.forward(&flat)?.neg()?.exp()? + 1.0)?.recip()?)?,
+                Some(gate) => {
+                    produced.broadcast_mul(&(gate.forward(&flat)?.neg()?.exp()? + 1.0)?.recip()?)?
+                }
                 None => produced,
             };
             output = (output + produced)?;

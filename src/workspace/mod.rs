@@ -7,17 +7,17 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 mod import;
 mod manage;
 mod state;
 
-pub use import::{import_pair_set, ImportReport};
+pub use import::{ImportReport, import_pair_set};
 pub use manage::{remove_pair_set, select_pair_set};
 
-use state::{load_state, WORKSPACE_SCHEMA};
+use state::{WORKSPACE_SCHEMA, load_state};
 
 pub fn active_pair_set() -> Result<Option<PathBuf>> {
     let state = load_state()?;
@@ -58,7 +58,6 @@ pub fn summary() -> Result<WorkspaceSummary> {
     })
 }
 
-
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceSummary {
     pub schema: &'static str,
@@ -74,4 +73,3 @@ pub struct WorkspacePairSet {
     pub pair_count: usize,
     pub active: bool,
 }
-

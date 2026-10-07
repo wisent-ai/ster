@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::{
     artifact::{LayerVector, PairSet, SteeringArtifact},
-    representation::{evaluate_direction, train_direction, TrainingMethod},
+    representation::{TrainingMethod, evaluate_direction, train_direction},
     runtime::Runtime,
 };
 
@@ -31,19 +31,40 @@ pub(super) struct CapturedLayer {
 
 pub(super) type CapturedPairs = BTreeMap<usize, CapturedLayer>;
 
-pub(super) fn capture_pairs(runtime: &Runtime, pairs: &PairSet, layers: &[usize]) -> Result<CapturedPairs> {
-    let mut captured: CapturedPairs = layers.iter().map(|layer| {
-        (*layer, CapturedLayer { positive: Vec::with_capacity(pairs.pairs.len()), negative: Vec::with_capacity(pairs.pairs.len()) })
-    }).collect();
+pub(super) fn capture_pairs(
+    runtime: &Runtime,
+    pairs: &PairSet,
+    layers: &[usize],
+) -> Result<CapturedPairs> {
+    let mut captured: CapturedPairs = layers
+        .iter()
+        .map(|layer| {
+            (
+                *layer,
+                CapturedLayer {
+                    positive: Vec::with_capacity(pairs.pairs.len()),
+                    negative: Vec::with_capacity(pairs.pairs.len()),
+                },
+            )
+        })
+        .collect();
     for (index, pair) in pairs.pairs.iter().enumerate() {
         progress(format!("reading pair {}/{}", index + 1, pairs.pairs.len()));
         let positive = runtime.activations(&pair.positive, layers)?;
         let negative = runtime.activations(&pair.negative, layers)?;
         for (layer, values) in positive {
-            captured.get_mut(&layer).expect("requested layer is captured").positive.push(values);
+            captured
+                .get_mut(&layer)
+                .expect("requested layer is captured")
+                .positive
+                .push(values);
         }
         for (layer, values) in negative {
-            captured.get_mut(&layer).expect("requested layer is captured").negative.push(values);
+            captured
+                .get_mut(&layer)
+                .expect("requested layer is captured")
+                .negative
+                .push(values);
         }
     }
     Ok(captured)
@@ -58,7 +79,9 @@ fn artifact_from_captured(
 ) -> Result<SteeringArtifact> {
     let mut vectors = Vec::with_capacity(layers.len());
     for &layer_index in layers {
-        let layer = captured.get(&layer_index).expect("requested layer is captured");
+        let layer = captured
+            .get(&layer_index)
+            .expect("requested layer is captured");
         let direction = train_direction(&layer.positive, &layer.negative, method)?;
         let (accuracy, margin) = evaluate_direction(&layer.positive, &layer.negative, &direction)?;
         vectors.push(LayerVector {

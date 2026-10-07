@@ -1,15 +1,14 @@
 //! Running the pair-authoring operations: workspace import, audit, save, and
 //! synthesis with either a local runtime or a hosted writer.
 
-use anyhow::{bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, bail};
+use serde_json::{Value, json};
 
 use std::path::Path;
 
 use crate::{
-    brama,
-    pairs::{self, quality::dedupe::DedupeOptions, InspectOptions, SynthesisOptions},
-    ChatChoice, ContrastivePair, GenerationOptions, PairSet,
+    ChatChoice, ContrastivePair, GenerationOptions, PairSet, brama,
+    pairs::{self, InspectOptions, SynthesisOptions, quality::dedupe::DedupeOptions},
 };
 
 use super::super::requests::{
@@ -32,12 +31,16 @@ pub(in crate::request) fn workspace_show_job(_request: WorkspaceShowRequest) -> 
 
 /// The same operation as `ster workspace select`.
 pub(in crate::request) fn workspace_select_job(request: WorkspacePairSetRequest) -> Result<Value> {
-    Ok(serde_json::to_value(crate::workspace::select_pair_set(&request.id)?)?)
+    Ok(serde_json::to_value(crate::workspace::select_pair_set(
+        &request.id,
+    )?)?)
 }
 
 /// The same operation as `ster workspace remove`.
 pub(in crate::request) fn workspace_remove_job(request: WorkspacePairSetRequest) -> Result<Value> {
-    Ok(serde_json::to_value(crate::workspace::remove_pair_set(&request.id)?)?)
+    Ok(serde_json::to_value(crate::workspace::remove_pair_set(
+        &request.id,
+    )?)?)
 }
 
 /// A benchmark export read into a pair set by the same `pairs::benchmark`

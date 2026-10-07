@@ -97,17 +97,28 @@ pub fn transformers_config(params: Value, path: &Path) -> Result<Value> {
     rename(&mut config, "hidden_dim", "intermediate_size");
     let activation = config.remove("activation").unwrap_or(Value::from("silu"));
     config.insert("hidden_act".to_owned(), activation);
-    let tied = config.remove("tied_embeddings").unwrap_or(Value::Bool(false));
+    let tied = config
+        .remove("tied_embeddings")
+        .unwrap_or(Value::Bool(false));
     config.insert("tie_word_embeddings".to_owned(), tied);
-    config.entry("max_position_embeddings").or_insert(Value::from(MISTRAL_DEFAULT_CONTEXT));
+    config
+        .entry("max_position_embeddings")
+        .or_insert(Value::from(MISTRAL_DEFAULT_CONTEXT));
     if let Some(quantization) = config.remove("quantization") {
         config.insert("quantization_config".to_owned(), quantization);
     }
     sliding_window(&mut config, path)?;
-    let latent = config.get("qk_nope_head_dim").is_some_and(|width| !width.is_null());
+    let latent = config
+        .get("qk_nope_head_dim")
+        .is_some_and(|width| !width.is_null());
     let model_type = match config.remove("moe") {
         Some(Value::Object(moe)) => {
-            if moe.get("num_shared_experts").and_then(Value::as_u64).unwrap_or(0) == 0 {
+            if moe
+                .get("num_shared_experts")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                == 0
+            {
                 bail!(
                     "{} declares experts without shared ones (Mixtral's layout); Ster reads Mistral's own format for dense models and Mistral Large 3 only, so use the Transformers conversion",
                     path.display()
@@ -121,7 +132,10 @@ pub fn transformers_config(params: Value, path: &Path) -> Result<Value> {
             config.insert("rope_interleave".to_owned(), Value::Bool(true));
             "mistral"
         }
-        Some(other) => bail!("{} declares moe {other}, which is not an object", path.display()),
+        Some(other) => bail!(
+            "{} declares moe {other}, which is not an object",
+            path.display()
+        ),
     };
     config.insert("model_type".to_owned(), Value::from(model_type));
     if let Some(yarn) = config.remove("yarn").filter(|yarn| !yarn.is_null()) {
@@ -140,27 +154,49 @@ fn rename(config: &mut Map<String, Value>, from: &str, to: &str) {
 /// layers) becomes `layer_types` and one window; a single window covers
 /// every layer.
 fn sliding_window(config: &mut Map<String, Value>, path: &Path) -> Result<()> {
-    let layers = config.get("num_hidden_layers").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let layers = config
+        .get("num_hidden_layers")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
     match config.get("sliding_window").cloned() {
         None | Some(Value::Null) | Some(Value::Number(_)) => {}
         Some(Value::Array(pattern)) => {
             if pattern.is_empty() || layers % pattern.len() != 0 {
-                bail!("{} repeats a sliding_window pattern of {} over {layers} layers unevenly", path.display(), pattern.len());
+                bail!(
+                    "{} repeats a sliding_window pattern of {} over {layers} layers unevenly",
+                    path.display(),
+                    pattern.len()
+                );
             }
             let windows: Vec<u64> = pattern.iter().filter_map(Value::as_u64).collect();
             if windows.windows(2).any(|pair| pair[0] != pair[1]) {
-                bail!("{} lists more than one sliding window; Ster gives every windowed layer one", path.display());
+                bail!(
+                    "{} lists more than one sliding window; Ster gives every windowed layer one",
+                    path.display()
+                );
             }
             let kinds: Vec<Value> = (0..layers)
                 .map(|layer| {
-                    let kind = if pattern[layer % pattern.len()].is_null() { "full_attention" } else { "sliding_attention" };
+                    let kind = if pattern[layer % pattern.len()].is_null() {
+                        "full_attention"
+                    } else {
+                        "sliding_attention"
+                    };
                     Value::from(kind)
                 })
                 .collect();
             config.insert("layer_types".to_owned(), Value::Array(kinds));
-            config.insert("sliding_window".to_owned(), windows.first().map_or(Value::Null, |window| Value::from(*window)));
+            config.insert(
+                "sliding_window".to_owned(),
+                windows
+                    .first()
+                    .map_or(Value::Null, |window| Value::from(*window)),
+            );
         }
-        Some(other) => bail!("{} declares sliding_window {other}, which is neither a window nor a list", path.display()),
+        Some(other) => bail!(
+            "{} declares sliding_window {other}, which is neither a window nor a list",
+            path.display()
+        ),
     }
     Ok(())
 }
@@ -193,16 +229,23 @@ fn experts(config: &mut Map<String, Value>, moe: Map<String, Value>) {
 /// leaves the magnitude uncorrected.
 fn rope_yarn(config: &mut Map<String, Value>, yarn: &Value, path: &Path) -> Result<()> {
     let stated = |key: &str| yarn.get(key).and_then(Value::as_f64);
-    let factor = stated("factor").with_context(|| format!("{} declares yarn without a factor", path.display()))?;
+    let factor = stated("factor")
+        .with_context(|| format!("{} declares yarn without a factor", path.display()))?;
     let mut rope = Map::new();
     rope.insert("rope_type".to_owned(), Value::from("yarn"));
-    rope.insert("mscale_all_dim".to_owned(), Value::from(MISTRAL_YARN_MSCALE_ALL_DIM));
+    rope.insert(
+        "mscale_all_dim".to_owned(),
+        Value::from(MISTRAL_YARN_MSCALE_ALL_DIM),
+    );
     rope.insert("factor".to_owned(), Value::from(factor));
     if let Some(theta) = config.remove("rope_theta") {
         rope.insert("rope_theta".to_owned(), theta);
     }
     if let Some(original) = yarn.get("original_max_position_embeddings") {
-        rope.insert("original_max_position_embeddings".to_owned(), original.clone());
+        rope.insert(
+            "original_max_position_embeddings".to_owned(),
+            original.clone(),
+        );
     }
     if let Some(fast) = stated("beta") {
         rope.insert("beta_fast".to_owned(), Value::from(fast));
@@ -211,7 +254,10 @@ fn rope_yarn(config: &mut Map<String, Value>, yarn: &Value, path: &Path) -> Resu
         rope.insert("beta_slow".to_owned(), Value::from(slow));
     }
     if yarn.get("apply_scale").and_then(Value::as_bool) == Some(false) {
-        rope.insert("attention_factor".to_owned(), Value::from(UNSCALED_ATTENTION));
+        rope.insert(
+            "attention_factor".to_owned(),
+            Value::from(UNSCALED_ATTENTION),
+        );
     }
     config.insert("rope_parameters".to_owned(), Value::Object(rope));
     Ok(())
@@ -226,7 +272,10 @@ fn stored_name(name: &str) -> String {
         "lm_head.weight" => return "output.weight".to_owned(),
         _ => {}
     }
-    let Some((layer, inner)) = name.strip_prefix("model.layers.").and_then(|rest| rest.split_once('.')) else {
+    let Some((layer, inner)) = name
+        .strip_prefix("model.layers.")
+        .and_then(|rest| rest.split_once('.'))
+    else {
         return name.to_owned();
     };
     let Some((module, leaf)) = inner.rsplit_once('.') else {
@@ -238,7 +287,9 @@ fn stored_name(name: &str) -> String {
             "post_attention_layernorm" => Some("ffn_norm".to_owned()),
             _ => None,
         },
-        Some(("self_attn", projection)) => attention_name(projection).map(|stored| format!("attention.{stored}")),
+        Some(("self_attn", projection)) => {
+            attention_name(projection).map(|stored| format!("attention.{stored}"))
+        }
         Some(("mlp", rest)) => feed_forward_name(rest),
         Some(_) => None,
     };
@@ -292,12 +343,18 @@ fn feed_forward_name(rest: &str) -> Option<String> {
 /// The end-of-sequence token a Mistral-format config leaves out: the
 /// tokenizer config's `eos_token` looked up among the added tokens.
 pub fn end_of_sequence(tokenizer_config: Option<&Path>, tokenizer: &Path) -> Option<u64> {
-    let read = |path: &Path| -> Option<Value> { serde_json::from_slice(&std::fs::read(path).ok()?).ok() };
-    let text = read(tokenizer_config?)?.get("eos_token").and_then(|token| match token {
-        Value::String(text) => Some(text.clone()),
-        Value::Object(object) => object.get("content").and_then(Value::as_str).map(str::to_owned),
-        _ => None,
-    })?;
+    let read =
+        |path: &Path| -> Option<Value> { serde_json::from_slice(&std::fs::read(path).ok()?).ok() };
+    let text = read(tokenizer_config?)?
+        .get("eos_token")
+        .and_then(|token| match token {
+            Value::String(text) => Some(text.clone()),
+            Value::Object(object) => object
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })?;
     read(tokenizer)?
         .get("added_tokens")?
         .as_array()?

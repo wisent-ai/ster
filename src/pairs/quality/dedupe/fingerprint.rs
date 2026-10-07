@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use blake2::{
-    digest::{Update, VariableOutput},
     Blake2bVar,
+    digest::{Update, VariableOutput},
 };
 use regex::Regex;
-use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 use super::DedupeOptions;
 
@@ -170,9 +170,14 @@ fn char_features(text: &str, char_ngram: usize) -> BTreeMap<String, f64> {
     // Spaces become a visible marker so that a shingle straddling a word break
     // stays distinguishable from the same letters run together. `normalize` has
     // already collapsed whitespace runs to a single space.
-    let marked: Vec<char> = text.chars().map(|c| if c == ' ' { '␠' } else { c }).collect();
+    let marked: Vec<char> = text
+        .chars()
+        .map(|c| if c == ' ' { '␠' } else { c })
+        .collect();
     for window in marked.windows(char_ngram) {
-        *counts.entry(window.iter().collect::<String>()).or_insert(0.0) += 1.0;
+        *counts
+            .entry(window.iter().collect::<String>())
+            .or_insert(0.0) += 1.0;
     }
     counts
 }

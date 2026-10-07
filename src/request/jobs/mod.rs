@@ -3,19 +3,19 @@
 //! the same payload the CLI prints.
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use std::path::Path;
 
 use crate::{
-    tune as tune_lib,
-    workflow::{self, parse_layers},
     ChatChoice, DeviceChoice, GenerationOptions, PairSet, Precision, Runtime, SteeringArtifact,
-    TrainingMethod,
+    TrainingMethod, tune as tune_lib,
+    workflow::{self, parse_layers},
 };
 
 use super::requests::{
-    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest, ParityRequest, TrainRequest,
+    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest,
+    ParityRequest, TrainRequest,
 };
 
 mod decide;
@@ -134,7 +134,10 @@ pub(in crate::request) fn extract_job(request: ExtractRequest) -> Result<Value> 
 
 pub(in crate::request) fn parity_job(request: ParityRequest) -> Result<Value> {
     let runtime = request.model.load_runtime_at(&request.precision)?;
-    Ok(serde_json::to_value(workflow::parity(&runtime, Path::new(&request.input))?)?)
+    Ok(serde_json::to_value(workflow::parity(
+        &runtime,
+        Path::new(&request.input),
+    )?)?)
 }
 
 pub(in crate::request) fn inspect_job(request: InspectRequest) -> Result<Value> {

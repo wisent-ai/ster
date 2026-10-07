@@ -4,7 +4,7 @@
 use serde::Deserialize;
 
 use super::defaults::*;
-use super::{require, ModelRequest, Validate};
+use super::{ModelRequest, Validate, require};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -46,7 +46,10 @@ pub(in crate::request) struct WorkspacePairSetRequest {
 
 impl Validate for WorkspacePairSetRequest {
     fn validate(&self) -> Result<(), String> {
-        require(&self.id, "a workspace pair-set request requires the set's id".to_owned())
+        require(
+            &self.id,
+            "a workspace pair-set request requires the set's id".to_owned(),
+        )
     }
 }
 

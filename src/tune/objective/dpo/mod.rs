@@ -158,7 +158,10 @@ pub fn dpo(
                     let scored = &encoded[slot];
                     let chosen = &read[position * 2];
                     let rejected = &read[position * 2 + 1];
-                    let preference = Preference { loss: options.loss, beta: options.beta };
+                    let preference = Preference {
+                        loss: options.loss,
+                        beta: options.beta,
+                    };
                     let value = step_loss(runtime, scored, chosen, rejected, preference)
                         .with_context(|| {
                             format!("pair {} produced no usable loss", scored.pair.index)

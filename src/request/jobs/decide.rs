@@ -7,8 +7,8 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::{
-    decide::{self, Calibration, ExampleSet, RAW_TEMPERATURE},
     ChatChoice, DecideOptions,
+    decide::{self, Calibration, ExampleSet, RAW_TEMPERATURE},
 };
 
 use super::super::requests::{CalibrateRequest, DecideRequest};

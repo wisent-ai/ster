@@ -4,7 +4,7 @@
 use serde::Deserialize;
 
 use super::defaults::*;
-use super::{require, ModelRequest, Validate};
+use super::{ModelRequest, Validate, require};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,9 +131,15 @@ pub(in crate::request) struct GenerateRequest {
 impl Validate for GenerateRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("generate")?;
-        let steers = self.vector.as_deref().is_some_and(|vector| !vector.trim().is_empty());
+        let steers = self
+            .vector
+            .as_deref()
+            .is_some_and(|vector| !vector.trim().is_empty());
         if steers && self.strength.is_none() {
-            return Err("generate with a vector requires a strength; Ster assumes no steering scale".to_owned());
+            return Err(
+                "generate with a vector requires a strength; Ster assumes no steering scale"
+                    .to_owned(),
+            );
         }
         require(&self.prompt, "generate requires a prompt".to_owned())
     }
@@ -182,7 +188,10 @@ pub(in crate::request) struct ParityRequest {
 impl Validate for ParityRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("parity")?;
-        require(&self.input, "parity requires a parity input file".to_owned())
+        require(
+            &self.input,
+            "parity requires a parity input file".to_owned(),
+        )
     }
 }
 

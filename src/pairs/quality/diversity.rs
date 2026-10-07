@@ -97,7 +97,11 @@ fn distinct_n(texts: &[String], n: usize) -> f64 {
             total += 1;
         }
     }
-    if total == 0 { 0.0 } else { unique.len() as f64 / total as f64 }
+    if total == 0 {
+        0.0
+    } else {
+        unique.len() as f64 / total as f64
+    }
 }
 
 /// Jaccard similarity of two token *sets*, built from token lists.
@@ -115,7 +119,11 @@ fn jaccard(left: &[String], right: &[String]) -> f64 {
     }
     let intersection = left.intersection(&right).count();
     let union = left.union(&right).count();
-    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
 }
 
 /// The Python `_TOKEN_RE`, `[A-Za-z0-9']+|[^\w\s]`, applied to lowercased text.

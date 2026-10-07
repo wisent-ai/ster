@@ -48,7 +48,9 @@ impl NormSpec {
     /// norm stores nothing, so its scale is a constant one.
     pub fn load(self, width: usize, builder: VarBuilder<'_>) -> candle_core::Result<Norm> {
         let weight = match self.kind {
-            NormKind::Bare | NormKind::BareRms => Tensor::ones(width, builder.dtype(), builder.device())?,
+            NormKind::Bare | NormKind::BareRms => {
+                Tensor::ones(width, builder.dtype(), builder.device())?
+            }
             _ => builder.get(width, "weight")?,
         };
         let bias = self.bias(|| builder.get(width, "bias"))?;
@@ -141,7 +143,10 @@ impl Norm {
         if shift == 0.0 {
             return Ok(self);
         }
-        Ok(Self { weight: (self.weight + shift)?, ..self })
+        Ok(Self {
+            weight: (self.weight + shift)?,
+            ..self
+        })
     }
 }
 
@@ -160,7 +165,10 @@ impl Norm {
     /// normalises each of its equal groups of the last axis apart, then
     /// scales the whole axis.
     pub fn forward(&self, hidden: &Tensor, pass: Pass) -> candle_core::Result<Tensor> {
-        let fused = pass == Pass::Inference && self.weight.rank() == 1 && hidden.is_contiguous() && self.groups == 1;
+        let fused = pass == Pass::Inference
+            && self.weight.rank() == 1
+            && hidden.is_contiguous()
+            && self.groups == 1;
         if fused {
             match (self.kind, &self.bias) {
                 (NormKind::Rms | NormKind::BareRms, None) => {
@@ -196,7 +204,9 @@ impl Norm {
             }
         };
         let square = (hidden.sqr()?.sum_keepdim(D::Minus1)? / width)?;
-        let normed = hidden.broadcast_div(&(square + self.eps)?.sqrt()?)?.reshape(shape)?;
+        let normed = hidden
+            .broadcast_div(&(square + self.eps)?.sqrt()?)?
+            .reshape(shape)?;
         let scaled = normed.to_dtype(dtype)?.broadcast_mul(&self.weight)?;
         match &self.bias {
             Some(bias) => scaled.broadcast_add(bias),
