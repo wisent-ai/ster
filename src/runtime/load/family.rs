@@ -11,12 +11,14 @@ use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
 use crate::model::{
-    ALIBI_SPAN, Activation, Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind,
-    GateFunction, GlobalAttention, IndexerSpec, LatentAttention, LayerPlan, LightningForm, LightningSpec, Loops, MixtureOfExperts,
-    Names, NgramSpec, NormKind, ParallelScan, ParameterNorm,
-    PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm, QueryTemperature, Recurrence, RopeScaling, ScaledResiduals, Scoring, SharedBlocksSpec,
-    LatentExperts, InklingSpec, RelativeHeads, CompressedSpec, CompressYarn,
-    SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec, StructuredSpec, SwigluLimit,
+    ALIBI_SPAN, Activation, Architecture, CompressYarn, CompressedSpec, DeltaRuleForm,
+    DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind, GateFunction, GlobalAttention,
+    HyperConnections, IndexerSpec, InklingSpec, KeyPool, LatentAttention, LatentExperts, LayerPlan,
+    LightningForm, LightningSpec, Loops, MixtureOfExperts, Names, NgramSpec, NormKind,
+    ParallelScan, ParameterNorm, PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm,
+    QueryTemperature, Recurrence, RelativeHeads, RopeScaling, ScaledResiduals, Scoring,
+    SharedBlocksSpec, SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec,
+    StructuredSpec, SwigluLimit,
 };
 
 /// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
@@ -156,10 +158,11 @@ pub(super) enum Family {
     HrmText,
     InklingText,
     DeepseekV4,
+    Glm5NextText,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 127] = [
+    pub(super) const ALL: [Self; 128] = [
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -287,11 +290,14 @@ impl Family {
         Self::HrmText,
         Self::InklingText,
         Self::DeepseekV4,
+        Self::Glm5NextText,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
     pub(super) fn of(model_type: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|family| family.model_type() == model_type)
+        Self::ALL
+            .into_iter()
+            .find(|family| family.model_type() == model_type)
     }
 
     /// The family a config without `model_type` belongs to, from the model
@@ -300,7 +306,9 @@ impl Family {
     pub(super) fn of_architectures(raw: &Value) -> Option<Self> {
         let names = raw.get("architectures")?.as_array()?;
         Self::ALL.into_iter().find(|family| {
-            family.remote_class().is_some_and(|class| names.iter().any(|name| name.as_str() == Some(class)))
+            family
+                .remote_class()
+                .is_some_and(|class| names.iter().any(|name| name.as_str() == Some(class)))
         })
     }
 
@@ -443,6 +451,7 @@ impl Family {
             Self::HrmText => "hrm_text",
             Self::InklingText => "inkling_text",
             Self::DeepseekV4 => "deepseek_v4",
+            Self::Glm5NextText => "glm5_next_text",
         }
     }
 
@@ -511,7 +520,11 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         let nested: Vec<(String, Value)> = ["attn_config", "ffn_config"]
             .iter()
             .filter_map(|section| raw.get(*section).and_then(Value::as_object))
-            .flat_map(|section| section.iter().map(|(key, value)| (key.clone(), value.clone())))
+            .flat_map(|section| {
+                section
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+            })
             .collect();
         if let Some(object) = raw.as_object_mut() {
             for (key, value) in nested {
@@ -522,7 +535,10 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     // Granite 4.0 without experts runs its `shared_mlp` as the feed-forward,
     // `shared_intermediate_size` wide; `intermediate_size` is then unused.
     if model_type == "granitemoehybrid" && whole(raw, "num_local_experts").unwrap_or(0) == 0 {
-        let shared = raw.get("shared_intermediate_size").filter(|width| width.is_u64()).cloned();
+        let shared = raw
+            .get("shared_intermediate_size")
+            .filter(|width| width.is_u64())
+            .cloned();
         if let (Some(width), Some(object)) = (shared, raw.as_object_mut()) {
             object.insert("intermediate_size".to_owned(), width);
         }
@@ -561,7 +577,10 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     // `swa_num_key_value_heads`. Ster's base count is the sliding-window
     // one; the full-attention count moves to `num_global_key_value_heads`.
     if model_type.starts_with("mimo_v2") {
-        let windowed = raw.get("swa_num_key_value_heads").filter(|value| !value.is_null()).cloned();
+        let windowed = raw
+            .get("swa_num_key_value_heads")
+            .filter(|value| !value.is_null())
+            .cloned();
         let full = raw.get("num_key_value_heads").cloned();
         if let (Some(windowed), Some(full), Some(object)) = (windowed, full, raw.as_object_mut()) {
             object.insert("num_global_key_value_heads".to_owned(), full);
@@ -587,7 +606,10 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     // spellings merge.
     if model_type == "cohere2_moe" {
         let experts = raw.get("intermediate_size").cloned();
-        let dense = raw.get("prefix_dense_intermediate_size").filter(|width| !width.is_null()).cloned();
+        let dense = raw
+            .get("prefix_dense_intermediate_size")
+            .filter(|width| !width.is_null())
+            .cloned();
         let layer_norm = raw.get("rms_norm_eps").is_none_or(Value::is_null);
         if let Some(object) = raw.as_object_mut() {
             if let Some(experts) = experts {
@@ -604,7 +626,10 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     // key.
     if model_type == "llama4_text" {
         let experts = raw.get("intermediate_size").cloned();
-        let dense = raw.get("intermediate_size_mlp").filter(|width| !width.is_null()).cloned();
+        let dense = raw
+            .get("intermediate_size_mlp")
+            .filter(|width| !width.is_null())
+            .cloned();
         if let Some(object) = raw.as_object_mut() {
             if let Some(experts) = experts {
                 object.entry("moe_intermediate_size").or_insert(experts);
@@ -636,7 +661,12 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         let uniform = raw
             .get("intermediate_size")
             .and_then(Value::as_array)
-            .and_then(|widths| widths.first().filter(|first| widths.iter().all(|width| width == *first)).cloned());
+            .and_then(|widths| {
+                widths
+                    .first()
+                    .filter(|first| widths.iter().all(|width| width == *first))
+                    .cloned()
+            });
         if let (Some(width), Some(object)) = (uniform, raw.as_object_mut()) {
             object.insert("intermediate_size".to_owned(), width);
         }
@@ -649,8 +679,16 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
         let windowed = raw
             .get("layer_types")
             .and_then(Value::as_array)
-            .and_then(|kinds| kinds.iter().position(|kind| kind.as_str() == Some("sliding_attention")))
-            .and_then(|layer| raw.get("num_attention_heads_per_layer").and_then(|counts| counts.get(layer)).cloned());
+            .and_then(|kinds| {
+                kinds
+                    .iter()
+                    .position(|kind| kind.as_str() == Some("sliding_attention"))
+            })
+            .and_then(|layer| {
+                raw.get("num_attention_heads_per_layer")
+                    .and_then(|counts| counts.get(layer))
+                    .cloned()
+            });
         if let (Some(heads), Some(object)) = (windowed, raw.as_object_mut()) {
             object.insert("num_attention_heads".to_owned(), heads);
         }
@@ -660,21 +698,55 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     // `norm_topk_prob=True`, `MoEGate.forward`).
     if model_type == "pangu_ultra_moe" {
         if let Some(object) = raw.as_object_mut() {
-            object.entry("scoring_func").or_insert_with(|| Value::from("sigmoid"));
+            object
+                .entry("scoring_func")
+                .or_insert_with(|| Value::from("sigmoid"));
             object.entry("norm_topk_prob").or_insert(Value::Bool(true));
         }
     }
     let aliases: &[(&str, &[&str])] = &[
-        ("rms_norm_eps", &["layer_norm_eps", "norm_epsilon", "norm_eps", "layer_norm_epsilon", "layernorm_epsilon"]),
+        (
+            "rms_norm_eps",
+            &[
+                "layer_norm_eps",
+                "norm_epsilon",
+                "norm_eps",
+                "layer_norm_epsilon",
+                "layernorm_epsilon",
+            ],
+        ),
         ("hidden_size", &["n_embd", "n_embed", "d_model"]),
         ("num_hidden_layers", &["n_layer", "n_layers", "num_layers"]),
         ("num_attention_heads", &["n_head", "n_heads"]),
-        ("num_key_value_heads", &["kv_n_heads", "num_attention_groups"]),
+        (
+            "num_key_value_heads",
+            &["kv_n_heads", "num_attention_groups"],
+        ),
         ("head_dim", &["attention_head_dim"]),
-        ("max_position_embeddings", &["n_positions", "max_seq_len", "seq_length", "model_max_length"]),
-        ("intermediate_size", &["n_inner", "ffn_dim", "ffn_hidden_size"]),
+        (
+            "max_position_embeddings",
+            &[
+                "n_positions",
+                "max_seq_len",
+                "seq_length",
+                "model_max_length",
+            ],
+        ),
+        (
+            "intermediate_size",
+            &["n_inner", "ffn_dim", "ffn_hidden_size"],
+        ),
         ("rope_theta", &["rotary_emb_base"]),
-        ("num_experts_per_tok", &["moe_k", "moe_top_k", "moe_topk", "num_experts_per_token", "top_k_experts"]),
+        (
+            "num_experts_per_tok",
+            &[
+                "moe_k",
+                "moe_top_k",
+                "moe_topk",
+                "num_experts_per_token",
+                "top_k_experts",
+            ],
+        ),
         // openPangu-Ultra-MoE's names for DeepSeek's latent attention and
         // experts.
         ("kv_lora_rank", &["attention_kv_lora_dim"]),
@@ -703,10 +775,16 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
     if matches!(model_type, "olmo" | "dbrx") && missing(raw, "rms_norm_eps") {
         defaults.push(("rms_norm_eps", Value::from(OLMO_NORM_EPS)));
     }
-    let four_times = matches!(model_type, "gptj" | "gpt2" | "gpt_bigcode" | "bloom" | "falcon");
+    let four_times = matches!(
+        model_type,
+        "gptj" | "gpt2" | "gpt_bigcode" | "bloom" | "falcon"
+    );
     if four_times && missing(raw, "intermediate_size") {
         if let Some(hidden) = raw.get("hidden_size").and_then(Value::as_u64) {
-            defaults.push(("intermediate_size", Value::from(GPT_INNER_PER_HIDDEN * hidden)));
+            defaults.push((
+                "intermediate_size",
+                Value::from(GPT_INNER_PER_HIDDEN * hidden),
+            ));
         }
     }
     // MPT states its feed-forward as a multiple of the model width.
@@ -729,7 +807,10 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
                     Some(multiplier) => (shrunk * multiplier).trunc(),
                     None => shrunk,
                 };
-                let multiple = raw.get("block_multiple_of").and_then(Value::as_f64).unwrap_or(1.0);
+                let multiple = raw
+                    .get("block_multiple_of")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1.0);
                 (scaled / multiple).ceil() * multiple
             } else {
                 width
@@ -788,7 +869,9 @@ fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> 
         .or_else(|| text(raw, "mlp_hidden_act"));
     match name {
         None | Some("silu") | Some("swish") => Ok(Activation::Silu),
-        Some("gelu_pytorch_tanh") | Some("gelu_new") | Some("gelu_fast") => Ok(Activation::GeluTanh),
+        Some("gelu_pytorch_tanh") | Some("gelu_new") | Some("gelu_fast") => {
+            Ok(Activation::GeluTanh)
+        }
         Some("gelu") => Ok(Activation::Gelu),
         Some("relu2") => Ok(Activation::Relu2),
         Some("relu") => Ok(Activation::Relu),
@@ -797,7 +880,9 @@ fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> 
         // `activation_situ_linear_beta`, none when absent
         // (`_get_situ_activation_params` in `modeling_kimi_linear.py`).
         Some("situ") => Ok(Activation::Situ {
-            beta: number(raw, "activation_situ_beta").filter(|beta| *beta != 0.0).unwrap_or(1.0),
+            beta: number(raw, "activation_situ_beta")
+                .filter(|beta| *beta != 0.0)
+                .unwrap_or(1.0),
             linear_beta: number(raw, "activation_situ_linear_beta"),
         }),
         Some(other) => bail!(
@@ -819,9 +904,15 @@ fn activation(raw: &Value, model_type: &str, path: &Path) -> Result<Activation> 
 /// layer type: the `full_attention` one is the model's rotation, and the
 /// `sliding_attention` one's base is `rope_local_base_freq`.
 pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<Value>> {
-    let per_type = raw.get("rope_parameters").filter(|value| value.get("full_attention").is_some()).cloned();
+    let per_type = raw
+        .get("rope_parameters")
+        .filter(|value| value.get("full_attention").is_some())
+        .cloned();
     if let Some(per_type) = per_type {
-        if let Some(sliding) = per_type.get("sliding_attention").filter(|value| value.is_object()) {
+        if let Some(sliding) = per_type
+            .get("sliding_attention")
+            .filter(|value| value.is_object())
+        {
             let kind = scaling_kind(sliding);
             if !matches!(kind, "default" | "") {
                 bail!(
@@ -829,22 +920,33 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
                     path.display()
                 );
             }
-            if let (Some(theta), Some(object)) =
-                (sliding.get("rope_theta").filter(|theta| theta.is_number()).cloned(), raw.as_object_mut())
-            {
+            if let (Some(theta), Some(object)) = (
+                sliding
+                    .get("rope_theta")
+                    .filter(|theta| theta.is_number())
+                    .cloned(),
+                raw.as_object_mut(),
+            ) {
                 object.entry("rope_local_base_freq").or_insert(theta);
             }
             // The sliding-window layers' rotated share, which a family that
             // gives each kind its own (Laguna) reads.
-            if let (Some(share), Some(object)) =
-                (sliding.get("partial_rotary_factor").filter(|share| share.is_number()).cloned(), raw.as_object_mut())
-            {
+            if let (Some(share), Some(object)) = (
+                sliding
+                    .get("partial_rotary_factor")
+                    .filter(|share| share.is_number())
+                    .cloned(),
+                raw.as_object_mut(),
+            ) {
                 object.entry("local_partial_rotary_factor").or_insert(share);
             }
         }
         // Chunked layers (Rnj-1.5) rotate by the global table, so their
         // stated rotation must be the full-attention one.
-        if let Some(chunked) = per_type.get("chunked_attention").filter(|value| value.is_object()) {
+        if let Some(chunked) = per_type
+            .get("chunked_attention")
+            .filter(|value| value.is_object())
+        {
             if per_type.get("full_attention") != Some(chunked) {
                 bail!(
                     "{} rotates its chunked_attention layers unlike its full_attention layers; Ster rotates both by the full-attention rotation",
@@ -852,19 +954,33 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
                 );
             }
         }
-        if let (Some(full), Some(object)) = (per_type.get("full_attention").cloned(), raw.as_object_mut()) {
+        if let (Some(full), Some(object)) =
+            (per_type.get("full_attention").cloned(), raw.as_object_mut())
+        {
             object.insert("rope_parameters".to_owned(), full);
         }
     }
-    if let Some(parameters) = raw.get("rope_parameters").filter(|value| value.is_object()).cloned() {
+    if let Some(parameters) = raw
+        .get("rope_parameters")
+        .filter(|value| value.is_object())
+        .cloned()
+    {
         let scaled = !matches!(scaling_kind(&parameters), "default" | "");
         if let Some(object) = raw.as_object_mut() {
-            if let Some(theta) = parameters.get("rope_theta").filter(|theta| theta.is_number()) {
+            if let Some(theta) = parameters
+                .get("rope_theta")
+                .filter(|theta| theta.is_number())
+            {
                 object.entry("rope_theta").or_insert_with(|| theta.clone());
             }
             // Transformers 5 states the rotated share of each head here too.
-            if let Some(share) = parameters.get("partial_rotary_factor").filter(|share| share.is_number()) {
-                object.entry("partial_rotary_factor").or_insert_with(|| share.clone());
+            if let Some(share) = parameters
+                .get("partial_rotary_factor")
+                .filter(|share| share.is_number())
+            {
+                object
+                    .entry("partial_rotary_factor")
+                    .or_insert_with(|| share.clone());
             }
             let unstated = object.get("rope_scaling").map_or(true, Value::is_null);
             if scaled && unstated {
@@ -877,7 +993,8 @@ pub(super) fn take_rope_scaling(raw: &mut Value, path: &Path) -> Result<Option<V
     };
     match scaling_kind(scaling) {
         "llama3" => Ok(None),
-        "default" | "linear" | "longrope" | "yarn" | "telechat3-yarn" | "proportional" | "deepseek_yarn" => Ok(raw
+        "default" | "linear" | "longrope" | "yarn" | "telechat3-yarn" | "proportional"
+        | "deepseek_yarn" => Ok(raw
             .as_object_mut()
             .and_then(|object| object.remove("rope_scaling"))),
         // HunYuan states `dynamic` with an `alpha`: a fixed NTK-aware base,
@@ -948,7 +1065,10 @@ fn rope_scaling(
     match scaling_kind(scaling) {
         "linear" => {
             let Some(factor) = scaling.get("factor").and_then(Value::as_f64) else {
-                bail!("{} declares linear rope_scaling with no factor", path.display());
+                bail!(
+                    "{} declares linear rope_scaling with no factor",
+                    path.display()
+                );
             };
             Ok(RopeScaling::Linear(factor as f32))
         }
@@ -973,7 +1093,10 @@ fn rope_scaling(
             let maximum = llama.max_position_embeddings;
             let (original, factor) = match whole(raw, "original_max_position_embeddings") {
                 Some(original) => (original, maximum as f64 / original as f64),
-                None => (maximum, scaling.get("factor").and_then(Value::as_f64).unwrap_or(1.0)),
+                None => (
+                    maximum,
+                    scaling.get("factor").and_then(Value::as_f64).unwrap_or(1.0),
+                ),
             };
             let attention = match scaling.get("attention_factor").and_then(Value::as_f64) {
                 Some(attention) => attention,
@@ -981,7 +1104,12 @@ fn rope_scaling(
                 None => (1.0 + factor.ln() / (original as f64).ln()).sqrt(),
             };
             // PhiMoE states each table's magnitude itself.
-            let magnitude = |key: &str| scaling.get(key).and_then(Value::as_f64).unwrap_or(attention);
+            let magnitude = |key: &str| {
+                scaling
+                    .get(key)
+                    .and_then(Value::as_f64)
+                    .unwrap_or(attention)
+            };
             Ok(RopeScaling::LongRope {
                 short,
                 long,
@@ -994,21 +1122,35 @@ fn rope_scaling(
         // slope (its `_compute_telechat_yarn_parameters`); vLLM's
         // `deepseek_yarn` (Sarvam) is YaRN with DeepSeek's `mscale` ratio.
         kind @ ("yarn" | "telechat3-yarn" | "deepseek_yarn") => {
-            let slope = if kind == "telechat3-yarn" { TELECHAT3_YARN_SLOPE } else { YARN_SLOPE };
+            let slope = if kind == "telechat3-yarn" {
+                TELECHAT3_YARN_SLOPE
+            } else {
+                YARN_SLOPE
+            };
             let Some(factor) = scaling.get("factor").and_then(Value::as_f64) else {
-                bail!("{} declares yarn rope_scaling with no factor", path.display());
+                bail!(
+                    "{} declares yarn rope_scaling with no factor",
+                    path.display()
+                );
             };
             let original = scaling
                 .get("original_max_position_embeddings")
                 .and_then(Value::as_u64)
                 .map(|value| value as usize)
                 .unwrap_or(llama.max_position_embeddings);
-            let stated = |key: &str| scaling.get(key).and_then(Value::as_f64).filter(|v| *v != 0.0);
+            let stated = |key: &str| {
+                scaling
+                    .get(key)
+                    .and_then(Value::as_f64)
+                    .filter(|v| *v != 0.0)
+            };
             // Transformers' `_compute_yarn_parameters`: the cos and sin
             // magnitude is `mscale / mscale_all_dim` when both are stated,
             // otherwise the stated `attention_factor`, otherwise YaRN's own.
             let attention = match (stated("mscale"), stated("mscale_all_dim")) {
-                (Some(mscale), Some(all)) => yarn_mscale(factor, mscale, slope) / yarn_mscale(factor, all, slope),
+                (Some(mscale), Some(all)) => {
+                    yarn_mscale(factor, mscale, slope) / yarn_mscale(factor, all, slope)
+                }
                 _ => stated("attention_factor").unwrap_or_else(|| yarn_mscale(factor, 1.0, slope)),
             };
             Ok(RopeScaling::Yarn {
@@ -1017,7 +1159,10 @@ fn rope_scaling(
                 beta_fast: stated("beta_fast").unwrap_or(YARN_BETA_FAST) as f32,
                 beta_slow: stated("beta_slow").unwrap_or(YARN_BETA_SLOW) as f32,
                 attention: attention as f32,
-                truncate: scaling.get("truncate").and_then(Value::as_bool).unwrap_or(true),
+                truncate: scaling
+                    .get("truncate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
             })
         }
         "proportional" => Ok(proportional(scaling, rotary_dim)),
@@ -1031,7 +1176,10 @@ fn rope_scaling(
 /// rotate at `rope_theta^(-2i / width)`, the rest are zero, and every
 /// frequency is divided by `factor`.
 fn proportional(scaling: &Value, width: usize) -> RopeScaling {
-    let share = scaling.get("partial_rotary_factor").and_then(Value::as_f64).unwrap_or(1.0);
+    let share = scaling
+        .get("partial_rotary_factor")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0);
     RopeScaling::Proportional {
         rotated: (share * width as f64 / 2.0).floor() as usize,
         factor: scaling.get("factor").and_then(Value::as_f64).unwrap_or(1.0) as f32,
@@ -1083,9 +1231,8 @@ pub(super) fn family(
     // rotated part, and only the rotated part rotates.
     if let Some(key_value_rank) = whole(raw, "kv_lora_rank") {
         let part = |key: &str| -> Result<usize> {
-            whole(raw, key).with_context(|| {
-                format!("{} declares kv_lora_rank without {key}", path.display())
-            })
+            whole(raw, key)
+                .with_context(|| format!("{} declares kv_lora_rank without {key}", path.display()))
         };
         let latent = LatentAttention {
             query_rank: whole(raw, "q_lora_rank"),
@@ -1110,7 +1257,16 @@ pub(super) fn family(
         (None, None, None) => head_dim,
     };
     let rotary_dim = architecture.rotary_dim;
-    if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
+    // A latent attention with no rotated part (GLM-5-Next's
+    // `qk_rope_head_dim` 0) rotates nothing: its positions come from the
+    // causal order alone.
+    let unrotated_latent = architecture
+        .latent
+        .is_some_and(|latent| latent.rotated == 0);
+    if unrotated_latent {
+        architecture.positions = Positions::None;
+        architecture.rotary_dim = head_dim;
+    } else if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
         bail!(
             "{} rotates {rotary_dim} of {head_dim} components per head (partial_rotary_factor, rotary_pct or rotary_dim); the rotated width must be even, above zero and at most the head",
             path.display()
@@ -1207,12 +1363,14 @@ pub(super) fn family(
                         path.display()
                     );
                 };
-                routed.scoring = Scoring::SparseMixer { jitter: jitter as f32 };
+                routed.scoring = Scoring::SparseMixer {
+                    jitter: jitter as f32,
+                };
                 architecture.experts = Some(routed);
             }
         }
-        "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" | "qwen3_next" | "mimo" | "mellum" | "qwen3_5_text"
-        | "qwen3_5_moe_text" => {
+        "qwen2" | "qwen3" | "qwen2_moe" | "qwen3_moe" | "qwen3_next" | "mimo" | "mellum"
+        | "qwen3_5_text" | "qwen3_5_moe_text" => {
             // MiMo is Qwen2 with next-token-prediction layers
             // (`model.mtp_layers`) that a single forward never reads.
             if model_type.starts_with("qwen2") || model_type == "mimo" {
@@ -1225,7 +1383,8 @@ pub(super) fn family(
             if flag(raw, "use_sliding_window") {
                 architecture.sliding_window = whole(raw, "sliding_window");
                 let from = whole(raw, "max_window_layers").unwrap_or(0);
-                architecture.sliding_layers = every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
+                architecture.sliding_layers =
+                    every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
             }
             // Qwen3.5 (`qwen3_5_text`, `qwen3_5_moe_text`) is Qwen3-Next with
             // its linear attention's projections stored apart.
@@ -1241,7 +1400,11 @@ pub(super) fn family(
                 let linear = match raw.get("layer_types").and_then(Value::as_array) {
                     Some(types) => {
                         if types.len() != layers {
-                            bail!("{} lists {} layer_types for {layers} layers", path.display(), types.len());
+                            bail!(
+                                "{} lists {} layer_types for {layers} layers",
+                                path.display(),
+                                types.len()
+                            );
                         }
                         let mut linear = 0u128;
                         for (layer, kind) in types.iter().enumerate() {
@@ -1257,7 +1420,9 @@ pub(super) fn family(
                         linear
                     }
                     None => {
-                        let Some(interval) = whole(raw, "full_attention_interval").filter(|n| *n > 0) else {
+                        let Some(interval) =
+                            whole(raw, "full_attention_interval").filter(|n| *n > 0)
+                        else {
                             bail!(
                                 "{} declares a Qwen3-Next model with neither layer_types nor full_attention_interval",
                                 path.display()
@@ -1269,12 +1434,18 @@ pub(super) fn family(
                     }
                 };
                 let size = |key: &str| -> Result<usize> {
-                    whole(raw, key)
-                        .filter(|size| *size > 0)
-                        .with_context(|| format!("{} declares a Qwen3-Next model without {key}", path.display()))
+                    whole(raw, key).filter(|size| *size > 0).with_context(|| {
+                        format!(
+                            "{} declares a Qwen3-Next model without {key}",
+                            path.display()
+                        )
+                    })
                 };
                 architecture.norm_offset = true;
-                architecture.output_gate = raw.get("attn_output_gate").and_then(Value::as_bool).unwrap_or(true);
+                architecture.output_gate = raw
+                    .get("attn_output_gate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
                 architecture.delta_rule = Some(DeltaRuleSpec {
                     key_heads: size("linear_num_key_heads")?,
                     value_heads: size("linear_num_value_heads")?,
@@ -1282,7 +1453,11 @@ pub(super) fn family(
                     value_dim: size("linear_value_head_dim")?,
                     kernel: size("linear_conv_kernel_dim")?,
                     layers: linear,
-                    form: if qwen35 { DeltaRuleForm::Qwen35 } else { DeltaRuleForm::Qwen3Next },
+                    form: if qwen35 {
+                        DeltaRuleForm::Qwen35
+                    } else {
+                        DeltaRuleForm::Qwen3Next
+                    },
                     negative_eigenvalues: false,
                     decay_floor: None,
                     full_rank_gate: false,
@@ -1290,7 +1465,11 @@ pub(super) fn family(
             }
             // Mellum is Qwen3-MoE with sliding-window layers, a rotation per
             // layer kind, and dense layers where `mlp_layer_types` says so.
-            if model_type.ends_with("_moe") || model_type.ends_with("_moe_text") || model_type == "qwen3_next" || model_type == "mellum" {
+            if model_type.ends_with("_moe")
+                || model_type.ends_with("_moe_text")
+                || model_type == "qwen3_next"
+                || model_type == "mellum"
+            {
                 // Qwen3-Next and Qwen3.5 renormalise unless told not to
                 // (vLLM's `getattr(config, "norm_topk_prob", True)`); Qwen2-
                 // and Qwen3-MoE only when told to.
@@ -1308,19 +1487,21 @@ pub(super) fn family(
                     path,
                 )?;
                 if model_type != "qwen3_moe" {
-                    routed.shared = whole(raw, "shared_expert_intermediate_size")
-                        .map(|intermediate| SharedExpert {
-                            intermediate,
-                            module: "mlp.shared_expert",
-                            gated: true,
-                            form: SharedForm::GateUpDown,
+                    routed.shared =
+                        whole(raw, "shared_expert_intermediate_size").map(|intermediate| {
+                            SharedExpert {
+                                intermediate,
+                                module: "mlp.shared_expert",
+                                gated: true,
+                                form: SharedForm::GateUpDown,
+                            }
                         });
                 }
                 architecture.experts = Some(routed);
             }
         }
-        "granite" | "granitemoe" | "granitemoehybrid" | "granite_swa" | "granitemoe_swa" | "granitemoeshared"
-        | "hyperclovax" => {
+        "granite" | "granitemoe" | "granitemoehybrid" | "granite_swa" | "granitemoe_swa"
+        | "granitemoeshared" | "hyperclovax" => {
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.feed_forward_bias = flag(raw, "mlp_bias");
@@ -1338,27 +1519,39 @@ pub(super) fn family(
             } else {
                 number(raw, "logits_scaling").map(|scale| 1.0 / scale)
             };
-            if model_type == "hyperclovax" && raw.get("use_post_norm").and_then(Value::as_bool) != Some(false) {
+            if model_type == "hyperclovax"
+                && raw.get("use_post_norm").and_then(Value::as_bool) != Some(false)
+            {
                 architecture.output_norms = true;
                 architecture.names = Names::HYPERCLOVAX;
             }
-            if matches!(model_type, "granitemoe" | "granitemoe_swa" | "granitemoeshared") {
+            if matches!(
+                model_type,
+                "granitemoe" | "granitemoe_swa" | "granitemoeshared"
+            ) {
                 // GraniteMoE takes the softmax over the top-k logits, which is
                 // the full softmax renormalised over the chosen experts.
-                let mut routed =
-                    experts(raw, "num_local_experts", "intermediate_size", true, ExpertLayout::Granite, 0, path)?;
+                let mut routed = experts(
+                    raw,
+                    "num_local_experts",
+                    "intermediate_size",
+                    true,
+                    ExpertLayout::Granite,
+                    0,
+                    path,
+                )?;
                 // GraniteMoeShared and GraniteMoeSWA add `shared_mlp`,
                 // `shared_intermediate_size` wide, to every layer's experts
                 // when that width is above zero.
                 if model_type != "granitemoe" {
-                    routed.shared = whole(raw, "shared_intermediate_size").filter(|width| *width > 0).map(
-                        |intermediate| SharedExpert {
+                    routed.shared = whole(raw, "shared_intermediate_size")
+                        .filter(|width| *width > 0)
+                        .map(|intermediate| SharedExpert {
                             intermediate,
                             module: "shared_mlp",
                             gated: false,
                             form: SharedForm::Stacked,
-                        },
-                    );
+                        });
                 }
                 architecture.experts = Some(routed);
             }
@@ -1483,10 +1676,16 @@ pub(super) fn family(
                 "enable_depth_attention",
             ] {
                 if flag(raw, key) {
-                    bail!("{} turns on Nanbeige's {key}, which Ster does not implement", path.display());
+                    bail!(
+                        "{} turns on Nanbeige's {key}, which Ster does not implement",
+                        path.display()
+                    );
                 }
             }
-            if raw.get("ngram_vocab_size_ratio").is_some_and(|value| !value.is_null()) {
+            if raw
+                .get("ngram_vocab_size_ratio")
+                .is_some_and(|value| !value.is_null())
+            {
                 bail!(
                     "{} declares Nanbeige's n-gram embeddings (ngram_vocab_size_ratio), which Ster does not implement",
                     path.display()
@@ -1521,7 +1720,12 @@ pub(super) fn family(
             let count = whole(raw, "loop_num").unwrap_or(LOOP_CODER_LOOPS).max(1);
             let window = whole(raw, "loop_window_size").unwrap_or(LOOP_CODER_WINDOW);
             if count > 1 {
-                architecture.loops = Some(Loops { physical: layers, count, norm_between: false, gate_window: Some(window) });
+                architecture.loops = Some(Loops {
+                    physical: layers,
+                    count,
+                    norm_between: false,
+                    gate_window: Some(window),
+                });
             }
         }
         "hy_v3" => {
@@ -1543,18 +1747,30 @@ pub(super) fn family(
                 let first = whole(raw, "first_k_dense_replace").unwrap_or(0).min(layers);
                 (0..first).fold(0u128, |set, layer| set | (1u128 << layer))
             };
-            let normalize = raw.get("route_norm").and_then(Value::as_bool).unwrap_or(true);
-            let mut routed =
-                experts(raw, "num_experts", "moe_intermediate_size", normalize, ExpertLayout::HyV3, dense, path)?;
+            let normalize = raw
+                .get("route_norm")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let mut routed = experts(
+                raw,
+                "num_experts",
+                "moe_intermediate_size",
+                normalize,
+                ExpertLayout::HyV3,
+                dense,
+                path,
+            )?;
             routed.scoring = Scoring::Sigmoid;
             routed.selection_bias = Some("mlp.expert_bias");
             routed.routed_scale = number(raw, "router_scaling_factor");
-            routed.shared = whole(raw, "num_shared_experts").filter(|shared| *shared > 0).map(|shared| SharedExpert {
-                intermediate: shared * routed.intermediate,
-                module: "mlp.shared_mlp",
-                gated: false,
-                form: SharedForm::GateUpDown,
-            });
+            routed.shared = whole(raw, "num_shared_experts")
+                .filter(|shared| *shared > 0)
+                .map(|shared| SharedExpert {
+                    intermediate: shared * routed.intermediate,
+                    module: "mlp.shared_mlp",
+                    gated: false,
+                    form: SharedForm::GateUpDown,
+                });
             architecture.experts = Some(routed);
         }
         "olmo_hybrid" => {
@@ -1569,7 +1785,11 @@ pub(super) fn family(
             let linear = match raw.get("layer_types").and_then(Value::as_array) {
                 Some(types) => {
                     if types.len() != layers {
-                        bail!("{} lists {} layer_types for {layers} layers", path.display(), types.len());
+                        bail!(
+                            "{} lists {} layer_types for {layers} layers",
+                            path.display(),
+                            types.len()
+                        );
                     }
                     let mut linear = 0u128;
                     for (layer, kind) in types.iter().enumerate() {
@@ -1585,9 +1805,11 @@ pub(super) fn family(
                     linear
                 }
                 None => {
-                    let attending = |layer: usize| layer % OLMO_HYBRID_FULL_EVERY == OLMO_HYBRID_FULL_EVERY - 1;
-                    let mut linear =
-                        (0..layers).filter(|layer| !attending(*layer)).fold(0u128, |set, layer| set | (1u128 << layer));
+                    let attending =
+                        |layer: usize| layer % OLMO_HYBRID_FULL_EVERY == OLMO_HYBRID_FULL_EVERY - 1;
+                    let mut linear = (0..layers)
+                        .filter(|layer| !attending(*layer))
+                        .fold(0u128, |set, layer| set | (1u128 << layer));
                     if layers > 0 && (0..layers).all(|layer| !attending(layer)) {
                         linear &= !(1u128 << (layers - 1));
                     }
@@ -1595,9 +1817,12 @@ pub(super) fn family(
                 }
             };
             let size = |key: &str| -> Result<usize> {
-                whole(raw, key)
-                    .filter(|size| *size > 0)
-                    .with_context(|| format!("{} declares an OLMo Hybrid model without {key}", path.display()))
+                whole(raw, key).filter(|size| *size > 0).with_context(|| {
+                    format!(
+                        "{} declares an OLMo Hybrid model without {key}",
+                        path.display()
+                    )
+                })
             };
             architecture.query_key_norm = QueryKeyNorm::Full;
             architecture.query_key_value_bias = flag(raw, "attention_bias");
@@ -1612,11 +1837,18 @@ pub(super) fn family(
                 kernel: size("linear_conv_kernel_dim")?,
                 layers: linear,
                 form: DeltaRuleForm::OlmoHybrid,
-                negative_eigenvalues: raw.get("linear_allow_neg_eigval").and_then(Value::as_bool).unwrap_or(true),
+                negative_eigenvalues: raw
+                    .get("linear_allow_neg_eigval")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 decay_floor: None,
                 full_rank_gate: false,
             });
-            let stated_theta = |object: Option<&Value>| object.and_then(|value| value.get("rope_theta")).is_some_and(Value::is_number);
+            let stated_theta = |object: Option<&Value>| {
+                object
+                    .and_then(|value| value.get("rope_theta"))
+                    .is_some_and(Value::is_number)
+            };
             if !stated_theta(raw.get("rope_parameters")) && !stated_theta(Some(raw)) {
                 architecture.positions = Positions::None;
             }
@@ -1768,9 +2000,16 @@ pub(super) fn family(
                     bail!("{} declares a Solar model without {key}", path.display());
                 };
                 list.iter().try_fold(0u128, |set, entry| {
-                    match entry.as_u64().map(|layer| layer as usize).filter(|layer| *layer < layers) {
+                    match entry
+                        .as_u64()
+                        .map(|layer| layer as usize)
+                        .filter(|layer| *layer < layers)
+                    {
                         Some(layer) => Ok(set | (1u128 << layer)),
-                        None => bail!("{} lists {entry} in {key}, which is not one of its {layers} layers", path.display()),
+                        None => bail!(
+                            "{} lists {entry} in {key}, which is not one of its {layers} layers",
+                            path.display()
+                        ),
                     }
                 })
             };
@@ -1788,7 +2027,8 @@ pub(super) fn family(
             // each sublayer's output.
             let bias = flag(raw, "attention_bias") || flag(raw, "bias");
             architecture.output_bias = bias;
-            architecture.query_key_value_bias = raw.get("qkv_bias").and_then(Value::as_bool).unwrap_or(bias);
+            architecture.query_key_value_bias =
+                raw.get("qkv_bias").and_then(Value::as_bool).unwrap_or(bias);
             architecture.feed_forward_bias = flag(raw, "mlp_bias");
             if flag(raw, "sandwich_norm") {
                 architecture.output_norms = true;
@@ -1821,7 +2061,8 @@ pub(super) fn family(
             if flag(raw, "use_sliding_window") {
                 architecture.sliding_window = whole(raw, "sliding_window");
                 let from = whole(raw, "max_window_layers").unwrap_or(0);
-                architecture.sliding_layers = every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
+                architecture.sliding_layers =
+                    every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
             }
         }
         "arcee" => {
@@ -1869,7 +2110,9 @@ pub(super) fn family(
                     .map_or(layers.saturating_sub(1), |end| end as usize);
                 let interval = whole(raw, "moe_layer_interval").unwrap_or(1).max(1);
                 let dense = (0..layers)
-                    .filter(|layer| *layer < start || *layer > end || (layer - start) % interval != 0)
+                    .filter(|layer| {
+                        *layer < start || *layer > end || (layer - start) % interval != 0
+                    })
                     .fold(0u128, |set, layer| set | (1u128 << layer));
                 let mut routed = experts(
                     raw,
@@ -1899,8 +2142,8 @@ pub(super) fn family(
             architecture.embedding_multiplier = number(raw, "scale_emb");
             architecture.residual_multiplier =
                 number(raw, "scale_depth").map(|depth| depth / (layers as f64).sqrt());
-            architecture.logits_multiplier = number(raw, "dim_model_base")
-                .map(|base| base / llama.hidden_size as f64);
+            architecture.logits_multiplier =
+                number(raw, "dim_model_base").map(|base| base / llama.hidden_size as f64);
         }
         "orion" => {
             architecture.norm = NormKind::Layer { bias: true };
@@ -1921,8 +2164,11 @@ pub(super) fn family(
                 );
             };
             let step_rank = match raw.get("time_step_rank") {
-                Some(Value::String(rule)) if rule == "auto" => hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK),
-                _ => whole(raw, "time_step_rank").unwrap_or(hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)),
+                Some(Value::String(rule)) if rule == "auto" => {
+                    hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)
+                }
+                _ => whole(raw, "time_step_rank")
+                    .unwrap_or(hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)),
             };
             architecture.names = Names::MAMBA;
             architecture.positions = Positions::None;
@@ -1932,7 +2178,10 @@ pub(super) fn family(
                 kernel,
                 step_rank,
                 projection_bias: flag(raw, "use_bias"),
-                convolution_bias: raw.get("use_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                convolution_bias: raw
+                    .get("use_conv_bias")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 parameter_norm: if model_type == "falcon_mamba" {
                     ParameterNorm::Bare(number(raw, "mixer_rms_eps").unwrap_or(llama.rms_norm_eps))
                 } else {
@@ -1961,17 +2210,22 @@ pub(super) fn family(
             let routed = periodic("expert_layer_period", "expert_layer_offset");
             let hidden = llama.hidden_size;
             let inner = whole(raw, "mamba_expand").map(|expand| expand * hidden);
-            let (Some(inner), Some(state), Some(kernel)) =
-                (inner, whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
-            else {
+            let (Some(inner), Some(state), Some(kernel)) = (
+                inner,
+                whole(raw, "mamba_d_state"),
+                whole(raw, "mamba_d_conv"),
+            ) else {
                 bail!(
                     "{} declares a Jamba model without mamba_expand, mamba_d_state and mamba_d_conv",
                     path.display()
                 );
             };
             let step_rank = match raw.get("mamba_dt_rank") {
-                Some(Value::String(rule)) if rule == "auto" => hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK),
-                _ => whole(raw, "mamba_dt_rank").unwrap_or(hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)),
+                Some(Value::String(rule)) if rule == "auto" => {
+                    hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)
+                }
+                _ => whole(raw, "mamba_dt_rank")
+                    .unwrap_or(hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)),
             };
             architecture.names = Names::JAMBA;
             architecture.positions = Positions::None;
@@ -1981,7 +2235,10 @@ pub(super) fn family(
                 kernel,
                 step_rank,
                 projection_bias: flag(raw, "mamba_proj_bias"),
-                convolution_bias: raw.get("mamba_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                convolution_bias: raw
+                    .get("mamba_conv_bias")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 parameter_norm: ParameterNorm::Weighted(llama.rms_norm_eps),
                 layers: every_layer(layers, path)? & !attention,
                 feed_forward: true,
@@ -2018,7 +2275,10 @@ pub(super) fn family(
                 kernel,
                 step_rank: 0,
                 projection_bias: flag(raw, "use_bias"),
-                convolution_bias: raw.get("use_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                convolution_bias: raw
+                    .get("use_conv_bias")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 parameter_norm: ParameterNorm::None,
                 layers: every_layer(layers, path)?,
                 feed_forward: false,
@@ -2041,7 +2301,8 @@ pub(super) fn family(
                 })
                 .unwrap_or(0);
             let heads = structured(raw, "mamba_n_heads", "mamba_d_head", "mamba_n_groups", path)?;
-            let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+            let (Some(state), Some(kernel)) =
+                (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
             else {
                 bail!(
                     "{} declares a Bamba model without mamba_d_state and mamba_d_conv",
@@ -2058,7 +2319,10 @@ pub(super) fn family(
                 kernel,
                 step_rank: 0,
                 projection_bias: flag(raw, "mamba_proj_bias"),
-                convolution_bias: raw.get("mamba_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                convolution_bias: raw
+                    .get("mamba_conv_bias")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 parameter_norm: ParameterNorm::None,
                 layers: every_layer(layers, path)? & !attention,
                 feed_forward: true,
@@ -2073,7 +2337,10 @@ pub(super) fn family(
             // feed-forwards behind DeepSeek-V3's router.
             fits(layers, path)?;
             let Some(pattern) = text(raw, "hybrid_override_pattern") else {
-                bail!("{} declares a Nemotron-H model without hybrid_override_pattern", path.display());
+                bail!(
+                    "{} declares a Nemotron-H model without hybrid_override_pattern",
+                    path.display()
+                );
             };
             if pattern.chars().count() != layers {
                 bail!(
@@ -2111,12 +2378,14 @@ pub(super) fn family(
                 routed.layout = ExpertLayout::NemotronH;
                 routed.dense_layers = every_layer(layers, path)? & !routed_layers;
                 routed.selection_bias = Some("mixer.gate.e_score_correction_bias");
-                routed.latent = whole(raw, "moe_latent_size").filter(|width| *width > 0).map(|width| LatentExperts {
-                    width,
-                    down: LatentExperts::NEMOTRON_H_DOWN,
-                    up: LatentExperts::NEMOTRON_H_UP,
-                    norm: None,
-                });
+                routed.latent = whole(raw, "moe_latent_size")
+                    .filter(|width| *width > 0)
+                    .map(|width| LatentExperts {
+                        width,
+                        down: LatentExperts::NEMOTRON_H_DOWN,
+                        up: LatentExperts::NEMOTRON_H_UP,
+                        norm: None,
+                    });
                 let shared_count = whole(raw, "n_shared_experts").unwrap_or(1).max(1);
                 routed.shared = whole(raw, "moe_shared_expert_intermediate_size")
                     .filter(|width| *width > 0)
@@ -2128,7 +2397,11 @@ pub(super) fn family(
                     });
                 if let Some(blocks) = raw.get("block_configs").and_then(Value::as_array) {
                     if blocks.len() != layers {
-                        bail!("{} lists {} block_configs for {layers} layers", path.display(), blocks.len());
+                        bail!(
+                            "{} lists {} block_configs for {layers} layers",
+                            path.display(),
+                            blocks.len()
+                        );
                     }
                     architecture.expert_overrides = Some(
                         blocks
@@ -2152,15 +2425,19 @@ pub(super) fn family(
                 architecture.experts = Some(routed);
             }
             let heads = structured(raw, "mamba_num_heads", "mamba_head_dim", "n_groups", path)?;
-            let (Some(state), Some(kernel)) = (whole(raw, "ssm_state_size"), whole(raw, "conv_kernel"))
+            let (Some(state), Some(kernel)) =
+                (whole(raw, "ssm_state_size"), whole(raw, "conv_kernel"))
             else {
                 bail!(
                     "{} declares a Nemotron-H model without ssm_state_size and conv_kernel",
                     path.display()
                 );
             };
-            architecture.names =
-                if model_type == "nemotron_h_puzzle" { Names::NEMOTRON_H_MODEL } else { Names::NEMOTRON_H };
+            architecture.names = if model_type == "nemotron_h_puzzle" {
+                Names::NEMOTRON_H_MODEL
+            } else {
+                Names::NEMOTRON_H
+            };
             architecture.positions = Positions::None;
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.query_key_value_bias = flag(raw, "attention_bias");
@@ -2173,7 +2450,10 @@ pub(super) fn family(
                 kernel,
                 step_rank: 0,
                 projection_bias: flag(raw, "use_bias"),
-                convolution_bias: raw.get("use_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                convolution_bias: raw
+                    .get("use_conv_bias")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 parameter_norm: ParameterNorm::None,
                 layers: mamba,
                 feed_forward: false,
@@ -2221,8 +2501,15 @@ pub(super) fn family(
                     path.display()
                 ),
             };
-            let mut routed =
-                experts(raw, "num_experts", "moe_intermediate_size", false, ExpertLayout::Qwen, dense, path)?;
+            let mut routed = experts(
+                raw,
+                "num_experts",
+                "moe_intermediate_size",
+                false,
+                ExpertLayout::Qwen,
+                dense,
+                path,
+            )?;
             routed.normalize = (sigmoid || flag(raw, "norm_topk_prob")) && routed.top_k > 1;
             routed.shared = whole(raw, "num_shared_experts")
                 .filter(|shared| *shared > 0)
@@ -2246,13 +2533,23 @@ pub(super) fn family(
                                 routed.count
                             );
                         }
-                        Some(ExpertGroups { groups, chosen_groups, rank_by_top_two: true })
+                        Some(ExpertGroups {
+                            groups,
+                            chosen_groups,
+                            rank_by_top_two: true,
+                        })
                     }
                     _ => None,
                 };
             }
             if model_type == "bailing_hybrid" {
-                step_limits(raw, ("expert_swiglu_limit_list", "share_expert_swiglu_limit_list"), layers, &mut routed, path)?;
+                step_limits(
+                    raw,
+                    ("expert_swiglu_limit_list", "share_expert_swiglu_limit_list"),
+                    layers,
+                    &mut routed,
+                    path,
+                )?;
             }
             architecture.experts = Some(routed);
         }
@@ -2265,7 +2562,9 @@ pub(super) fn family(
             // of its projection and its output, the feed-forward's gate and
             // output, and the logits.
             let scale = |key: &str| number(raw, key).unwrap_or(1.0);
-            if raw.get("attn_layer_indices").is_some_and(|indices| !indices.is_null())
+            if raw
+                .get("attn_layer_indices")
+                .is_some_and(|indices| !indices.is_null())
                 || raw.get("mamba_use_mlp").and_then(Value::as_bool) == Some(false)
                 || flag(raw, "mamba_norm_before_gate")
                 || flag(raw, "mamba_proj_bias") != flag(raw, "projectors_bias")
@@ -2275,8 +2574,10 @@ pub(super) fn family(
                     path.display()
                 );
             }
-            let mut heads = structured(raw, "mamba_n_heads", "mamba_d_head", "mamba_n_groups", path)?;
-            let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+            let mut heads =
+                structured(raw, "mamba_n_heads", "mamba_d_head", "mamba_n_groups", path)?;
+            let (Some(state), Some(kernel)) =
+                (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
             else {
                 bail!(
                     "{} declares a Falcon-H1 model without mamba_d_state and mamba_d_conv",
@@ -2298,7 +2599,10 @@ pub(super) fn family(
             let [gate_scale, output_scale] = numbers::<2>(raw, "mlp_multipliers", path)?;
             heads.input_scale = scale("ssm_in_multiplier");
             heads.projection_scales = Some(numbers::<5>(raw, "ssm_multipliers", path)?);
-            heads.gated_norm = raw.get("mamba_rms_norm").and_then(Value::as_bool).unwrap_or(true);
+            heads.gated_norm = raw
+                .get("mamba_rms_norm")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             architecture.names = Names::JAMBA;
             architecture.query_key_value_bias = flag(raw, "attention_bias");
             architecture.output_bias = architecture.query_key_value_bias;
@@ -2318,7 +2622,10 @@ pub(super) fn family(
                 kernel,
                 step_rank: 0,
                 projection_bias: flag(raw, "mamba_proj_bias"),
-                convolution_bias: raw.get("mamba_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                convolution_bias: raw
+                    .get("mamba_conv_bias")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 parameter_norm: ParameterNorm::None,
                 // The scan runs inside every layer's parallel block, never
                 // as a layer of its own.
@@ -2369,7 +2676,10 @@ pub(super) fn family(
                     .unwrap_or(0),
             };
             let Some(kernel) = whole(raw, "conv_L_cache") else {
-                bail!("{} declares an LFM2 model without conv_L_cache", path.display());
+                bail!(
+                    "{} declares an LFM2 model without conv_L_cache",
+                    path.display()
+                );
             };
             architecture.names = Names::LFM2;
             architecture.query_key_norm = QueryKeyNorm::PerHead;
@@ -2398,7 +2708,8 @@ pub(super) fn family(
                     path,
                 )?;
                 routed.scoring = Scoring::Sigmoid;
-                routed.selection_bias = flag(raw, "use_expert_bias").then_some("feed_forward.expert_bias");
+                routed.selection_bias =
+                    flag(raw, "use_expert_bias").then_some("feed_forward.expert_bias");
                 routed.routed_scale = number(raw, "routed_scaling_factor");
                 architecture.experts = Some(routed);
             }
@@ -2456,8 +2767,15 @@ pub(super) fn family(
                 fits(layers, path)?;
                 let skipped = whole(raw, "moe_layer_num_skipped").unwrap_or(0).min(layers);
                 let dense = (0..skipped).fold(0u128, |set, layer| set | (1u128 << layer));
-                let mut routed =
-                    experts(raw, "num_experts", width, true, ExpertLayout::HunYuan, dense, path)?;
+                let mut routed = experts(
+                    raw,
+                    "num_experts",
+                    width,
+                    true,
+                    ExpertLayout::HunYuan,
+                    dense,
+                    path,
+                )?;
                 if raw.get("use_mixed_mlp_moe").and_then(Value::as_bool) != Some(false) {
                     let shared = uniform(raw, "num_shared_expert", path)?.unwrap_or(1);
                     routed.shared = (shared > 0).then_some(SharedExpert {
@@ -2478,7 +2796,8 @@ pub(super) fn family(
             // TeleChat2: Llama's block below `transformer`, a separate
             // `query` beside a `key_value` matrix paired per head, biases on
             // the attention output and the down projection only.
-            if flag(raw, "apply_residual_connection_post_layernorm") || flag(raw, "embed_layernorm") {
+            if flag(raw, "apply_residual_connection_post_layernorm") || flag(raw, "embed_layernorm")
+            {
                 bail!(
                     "{} adds its residual after the norm (apply_residual_connection_post_layernorm) or normalises the embeddings (embed_layernorm); Ster implements TeleChat2's pre-norm block without an embedding norm",
                     path.display()
@@ -2496,7 +2815,8 @@ pub(super) fn family(
         // openPangu-Ultra-MoE is DeepSeek-V3's latent attention and a sigmoid
         // router without selection bias, under its own key names (read as
         // DeepSeek's), with sandwich norms.
-        "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" | "deepseek_v32" | "glm_moe_dsa" | "axk1" | "pangu_ultra_moe" => {
+        "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" | "deepseek_v32"
+        | "glm_moe_dsa" | "axk1" | "pangu_ultra_moe" => {
             if architecture.latent.is_none() {
                 bail!(
                     "{} declares no kv_lora_rank; Ster implements {model_type} with its latent attention",
@@ -2509,15 +2829,20 @@ pub(super) fn family(
                 architecture.embedding_multiplier = number(raw, "scale_emb");
                 architecture.residual_multiplier =
                     number(raw, "scale_depth").map(|depth| depth / (layers as f64).sqrt());
-                architecture.logits_multiplier = number(raw, "dim_model_base")
-                    .map(|base| base / llama.hidden_size as f64);
+                architecture.logits_multiplier =
+                    number(raw, "dim_model_base").map(|base| base / llama.hidden_size as f64);
             } else {
                 // DeepSeek rotates adjacent pairs (`rope_interleave`, on by
                 // default).
-                architecture.interleaved_rotary =
-                    raw.get("rope_interleave").and_then(Value::as_bool).unwrap_or(true);
+                architecture.interleaved_rotary = raw
+                    .get("rope_interleave")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
             }
-            if raw.get("n_routed_experts").is_some_and(|count| !count.is_null()) {
+            if raw
+                .get("n_routed_experts")
+                .is_some_and(|count| !count.is_null())
+            {
                 architecture.experts = Some(deepseek_experts(raw, model_type, layers, path)?);
             }
             // Mistral Large 3 (read from Mistral's own format) adds Llama
@@ -2545,7 +2870,10 @@ pub(super) fn family(
             // norm `inter_norm` and widens through `wq`, beside
             // `num_attention_groups` key-value heads, and Step's experts.
             let Some(width) = whole(raw, "share_q_dim").filter(|width| *width > 0) else {
-                bail!("{} declares a Step3 model without share_q_dim", path.display());
+                bail!(
+                    "{} declares a Step3 model without share_q_dim",
+                    path.display()
+                );
             };
             architecture.names = Names::STEP3;
             architecture.query_bottleneck = Some(width);
@@ -2583,10 +2911,17 @@ pub(super) fn family(
             // under `use_mem_rope`.
             fits(layers, path)?;
             let Some(kinds) = raw.get("layers_block_type").and_then(Value::as_array) else {
-                bail!("{} declares a Zamba2 model without layers_block_type", path.display());
+                bail!(
+                    "{} declares a Zamba2 model without layers_block_type",
+                    path.display()
+                );
             };
             if kinds.len() != layers {
-                bail!("{} lists {} layers_block_type entries for {layers} layers", path.display(), kinds.len());
+                bail!(
+                    "{} lists {} layers_block_type entries for {layers} layers",
+                    path.display(),
+                    kinds.len()
+                );
             }
             let mut hybrid = 0u128;
             for (layer, kind) in kinds.iter().enumerate() {
@@ -2599,18 +2934,21 @@ pub(super) fn family(
                     ),
                 }
             }
-            let mut heads = structured(raw, "n_mamba_heads", "mamba_headdim", "mamba_ngroups", path)?;
+            let mut heads =
+                structured(raw, "n_mamba_heads", "mamba_headdim", "mamba_ngroups", path)?;
             // Transformers' `Zamba2MambaMixer` clamps the step to
             // `(time_step_min, inf)`.
             heads.step_limit = (number(raw, "time_step_min").unwrap_or(0.0), f64::INFINITY);
-            let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+            let (Some(state), Some(kernel)) =
+                (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
             else {
                 bail!(
                     "{} declares a Zamba2 model without mamba_d_state and mamba_d_conv",
                     path.display()
                 );
             };
-            let inner = (number(raw, "mamba_expand").unwrap_or(2.0) * llama.hidden_size as f64) as usize;
+            let inner =
+                (number(raw, "mamba_expand").unwrap_or(2.0) * llama.hidden_size as f64) as usize;
             if inner != heads.heads * heads.head_dim {
                 bail!(
                     "{} sizes its Mamba-2 mixer at mamba_expand times the width, {inner}, but {} heads of {} make {}",
@@ -2621,7 +2959,10 @@ pub(super) fn family(
                 );
             }
             let Some(blocks) = whole(raw, "num_mem_blocks").filter(|blocks| *blocks > 0) else {
-                bail!("{} declares a Zamba2 model without num_mem_blocks", path.display());
+                bail!(
+                    "{} declares a Zamba2 model without num_mem_blocks",
+                    path.display()
+                );
             };
             let attention_adapters = flag(raw, "use_shared_attention_adapter");
             let feed_forward_adapters = flag(raw, "use_shared_mlp_adapter");
@@ -2640,7 +2981,8 @@ pub(super) fn family(
             architecture.shared_blocks = Some(SharedBlocksSpec {
                 hybrid_layers: hybrid,
                 blocks,
-                attention_input: whole(raw, "attention_hidden_size").unwrap_or(2 * llama.hidden_size),
+                attention_input: whole(raw, "attention_hidden_size")
+                    .unwrap_or(2 * llama.hidden_size),
                 intermediate: llama.intermediate_size,
                 rank,
                 attention_adapters,
@@ -2652,7 +2994,10 @@ pub(super) fn family(
                 kernel,
                 step_rank: 0,
                 projection_bias: flag(raw, "add_bias_linear"),
-                convolution_bias: raw.get("use_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+                convolution_bias: raw
+                    .get("use_conv_bias")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 parameter_norm: ParameterNorm::None,
                 layers: every_layer(layers, path)? & !hybrid,
                 feed_forward: false,
@@ -2672,7 +3017,11 @@ pub(super) fn family(
             let mut lightning = 0u128;
             if let Some(kinds) = raw.get("attn_type_list").and_then(Value::as_array) {
                 if kinds.len() != layers {
-                    bail!("{} lists {} attn_type_list entries for {layers} layers", path.display(), kinds.len());
+                    bail!(
+                        "{} lists {} attn_type_list entries for {layers} layers",
+                        path.display(),
+                        kinds.len()
+                    );
                 }
                 for (layer, kind) in kinds.iter().enumerate() {
                     match kind.as_u64() {
@@ -2686,7 +3035,11 @@ pub(super) fn family(
                 }
             } else if let Some(types) = raw.get("layer_types").and_then(Value::as_array) {
                 if types.len() != layers {
-                    bail!("{} lists {} layer_types for {layers} layers", path.display(), types.len());
+                    bail!(
+                        "{} lists {} layer_types for {layers} layers",
+                        path.display(),
+                        types.len()
+                    );
                 }
                 for (layer, kind) in types.iter().enumerate() {
                     match kind.as_str() {
@@ -2712,7 +3065,8 @@ pub(super) fn family(
             }
             // The release's keys first, Transformers' after; one when unstated.
             let pair = |alpha: [&str; 2], beta: [&str; 2]| -> (f64, f64) {
-                let read = |keys: [&str; 2]| keys.iter().find_map(|key| number(raw, key)).unwrap_or(1.0);
+                let read =
+                    |keys: [&str; 2]| keys.iter().find_map(|key| number(raw, key)).unwrap_or(1.0);
                 (read(alpha), read(beta))
             };
             architecture.lightning = Some(LightningSpec {
@@ -2724,7 +3078,10 @@ pub(super) fn family(
             architecture.scaled_residuals = Some(ScaledResiduals {
                 from_normed: raw.get("postnorm").and_then(Value::as_bool).unwrap_or(true),
                 linear_attention: pair(
-                    ["layernorm_linear_attention_alpha", "linear_attn_alpha_factor"],
+                    [
+                        "layernorm_linear_attention_alpha",
+                        "linear_attn_alpha_factor",
+                    ],
                     ["layernorm_linear_attention_beta", "linear_attn_beta_factor"],
                 ),
                 full_attention: pair(
@@ -2793,8 +3150,9 @@ pub(super) fn family(
                     path.display()
                 ),
             };
-            routed.selection_bias = (raw.get("use_routing_bias").and_then(Value::as_bool) != Some(false))
-                .then_some("block_sparse_moe.e_score_correction_bias");
+            routed.selection_bias = (raw.get("use_routing_bias").and_then(Value::as_bool)
+                != Some(false))
+            .then_some("block_sparse_moe.e_score_correction_bias");
             architecture.experts = Some(routed);
         }
         "kimi_linear" => {
@@ -2812,7 +3170,10 @@ pub(super) fn family(
                 );
             }
             let Some(linear) = raw.get("linear_attn_config").and_then(Value::as_object) else {
-                bail!("{} declares a Kimi-Linear model without linear_attn_config", path.display());
+                bail!(
+                    "{} declares a Kimi-Linear model without linear_attn_config",
+                    path.display()
+                );
             };
             let size = |key: &str| -> Result<usize> {
                 linear
@@ -2820,10 +3181,18 @@ pub(super) fn family(
                     .and_then(Value::as_u64)
                     .map(|size| size as usize)
                     .filter(|size| *size > 0)
-                    .with_context(|| format!("{} declares linear_attn_config without {key}", path.display()))
+                    .with_context(|| {
+                        format!(
+                            "{} declares linear_attn_config without {key}",
+                            path.display()
+                        )
+                    })
             };
             let Some(listed) = linear.get("kda_layers").and_then(Value::as_array) else {
-                bail!("{} declares linear_attn_config without kda_layers", path.display());
+                bail!(
+                    "{} declares linear_attn_config without kda_layers",
+                    path.display()
+                );
             };
             let mut kda = 0u128;
             for entry in listed {
@@ -2846,7 +3215,10 @@ pub(super) fn family(
                 form: DeltaRuleForm::Kimi,
                 negative_eigenvalues: false,
                 decay_floor: linear.get("gate_lower_bound").and_then(Value::as_f64),
-                full_rank_gate: linear.get("use_full_rank_gate").and_then(Value::as_bool).unwrap_or(false),
+                full_rank_gate: linear
+                    .get("use_full_rank_gate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             });
             if flag(raw, "mla_use_nope") {
                 architecture.positions = Positions::None;
@@ -2885,7 +3257,11 @@ pub(super) fn family(
                         routed.count
                     );
                 }
-                routed.groups = Some(ExpertGroups { groups, chosen_groups, rank_by_top_two: true });
+                routed.groups = Some(ExpertGroups {
+                    groups,
+                    chosen_groups,
+                    rank_by_top_two: true,
+                });
             }
             routed.shared = whole(raw, "num_shared_experts")
                 .filter(|shared| *shared > 0)
@@ -2897,12 +3273,15 @@ pub(super) fn family(
                 });
             // Kimi-K3's latent experts: `routed_expert_hidden_size` wide,
             // `routed_expert_norm` over their sum under `latent_moe_use_norm`.
-            routed.latent = whole(raw, "routed_expert_hidden_size").filter(|width| *width > 0).map(|width| LatentExperts {
-                width,
-                down: LatentExperts::KIMI_DOWN,
-                up: LatentExperts::KIMI_UP,
-                norm: flag(raw, "latent_moe_use_norm").then_some((LatentExperts::KIMI_NORM, architecture.norm_eps)),
-            });
+            routed.latent = whole(raw, "routed_expert_hidden_size")
+                .filter(|width| *width > 0)
+                .map(|width| LatentExperts {
+                    width,
+                    down: LatentExperts::KIMI_DOWN,
+                    up: LatentExperts::KIMI_UP,
+                    norm: flag(raw, "latent_moe_use_norm")
+                        .then_some((LatentExperts::KIMI_NORM, architecture.norm_eps)),
+                });
             architecture.experts = Some(routed);
             // Kimi-K3's `mla_use_output_gate`: attention's output times the
             // sigmoid of `g_proj`, elementwise, before `o_proj`.
@@ -2911,7 +3290,10 @@ pub(super) fn family(
                 architecture.names.attention_gate = "g_proj";
             }
             architecture.depth_block_size = match whole(raw, "attn_res_block_size") {
-                Some(0) => bail!("{} declares attn_res_block_size 0; a block holds at least one layer", path.display()),
+                Some(0) => bail!(
+                    "{} declares attn_res_block_size 0; a block holds at least one layer",
+                    path.display()
+                ),
                 size => size,
             };
         }
@@ -2923,13 +3305,18 @@ pub(super) fn family(
             architecture.names = Names::GPT_NEOX;
             architecture.norm = NormKind::Layer { bias: true };
             architecture.qkv_layout = QkvLayout::Grouped;
-            let bias = raw.get("attention_bias").and_then(Value::as_bool).unwrap_or(true);
+            let bias = raw
+                .get("attention_bias")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             architecture.query_key_value_bias = bias;
             architecture.output_bias = bias;
             architecture.feed_forward_bias = true;
             architecture.feed_forward = FeedForwardKind::Plain;
-            architecture.parallel =
-                raw.get("use_parallel_residual").and_then(Value::as_bool).unwrap_or(true);
+            architecture.parallel = raw
+                .get("use_parallel_residual")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             architecture.parallel_norms = true;
         }
         "gptj" => {
@@ -2975,17 +3362,24 @@ pub(super) fn family(
                     path.display()
                 );
             }
-            if let Some(width) = whole(raw, "word_embed_proj_dim").filter(|w| *w != llama.hidden_size) {
+            if let Some(width) =
+                whole(raw, "word_embed_proj_dim").filter(|w| *w != llama.hidden_size)
+            {
                 bail!(
                     "{} projects {width}-wide word embeddings into a {}-wide model (word_embed_proj_dim); Ster implements OPT with embeddings as wide as the model",
                     path.display(),
                     llama.hidden_size
                 );
             }
-            let bias = raw.get("enable_bias").and_then(Value::as_bool).unwrap_or(true);
+            let bias = raw
+                .get("enable_bias")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             architecture.names = Names::OPT;
             architecture.norm = NormKind::Layer { bias: true };
-            architecture.positions = Positions::Learned { offset: OPT_POSITION_OFFSET };
+            architecture.positions = Positions::Learned {
+                offset: OPT_POSITION_OFFSET,
+            };
             architecture.query_key_value_bias = bias;
             architecture.output_bias = bias;
             architecture.feed_forward_bias = bias;
@@ -3004,7 +3398,9 @@ pub(super) fn family(
             architecture.names = Names::BLOOM;
             architecture.norm = NormKind::Layer { bias: true };
             architecture.embedding_norm = true;
-            architecture.positions = Positions::Alibi { inside_scale: false };
+            architecture.positions = Positions::Alibi {
+                inside_scale: false,
+            };
             architecture.qkv_layout = QkvLayout::Grouped;
             architecture.query_key_value_bias = true;
             architecture.output_bias = true;
@@ -3020,7 +3416,11 @@ pub(super) fn family(
             // `ln_mlp`, the exact GELU, and rotation or ALiBi.
             let new = flag(raw, "new_decoder_architecture");
             let two_norms = new && whole(raw, "num_ln_in_parallel_attn") != Some(1);
-            architecture.names = if two_norms { Names::FALCON_TWO_NORMS } else { Names::FALCON };
+            architecture.names = if two_norms {
+                Names::FALCON_TWO_NORMS
+            } else {
+                Names::FALCON
+            };
             architecture.parallel = new || flag(raw, "parallel_attn");
             architecture.parallel_norms = two_norms;
             architecture.norm = NormKind::Layer { bias: true };
@@ -3042,8 +3442,14 @@ pub(super) fn family(
             let attention = raw.get("attn_config").cloned().unwrap_or(Value::Null);
             let unsupported = [
                 ("qk_ln", flag(&attention, "qk_ln")),
-                ("clip_qkv", attention.get("clip_qkv").is_some_and(|v| !v.is_null())),
-                ("softmax_scale", attention.get("softmax_scale").is_some_and(|v| !v.is_null())),
+                (
+                    "clip_qkv",
+                    attention.get("clip_qkv").is_some_and(|v| !v.is_null()),
+                ),
+                (
+                    "softmax_scale",
+                    attention.get("softmax_scale").is_some_and(|v| !v.is_null()),
+                ),
                 (
                     "attn_type",
                     text(&attention, "attn_type").is_some_and(|kind| kind != "multihead_attention"),
@@ -3071,7 +3477,9 @@ pub(super) fn family(
             architecture.names = Names::MPT;
             architecture.norm = NormKind::Layer { bias };
             architecture.positions = if alibi {
-                Positions::Alibi { inside_scale: false }
+                Positions::Alibi {
+                    inside_scale: false,
+                }
             } else {
                 Positions::Learned { offset: 0 }
             };
@@ -3108,7 +3516,10 @@ pub(super) fn family(
             architecture.query_key_value_bias = bias || flag(raw, "add_qkv_bias");
             architecture.output_bias = bias;
             architecture.feed_forward_bias = bias;
-            architecture.interleaved_rotary = raw.get("original_rope").and_then(Value::as_bool).unwrap_or(true);
+            architecture.interleaved_rotary = raw
+                .get("original_rope")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             if raw.get("rmsnorm").and_then(Value::as_bool) == Some(false) {
                 architecture.norm = NormKind::Layer { bias: true };
             }
@@ -3151,7 +3562,11 @@ pub(super) fn family(
                 let chunked = raw
                     .get("layer_types")
                     .and_then(Value::as_array)
-                    .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("chunked_attention")));
+                    .is_some_and(|kinds| {
+                        kinds
+                            .iter()
+                            .any(|kind| kind.as_str() == Some("chunked_attention"))
+                    });
                 if chunked {
                     architecture.chunk_lookback = Some(RNJ1_CHUNK_LOOKBACK);
                 }
@@ -3170,6 +3585,7 @@ pub(super) fn family(
         "hrm_text" => hrm_text(raw, layers, &mut architecture, path)?,
         "inkling_text" => inkling(raw, layers, &mut architecture, path)?,
         "deepseek_v4" => deepseek_v4(raw, scaling, layers, &mut architecture, path)?,
+        "glm5_next_text" => glm5_next(raw, layers, &mut architecture, path)?,
         "gemma4_text" | "gemma4_unified_text" => {
             // Gemma 4: Gemma 3's norms around both sublayers and per-head
             // query and key norms, but norms that scale by their weight
@@ -3181,7 +3597,11 @@ pub(super) fn family(
             // from the key projection, and rotate by the `full_attention`
             // rotation over that width; the sliding-window layers rotate by
             // their own base.
-            if raw.get("use_bidirectional_attention").and_then(Value::as_str) == Some("all") {
+            if raw
+                .get("use_bidirectional_attention")
+                .and_then(Value::as_str)
+                == Some("all")
+            {
                 bail!(
                     "{} declares use_bidirectional_attention \"all\", so every token sees the whole sequence; Ster runs causal decoders only",
                     path.display()
@@ -3194,12 +3614,19 @@ pub(super) fn family(
                 );
             }
             let Some(global_head_dim) = whole(raw, "global_head_dim") else {
-                bail!("{} declares a Gemma 4 model without global_head_dim", path.display());
+                bail!(
+                    "{} declares a Gemma 4 model without global_head_dim",
+                    path.display()
+                );
             };
             let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-                bail!("{} declares a Gemma 4 model without layer_types", path.display());
+                bail!(
+                    "{} declares a Gemma 4 model without layer_types",
+                    path.display()
+                );
             };
-            architecture.local_rope_theta = number(raw, "rope_local_base_freq").map(|theta| theta as f32);
+            architecture.local_rope_theta =
+                number(raw, "rope_local_base_freq").map(|theta| theta as f32);
             if architecture.local_rope_theta.is_none() {
                 bail!(
                     "{} declares a Gemma 4 model without a sliding_attention rotation base",
@@ -3240,14 +3667,18 @@ pub(super) fn family(
                 }
                 let first = layers - shared;
                 architecture.shared_key_values = Some(first);
-                if let Some(layer) = (first..layers).find(|layer| architecture.key_value_source(*layer).is_none()) {
+                if let Some(layer) =
+                    (first..layers).find(|layer| architecture.key_value_source(*layer).is_none())
+                {
                     bail!(
                         "{} shares keys and values from layer {first} on, but layer {layer} has no earlier layer of its kind to share them from",
                         path.display()
                     );
                 }
             }
-            if let Some(width) = whole(raw, "hidden_size_per_layer_input").filter(|width| *width > 0) {
+            if let Some(width) =
+                whole(raw, "hidden_size_per_layer_input").filter(|width| *width > 0)
+            {
                 architecture.per_layer_input = Some(PerLayerInputSpec {
                     width,
                     vocab: whole(raw, "vocab_size_per_layer_input").unwrap_or(llama.vocab_size),
@@ -3265,7 +3696,9 @@ pub(super) fn family(
                 )?);
             }
         }
-        "mimo_v2_flash" | "mimo_v2" => mimo_v2(raw, model_type, layers, llama, &mut architecture, path)?,
+        "mimo_v2_flash" | "mimo_v2" => {
+            mimo_v2(raw, model_type, layers, llama, &mut architecture, path)?
+        }
         other => bail!("model architecture {other:?} has no decoder in this Ster build"),
     }
     // A rotation stated per layer kind (Transformers 5's `rope_parameters`
@@ -3273,7 +3706,8 @@ pub(super) fn family(
     // the family, so a scaling on the full-attention rotation (Mellum's
     // YaRN) never reaches them.
     if architecture.local_rope_theta.is_none() && architecture.sliding_window.is_some() {
-        architecture.local_rope_theta = number(raw, "rope_local_base_freq").map(|theta| theta as f32);
+        architecture.local_rope_theta =
+            number(raw, "rope_local_base_freq").map(|theta| theta as f32);
     }
     // A family with recurrent mixers (LFM2's convolutions, Qwen3-Next's,
     // Kimi-Linear's and OLMo Hybrid's delta rule, MiniMax's lightning
@@ -3287,13 +3721,18 @@ pub(super) fn family(
         || architecture.state_space.is_some()
         || architecture.inkling.is_some()
         || architecture.compressed.is_some();
-    let windows = raw.get("layer_types").and_then(Value::as_array).filter(|_| !mixers_listed);
+    let windows = raw
+        .get("layer_types")
+        .and_then(Value::as_array)
+        .filter(|_| !mixers_listed);
     if let Some(types) = windows {
-        architecture.sliding_layers = windowed_layers(types, layers, architecture.chunk_lookback.is_some(), path)?;
+        architecture.sliding_layers =
+            windowed_layers(types, layers, architecture.chunk_lookback.is_some(), path)?;
     }
     // Cohere 2's global layers apply no rotary embedding; so do EXAONE 4's
     // when the model mixes local and global layers at all.
-    let hybrid_exaone = matches!(model_type, "exaone4" | "exaone_moe") && architecture.sliding_window.is_some();
+    let hybrid_exaone =
+        matches!(model_type, "exaone4" | "exaone_moe") && architecture.sliding_window.is_some();
     if model_type == "cohere2" || hybrid_exaone {
         architecture.unrotated_layers = every_layer(layers, path)? & !architecture.sliding_layers;
     }
@@ -3406,26 +3845,43 @@ fn deepseek_experts(
     let mut routed = experts(
         raw,
         // K-EXAONE spells the counts `num_experts` and `num_shared_experts`.
-        if model_type == "exaone_moe" { "num_experts" } else { "n_routed_experts" },
+        if model_type == "exaone_moe" {
+            "num_experts"
+        } else {
+            "n_routed_experts"
+        },
         "moe_intermediate_size",
         normalize,
         ExpertLayout::Qwen,
         dense_layers,
         path,
     )?;
-    routed.shared = whole(raw, if model_type == "exaone_moe" { "num_shared_experts" } else { "n_shared_experts" })
-        .filter(|shared| *shared > 0)
-        .map(|shared| SharedExpert {
-            intermediate: shared * routed.intermediate,
-            module: "mlp.shared_experts",
-            gated: false,
-            form: SharedForm::GateUpDown,
-        });
+    routed.shared = whole(
+        raw,
+        if model_type == "exaone_moe" {
+            "num_shared_experts"
+        } else {
+            "n_shared_experts"
+        },
+    )
+    .filter(|shared| *shared > 0)
+    .map(|shared| SharedExpert {
+        intermediate: shared * routed.intermediate,
+        module: "mlp.shared_experts",
+        gated: false,
+        form: SharedForm::GateUpDown,
+    });
     // GLM-4-MoE's and Nemotron-H's routers are DeepSeek-V3's and their
     // configs leave the method out: sigmoid scores, `noaux_tc` selection.
-    let v3_default =
-        matches!(model_type, "glm4_moe" | "glm4_moe_lite" | "glm_moe_dsa" | "exaone_moe") || model_type.starts_with("nemotron_h");
-    let v3_router = v3_default || matches!(model_type, "deepseek_v3" | "deepseek_v32" | "axk1" | "pangu_ultra_moe");
+    let v3_default = matches!(
+        model_type,
+        "glm4_moe" | "glm4_moe_lite" | "glm_moe_dsa" | "exaone_moe"
+    ) || model_type.starts_with("nemotron_h");
+    let v3_router = v3_default
+        || matches!(
+            model_type,
+            "deepseek_v3" | "deepseek_v32" | "axk1" | "pangu_ultra_moe"
+        );
     routed.scoring = match text(raw, "scoring_func") {
         None if v3_default => Scoring::Sigmoid,
         None | Some("softmax") => Scoring::Softmax,
@@ -3439,11 +3895,16 @@ fn deepseek_experts(
     // A.X-K1's `topk_method` `none` is vLLM's grouped top-k with no
     // selection bias, which ranks each group by its best expert: DeepSeek-V2's
     // `group_limited_greedy`.
-    let method = if model_type == "axk1" && method == "none" { "group_limited_greedy" } else { method };
+    let method = if model_type == "axk1" && method == "none" {
+        "group_limited_greedy"
+    } else {
+        method
+    };
     routed.groups = match method {
         "greedy" => None,
         "group_limited_greedy" | "noaux_tc" => {
-            let (Some(groups), Some(chosen_groups)) = (whole(raw, "n_group"), whole(raw, "topk_group"))
+            let (Some(groups), Some(chosen_groups)) =
+                (whole(raw, "n_group"), whole(raw, "topk_group"))
             else {
                 bail!(
                     "{} routes by {method} without n_group and topk_group",
@@ -3498,10 +3959,17 @@ fn granite_hybrid(
 ) -> Result<()> {
     fits(layers, path)?;
     let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-        bail!("{} declares a Granite 4.0 model without layer_types", path.display());
+        bail!(
+            "{} declares a Granite 4.0 model without layer_types",
+            path.display()
+        );
     };
     if types.len() != layers {
-        bail!("{} lists {} layer_types for {layers} layers", path.display(), types.len());
+        bail!(
+            "{} lists {} layer_types for {layers} layers",
+            path.display(),
+            types.len()
+        );
     }
     let mut mamba = 0u128;
     for (layer, kind) in types.iter().enumerate() {
@@ -3523,7 +3991,8 @@ fn granite_hybrid(
         ),
     };
     let heads = structured(raw, "mamba_n_heads", "mamba_d_head", "mamba_n_groups", path)?;
-    let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv")) else {
+    let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+    else {
         bail!(
             "{} declares a Granite 4.0 model without mamba_d_state and mamba_d_conv",
             path.display()
@@ -3535,7 +4004,10 @@ fn granite_hybrid(
         kernel,
         step_rank: 0,
         projection_bias: flag(raw, "mamba_proj_bias"),
-        convolution_bias: raw.get("mamba_conv_bias").and_then(Value::as_bool).unwrap_or(true),
+        convolution_bias: raw
+            .get("mamba_conv_bias")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         parameter_norm: ParameterNorm::None,
         layers: mamba,
         feed_forward: true,
@@ -3551,8 +4023,15 @@ fn granite_hybrid(
         architecture.names = Names::GRANITE_HYBRID;
         architecture.fused_feed_forward = true;
     } else {
-        let mut routed =
-            experts(raw, "num_local_experts", "intermediate_size", true, ExpertLayout::Granite, 0, path)?;
+        let mut routed = experts(
+            raw,
+            "num_local_experts",
+            "intermediate_size",
+            true,
+            ExpertLayout::Granite,
+            0,
+            path,
+        )?;
         routed.shared = Some(SharedExpert {
             intermediate: shared,
             module: "shared_mlp",
@@ -3612,7 +4091,11 @@ fn qwen_dense_layers(raw: &Value, layers: usize, path: &Path) -> Result<u128> {
     fits(layers, path)?;
     if let Some(kinds) = raw.get("mlp_layer_types").and_then(Value::as_array) {
         if kinds.len() != layers {
-            bail!("{} lists {} mlp_layer_types for {layers} layers", path.display(), kinds.len());
+            bail!(
+                "{} lists {} mlp_layer_types for {layers} layers",
+                path.display(),
+                kinds.len()
+            );
         }
         let mut dense = 0u128;
         for (layer, kind) in kinds.iter().enumerate() {
@@ -3631,7 +4114,11 @@ fn qwen_dense_layers(raw: &Value, layers: usize, path: &Path) -> Result<u128> {
     let listed: Vec<usize> = raw
         .get("mlp_only_layers")
         .and_then(Value::as_array)
-        .map(|list| list.iter().filter_map(|v| v.as_u64().map(|v| v as usize)).collect())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_u64().map(|v| v as usize))
+                .collect()
+        })
         .unwrap_or_default();
     Ok((0..layers)
         .filter(|layer| listed.contains(layer) || (layer + 1) % step != 0)
@@ -3671,7 +4158,7 @@ const INDEX_SKIP_OFFSET: usize = 2;
 /// `i` indexes when `max(i − offset + 1, 0)` is a multiple of the frequency.
 fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Result<IndexerSpec> {
     fits(layers, path)?;
-    let glm = model_type == "glm_moe_dsa";
+    let glm = matches!(model_type, "glm_moe_dsa" | "glm5_next_text");
     let mut shared_layers = 0u128;
     if glm {
         let listed: Option<Vec<bool>> = match (raw.get("indexer_types"), raw.get("index_topk_pattern")) {
@@ -3708,16 +4195,27 @@ fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Re
         let shared: Vec<bool> = match listed {
             Some(shared) => shared,
             None => {
-                let frequency = whole(raw, "index_topk_freq").unwrap_or(INDEX_FREQUENCY).max(1);
+                let frequency = whole(raw, "index_topk_freq")
+                    .unwrap_or(INDEX_FREQUENCY)
+                    .max(1);
                 let offset = whole(raw, "index_skip_topk_offset").unwrap_or(INDEX_SKIP_OFFSET);
-                (0..layers).map(|layer| (layer + 1).saturating_sub(offset) % frequency != 0).collect()
+                (0..layers)
+                    .map(|layer| (layer + 1).saturating_sub(offset) % frequency != 0)
+                    .collect()
             }
         };
         if shared.len() != layers {
-            bail!("{} marks {} layers' indexers for {layers} layers", path.display(), shared.len());
+            bail!(
+                "{} marks {} layers' indexers for {layers} layers",
+                path.display(),
+                shared.len()
+            );
         }
         if shared.first() == Some(&true) {
-            bail!("{} makes layer 0's indexer shared, with no earlier layer to share from", path.display());
+            bail!(
+                "{} makes layer 0's indexer shared, with no earlier layer to share from",
+                path.display()
+            );
         }
         shared_layers = shared
             .iter()
@@ -3725,12 +4223,35 @@ fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Re
             .filter(|(_, shared)| **shared)
             .fold(0u128, |set, (layer, _)| set | (1u128 << layer));
     }
+    let pool = if model_type == "glm5_next_text" {
+        let Some(size) = whole(raw, "index_kpool").filter(|size| *size > 0) else {
+            bail!(
+                "{} declares a GLM-5-Next indexer without index_kpool",
+                path.display()
+            );
+        };
+        Some(KeyPool {
+            size,
+            tail: flag(raw, "index_kpool_always_select_tail"),
+        })
+    } else {
+        None
+    };
     Ok(IndexerSpec {
-        heads: whole(raw, "index_n_heads").unwrap_or(if glm { GLM_INDEX_HEADS } else { DEEPSEEK_INDEX_HEADS }),
+        heads: whole(raw, "index_n_heads").unwrap_or(if glm {
+            GLM_INDEX_HEADS
+        } else {
+            DEEPSEEK_INDEX_HEADS
+        }),
         head_dim: whole(raw, "index_head_dim").unwrap_or(INDEX_HEAD_DIM),
         top_k: whole(raw, "index_topk").unwrap_or(INDEX_TOP_K),
-        interleaved: glm && raw.get("indexer_rope_interleave").and_then(Value::as_bool).unwrap_or(true),
+        interleaved: glm
+            && raw
+                .get("indexer_rope_interleave")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
         shared_layers,
+        pool,
     })
 }
 
@@ -3750,13 +4271,20 @@ fn bailing_hybrid(
 ) -> Result<()> {
     fits(layers, path)?;
     let Some(latent) = architecture.latent else {
-        bail!("{} declares a Ling hybrid model without kv_lora_rank", path.display());
+        bail!(
+            "{} declares a Ling hybrid model without kv_lora_rank",
+            path.display()
+        );
     };
     let ling3 = raw.get("short_conv_kernel_size").is_some()
         || raw
             .get("architectures")
             .and_then(Value::as_array)
-            .is_some_and(|names| names.iter().any(|name| name.as_str() == Some("BailingMoeV3ForCausalLM")));
+            .is_some_and(|names| {
+                names
+                    .iter()
+                    .any(|name| name.as_str() == Some("BailingMoeV3ForCausalLM"))
+            });
     if ling3 {
         return ling_kda(raw, layers, llama, architecture, path);
     }
@@ -3765,7 +4293,10 @@ fn bailing_hybrid(
         .filter(|layer| (layer + 1) % group != 0)
         .fold(0u128, |set, layer| set | (1u128 << layer));
     let Some(head_dim) = whole(raw, "head_dim") else {
-        bail!("{} declares a Ling hybrid model without head_dim", path.display());
+        bail!(
+            "{} declares a Ling hybrid model without head_dim",
+            path.display()
+        );
     };
     let heads = llama.num_attention_heads;
     if whole(raw, "num_kv_heads_for_linear_attn").is_some_and(|stated| stated != heads) {
@@ -3785,9 +4316,16 @@ fn bailing_hybrid(
     }
     let groups = whole(raw, "group_norm_size").unwrap_or(1).max(1);
     if (heads * head_dim) % groups != 0 {
-        bail!("{} splits its {} lightning channels into {groups} norm groups unevenly", path.display(), heads * head_dim);
+        bail!(
+            "{} splits its {} lightning channels into {groups} norm groups unevenly",
+            path.display(),
+            heads * head_dim
+        );
     }
-    architecture.interleaved_rotary = raw.get("rope_interleave").and_then(Value::as_bool).unwrap_or(true);
+    architecture.interleaved_rotary = raw
+        .get("rope_interleave")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     architecture.lightning = Some(LightningSpec {
         heads,
         head_dim,
@@ -3813,7 +4351,13 @@ fn bailing_hybrid(
 /// (`_is_kda_layer`). The latent-attention layers multiply each head's
 /// output by the sigmoid of its `attention.g_proj` logit under
 /// `gated_attention_proj_granularity_type` `head_wise`.
-fn ling_kda(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+fn ling_kda(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
     if raw.get("no_kda_lora").and_then(Value::as_bool) == Some(false) || flag(raw, "use_kda_lora") {
         bail!(
             "{} factors its Kimi Delta Attention projections (no_kda_lora false or use_kda_lora); Ster implements Ling 3.0's full-rank f_proj and g_proj",
@@ -3822,14 +4366,23 @@ fn ling_kda(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut 
     }
     for key in ["use_nGPT", "value_norm", "up_proj_norm", "use_mla_nope"] {
         if flag(raw, key) {
-            bail!("{} declares {key}; Ster implements Ling 3.0 without it", path.display());
+            bail!(
+                "{} declares {key}; Ster implements Ling 3.0 without it",
+                path.display()
+            );
         }
     }
     let Some(head_dim) = whole(raw, "head_dim") else {
-        bail!("{} declares a Ling 3.0 model without head_dim", path.display());
+        bail!(
+            "{} declares a Ling 3.0 model without head_dim",
+            path.display()
+        );
     };
     let Some(kernel) = whole(raw, "short_conv_kernel_size").filter(|kernel| *kernel > 0) else {
-        bail!("{} declares a Ling 3.0 model without short_conv_kernel_size", path.display());
+        bail!(
+            "{} declares a Ling 3.0 model without short_conv_kernel_size",
+            path.display()
+        );
     };
     let group = whole(raw, "layer_group_size").unwrap_or(1).max(1);
     let whole_groups = layers / group * group;
@@ -3837,7 +4390,11 @@ fn ling_kda(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut 
         .filter(|layer| (layer + 1) % group != 0 && *layer < whole_groups)
         .fold(0u128, |set, layer| set | (1u128 << layer));
     let heads = llama.num_attention_heads;
-    let decay_floor = if raw.get("kda_safe_gate").and_then(Value::as_bool).unwrap_or(true) {
+    let decay_floor = if raw
+        .get("kda_safe_gate")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
         Some(number(raw, "kda_lower_bound").unwrap_or(KDA_LOWER_BOUND))
     } else {
         None
@@ -3854,7 +4411,10 @@ fn ling_kda(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut 
         decay_floor,
         full_rank_gate: true,
     });
-    architecture.interleaved_rotary = raw.get("rope_interleave").and_then(Value::as_bool).unwrap_or(true);
+    architecture.interleaved_rotary = raw
+        .get("rope_interleave")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     architecture.head_gate = match text(raw, "gated_attention_proj_granularity_type") {
         None => None,
         Some("head_wise") => Some(GateFunction::Sigmoid),
@@ -3918,10 +4478,18 @@ fn mimo_v2(
     architecture.query_key_value_bias = flag(raw, "attention_bias");
     let windowed = flagged_layers(raw, "hybrid_layer_pattern", layers, path)?;
     architecture.sliding_layers = windowed;
-    architecture.sliding_window = whole(raw, "sliding_window_size").or_else(|| whole(raw, "sliding_window"));
+    architecture.sliding_window =
+        whole(raw, "sliding_window_size").or_else(|| whole(raw, "sliding_window"));
     let full = every_layer(layers, path)? & !windowed;
-    architecture.attention_sinks = if flag(raw, "add_swa_attention_sink_bias") { windowed } else { 0 }
-        | if flag(raw, "add_full_attention_sink_bias") { full } else { 0 };
+    architecture.attention_sinks = if flag(raw, "add_swa_attention_sink_bias") {
+        windowed
+    } else {
+        0
+    } | if flag(raw, "add_full_attention_sink_bias") {
+        full
+    } else {
+        0
+    };
     architecture.local_rope_theta = number(raw, "swa_rope_theta")
         .filter(|base| *base != f64::from(llama.rope_theta))
         .map(|base| base as f32);
@@ -3989,7 +4557,10 @@ const CHATGLM_ROTARY_SHARE: f64 = 0.5;
 /// (`kv_channels`), vocabulary (`padded_vocab_size`), the half of each head
 /// that rotates, and the base `10000 · rope_ratio`.
 fn chatglm_keys(raw: &mut Value) {
-    let groups = raw.get("multi_query_group_num").filter(|_| flag(raw, "multi_query_attention")).cloned();
+    let groups = raw
+        .get("multi_query_group_num")
+        .filter(|_| flag(raw, "multi_query_attention"))
+        .cloned();
     let heads = raw.get("num_attention_heads").cloned();
     let width = raw.get("kv_channels").cloned();
     let vocabulary = raw.get("padded_vocab_size").cloned();
@@ -3998,7 +4569,9 @@ fn chatglm_keys(raw: &mut Value) {
         return;
     };
     if let Some(key_value_heads) = groups.or(heads) {
-        object.entry("num_key_value_heads").or_insert(key_value_heads);
+        object
+            .entry("num_key_value_heads")
+            .or_insert(key_value_heads);
     }
     if let Some(width) = width {
         object.entry("head_dim").or_insert(width);
@@ -4006,7 +4579,9 @@ fn chatglm_keys(raw: &mut Value) {
     if let Some(vocabulary) = vocabulary {
         object.entry("vocab_size").or_insert(vocabulary);
     }
-    object.entry("partial_rotary_factor").or_insert(Value::from(CHATGLM_ROTARY_SHARE));
+    object
+        .entry("partial_rotary_factor")
+        .or_insert(Value::from(CHATGLM_ROTARY_SHARE));
     object.entry("rope_theta").or_insert(Value::from(base));
 }
 
@@ -4018,28 +4593,37 @@ fn chatglm_keys(raw: &mut Value) {
 /// it does not know is left as `?`, which the Nemotron-H reading refuses
 /// by layer.
 fn nemotron_puzzle_keys(raw: &mut Value) {
-    let pattern: Option<String> = raw.get("layers_block_type").and_then(Value::as_array).map(|kinds| {
-        kinds
-            .iter()
-            .map(|kind| match kind.as_str() {
-                Some("mamba") => 'M',
-                Some("attention") => '*',
-                Some("mlp") => '-',
-                Some("moe") => 'E',
-                _ => '?',
-            })
-            .collect()
-    });
+    let pattern: Option<String> =
+        raw.get("layers_block_type")
+            .and_then(Value::as_array)
+            .map(|kinds| {
+                kinds
+                    .iter()
+                    .map(|kind| match kind.as_str() {
+                        Some("mamba") => 'M',
+                        Some("attention") => '*',
+                        Some("mlp") => '-',
+                        Some("moe") => 'E',
+                        _ => '?',
+                    })
+                    .collect()
+            });
     let first_moe = raw
         .get("block_configs")
         .and_then(Value::as_array)
-        .and_then(|blocks| blocks.iter().find(|block| block.get("block_type").and_then(Value::as_str) == Some("moe")))
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find(|block| block.get("block_type").and_then(Value::as_str) == Some("moe"))
+        })
         .cloned();
     let Some(object) = raw.as_object_mut() else {
         return;
     };
     if let Some(pattern) = pattern {
-        object.entry("hybrid_override_pattern").or_insert(Value::from(pattern));
+        object
+            .entry("hybrid_override_pattern")
+            .or_insert(Value::from(pattern));
     }
     if let Some(block) = first_moe {
         for key in ["num_experts_per_tok", "moe_intermediate_size"] {
@@ -4080,7 +4664,11 @@ fn step3p5_keys(raw: &mut Value) {
         let first_full = object
             .get("layer_types")
             .and_then(Value::as_array)
-            .and_then(|kinds| kinds.iter().position(|kind| kind.as_str() == Some("full_attention")))
+            .and_then(|kinds| {
+                kinds
+                    .iter()
+                    .position(|kind| kind.as_str() == Some("full_attention"))
+            })
             .unwrap_or(0);
         if let Some(base) = bases.get(first_full).cloned() {
             object.insert("rope_theta".to_owned(), base);
@@ -4089,13 +4677,18 @@ fn step3p5_keys(raw: &mut Value) {
     }
     let Some(other) = object
         .get("attention_other_setting")
-        .filter(|setting| setting.get("attention_type").and_then(Value::as_str) == Some("sliding_attention"))
+        .filter(|setting| {
+            setting.get("attention_type").and_then(Value::as_str) == Some("sliding_attention")
+        })
         .cloned()
     else {
         return;
     };
     let full_heads = object.get("num_attention_heads").cloned();
-    let full_groups = object.get("num_attention_groups").or_else(|| object.get("num_key_value_heads")).cloned();
+    let full_groups = object
+        .get("num_attention_groups")
+        .or_else(|| object.get("num_key_value_heads"))
+        .cloned();
     let windowed_heads = other.get("num_attention_heads").cloned();
     let windowed_groups = other.get("num_attention_groups").cloned();
     if let (Some(heads), Some(groups), Some(own_heads), Some(own_groups)) =
@@ -4128,10 +4721,16 @@ fn step3p5(
     path: &Path,
 ) -> Result<()> {
     let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-        bail!("{} declares a Step 3.5 model without layer_types", path.display());
+        bail!(
+            "{} declares a Step 3.5 model without layer_types",
+            path.display()
+        );
     };
     let windowed = listed_layers(types, layers, path)?;
-    if let Some(other) = raw.get("attention_other_setting").filter(|setting| !setting.is_null()) {
+    if let Some(other) = raw
+        .get("attention_other_setting")
+        .filter(|setting| !setting.is_null())
+    {
         let kind = other.get("attention_type").and_then(Value::as_str);
         if kind != Some("sliding_attention") {
             bail!(
@@ -4147,7 +4746,9 @@ fn step3p5(
             );
         }
     }
-    let scaled = raw.get("rope_scaling").is_some_and(|scaling| !scaling.is_null());
+    let scaled = raw
+        .get("rope_scaling")
+        .is_some_and(|scaling| !scaling.is_null());
     let full_only = raw
         .get("yarn_only_types")
         .and_then(Value::as_array)
@@ -4165,9 +4766,17 @@ fn step3p5(
         architecture.query_key_norm = QueryKeyNorm::PerHead;
     }
     architecture.head_gate = flag(raw, "use_head_wise_attn_gate").then_some(GateFunction::Sigmoid);
-    if let Some(rotated) = raw.get("use_rope_layers").and_then(Value::as_array).filter(|list| !list.is_empty()) {
+    if let Some(rotated) = raw
+        .get("use_rope_layers")
+        .and_then(Value::as_array)
+        .filter(|list| !list.is_empty())
+    {
         if rotated.len() != layers {
-            bail!("{} lists {} use_rope_layers entries for {layers} layers", path.display(), rotated.len());
+            bail!(
+                "{} lists {} use_rope_layers entries for {layers} layers",
+                path.display(),
+                rotated.len()
+            );
         }
         for (layer, entry) in rotated.iter().enumerate() {
             if entry.as_bool() == Some(false) {
@@ -4176,10 +4785,14 @@ fn step3p5(
         }
     }
     let head_dim = architecture.head_dim;
-    let (full_share, windowed_share) = per_kind(raw, "partial_rotary_factors", windowed, layers, path)?;
+    let (full_share, windowed_share) =
+        per_kind(raw, "partial_rotary_factors", windowed, layers, path)?;
     let width = |share: Option<f64>| (head_dim as f64 * share.unwrap_or(1.0)) as usize;
     let (global_rotary, local_rotary) = (width(full_share), width(windowed_share));
-    if [global_rotary, local_rotary].iter().any(|rotated| *rotated == 0 || rotated % 2 != 0 || *rotated > head_dim) {
+    if [global_rotary, local_rotary]
+        .iter()
+        .any(|rotated| *rotated == 0 || rotated % 2 != 0 || *rotated > head_dim)
+    {
         bail!(
             "{} rotates {global_rotary} and {local_rotary} of {head_dim} components per head (partial_rotary_factors); each must be even, above zero and at most the head",
             path.display()
@@ -4189,7 +4802,10 @@ fn step3p5(
     let base = f64::from(llama.rope_theta);
     let (full_base, windowed_base) = per_kind(raw, "layer_rope_theta", windowed, layers, path)?;
     if full_base.is_some_and(|full| full != base) {
-        bail!("{} rotates its full-attention layers by more than one base; Ster rotates them all by one", path.display());
+        bail!(
+            "{} rotates its full-attention layers by more than one base; Ster rotates them all by one",
+            path.display()
+        );
     }
     // The sliding-window layers always rotate by their own table: its width
     // can differ from the full-attention layers' and it is never scaled.
@@ -4212,7 +4828,13 @@ fn step3p5(
     };
     routed.routed_scale = number(raw, "moe_router_scaling_factor");
     routed.selection_bias = flag(raw, "use_moe_router_bias").then_some("moe.router_bias");
-    step_limits(raw, ("swiglu_limits", "swiglu_limits_shared"), layers, &mut routed, path)?;
+    step_limits(
+        raw,
+        ("swiglu_limits", "swiglu_limits_shared"),
+        layers,
+        &mut routed,
+        path,
+    )?;
     architecture.experts = Some(routed);
     Ok(())
 }
@@ -4235,22 +4857,44 @@ fn step_limits(
             Some(list) => list
                 .as_array()
                 .and_then(|entries| {
-                    entries.iter().map(|entry| if entry.is_null() { Some(0.0) } else { entry.as_f64() }).collect()
+                    entries
+                        .iter()
+                        .map(|entry| {
+                            if entry.is_null() {
+                                Some(0.0)
+                            } else {
+                                entry.as_f64()
+                            }
+                        })
+                        .collect()
                 })
-                .with_context(|| format!("{} declares {key} that is not a list of numbers", path.display())),
+                .with_context(|| {
+                    format!(
+                        "{} declares {key} that is not a list of numbers",
+                        path.display()
+                    )
+                }),
         }
     };
     let (routed_limits, shared_limits) = (limits(routed_key)?, limits(shared_key)?);
     if let Some(layer) = (0..layers).find(|layer| {
-        routed.dense_layers & (1u128 << layer) != 0 && shared_limits.get(*layer).is_some_and(|limit| *limit != 0.0)
+        routed.dense_layers & (1u128 << layer) != 0
+            && shared_limits.get(*layer).is_some_and(|limit| *limit != 0.0)
     }) {
         bail!(
             "{} clamps the dense feed-forward of layer {layer} ({shared_key}); Ster clamps expert feed-forwards only",
             path.display()
         );
     }
-    if routed_limits.iter().chain(&shared_limits).any(|limit| *limit != 0.0) {
-        routed.swiglu_limit = Some(SwigluLimit::Step { routed: routed_limits, shared: shared_limits });
+    if routed_limits
+        .iter()
+        .chain(&shared_limits)
+        .any(|limit| *limit != 0.0)
+    {
+        routed.swiglu_limit = Some(SwigluLimit::Step {
+            routed: routed_limits,
+            shared: shared_limits,
+        });
     }
     Ok(())
 }
@@ -4259,16 +4903,31 @@ fn step_limits(
 /// full-attention layers and one for the sliding-window layers in
 /// `windowed`, as `(full, sliding)`; refused when either kind's values
 /// differ.
-fn per_kind(raw: &Value, key: &str, windowed: u128, layers: usize, path: &Path) -> Result<(Option<f64>, Option<f64>)> {
+fn per_kind(
+    raw: &Value,
+    key: &str,
+    windowed: u128,
+    layers: usize,
+    path: &Path,
+) -> Result<(Option<f64>, Option<f64>)> {
     let Some(list) = raw.get(key).filter(|list| !list.is_null()) else {
         return Ok((None, None));
     };
     let values: Vec<f64> = list
         .as_array()
         .and_then(|entries| entries.iter().map(Value::as_f64).collect())
-        .with_context(|| format!("{} declares {key} that is not a list of numbers", path.display()))?;
+        .with_context(|| {
+            format!(
+                "{} declares {key} that is not a list of numbers",
+                path.display()
+            )
+        })?;
     if values.len() != layers {
-        bail!("{} lists {} {key} values for {layers} layers", path.display(), values.len());
+        bail!(
+            "{} lists {} {key} values for {layers} layers",
+            path.display(),
+            values.len()
+        );
     }
     fits(layers, path)?;
     let mut kinds = [None, None];
@@ -4278,7 +4937,11 @@ fn per_kind(raw: &Value, key: &str, windowed: u128, layers: usize, path: &Path) 
             Some(seen) if seen != value => bail!(
                 "{} lists more than one {key} value for its {} layers; Ster gives each attention kind one",
                 path.display(),
-                if slot == 1 { "sliding-window" } else { "full-attention" }
+                if slot == 1 {
+                    "sliding-window"
+                } else {
+                    "full-attention"
+                }
             ),
             _ => kinds[slot] = Some(value),
         }
@@ -4382,7 +5045,10 @@ fn k2_horizon(
         architecture.value_experts = Some(MixtureOfExperts {
             count,
             top_k,
-            intermediate: llama.num_key_value_heads.unwrap_or(llama.num_attention_heads) * head_dim,
+            intermediate: llama
+                .num_key_value_heads
+                .unwrap_or(llama.num_attention_heads)
+                * head_dim,
             normalize: top_k > 1,
             shared: None,
             layout: ExpertLayout::Mova,
@@ -4409,9 +5075,11 @@ fn k2_horizon(
 /// (the first, when it is a list; 2, the config class's default, when it
 /// is left out).
 fn longcat_ngram(raw: &Value, path: &Path) -> Result<NgramSpec> {
-    let (Some(ratio), Some(splits), Some(neighbors)) =
-        (whole(raw, "ngram_vocab_size_ratio"), whole(raw, "emb_split_num"), whole(raw, "emb_neighbor_num"))
-    else {
+    let (Some(ratio), Some(splits), Some(neighbors)) = (
+        whole(raw, "ngram_vocab_size_ratio"),
+        whole(raw, "emb_split_num"),
+        whole(raw, "emb_neighbor_num"),
+    ) else {
         bail!(
             "{} declares a LongCat n-gram model without ngram_vocab_size_ratio, emb_split_num or emb_neighbor_num",
             path.display()
@@ -4425,10 +5093,23 @@ fn longcat_ngram(raw: &Value, path: &Path) -> Result<NgramSpec> {
     }
     let eos = match raw.get("eos_token_id") {
         None | Some(Value::Null) => LONGCAT_NGRAM_EOS,
-        Some(Value::Array(ids)) => ids.first().and_then(Value::as_u64).unwrap_or(LONGCAT_NGRAM_EOS),
-        Some(id) => id.as_u64().with_context(|| format!("{} declares an eos_token_id that is not a token", path.display()))?,
+        Some(Value::Array(ids)) => ids
+            .first()
+            .and_then(Value::as_u64)
+            .unwrap_or(LONGCAT_NGRAM_EOS),
+        Some(id) => id.as_u64().with_context(|| {
+            format!(
+                "{} declares an eos_token_id that is not a token",
+                path.display()
+            )
+        })?,
     };
-    Ok(NgramSpec { ratio, splits, neighbors, eos: eos as u32 })
+    Ok(NgramSpec {
+        ratio,
+        splits,
+        neighbors,
+        eos: eos as u32,
+    })
 }
 
 /// The end-of-sequence token LongCat's n-gram config class assumes when a
@@ -4448,9 +5129,17 @@ const LONGCAT_NGRAM_EOS: u64 = 2;
 /// `expert_ffn_hidden_size` wide and `zero_expert_num` identity experts by
 /// softmax, `mlp.router.e_score_correction_bias` moving the choice of
 /// `moe_topk`, and scales the chosen weights by `routed_scaling_factor`.
-fn longcat_flash(raw: &Value, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+fn longcat_flash(
+    raw: &Value,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
     let Some(latent) = architecture.latent else {
-        bail!("{} declares a LongCat-Flash model without kv_lora_rank", path.display());
+        bail!(
+            "{} declares a LongCat-Flash model without kv_lora_rank",
+            path.display()
+        );
     };
     if let Some(method) = text(raw, "attention_method").filter(|method| *method != "MLA") {
         bail!(
@@ -4506,7 +5195,12 @@ fn longcat_flash(raw: &Value, llama: &LlamaConfig, architecture: &mut Architectu
 /// scores, renormalised under `norm_topk_prob`, beside
 /// `num_shared_experts` shared ones whose sum with the routed ones is
 /// halved under `shared_expert_combination_strategy` `average`.
-fn cohere2_moe(raw: &Value, layers: usize, architecture: &mut Architecture, path: &Path) -> Result<()> {
+fn cohere2_moe(
+    raw: &Value,
+    layers: usize,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
     fits(layers, path)?;
     if flag(raw, "use_qk_norm") {
         bail!(
@@ -4521,10 +5215,17 @@ fn cohere2_moe(raw: &Value, layers: usize, architecture: &mut Architecture, path
         );
     }
     let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-        bail!("{} declares a Cohere2-MoE model without layer_types", path.display());
+        bail!(
+            "{} declares a Cohere2-MoE model without layer_types",
+            path.display()
+        );
     };
     let windowed = listed_layers(types, layers, path)?;
-    architecture.norm = if flag(raw, "layer_norm") { NormKind::Layer { bias: false } } else { NormKind::Rms };
+    architecture.norm = if flag(raw, "layer_norm") {
+        NormKind::Layer { bias: false }
+    } else {
+        NormKind::Rms
+    };
     architecture.parallel = true;
     architecture.interleaved_rotary = true;
     architecture.query_key_value_bias = flag(raw, "attention_bias");
@@ -4535,7 +5236,11 @@ fn cohere2_moe(raw: &Value, layers: usize, architecture: &mut Architecture, path
     let dense = match raw.get("mlp_layer_types").and_then(Value::as_array) {
         Some(kinds) => {
             if kinds.len() != layers {
-                bail!("{} lists {} mlp_layer_types for {layers} layers", path.display(), kinds.len());
+                bail!(
+                    "{} lists {} mlp_layer_types for {layers} layers",
+                    path.display(),
+                    kinds.len()
+                );
             }
             let mut set = 0u128;
             for (layer, kind) in kinds.iter().enumerate() {
@@ -4558,10 +5263,25 @@ fn cohere2_moe(raw: &Value, layers: usize, architecture: &mut Architecture, path
     let prefix = (0..layers)
         .take_while(|layer| dense & (1u128 << layer) != 0)
         .fold(0u128, |set, layer| set | (1u128 << layer));
-    let forced = if whole(raw, "prefix_dense_sliding_window_pattern").unwrap_or(1) == 1 { prefix } else { 0 };
+    let forced = if whole(raw, "prefix_dense_sliding_window_pattern").unwrap_or(1) == 1 {
+        prefix
+    } else {
+        0
+    };
     architecture.unrotated_layers = every_layer(layers, path)? & !windowed & !forced;
-    let normalize = raw.get("norm_topk_prob").and_then(Value::as_bool).unwrap_or(true);
-    let mut routed = experts(raw, "num_experts", "moe_intermediate_size", normalize, ExpertLayout::Qwen, dense, path)?;
+    let normalize = raw
+        .get("norm_topk_prob")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let mut routed = experts(
+        raw,
+        "num_experts",
+        "moe_intermediate_size",
+        normalize,
+        ExpertLayout::Qwen,
+        dense,
+        path,
+    )?;
     routed.scoring = match text(raw, "expert_selection_fn") {
         None | Some("softmax") => Scoring::Softmax,
         Some("sigmoid") => Scoring::Sigmoid,
@@ -4614,7 +5334,10 @@ fn laguna(
     path: &Path,
 ) -> Result<()> {
     let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-        bail!("{} declares a Laguna model without layer_types", path.display());
+        bail!(
+            "{} declares a Laguna model without layer_types",
+            path.display()
+        );
     };
     let windowed = listed_layers(types, layers, path)?;
     if number(raw, "moe_router_logit_softcapping").is_some_and(|cap| cap > 0.0) {
@@ -4631,7 +5354,9 @@ fn laguna(
     match raw.get("gating") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => {}
         Some(Value::Bool(true)) => architecture.head_gate = Some(GateFunction::NaturalSoftplus),
-        Some(Value::String(kind)) if kind == "per-head" => architecture.head_gate = Some(GateFunction::NaturalSoftplus),
+        Some(Value::String(kind)) if kind == "per-head" => {
+            architecture.head_gate = Some(GateFunction::NaturalSoftplus)
+        }
         Some(other) => bail!(
             "{} declares gating {other}; Ster implements Laguna's per-head gate",
             path.display()
@@ -4643,21 +5368,35 @@ fn laguna(
     }
     // Each kind's own head count, as `num_attention_heads_per_layer` lists
     // it; the sliding-window count is the base one.
-    let full_heads = match raw.get("num_attention_heads_per_layer").and_then(Value::as_array) {
+    let full_heads = match raw
+        .get("num_attention_heads_per_layer")
+        .and_then(Value::as_array)
+    {
         Some(counts) => {
             if counts.len() != layers {
-                bail!("{} lists {} num_attention_heads_per_layer for {layers} layers", path.display(), counts.len());
+                bail!(
+                    "{} lists {} num_attention_heads_per_layer for {layers} layers",
+                    path.display(),
+                    counts.len()
+                );
             }
             let mut kinds = [None, None];
             for (layer, count) in counts.iter().enumerate() {
                 let count = count.as_u64().map(|count| count as usize);
                 let slot = usize::from(windowed & (1u128 << layer) != 0);
                 match (kinds[slot], count) {
-                    (_, None) => bail!("{} lists a head count for layer {layer} that is not a whole number", path.display()),
+                    (_, None) => bail!(
+                        "{} lists a head count for layer {layer} that is not a whole number",
+                        path.display()
+                    ),
                     (Some(seen), Some(count)) if seen != count => bail!(
                         "{} gives its {} layers more than one head count; Ster gives each attention kind one",
                         path.display(),
-                        if slot == 1 { "sliding-window" } else { "full-attention" }
+                        if slot == 1 {
+                            "sliding-window"
+                        } else {
+                            "full-attention"
+                        }
                     ),
                     (_, count) => kinds[slot] = count,
                 }
@@ -4676,9 +5415,16 @@ fn laguna(
     };
     let head_dim = architecture.head_dim;
     let share = |value: Option<f64>| (head_dim as f64 * value.unwrap_or(1.0)) as usize;
-    let global_rotary = share(scaling.and_then(|scaling| scaling.get("partial_rotary_factor")).and_then(Value::as_f64));
+    let global_rotary = share(
+        scaling
+            .and_then(|scaling| scaling.get("partial_rotary_factor"))
+            .and_then(Value::as_f64),
+    );
     let local_rotary = share(number(raw, "local_partial_rotary_factor"));
-    if [global_rotary, local_rotary].iter().any(|rotated| *rotated == 0 || rotated % 2 != 0 || *rotated > head_dim) {
+    if [global_rotary, local_rotary]
+        .iter()
+        .any(|rotated| *rotated == 0 || rotated % 2 != 0 || *rotated > head_dim)
+    {
         bail!(
             "{} rotates {global_rotary} and {local_rotary} of {head_dim} components per head; each must be even, above zero and at most the head",
             path.display()
@@ -4687,7 +5433,8 @@ fn laguna(
     architecture.rotary_dim = local_rotary;
     architecture.rope_scaling = rope_scaling(scaling, global_rotary, raw, llama, path)?;
     let base = f64::from(llama.rope_theta);
-    architecture.local_rope_theta = Some(number(raw, "rope_local_base_freq").unwrap_or(base) as f32);
+    architecture.local_rope_theta =
+        Some(number(raw, "rope_local_base_freq").unwrap_or(base) as f32);
     architecture.global_attention = Some(GlobalAttention {
         heads: full_heads.filter(|heads| *heads != llama.num_attention_heads),
         head_dim,
@@ -4767,9 +5514,25 @@ fn afmoe(
             path.display()
         ),
     };
-    let normalize = sigmoid && raw.get("route_norm").and_then(Value::as_bool).unwrap_or(true);
-    let mut routed = experts(raw, "num_experts", "moe_intermediate_size", normalize, ExpertLayout::HyV3, dense, path)?;
-    routed.scoring = if sigmoid { Scoring::Sigmoid } else { Scoring::Softmax };
+    let normalize = sigmoid
+        && raw
+            .get("route_norm")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+    let mut routed = experts(
+        raw,
+        "num_experts",
+        "moe_intermediate_size",
+        normalize,
+        ExpertLayout::HyV3,
+        dense,
+        path,
+    )?;
+    routed.scoring = if sigmoid {
+        Scoring::Sigmoid
+    } else {
+        Scoring::Softmax
+    };
     routed.routed_scale = number(raw, "route_scale");
     routed.selection_bias = Some("mlp.expert_bias");
     routed.groups = match (whole(raw, "n_group"), whole(raw, "topk_group")) {
@@ -4781,7 +5544,11 @@ fn afmoe(
                     routed.count
                 );
             }
-            Some(ExpertGroups { groups, chosen_groups, rank_by_top_two: true })
+            Some(ExpertGroups {
+                groups,
+                chosen_groups,
+                rank_by_top_two: true,
+            })
         }
         _ => None,
     };
@@ -4814,7 +5581,12 @@ const LLAMA4_FLOOR_SCALE: usize = 8192;
 /// `1 + beta · ln(1 + floor(position / original))`, the two read from the
 /// `llama_4_scaling` block or, as Transformers writes them, beside the
 /// rotation (`llama_4_scaling_beta`). None when no beta is stated.
-fn llama4_temperature(raw: &Value, scaling: Option<&Value>, layers: usize, path: &Path) -> Result<Option<QueryTemperature>> {
+fn llama4_temperature(
+    raw: &Value,
+    scaling: Option<&Value>,
+    layers: usize,
+    path: &Path,
+) -> Result<Option<QueryTemperature>> {
     let stated = |key: &str| {
         raw.get("llama_4_scaling")
             .and_then(|block| block.get(key))
@@ -4854,10 +5626,18 @@ fn llama4(raw: &Value, layers: usize, architecture: &mut Architecture, path: &Pa
     architecture.names = Names::LLAMA4;
     architecture.query_key_value_bias = flag(raw, "attention_bias");
     architecture.output_bias = architecture.query_key_value_bias;
-    let rotating = match raw.get("no_rope_layers").and_then(Value::as_array).filter(|flags| !flags.is_empty()) {
+    let rotating = match raw
+        .get("no_rope_layers")
+        .and_then(Value::as_array)
+        .filter(|flags| !flags.is_empty())
+    {
         Some(flags) => {
             if flags.len() != layers {
-                bail!("{} lists {} no_rope_layers entries for {layers} layers", path.display(), flags.len());
+                bail!(
+                    "{} lists {} no_rope_layers entries for {layers} layers",
+                    path.display(),
+                    flags.len()
+                );
             }
             flags
                 .iter()
@@ -4879,10 +5659,16 @@ fn llama4(raw: &Value, layers: usize, architecture: &mut Architecture, path: &Pa
         architecture.query_key_norm = QueryKeyNorm::Unscaled;
         architecture.norm_after_rotary = true;
     }
-    if raw.get("attn_temperature_tuning").and_then(Value::as_bool).unwrap_or(true) {
+    if raw
+        .get("attn_temperature_tuning")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
         architecture.query_temperature = Some(QueryTemperature {
             beta: number(raw, "attn_scale").unwrap_or(LLAMA4_ATTENTION_SCALE),
-            interval: whole(raw, "floor_scale").unwrap_or(LLAMA4_FLOOR_SCALE).max(1),
+            interval: whole(raw, "floor_scale")
+                .unwrap_or(LLAMA4_FLOOR_SCALE)
+                .max(1),
             shift: 1,
             layers: every & !rotating,
         });
@@ -4893,18 +5679,30 @@ fn llama4(raw: &Value, layers: usize, architecture: &mut Architecture, path: &Pa
             for entry in listed {
                 match entry.as_u64().map(|layer| layer as usize) {
                     Some(layer) if layer < layers => set |= 1u128 << layer,
-                    _ => bail!("{} lists moe_layers entry {entry}, which names no layer below {layers}", path.display()),
+                    _ => bail!(
+                        "{} lists moe_layers entry {entry}, which names no layer below {layers}",
+                        path.display()
+                    ),
                 }
             }
             set
         }
         None => {
             let step = whole(raw, "interleave_moe_layer_step").unwrap_or(1).max(1);
-            (step - 1..layers).step_by(step).fold(0u128, |set, layer| set | (1u128 << layer))
+            (step - 1..layers)
+                .step_by(step)
+                .fold(0u128, |set, layer| set | (1u128 << layer))
         }
     };
-    let mut routed =
-        experts(raw, "num_local_experts", "moe_intermediate_size", false, ExpertLayout::Llama4, every & !routed_layers, path)?;
+    let mut routed = experts(
+        raw,
+        "num_local_experts",
+        "moe_intermediate_size",
+        false,
+        ExpertLayout::Llama4,
+        every & !routed_layers,
+        path,
+    )?;
     routed.scoring = Scoring::Sigmoid;
     routed.weight_input = true;
     routed.shared = Some(SharedExpert {
@@ -4933,9 +5731,17 @@ const SARVAM_ROUTED_SCALE: f64 = 2.5;
 /// beside `num_shared_experts` shared experts
 /// (`moe_shared_expert_intermediate_size`, else `moe_intermediate_size`,
 /// wide each).
-fn sarvam_mla(raw: &Value, layers: usize, architecture: &mut Architecture, path: &Path) -> Result<()> {
+fn sarvam_mla(
+    raw: &Value,
+    layers: usize,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
     if architecture.latent.is_none() {
-        bail!("{} declares a Sarvam MLA model without kv_lora_rank", path.display());
+        bail!(
+            "{} declares a Sarvam MLA model without kv_lora_rank",
+            path.display()
+        );
     }
     fits(layers, path)?;
     architecture.interleaved_rotary = true;
@@ -4944,8 +5750,19 @@ fn sarvam_mla(raw: &Value, layers: usize, architecture: &mut Architecture, path:
     let dense = (0..layers)
         .filter(|layer| *layer < first || (layer - first) % frequency != 0)
         .fold(0u128, |set, layer| set | (1u128 << layer));
-    let normalize = raw.get("norm_topk_prob").and_then(Value::as_bool).unwrap_or(true);
-    let mut routed = experts(raw, "num_experts", "moe_intermediate_size", normalize, ExpertLayout::Qwen, dense, path)?;
+    let normalize = raw
+        .get("norm_topk_prob")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let mut routed = experts(
+        raw,
+        "num_experts",
+        "moe_intermediate_size",
+        normalize,
+        ExpertLayout::Qwen,
+        dense,
+        path,
+    )?;
     routed.scoring = match text(raw, "score_function") {
         None | Some("sigmoid") => Scoring::Sigmoid,
         Some("softmax") => Scoring::Softmax,
@@ -4954,7 +5771,10 @@ fn sarvam_mla(raw: &Value, layers: usize, architecture: &mut Architecture, path:
             path.display()
         ),
     };
-    let biased = raw.get("moe_router_enable_expert_bias").and_then(Value::as_bool).unwrap_or(true);
+    let biased = raw
+        .get("moe_router_enable_expert_bias")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     routed.selection_bias = biased.then_some("mlp.gate.e_score_correction_bias");
     routed.routed_scale = Some(number(raw, "routed_scaling_factor").unwrap_or(SARVAM_ROUTED_SCALE));
     routed.groups = match (whole(raw, "n_group"), whole(raw, "topk_group")) {
@@ -4966,11 +5786,16 @@ fn sarvam_mla(raw: &Value, layers: usize, architecture: &mut Architecture, path:
                     routed.count
                 );
             }
-            Some(ExpertGroups { groups, chosen_groups, rank_by_top_two: biased })
+            Some(ExpertGroups {
+                groups,
+                chosen_groups,
+                rank_by_top_two: biased,
+            })
         }
         _ => None,
     };
-    let shared_width = whole(raw, "moe_shared_expert_intermediate_size").unwrap_or(routed.intermediate);
+    let shared_width =
+        whole(raw, "moe_shared_expert_intermediate_size").unwrap_or(routed.intermediate);
     routed.shared = Some(whole(raw, "num_shared_experts").unwrap_or(1))
         .filter(|shared| *shared > 0)
         .map(|shared| SharedExpert {
@@ -5001,14 +5826,30 @@ fn deci_intermediate(ffn: &Value, hidden: usize) -> Option<usize> {
 }
 
 /// DeciLM's `block_configs`, one plan per layer.
-fn deci_plans(raw: &Value, layers: usize, llama: &LlamaConfig, path: &Path) -> Result<Vec<LayerPlan>> {
+fn deci_plans(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    path: &Path,
+) -> Result<Vec<LayerPlan>> {
     let Some(blocks) = raw.get("block_configs").and_then(Value::as_array) else {
-        bail!("{} declares a DeciLM model without block_configs", path.display());
+        bail!(
+            "{} declares a DeciLM model without block_configs",
+            path.display()
+        );
     };
     if blocks.len() != layers {
-        bail!("{} lists {} block_configs for {layers} layers", path.display(), blocks.len());
+        bail!(
+            "{} lists {} block_configs for {layers} layers",
+            path.display(),
+            blocks.len()
+        );
     }
-    let stated = |section: &Value, key: &str| section.get(key).is_some_and(|value| !value.is_null() && value != false);
+    let stated = |section: &Value, key: &str| {
+        section
+            .get(key)
+            .is_some_and(|value| !value.is_null() && value != false)
+    };
     blocks
         .iter()
         .enumerate()
@@ -5093,16 +5934,31 @@ fn granite_windows(
 /// (GraniteSWA, MuseGlimmer). Ster rotates full-attention layers by
 /// `rope_theta` and sliding-window layers by one base of their own, so the
 /// stated bases must fit that.
-fn layer_bases(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+fn layer_bases(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
     let Some(thetas) = raw.get("layer_rope_theta").filter(|value| !value.is_null()) else {
         return Ok(());
     };
     let thetas: Vec<f64> = thetas
         .as_array()
         .and_then(|list| list.iter().map(Value::as_f64).collect())
-        .with_context(|| format!("{} declares layer_rope_theta that is not a list of numbers", path.display()))?;
+        .with_context(|| {
+            format!(
+                "{} declares layer_rope_theta that is not a list of numbers",
+                path.display()
+            )
+        })?;
     if thetas.len() != layers {
-        bail!("{} lists {} layer_rope_theta values for {layers} layers", path.display(), thetas.len());
+        bail!(
+            "{} lists {} layer_rope_theta values for {layers} layers",
+            path.display(),
+            thetas.len()
+        );
     }
     let mut local: Option<f64> = None;
     for (layer, theta) in thetas.into_iter().enumerate() {
@@ -5124,7 +5980,9 @@ fn layer_bases(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &m
             local = Some(theta);
         }
     }
-    architecture.local_rope_theta = local.filter(|base| *base != f64::from(llama.rope_theta)).map(|base| base as f32);
+    architecture.local_rope_theta = local
+        .filter(|base| *base != f64::from(llama.rope_theta))
+        .map(|base| base as f32);
     Ok(())
 }
 
@@ -5138,12 +5996,25 @@ fn layer_bases(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &m
 /// config class sets it) a prompt read whole from position zero is one
 /// bidirectional block, as the model card asks for with `token_type_ids` of
 /// ones; decode steps and passes that score every position stay causal.
-fn hrm_text(raw: &Value, layers: usize, architecture: &mut Architecture, path: &Path) -> Result<()> {
-    let (Some(high_cycles), Some(low_cycles)) = (whole(raw, "H_cycles"), whole(raw, "L_cycles")) else {
-        bail!("{} declares an HRM-Text model without H_cycles and L_cycles", path.display());
+fn hrm_text(
+    raw: &Value,
+    layers: usize,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    let (Some(high_cycles), Some(low_cycles)) = (whole(raw, "H_cycles"), whole(raw, "L_cycles"))
+    else {
+        bail!(
+            "{} declares an HRM-Text model without H_cycles and L_cycles",
+            path.display()
+        );
     };
     let per_stack = whole(raw, "num_layers_per_stack").unwrap_or(layers);
-    let recurrence = Recurrence { per_stack, high_cycles, low_cycles };
+    let recurrence = Recurrence {
+        per_stack,
+        high_cycles,
+        low_cycles,
+    };
     if per_stack == 0 || high_cycles == 0 || recurrence.layers() > u128::BITS as usize {
         bail!(
             "{} runs {high_cycles} high cycles of {low_cycles} low passes over stacks of {per_stack} layers; Ster runs at least one layer and one cycle, and at most {} layers in all",
@@ -5161,7 +6032,10 @@ fn hrm_text(raw: &Value, layers: usize, architecture: &mut Architecture, path: &
     architecture.feed_forward_bias = flag(raw, "mlp_bias");
     architecture.embedding_multiplier = number(raw, "embedding_scale");
     architecture.recurrence = Some(recurrence);
-    architecture.prefix_lm = raw.get("prefix_lm").and_then(Value::as_bool).unwrap_or(true);
+    architecture.prefix_lm = raw
+        .get("prefix_lm")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     Ok(())
 }
 
@@ -5176,19 +6050,40 @@ fn hrm_text(raw: &Value, layers: usize, architecture: &mut Architecture, path: &
 /// `activation_sparsity_pattern` entry is above zero a feed-forward gate cut
 /// at its mean plus the normal quantile of that entry in standard
 /// deviations.
-fn gemma3n(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+fn gemma3n(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
     let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-        bail!("{} declares a Gemma 3n model without layer_types", path.display());
+        bail!(
+            "{} declares a Gemma 3n model without layer_types",
+            path.display()
+        );
     };
     if whole(raw, "altup_active_idx").unwrap_or(0) != 0 {
-        bail!("{} runs its blocks on AltUp stream {:?}; Ster runs them on stream 0", path.display(), raw.get("altup_active_idx"));
+        bail!(
+            "{} runs its blocks on AltUp stream {:?}; Ster runs them on stream 0",
+            path.display(),
+            raw.get("altup_active_idx")
+        );
     }
     if raw.get("altup_correct_scale").and_then(Value::as_bool) == Some(false) {
-        bail!("{} declares altup_correct_scale false; Ster scales the corrected stream as Gemma 3n does", path.display());
+        bail!(
+            "{} declares altup_correct_scale false; Ster scales the corrected stream as Gemma 3n does",
+            path.display()
+        );
     }
-    let streams = whole(raw, "altup_num_inputs").filter(|streams| *streams >= 1).with_context(|| {
-        format!("{} declares a Gemma 3n model without altup_num_inputs", path.display())
-    })?;
+    let streams = whole(raw, "altup_num_inputs")
+        .filter(|streams| *streams >= 1)
+        .with_context(|| {
+            format!(
+                "{} declares a Gemma 3n model without altup_num_inputs",
+                path.display()
+            )
+        })?;
     architecture.embedding_multiplier = Some((llama.hidden_size as f64).sqrt());
     architecture.activation = Activation::GeluTanh;
     architecture.output_norms = true;
@@ -5203,7 +6098,10 @@ fn gemma3n(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut A
     let shared = whole(raw, "num_kv_shared_layers").unwrap_or(0);
     if shared > 0 {
         if shared >= layers {
-            bail!("{} shares keys and values on {shared} of {layers} layers, leaving none to produce them", path.display());
+            bail!(
+                "{} shares keys and values on {shared} of {layers} layers, leaving none to produce them",
+                path.display()
+            );
         }
         architecture.shared_key_values = Some(layers - shared);
     }
@@ -5215,14 +6113,33 @@ fn gemma3n(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut A
     }
     architecture.altup_streams = Some(streams);
     architecture.laurel_rank = whole(raw, "laurel_rank").filter(|rank| *rank > 0);
-    if let Some(pattern) = raw.get("activation_sparsity_pattern").and_then(Value::as_array) {
-        let shares: Vec<f64> = pattern.iter().map(Value::as_f64).collect::<Option<_>>().with_context(|| {
-            format!("{} declares activation_sparsity_pattern that is not a list of numbers", path.display())
-        })?;
+    if let Some(pattern) = raw
+        .get("activation_sparsity_pattern")
+        .and_then(Value::as_array)
+    {
+        let shares: Vec<f64> = pattern
+            .iter()
+            .map(Value::as_f64)
+            .collect::<Option<_>>()
+            .with_context(|| {
+                format!(
+                    "{} declares activation_sparsity_pattern that is not a list of numbers",
+                    path.display()
+                )
+            })?;
         if shares.len() != layers {
-            bail!("{} lists {} activation_sparsity_pattern entries for {layers} layers", path.display(), shares.len());
+            bail!(
+                "{} lists {} activation_sparsity_pattern entries for {layers} layers",
+                path.display(),
+                shares.len()
+            );
         }
-        let sparse: Vec<(usize, f64)> = shares.iter().copied().enumerate().filter(|(_, share)| *share > 0.0).collect();
+        let sparse: Vec<(usize, f64)> = shares
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, share)| *share > 0.0)
+            .collect();
         if let Some(&(_, share)) = sparse.first() {
             if sparse.iter().any(|(_, other)| *other != share) || share >= 1.0 {
                 bail!(
@@ -5231,8 +6148,11 @@ fn gemma3n(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut A
                 );
             }
             // The standard normal quantile of `share`: √2 · erf⁻¹(2·share − 1).
-            let multiplier = std::f64::consts::SQRT_2 * candle_core::cpu::erf::erf_inv(2.0 * share - 1.0);
-            let layers = sparse.iter().fold(0u128, |set, (layer, _)| set | (1u128 << layer));
+            let multiplier =
+                std::f64::consts::SQRT_2 * candle_core::cpu::erf::erf_inv(2.0 * share - 1.0);
+            let layers = sparse
+                .iter()
+                .fold(0u128, |set, (layer, _)| set | (1u128 << layer));
             architecture.activation_sparsity = Some((multiplier, layers));
         }
     }
@@ -5260,32 +6180,53 @@ const PLAMO3_YARN_BETA_SLOW: f64 = 1.0;
 /// positions without rounding its band when `rope_scaling_factor` is not
 /// one. Under `scale_embedding` the embedding is multiplied by
 /// `sqrt(hidden_size)`.
-fn plamo3(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+fn plamo3(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
     if text(raw, "linear_type").is_some_and(|kind| kind != "normal") {
-        bail!("{} declares a linear_type other than normal; Ster reads PLaMo 3's unquantized projections", path.display());
+        bail!(
+            "{} declares a linear_type other than normal; Ster reads PLaMo 3's unquantized projections",
+            path.display()
+        );
     }
-    let pattern = whole(raw, "sliding_window_pattern").filter(|pattern| *pattern > 0).with_context(|| {
-        format!("{} declares a PLaMo 3 model without a sliding_window_pattern above zero", path.display())
-    })?;
+    let pattern = whole(raw, "sliding_window_pattern")
+        .filter(|pattern| *pattern > 0)
+        .with_context(|| {
+            format!(
+                "{} declares a PLaMo 3 model without a sliding_window_pattern above zero",
+                path.display()
+            )
+        })?;
     fits(layers, path)?;
     architecture.names = Names::PLAMO3;
     architecture.qkv_layout = QkvLayout::Stacked;
     architecture.fused_feed_forward = true;
     architecture.norm_offset = true;
     architecture.output_norms = true;
-    architecture.output_norm_shifts = Some((PLAMO3_POST_MIXER_NORM_OFFSET, PLAMO3_POST_MLP_NORM_OFFSET));
+    architecture.output_norm_shifts =
+        Some((PLAMO3_POST_MIXER_NORM_OFFSET, PLAMO3_POST_MLP_NORM_OFFSET));
     architecture.query_key_norm = QueryKeyNorm::PerHead;
-    architecture.sliding_window = whole(raw, "window_size").or_else(|| whole(raw, "sliding_window"));
-    architecture.sliding_layers =
-        (0..layers).filter(|layer| (layer + 1) % pattern != 0).fold(0u128, |set, layer| set | (1u128 << layer));
+    architecture.sliding_window =
+        whole(raw, "window_size").or_else(|| whole(raw, "sliding_window"));
+    architecture.sliding_layers = (0..layers)
+        .filter(|layer| (layer + 1) % pattern != 0)
+        .fold(0u128, |set, layer| set | (1u128 << layer));
     architecture.local_rope_theta = number(raw, "rope_local_theta").map(|theta| theta as f32);
     if flag(raw, "scale_embedding") {
         architecture.embedding_multiplier = Some((llama.hidden_size as f64).sqrt());
     }
     let factor = number(raw, "rope_scaling_factor").unwrap_or(1.0);
     if factor != 1.0 {
-        let original = whole(raw, "initial_context_length")
-            .with_context(|| format!("{} scales its rotation without initial_context_length", path.display()))?;
+        let original = whole(raw, "initial_context_length").with_context(|| {
+            format!(
+                "{} scales its rotation without initial_context_length",
+                path.display()
+            )
+        })?;
         let yarn = serde_json::json!({
             "rope_type": "yarn",
             "factor": factor,
@@ -5294,7 +6235,8 @@ fn plamo3(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Ar
             "original_max_position_embeddings": original,
             "truncate": false,
         });
-        architecture.rope_scaling = rope_scaling(Some(&yarn), architecture.rotary_dim, raw, llama, path)?;
+        architecture.rope_scaling =
+            rope_scaling(Some(&yarn), architecture.rotary_dim, raw, llama, path)?;
     }
     Ok(())
 }
@@ -5313,9 +6255,18 @@ fn plamo3(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Ar
 /// lists, the bases of `layer_rope_theta` with zero for the unrotated
 /// full-attention layers; and the logits multiplied by `output_multiplier`
 /// and capped at `final_logit_softcapping`.
-fn muse_glimmer(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &mut Architecture, path: &Path) -> Result<()> {
+fn muse_glimmer(
+    raw: &Value,
+    layers: usize,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
     let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-        bail!("{} declares a MuseGlimmer model without layer_types", path.display());
+        bail!(
+            "{} declares a MuseGlimmer model without layer_types",
+            path.display()
+        );
     };
     architecture.names = Names::MUSE_GLIMMER;
     architecture.norm_offset = true;
@@ -5329,14 +6280,20 @@ fn muse_glimmer(raw: &Value, layers: usize, llama: &LlamaConfig, architecture: &
     if raw.get("use_qk_norm").and_then(Value::as_bool) != Some(false) {
         architecture.query_key_norm = QueryKeyNorm::Weightless;
         let head_dim = architecture.head_dim as f64;
-        let prescale = match (number(raw, "scale_query_by"), number(raw, "qk_scale_factor")) {
+        let prescale = match (
+            number(raw, "scale_query_by"),
+            number(raw, "qk_scale_factor"),
+        ) {
             (Some(explicit), _) => explicit,
             (None, Some(factor)) if factor >= head_dim.sqrt() => factor / head_dim.sqrt(),
             (None, Some(factor)) => factor,
             (None, None) => 1.0,
         };
         if prescale <= 0.0 {
-            bail!("{} scales its queries by {prescale}; the scale must be above zero", path.display());
+            bail!(
+                "{} scales its queries by {prescale}; the scale must be above zero",
+                path.display()
+            );
         }
         architecture.score_divisor = head_dim.sqrt() / prescale;
     }
@@ -5378,33 +6335,74 @@ const DEEPSEEK_V4_HASH_LAYERS: usize = 3;
 /// `mlp.gate.e_score_correction_bias` added, renormalised and scaled by
 /// `routed_scaling_factor`, beside one shared expert — and every SwiGLU is
 /// clamped by `swiglu_limit`.
-fn deepseek_v4(raw: &Value, scaling: Option<&Value>, layers: usize, architecture: &mut Architecture, path: &Path) -> Result<()> {
+fn deepseek_v4(
+    raw: &Value,
+    scaling: Option<&Value>,
+    layers: usize,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
     fits(layers, path)?;
     let size = |key: &str| -> Result<usize> {
-        whole(raw, key).filter(|size| *size > 0).with_context(|| format!("{} declares a DeepSeek-V4 model without {key}", path.display()))
+        whole(raw, key).filter(|size| *size > 0).with_context(|| {
+            format!(
+                "{} declares a DeepSeek-V4 model without {key}",
+                path.display()
+            )
+        })
     };
     let rates = raw.get("compress_rates");
-    let rate = |kind: &str, default: usize| rates.and_then(|rates| rates.get(kind)).and_then(Value::as_u64).map_or(default, |rate| rate as usize);
-    let (sparse_rate, heavy_rate) =
-        (rate("compressed_sparse_attention", DEEPSEEK_V4_SPARSE_RATE), rate("heavily_compressed_attention", DEEPSEEK_V4_HEAVY_RATE));
-    let kinds: Vec<String> = match (raw.get("layer_types").and_then(Value::as_array), raw.get("compress_ratios").and_then(Value::as_array)) {
-        (Some(types), _) => types.iter().map(|kind| kind.as_str().unwrap_or_default().to_owned()).collect(),
+    let rate = |kind: &str, default: usize| {
+        rates
+            .and_then(|rates| rates.get(kind))
+            .and_then(Value::as_u64)
+            .map_or(default, |rate| rate as usize)
+    };
+    let (sparse_rate, heavy_rate) = (
+        rate("compressed_sparse_attention", DEEPSEEK_V4_SPARSE_RATE),
+        rate("heavily_compressed_attention", DEEPSEEK_V4_HEAVY_RATE),
+    );
+    let kinds: Vec<String> = match (
+        raw.get("layer_types").and_then(Value::as_array),
+        raw.get("compress_ratios").and_then(Value::as_array),
+    ) {
+        (Some(types), _) => types
+            .iter()
+            .map(|kind| kind.as_str().unwrap_or_default().to_owned())
+            .collect(),
         (None, Some(ratios)) => ratios
             .iter()
             .map(|ratio| match ratio.as_u64() {
                 Some(0) => Ok("sliding_attention".to_owned()),
-                Some(ratio) if ratio as usize == DEEPSEEK_V4_SPARSE_RATE => Ok("compressed_sparse_attention".to_owned()),
-                Some(ratio) if ratio as usize == DEEPSEEK_V4_HEAVY_RATE => Ok("heavily_compressed_attention".to_owned()),
-                _ => bail!("{} lists compress_ratios entry {ratio}; DeepSeek-V4 reads 0, 4 and 128", path.display()),
+                Some(ratio) if ratio as usize == DEEPSEEK_V4_SPARSE_RATE => {
+                    Ok("compressed_sparse_attention".to_owned())
+                }
+                Some(ratio) if ratio as usize == DEEPSEEK_V4_HEAVY_RATE => {
+                    Ok("heavily_compressed_attention".to_owned())
+                }
+                _ => bail!(
+                    "{} lists compress_ratios entry {ratio}; DeepSeek-V4 reads 0, 4 and 128",
+                    path.display()
+                ),
             })
             .collect::<Result<_>>()?,
         (None, None) => (0..layers)
-            .map(|layer| if layer >= 2 && layer % 2 == 1 { "compressed_sparse_attention" } else { "heavily_compressed_attention" })
+            .map(|layer| {
+                if layer >= 2 && layer % 2 == 1 {
+                    "compressed_sparse_attention"
+                } else {
+                    "heavily_compressed_attention"
+                }
+            })
             .map(str::to_owned)
             .collect(),
     };
     if kinds.len() < layers {
-        bail!("{} lists {} layer kinds for {layers} layers", path.display(), kinds.len());
+        bail!(
+            "{} lists {} layer kinds for {layers} layers",
+            path.display(),
+            kinds.len()
+        );
     }
     let (mut sparse_layers, mut heavy_layers) = (0u128, 0u128);
     for (layer, kind) in kinds.iter().take(layers).enumerate() {
@@ -5425,57 +6423,90 @@ fn deepseek_v4(raw: &Value, scaling: Option<&Value>, layers: usize, architecture
                 match kind.as_str() {
                     Some("hash_moe") => set |= 1u128 << layer,
                     Some("moe") => {}
-                    other => bail!("{} declares feed-forward {layer} as {other:?}; DeepSeek-V4's are hash_moe and moe", path.display()),
+                    other => bail!(
+                        "{} declares feed-forward {layer} as {other:?}; DeepSeek-V4's are hash_moe and moe",
+                        path.display()
+                    ),
                 }
             }
             set
         }
         None => {
-            let count = whole(raw, "num_hash_layers").unwrap_or(DEEPSEEK_V4_HASH_LAYERS).min(layers);
+            let count = whole(raw, "num_hash_layers")
+                .unwrap_or(DEEPSEEK_V4_HASH_LAYERS)
+                .min(layers);
             (0..count).fold(0u128, |set, layer| set | 1u128 << layer)
         }
     };
     let head_dim = size("head_dim")?;
-    let rotary_dim = match (number(raw, "partial_rotary_factor"), whole(raw, "qk_rope_head_dim")) {
+    let rotary_dim = match (
+        number(raw, "partial_rotary_factor"),
+        whole(raw, "qk_rope_head_dim"),
+    ) {
         (Some(factor), _) => (head_dim as f64 * factor) as usize,
         (None, Some(rotary)) => rotary,
-        (None, None) => bail!("{} declares neither partial_rotary_factor nor qk_rope_head_dim", path.display()),
+        (None, None) => bail!(
+            "{} declares neither partial_rotary_factor nor qk_rope_head_dim",
+            path.display()
+        ),
     };
     if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
-        bail!("{} rotates {rotary_dim} of each head's {head_dim} channels; it must be even and within the head", path.display());
+        bail!(
+            "{} rotates {rotary_dim} of each head's {head_dim} channels; it must be even and within the head",
+            path.display()
+        );
     }
     let heads = size("num_attention_heads")?;
     let output_groups = size("o_groups")?;
     if (heads * head_dim) % output_groups != 0 {
-        bail!("{} splits {heads} heads of {head_dim} into {output_groups} output groups unevenly", path.display());
+        bail!(
+            "{} splits {heads} heads of {head_dim} into {output_groups} output groups unevenly",
+            path.display()
+        );
     }
     let scaling = scaling.filter(|scaling| scaling.is_object());
     let compress_yarn = match scaling {
-        Some(scaling) if matches!(scaling.get("type").or_else(|| scaling.get("rope_type")).and_then(Value::as_str), Some("yarn")) => {
-            let field = |key: &str| scaling.get(key).and_then(Value::as_f64).with_context(|| format!("{} states a YaRN rotation without {key}", path.display()));
+        Some(scaling)
+            if matches!(
+                scaling
+                    .get("type")
+                    .or_else(|| scaling.get("rope_type"))
+                    .and_then(Value::as_str),
+                Some("yarn")
+            ) =>
+        {
+            let field = |key: &str| {
+                scaling.get(key).and_then(Value::as_f64).with_context(|| {
+                    format!("{} states a YaRN rotation without {key}", path.display())
+                })
+            };
             Some(CompressYarn {
                 factor: field("factor")? as f32,
                 original: field("original_max_position_embeddings")? as usize,
                 beta_fast: field("beta_fast")? as f32,
                 beta_slow: field("beta_slow")? as f32,
-                truncate: scaling.get("truncate").and_then(Value::as_bool).unwrap_or(true),
+                truncate: scaling
+                    .get("truncate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
             })
         }
         _ => None,
     };
     let Some(main_theta) = number(raw, "rope_theta") else {
-        bail!("{} declares a DeepSeek-V4 model without rope_theta", path.display());
+        bail!(
+            "{} declares a DeepSeek-V4 model without rope_theta",
+            path.display()
+        );
     };
     let Some(compress_theta) = number(raw, "compress_rope_theta") else {
-        bail!("{} declares a DeepSeek-V4 model without compress_rope_theta", path.display());
+        bail!(
+            "{} declares a DeepSeek-V4 model without compress_rope_theta",
+            path.display()
+        );
     };
-    let Some(hyper_eps) = number(raw, "hc_eps") else {
-        bail!("{} declares a DeepSeek-V4 model without hc_eps", path.display());
-    };
+    architecture.hyper_connections = Some(hyper_connections(raw, true, path)?);
     architecture.compressed = Some(CompressedSpec {
-        streams: size("hc_mult")?,
-        sinkhorn_iterations: size("hc_sinkhorn_iters")?,
-        hyper_eps,
         heads,
         head_dim,
         rotary_dim,
@@ -5495,14 +6526,28 @@ fn deepseek_v4(raw: &Value, scaling: Option<&Value>, layers: usize, architecture
         compress_yarn,
     });
     if whole(raw, "n_shared_experts").unwrap_or(1) != 1 {
-        bail!("{} declares n_shared_experts other than one; DeepSeek-V4 has one shared expert", path.display());
+        bail!(
+            "{} declares n_shared_experts other than one; DeepSeek-V4 has one shared expert",
+            path.display()
+        );
     }
-    let mut routed = experts(raw, "n_routed_experts", "moe_intermediate_size", true, ExpertLayout::DeepseekV4, 0, path)?;
+    let mut routed = experts(
+        raw,
+        "n_routed_experts",
+        "moe_intermediate_size",
+        true,
+        ExpertLayout::DeepseekV4,
+        0,
+        path,
+    )?;
     routed.scoring = match text(raw, "scoring_func") {
         Some("sqrtsoftplus") => Scoring::SqrtSoftplus,
         Some("sigmoid") => Scoring::Sigmoid,
         Some("softmax") => Scoring::Softmax,
-        other => bail!("{} declares scoring_func {other:?}; Ster implements sqrtsoftplus, sigmoid and softmax", path.display()),
+        other => bail!(
+            "{} declares scoring_func {other:?}; Ster implements sqrtsoftplus, sigmoid and softmax",
+            path.display()
+        ),
     };
     routed.selection_bias = Some("mlp.gate.e_score_correction_bias");
     routed.routed_scale = number(raw, "routed_scaling_factor");
@@ -5516,6 +6561,167 @@ fn deepseek_v4(raw: &Value, scaling: Option<&Value>, layers: usize, architecture
     });
     architecture.experts = Some(routed);
     Ok(())
+}
+
+/// GLM-5-Next (`glm5_next_text`, inside `glm5_next` below
+/// `model.language_model`): hyper-connected residual streams averaged at the
+/// end, the layers `layer_types` marks `linear_attention` running Kimi Delta
+/// Attention (`linear_attn_config`, its log-decay bounded below by
+/// `gate_lower_bound` under `safe_gate`) and the `deepseek_sparse_attention`
+/// ones latent attention with no rotation behind a pooled indexer, and the
+/// feed-forwards `mlp_layer_types` marks `sparse` routing DeepSeek-V3's way
+/// beside shared experts; every SwiGLU, dense, routed or shared, is clamped
+/// by `swiglu_limit`.
+fn glm5_next(
+    raw: &Value,
+    layers: usize,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    fits(layers, path)?;
+    if architecture
+        .latent
+        .is_none_or(|latent| latent.rotated != 0 || latent.query_rank.is_none())
+    {
+        bail!(
+            "{} declares GLM-5-Next attention other than latent attention with q_lora_rank and qk_rope_head_dim 0; Ster implements that one",
+            path.display()
+        );
+    }
+    let listed = |key: &str, chosen: &str, other: &str| -> Result<u128> {
+        let Some(entries) = raw
+            .get(key)
+            .and_then(Value::as_array)
+            .filter(|entries| entries.len() == layers)
+        else {
+            bail!("{} lists no {key} for its {layers} layers", path.display());
+        };
+        let mut set = 0u128;
+        for (layer, entry) in entries.iter().enumerate() {
+            match entry.as_str() {
+                Some(kind) if kind == chosen => set |= 1u128 << layer,
+                Some(kind) if kind == other => {}
+                found => bail!(
+                    "{} declares {key} entry {layer} as {found:?}; GLM-5-Next's are {chosen} and {other}",
+                    path.display()
+                ),
+            }
+        }
+        Ok(set)
+    };
+    let linear = listed(
+        "layer_types",
+        "linear_attention",
+        "deepseek_sparse_attention",
+    )?;
+    let routed_layers = listed("mlp_layer_types", "sparse", "dense")?;
+    let Some(kda) = raw.get("linear_attn_config").and_then(Value::as_object) else {
+        bail!(
+            "{} declares a GLM-5-Next model without linear_attn_config",
+            path.display()
+        );
+    };
+    let size = |key: &str| -> Result<usize> {
+        kda.get(key)
+            .and_then(Value::as_u64)
+            .map(|size| size as usize)
+            .filter(|size| *size > 0)
+            .with_context(|| {
+                format!(
+                    "{} declares linear_attn_config without {key}",
+                    path.display()
+                )
+            })
+    };
+    let (heads, head_dim) = (size("num_heads")?, size("head_dim")?);
+    let safe = kda
+        .get("safe_gate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    architecture.delta_rule = Some(DeltaRuleSpec {
+        key_heads: heads,
+        value_heads: heads,
+        key_dim: head_dim,
+        value_dim: head_dim,
+        kernel: size("short_conv_kernel_size")?,
+        layers: linear,
+        form: DeltaRuleForm::Kimi,
+        negative_eigenvalues: false,
+        decay_floor: if safe {
+            kda.get("gate_lower_bound").and_then(Value::as_f64)
+        } else {
+            None
+        },
+        full_rank_gate: false,
+    });
+    architecture.sparse_index = Some(sparse_index(raw, "glm5_next_text", layers, path)?);
+    architecture.hyper_connections = Some(hyper_connections(raw, false, path)?);
+    let limit = number(raw, "swiglu_limit");
+    architecture.dense_swiglu_limit = limit;
+    let every = every_layer(layers, path)?;
+    let mut routed = experts(
+        raw,
+        "n_routed_experts",
+        "moe_intermediate_size",
+        flag(raw, "norm_topk_prob"),
+        ExpertLayout::Qwen,
+        every & !routed_layers,
+        path,
+    )?;
+    routed.scoring = Scoring::Sigmoid;
+    routed.selection_bias = Some("mlp.gate.e_score_correction_bias");
+    routed.routed_scale = number(raw, "routed_scaling_factor");
+    routed.swiglu_limit = limit.map(SwigluLimit::Inner);
+    let groups = whole(raw, "n_group").unwrap_or(1).max(1);
+    let chosen_groups = whole(raw, "topk_group").unwrap_or(groups);
+    if routed.count % groups != 0 || chosen_groups > groups {
+        bail!(
+            "{} splits {} experts into {groups} groups and keeps {chosen_groups}",
+            path.display(),
+            routed.count
+        );
+    }
+    routed.groups = Some(ExpertGroups {
+        groups,
+        chosen_groups,
+        rank_by_top_two: true,
+    });
+    routed.shared = whole(raw, "n_shared_experts")
+        .filter(|shared| *shared > 0)
+        .map(|shared| SharedExpert {
+            intermediate: shared * routed.intermediate,
+            module: "mlp.shared_experts",
+            gated: false,
+            form: SharedForm::GateUpDown,
+        });
+    architecture.experts = Some(routed);
+    Ok(())
+}
+
+/// The hyper-connections DeepSeek-V4 and GLM-5-Next state: `hc_mult`
+/// streams, `hc_sinkhorn_iters` rounds, `hc_eps`; `learned_head` when the
+/// model collapses its last streams through `hc_head`.
+fn hyper_connections(raw: &Value, learned_head: bool, path: &Path) -> Result<HyperConnections> {
+    let size = |key: &str| -> Result<usize> {
+        whole(raw, key).filter(|size| *size > 0).with_context(|| {
+            format!(
+                "{} declares hyper-connections without {key}",
+                path.display()
+            )
+        })
+    };
+    let Some(eps) = number(raw, "hc_eps") else {
+        bail!(
+            "{} declares hyper-connections without hc_eps",
+            path.display()
+        );
+    };
+    Ok(HyperConnections {
+        streams: size("hc_mult")?,
+        sinkhorn_iterations: size("hc_sinkhorn_iters")?,
+        eps,
+        learned_head,
+    })
 }
 
 /// Inkling (`inkling_text`, inside `inkling_mm_model` below `model.llm`):
@@ -5532,7 +6738,9 @@ fn deepseek_v4(raw: &Value, scaling: Option<&Value>, layers: usize, architecture
 fn inkling(raw: &Value, layers: usize, architecture: &mut Architecture, path: &Path) -> Result<()> {
     fits(layers, path)?;
     let size = |key: &str| -> Result<usize> {
-        whole(raw, key).filter(|size| *size > 0).with_context(|| format!("{} declares an Inkling model without {key}", path.display()))
+        whole(raw, key)
+            .filter(|size| *size > 0)
+            .with_context(|| format!("{} declares an Inkling model without {key}", path.display()))
     };
     for (key, required) in [
         ("use_sconv", true),
@@ -5546,36 +6754,67 @@ fn inkling(raw: &Value, layers: usize, architecture: &mut Architecture, path: &P
     ] {
         if let Some(stated) = raw.get(key).and_then(Value::as_bool) {
             if stated != required {
-                bail!("{} declares {key} {stated}; Ster implements Inkling with {key} {required}", path.display());
+                bail!(
+                    "{} declares {key} {stated}; Ster implements Inkling with {key} {required}",
+                    path.display()
+                );
             }
         }
     }
-    if let Some(activation) = text(raw, "gate_activation").filter(|activation| *activation != "sigmoid") {
-        bail!("{} declares gate_activation {activation:?}; Ster implements Inkling's sigmoid router", path.display());
+    if let Some(activation) =
+        text(raw, "gate_activation").filter(|activation| *activation != "sigmoid")
+    {
+        bail!(
+            "{} declares gate_activation {activation:?}; Ster implements Inkling's sigmoid router",
+            path.display()
+        );
     }
-    if raw.get("final_logit_softcapping").is_some_and(|cap| !cap.is_null()) {
-        bail!("{} declares final_logit_softcapping; Ster implements Inkling without it", path.display());
+    if raw
+        .get("final_logit_softcapping")
+        .is_some_and(|cap| !cap.is_null())
+    {
+        bail!(
+            "{} declares final_logit_softcapping; Ster implements Inkling without it",
+            path.display()
+        );
     }
     let listed = |key: &str, chosen: &str| -> Result<Option<u128>> {
         let Some(entries) = raw.get(key).and_then(Value::as_array) else {
             return Ok(None);
         };
         if entries.len() != layers {
-            bail!("{} lists {} {key} entries for {layers} layers", path.display(), entries.len());
+            bail!(
+                "{} lists {} {key} entries for {layers} layers",
+                path.display(),
+                entries.len()
+            );
         }
-        Ok(Some(entries.iter().enumerate().filter(|(_, entry)| entry.as_str() == Some(chosen)).fold(0u128, |set, (layer, _)| set | 1u128 << layer)))
+        Ok(Some(
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.as_str() == Some(chosen))
+                .fold(0u128, |set, (layer, _)| set | 1u128 << layer),
+        ))
     };
     let sliding_layers = match listed("layer_types", "hybrid_sliding")? {
         Some(set) => set,
         None => {
             let Some(local) = raw.get("local_layer_ids").and_then(Value::as_array) else {
-                bail!("{} declares an Inkling model with neither layer_types nor local_layer_ids", path.display());
+                bail!(
+                    "{} declares an Inkling model with neither layer_types nor local_layer_ids",
+                    path.display()
+                );
             };
             let mut set = 0u128;
             for entry in local {
                 match entry.as_u64().map(|layer| layer as usize) {
                     Some(layer) if layer < layers => set |= 1u128 << layer,
-                    _ => bail!("{} lists local_layer_ids entry {entry}, outside layers 0 to {}", path.display(), layers - 1),
+                    _ => bail!(
+                        "{} lists local_layer_ids entry {entry}, outside layers 0 to {}",
+                        path.display(),
+                        layers - 1
+                    ),
                 }
             }
             set
@@ -5591,15 +6830,24 @@ fn inkling(raw: &Value, layers: usize, architecture: &mut Architecture, path: &P
     let log_scaling = match number(raw, "log_scaling_n_floor") {
         Some(floor) if floor > 0.0 => {
             let Some(alpha) = number(raw, "log_scaling_alpha") else {
-                bail!("{} declares log_scaling_n_floor without log_scaling_alpha", path.display());
+                bail!(
+                    "{} declares log_scaling_n_floor without log_scaling_alpha",
+                    path.display()
+                );
             };
             Some((alpha, floor))
         }
-        Some(floor) => bail!("{} declares log_scaling_n_floor {floor}; it must be positive", path.display()),
+        Some(floor) => bail!(
+            "{} declares log_scaling_n_floor {floor}; it must be positive",
+            path.display()
+        ),
         None => None,
     };
     let Some(route_scale) = number(raw, "route_scale") else {
-        bail!("{} declares an Inkling model without route_scale", path.display());
+        bail!(
+            "{} declares an Inkling model without route_scale",
+            path.display()
+        );
     };
     let spec = InklingSpec {
         full: RelativeHeads {
@@ -5636,12 +6884,19 @@ fn inkling(raw: &Value, layers: usize, architecture: &mut Architecture, path: &P
         }
     }
     if spec.top_k > spec.experts {
-        bail!("{} chooses {} of {} experts", path.display(), spec.top_k, spec.experts);
+        bail!(
+            "{} chooses {} of {} experts",
+            path.display(),
+            spec.top_k,
+            spec.experts
+        );
     }
     architecture.names = Names::INKLING;
     architecture.positions = Positions::None;
     architecture.embedding_norm = true;
-    architecture.logits_multiplier = number(raw, "logits_mup_width_multiplier").filter(|width| *width > 0.0).map(|width| width.recip());
+    architecture.logits_multiplier = number(raw, "logits_mup_width_multiplier")
+        .filter(|width| *width > 0.0)
+        .map(|width| width.recip());
     architecture.vocabulary_limit = whole(raw, "unpadded_vocab_size");
     architecture.inkling = Some(spec);
     Ok(())
@@ -5652,7 +6907,9 @@ fn flag(raw: &Value, key: &str) -> bool {
 }
 
 fn whole(raw: &Value, key: &str) -> Option<usize> {
-    raw.get(key).and_then(Value::as_u64).map(|value| value as usize)
+    raw.get(key)
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
 }
 
 fn number(raw: &Value, key: &str) -> Option<f64> {
@@ -5707,7 +6964,9 @@ fn every_layer(layers: usize, path: &Path) -> Result<u128> {
 
 fn even_layers(layers: usize, path: &Path) -> Result<u128> {
     fits(layers, path)?;
-    Ok((0..layers).step_by(2).fold(0, |set, layer| set | (1u128 << layer)))
+    Ok((0..layers)
+        .step_by(2)
+        .fold(0, |set, layer| set | (1u128 << layer)))
 }
 
 /// `layer_types`, as newer configs list it: one entry per layer, either
@@ -5736,7 +6995,11 @@ fn windowed_layers(types: &[Value], layers: usize, chunked: bool, path: &Path) -
             other => bail!(
                 "{} declares layer {layer} as {other:?}; Ster implements sliding_attention and full_attention{}",
                 path.display(),
-                if chunked { " and chunked_attention" } else { "" }
+                if chunked {
+                    " and chunked_attention"
+                } else {
+                    ""
+                }
             ),
         }
     }
@@ -5750,7 +7013,11 @@ fn flagged_layers(raw: &Value, key: &str, layers: usize, path: &Path) -> Result<
         bail!("{} lists no {key}", path.display());
     };
     if flags.len() != layers {
-        bail!("{} lists {} {key} entries for {layers} layers", path.display(), flags.len());
+        bail!(
+            "{} lists {} {key} entries for {layers} layers",
+            path.display(),
+            flags.len()
+        );
     }
     fits(layers, path)?;
     let mut set = 0u128;
@@ -5758,7 +7025,10 @@ fn flagged_layers(raw: &Value, key: &str, layers: usize, path: &Path) -> Result<
         match flag.as_u64() {
             Some(1) => set |= 1u128 << layer,
             Some(0) => {}
-            _ => bail!("{} marks layer {layer} in {key} as {flag}; Ster reads 0 or 1", path.display()),
+            _ => bail!(
+                "{} marks layer {layer} in {key} as {flag}; Ster reads 0 or 1",
+                path.display()
+            ),
         }
     }
     Ok(set)

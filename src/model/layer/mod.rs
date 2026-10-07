@@ -14,21 +14,22 @@ use candle_transformers::models::llama::Config;
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Activation, Architecture, Cache, DeltaRuleForm, FeedForwardKind, Mode, ParallelScan, Pass, Route,
+    Activation, Architecture, Cache, DeltaRuleForm, FeedForwardKind, Mode, ParallelScan, Pass,
+    Route,
     attention::{Attention, project, relative::RelativeAttention},
-    depth::{DepthMix, DepthMixes},
     deepseek4::{HyperConnection, attention::CompressedAttention},
+    depth::{DepthMix, DepthMixes},
     inkling,
 };
 use experts::Experts;
 use norm::{Norm, NormSpec};
-use shared::{SharedBlock, SharedInvocation};
 use recurrent::{
     delta::DeltaRule,
     lightning::Lightning,
     state_space::{ShortConv, StateSpace},
     structured::Structured,
 };
+use shared::{SharedBlock, SharedInvocation};
 
 /// The feed-forward half of a block: one dense feed-forward, a router over
 /// experts, Gemma 4's dense feed-forward beside its experts, or a
@@ -55,9 +56,13 @@ impl FeedForwardBlock {
         match self {
             Self::Dense(dense) | Self::Shortcut(dense, _) => dense.forward(hidden, mode.route),
             Self::Routed(experts) => experts.forward(hidden),
-            Self::Inkling(_) => candle_core::bail!("Inkling's feed-forward keeps a convolution history and runs only with its layer's cache"),
+            Self::Inkling(_) => candle_core::bail!(
+                "Inkling's feed-forward keeps a convolution history and runs only with its layer's cache"
+            ),
             Self::Paired(paired) => {
-                let dense = paired.dense.forward(&paired.dense_norm.forward(hidden, mode.pass)?, mode.route)?;
+                let dense = paired
+                    .dense
+                    .forward(&paired.dense_norm.forward(hidden, mode.pass)?, mode.route)?;
                 let dense = paired.dense_output_norm.forward(&dense, mode.pass)?;
                 let routed = paired.experts.forward_routed(
                     &paired.router_norm.forward(hidden, mode.pass)?,
@@ -70,7 +75,13 @@ impl FeedForwardBlock {
 
     /// The feed-forward of layer `layer`, with the cache an Inkling
     /// feed-forward keeps its convolution history in.
-    fn forward_at(&self, hidden: &Tensor, mode: Mode, layer: usize, cache: &mut Cache) -> candle_core::Result<Tensor> {
+    fn forward_at(
+        &self,
+        hidden: &Tensor,
+        mode: Mode,
+        layer: usize,
+        cache: &mut Cache,
+    ) -> candle_core::Result<Tensor> {
         match self {
             Self::Inkling(feed_forward) => feed_forward.forward(hidden, layer, cache),
             Self::Routed(experts) => experts.forward_ids(hidden, cache.token_ids.as_deref()),
@@ -82,7 +93,13 @@ impl FeedForwardBlock {
     /// over `input` (its feed-forward input) in the cache and adds nothing;
     /// the second half takes it and adds it to `output`. Every other block
     /// returns `output` as it is.
-    fn shortcut(&self, input: &Tensor, output: Tensor, layer: usize, cache: &mut Cache) -> candle_core::Result<Tensor> {
+    fn shortcut(
+        &self,
+        input: &Tensor,
+        output: Tensor,
+        layer: usize,
+        cache: &mut Cache,
+    ) -> candle_core::Result<Tensor> {
         match self {
             Self::Shortcut(_, Some(experts)) => {
                 cache.shortcut = Some(experts.forward(input)?);
@@ -90,7 +107,9 @@ impl FeedForwardBlock {
             }
             Self::Shortcut(_, None) => match cache.shortcut.take() {
                 Some(kept) => output + kept,
-                None => candle_core::bail!("layer {layer} closes a shortcut that no earlier layer opened"),
+                None => candle_core::bail!(
+                    "layer {layer} closes a shortcut that no earlier layer opened"
+                ),
             },
             _ => Ok(output),
         }
@@ -124,8 +143,15 @@ pub(super) fn projection(
     builder: VarBuilder<'_>,
 ) -> candle_core::Result<Linear> {
     if conv1d {
-        let weight = builder.get((inputs, outputs), "weight")?.t()?.contiguous()?;
-        let bias = if bias { Some(builder.get(outputs, "bias")?) } else { None };
+        let weight = builder
+            .get((inputs, outputs), "weight")?
+            .t()?
+            .contiguous()?;
+        let bias = if bias {
+            Some(builder.get(outputs, "bias")?)
+        } else {
+            None
+        };
         return Ok(Linear::new(weight, bias));
     }
     if bias {
@@ -153,6 +179,9 @@ pub(super) struct FeedForward {
     /// Gemma 3n's activation sparsity: the gate keeps only what lies above
     /// its mean plus this many standard deviations.
     sparsity: Option<f64>,
+    /// GLM-5-Next's `swiglu_limit`: the gate clamped above and the up
+    /// projection both ways before they meet.
+    clamp: Option<f64>,
 }
 
 /// xIELU's parameters from the feed-forward's `act_fn`, as Transformers'
@@ -169,7 +198,11 @@ struct Xielu {
 impl Xielu {
     fn load(builder: VarBuilder<'_>) -> candle_core::Result<Self> {
         let scalar = |name: &str| -> candle_core::Result<f64> {
-            let values = builder.get_unchecked(name)?.flatten_all()?.to_dtype(candle_core::DType::F64)?.to_vec1::<f64>()?;
+            let values = builder
+                .get_unchecked(name)?
+                .flatten_all()?
+                .to_dtype(candle_core::DType::F64)?
+                .to_vec1::<f64>()?;
             match values.as_slice() {
                 [value] => Ok(*value),
                 _ => candle_core::bail!("xIELU's {name} holds {} values, not one", values.len()),
@@ -190,7 +223,8 @@ impl Xielu {
     fn apply(&self, input: &Tensor) -> candle_core::Result<Tensor> {
         let linear = (input * self.beta)?;
         let positive = ((input.sqr()? * self.alpha_p)? + &linear)?;
-        let negative = ((((input.minimum(self.eps)?.exp()? - 1.0)? - input)? * self.alpha_n)? + &linear)?;
+        let negative =
+            ((((input.minimum(self.eps)?.exp()? - 1.0)? - input)? * self.alpha_n)? + &linear)?;
         input.gt(0.0)?.where_cond(&positive, &negative)
     }
 }
@@ -219,22 +253,35 @@ impl FeedForward {
         let (gate, up) = if architecture.fused_feed_forward {
             let fused = builder.pp(names.fused_gate_up);
             let weight = fused.get((2 * intermediate, hidden), "weight")?;
-            let bias = if bias { Some(fused.get(2 * intermediate, "bias")?) } else { None };
+            let bias = if bias {
+                Some(fused.get(2 * intermediate, "bias")?)
+            } else {
+                None
+            };
             let slice = |start: usize| -> candle_core::Result<Linear> {
                 Ok(Linear::new(
                     weight.narrow(0, start, intermediate)?,
-                    bias.as_ref().map(|bias| bias.narrow(0, start, intermediate)).transpose()?,
+                    bias.as_ref()
+                        .map(|bias| bias.narrow(0, start, intermediate))
+                        .transpose()?,
                 ))
             };
             (Some(slice(0)?), slice(intermediate)?)
         } else {
             let gate = match (architecture.feed_forward, names.gate) {
-                (FeedForwardKind::Gated, Some(name)) => {
-                    Some(projection(hidden, intermediate, bias, conv1d, builder.pp(name))?)
-                }
+                (FeedForwardKind::Gated, Some(name)) => Some(projection(
+                    hidden,
+                    intermediate,
+                    bias,
+                    conv1d,
+                    builder.pp(name),
+                )?),
                 _ => None,
             };
-            (gate, projection(hidden, intermediate, bias, conv1d, builder.pp(names.up))?)
+            (
+                gate,
+                projection(hidden, intermediate, bias, conv1d, builder.pp(names.up))?,
+            )
         };
         Ok(Self {
             gate,
@@ -253,7 +300,11 @@ impl FeedForward {
             scales: architecture.feed_forward_scales,
             xielu: if architecture.activation == Activation::Xielu {
                 let parent = names.down.rsplit_once('.').map_or("", |(parent, _)| parent);
-                let block = if parent.is_empty() { builder.clone() } else { builder.pp(parent) };
+                let block = if parent.is_empty() {
+                    builder.clone()
+                } else {
+                    builder.pp(parent)
+                };
                 Some(Xielu::load(block.pp("act_fn"))?)
             } else {
                 None
@@ -262,6 +313,7 @@ impl FeedForward {
                 .activation_sparsity
                 .filter(|(_, layers)| layer < 128 && layers & (1u128 << layer) != 0)
                 .map(|(multiplier, _)| multiplier),
+            clamp: architecture.dense_swiglu_limit,
         })
     }
 
@@ -279,6 +331,10 @@ impl FeedForward {
                     None => gate,
                 };
                 let gate = self.sparse(gate)?;
+                let (gate, up) = match self.clamp {
+                    Some(limit) => (gate.minimum(limit)?, up.clamp(-limit, limit)?),
+                    None => (gate, up),
+                };
                 match &self.xielu {
                     Some(xielu) => (xielu.apply(&gate)? * up)?,
                     None => self.activation.gated(&gate, &up)?,
@@ -308,8 +364,13 @@ impl FeedForward {
             return Ok(gate);
         };
         let mean = gate.mean_keepdim(candle_core::D::Minus1)?;
-        let deviation = gate.broadcast_sub(&mean)?.sqr()?.mean_keepdim(candle_core::D::Minus1)?.sqrt()?;
-        gate.broadcast_sub(&(mean + (deviation * multiplier)?)?)?.relu()
+        let deviation = gate
+            .broadcast_sub(&mean)?
+            .sqr()?
+            .mean_keepdim(candle_core::D::Minus1)?
+            .sqrt()?;
+        gate.broadcast_sub(&(mean + (deviation * multiplier)?)?)?
+            .relu()
     }
 }
 
@@ -371,10 +432,20 @@ impl ParallelMixers {
         mask: Option<&Tensor>,
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
-        let ParallelScan { attention_in, attention_out, scan_out } = self.scales;
+        let ParallelScan {
+            attention_in,
+            attention_out,
+            scan_out,
+        } = self.scales;
         let scanned = (self.scan.forward(normed, layer, cache)? * scan_out)?;
-        let attended =
-            self.attention.forward(&(normed * attention_in)?, index_pos, layer, cache, mask, mode)?;
+        let attended = self.attention.forward(
+            &(normed * attention_in)?,
+            index_pos,
+            layer,
+            cache,
+            mask,
+            mode,
+        )?;
         scanned + (attended * attention_out)?
     }
 }
@@ -427,23 +498,46 @@ impl DecoderLayer {
     ) -> candle_core::Result<Self> {
         let per_layer_input = match architecture.per_layer_input {
             Some(spec) => Some(PerLayerInput {
-                gate: linear_no_bias(config.hidden_size, spec.width, builder.pp("per_layer_input_gate"))?,
-                projection: linear_no_bias(spec.width, config.hidden_size, builder.pp("per_layer_projection"))?,
+                gate: linear_no_bias(
+                    config.hidden_size,
+                    spec.width,
+                    builder.pp("per_layer_input_gate"),
+                )?,
+                projection: linear_no_bias(
+                    spec.width,
+                    config.hidden_size,
+                    builder.pp("per_layer_projection"),
+                )?,
                 norm: NormSpec::of(architecture)
                     .load(config.hidden_size, builder.pp("post_per_layer_input_norm"))?,
                 activation: architecture.activation,
             }),
             None => None,
         };
-        let scalar = if architecture.layer_scalar { Some(builder.get(1, "layer_scalar")?) } else { None };
+        let scalar = if architecture.layer_scalar {
+            Some(builder.get(1, "layer_scalar")?)
+        } else {
+            None
+        };
         let altup = match architecture.altup_streams {
-            Some(streams) => Some(altup::AltUp::load(builder.pp("altup"), config.hidden_size, streams, NormSpec::of(architecture))?),
+            Some(streams) => Some(altup::AltUp::load(
+                builder.pp("altup"),
+                config.hidden_size,
+                streams,
+                NormSpec::of(architecture),
+            )?),
             None => None,
         };
         let depth = match architecture.depth_block_size {
             Some(block_size) => {
                 let mix = |norm: &str, projection: &str| {
-                    DepthMix::load(&builder, config.hidden_size, norm, projection, architecture.norm_eps)
+                    DepthMix::load(
+                        &builder,
+                        config.hidden_size,
+                        norm,
+                        projection,
+                        architecture.norm_eps,
+                    )
                 };
                 Some(DepthMixes {
                     attention: mix("self_attention_res_norm", "self_attention_res_proj")?,
@@ -453,19 +547,20 @@ impl DecoderLayer {
             }
             None => None,
         };
-        let hyper = match architecture.compressed {
+        let hyper = match architecture.hyper_connections {
             Some(spec) => {
-                let connection = |name: &str| {
+                let connection = |kind: &str| {
                     HyperConnection::load(
-                        &builder.pp(name),
+                        &builder,
+                        kind,
                         config.hidden_size,
                         spec.streams,
                         spec.sinkhorn_iterations,
-                        spec.hyper_eps,
+                        spec.eps,
                         architecture.norm_eps,
                     )
                 };
-                Some((connection("attn_hc")?, connection("ffn_hc")?))
+                Some((connection("attn")?, connection("ffn")?))
             }
             None => None,
         };
@@ -496,14 +591,28 @@ impl DecoderLayer {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let Some(depth) = &self.depth else {
-            candle_core::bail!("layer {layer} has no attention residuals and was asked to run under them");
+            candle_core::bail!(
+                "layer {layer} has no attention residuals and was asked to run under them"
+            );
         };
-        let input = if blocks.is_empty() { partial.clone() } else { depth.attention.mix(blocks, partial)? };
+        let input = if blocks.is_empty() {
+            partial.clone()
+        } else {
+            depth.attention.mix(blocks, partial)?
+        };
         let mut running = Some(partial.clone());
         if layer % depth.block_size == 0 {
             blocks.extend(running.take());
         }
-        let attended = self.block.mixer_output(&input, inputs.embedded, index_pos, layer, cache, mask, mode)?;
+        let attended = self.block.mixer_output(
+            &input,
+            inputs.embedded,
+            index_pos,
+            layer,
+            cache,
+            mask,
+            mode,
+        )?;
         let running = match running {
             Some(running) => (running + attended)?,
             None => attended,
@@ -527,13 +636,25 @@ impl DecoderLayer {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let Some((attention, feed_forward)) = &self.hyper else {
-            candle_core::bail!("layer {layer} has no hyper-connections and was asked to run its streams");
+            candle_core::bail!(
+                "layer {layer} has no hyper-connections and was asked to run its streams"
+            );
         };
         let mixing = attention.mixing(streams)?;
-        let attended = self.block.mixer_output(&mixing.collapsed, inputs.embedded, index_pos, layer, cache, mask, mode)?;
+        let attended = self.block.mixer_output(
+            &mixing.collapsed,
+            inputs.embedded,
+            index_pos,
+            layer,
+            cache,
+            mask,
+            mode,
+        )?;
         let streams = mixing.spread(&attended, streams)?;
         let mixing = feed_forward.mixing(&streams)?;
-        let output = self.block.feed_forward_output(&mixing.collapsed, layer, cache, mode)?;
+        let output = self
+            .block
+            .feed_forward_output(&mixing.collapsed, layer, cache, mode)?;
         mixing.spread(&output, &streams)
     }
 
@@ -552,14 +673,23 @@ impl DecoderLayer {
         mask: Option<&Tensor>,
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
-        let output = self.block.forward(hidden, inputs.embedded, index_pos, layer, cache, mask, mode)?;
+        let output =
+            self.block
+                .forward(hidden, inputs.embedded, index_pos, layer, cache, mask, mode)?;
         let output = match (&self.per_layer_input, &inputs.per_layer) {
             (Some(per_layer), Some(input)) => {
-                let gated = (per_layer.activation.apply(&per_layer.gate.forward(&output)?)? * input)?;
-                let added = per_layer.norm.forward(&per_layer.projection.forward(&gated)?, mode.pass)?;
+                let gated = (per_layer
+                    .activation
+                    .apply(&per_layer.gate.forward(&output)?)?
+                    * input)?;
+                let added = per_layer
+                    .norm
+                    .forward(&per_layer.projection.forward(&gated)?, mode.pass)?;
                 (output + added)?
             }
-            (Some(_), None) => candle_core::bail!("layer {layer} takes a per-layer input and was given none"),
+            (Some(_), None) => {
+                candle_core::bail!("layer {layer} takes a per-layer input and was given none")
+            }
             (None, _) => output,
         };
         match &self.scalar {
@@ -588,12 +718,25 @@ impl DecoderLayer {
             candle_core::bail!("layer {layer} carries no AltUp streams");
         };
         let predictions = altup.predict(streams, mode.pass)?;
-        let activated = self.block.forward(&predictions[0], inputs.embedded, index_pos, layer, cache, mask, mode)?;
+        let activated = self.block.forward(
+            &predictions[0],
+            inputs.embedded,
+            index_pos,
+            layer,
+            cache,
+            mask,
+            mode,
+        )?;
         let mut corrected = altup.correct(&predictions, &activated, mode.pass)?;
         if let (Some(per_layer), Some(input)) = (&self.per_layer_input, &inputs.per_layer) {
             let first = altup.scaled(&corrected[0])?;
-            let gated = (per_layer.activation.apply(&per_layer.gate.forward(&first)?)? * input)?;
-            let added = per_layer.norm.forward(&per_layer.projection.forward(&gated)?, mode.pass)?;
+            let gated = (per_layer
+                .activation
+                .apply(&per_layer.gate.forward(&first)?)?
+                * input)?;
+            let added = per_layer
+                .norm
+                .forward(&per_layer.projection.forward(&gated)?, mode.pass)?;
             for stream in corrected.iter_mut().skip(1) {
                 *stream = (&*stream + &added)?;
             }
@@ -664,7 +807,13 @@ impl Block {
                 )?),
                 attention_output_norm: None,
                 feed_forward_norm: Some(norm(names.feed_forward_norm)?),
-                feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
+                feed_forward: Some(feed_forward_block(
+                    &builder,
+                    config,
+                    architecture,
+                    layer,
+                    adapters,
+                )?),
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
@@ -683,7 +832,9 @@ impl Block {
                 attention_norm: Some(norm(names.attention_norm)?),
                 mixer: Mixer::DeltaRule(DeltaRule::load(
                     builder.pp(match spec.form {
-                        DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 | DeltaRuleForm::OlmoHybrid => "linear_attn",
+                        DeltaRuleForm::Qwen3Next
+                        | DeltaRuleForm::Qwen35
+                        | DeltaRuleForm::OlmoHybrid => "linear_attn",
                         DeltaRuleForm::Kimi => "self_attn",
                         DeltaRuleForm::Ling => "attention",
                     }),
@@ -693,7 +844,13 @@ impl Block {
                 )?),
                 attention_output_norm: None,
                 feed_forward_norm: Some(norm(names.feed_forward_norm)?),
-                feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
+                feed_forward: Some(feed_forward_block(
+                    &builder,
+                    config,
+                    architecture,
+                    layer,
+                    adapters,
+                )?),
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
@@ -713,7 +870,13 @@ impl Block {
                 )?),
                 attention_output_norm: None,
                 feed_forward_norm: Some(norm(names.feed_forward_norm)?),
-                feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
+                feed_forward: Some(feed_forward_block(
+                    &builder,
+                    config,
+                    architecture,
+                    layer,
+                    adapters,
+                )?),
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
@@ -725,9 +888,13 @@ impl Block {
         // layer's `linear`, joins the hidden state before the Mamba-2 mixer's
         // norm (`mamba_decoder.input_layernorm`), and the mixer's output is
         // added to the hidden state.
-        if let (Some((block, block_builder)), Some(state_space)) = (shared, architecture.state_space.as_ref()) {
+        if let (Some((block, block_builder)), Some(state_space)) =
+            (shared, architecture.state_space.as_ref())
+        {
             let Some(heads) = state_space.structured else {
-                candle_core::bail!("a Zamba2 hybrid layer runs Mamba-2 heads, and this architecture states none");
+                candle_core::bail!(
+                    "a Zamba2 hybrid layer runs Mamba-2 heads, and this architecture states none"
+                );
             };
             let Some(blocks) = architecture.shared_blocks else {
                 candle_core::bail!("a hybrid layer needs the architecture's shared blocks");
@@ -767,7 +934,13 @@ impl Block {
         // as in any other block.
         if let Some(state_space) = architecture.state_space_at(layer) {
             let feed_forward = if state_space.feed_forward {
-                Some(feed_forward_block(&builder, config, architecture, layer, adapters)?)
+                Some(feed_forward_block(
+                    &builder,
+                    config,
+                    architecture,
+                    layer,
+                    adapters,
+                )?)
             } else {
                 None
             };
@@ -804,11 +977,14 @@ impl Block {
         }
         // Falcon-H1: attention and a Mamba-2 scan side by side on one normed
         // input, added to the residual, then a norm and the feed-forward.
-        if let (Some(scales), Some(state_space)) =
-            (architecture.parallel_scan, architecture.state_space.as_ref())
-        {
+        if let (Some(scales), Some(state_space)) = (
+            architecture.parallel_scan,
+            architecture.state_space.as_ref(),
+        ) {
             let Some(heads) = state_space.structured else {
-                candle_core::bail!("a parallel scan runs Mamba-2 heads, and this architecture states none");
+                candle_core::bail!(
+                    "a parallel scan runs Mamba-2 heads, and this architecture states none"
+                );
             };
             return Ok(Self {
                 attention_norm: Some(norm(names.attention_norm)?),
@@ -825,7 +1001,13 @@ impl Block {
                 })),
                 attention_output_norm: None,
                 feed_forward_norm: Some(norm(names.feed_forward_norm)?),
-                feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
+                feed_forward: Some(feed_forward_block(
+                    &builder,
+                    config,
+                    architecture,
+                    layer,
+                    adapters,
+                )?),
                 feed_forward_output_norm: None,
                 residual_multiplier: architecture.residual_multiplier,
                 parallel: false,
@@ -836,11 +1018,24 @@ impl Block {
         // Nemotron-H: one norm and one sublayer per block — the feed-forward
         // alone on the layers that name it, attention alone on the others.
         if let Some(feed_forward_layers) = architecture.lone_sublayers {
-            let mixer = if layer < u128::BITS as usize && feed_forward_layers & (1u128 << layer) != 0 {
-                Mixer::FeedForward(feed_forward_block(&builder, config, architecture, layer, adapters)?)
-            } else {
-                Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?)
-            };
+            let mixer =
+                if layer < u128::BITS as usize && feed_forward_layers & (1u128 << layer) != 0 {
+                    Mixer::FeedForward(feed_forward_block(
+                        &builder,
+                        config,
+                        architecture,
+                        layer,
+                        adapters,
+                    )?)
+                } else {
+                    Mixer::Attention(Attention::load(
+                        &builder,
+                        config,
+                        architecture,
+                        layer,
+                        adapters,
+                    )?)
+                };
             return Ok(Self {
                 attention_norm: Some(norm(names.attention_norm)?),
                 mixer,
@@ -861,14 +1056,26 @@ impl Block {
             let (attention_norm, mixer) = match plan.key_value_heads {
                 Some(_) => (
                     Some(norm(names.attention_norm)?),
-                    Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
+                    Mixer::Attention(Attention::load(
+                        &builder,
+                        config,
+                        architecture,
+                        layer,
+                        adapters,
+                    )?),
                 ),
                 None => (None, Mixer::Skip),
             };
             let (feed_forward_norm, feed_forward) = match plan.intermediate {
                 Some(_) => (
                     Some(norm(names.feed_forward_norm)?),
-                    Some(FeedForwardBlock::Dense(FeedForward::load(&builder, config, architecture, layer, adapters)?)),
+                    Some(FeedForwardBlock::Dense(FeedForward::load(
+                        &builder,
+                        config,
+                        architecture,
+                        layer,
+                        adapters,
+                    )?)),
                 ),
                 None => (None, None),
             };
@@ -894,7 +1101,11 @@ impl Block {
         // both halves, unless the feed-forward has its own norm (GPT-NeoX);
         // OLMo 2 has no norm before either sublayer.
         let (attention_norm, attention_output_norm, feed_forward_norm, feed_forward_output_norm) =
-            match (architecture.parallel, architecture.pre_norms, architecture.output_norms) {
+            match (
+                architecture.parallel,
+                architecture.pre_norms,
+                architecture.output_norms,
+            ) {
                 (true, _, _) => (
                     Some(norm(names.attention_norm)?),
                     None,
@@ -920,13 +1131,21 @@ impl Block {
                         offset: spec.offset && architecture.output_norm_shifts.is_none(),
                         ..spec
                     };
-                    let (attention_shift, feed_forward_shift) = architecture.output_norm_shifts.unwrap_or_default();
-                    let output_norm = |name: &str, shift: f64| output_spec.load(config.hidden_size, builder.pp(name))?.shifted(shift);
+                    let (attention_shift, feed_forward_shift) =
+                        architecture.output_norm_shifts.unwrap_or_default();
+                    let output_norm = |name: &str, shift: f64| {
+                        output_spec
+                            .load(config.hidden_size, builder.pp(name))?
+                            .shifted(shift)
+                    };
                     (
                         Some(norm(names.attention_norm)?),
                         Some(output_norm(names.attention_output_norm, attention_shift)?),
                         Some(norm(names.feed_forward_norm)?),
-                        Some(output_norm(names.feed_forward_output_norm, feed_forward_shift)?),
+                        Some(output_norm(
+                            names.feed_forward_output_norm,
+                            feed_forward_shift,
+                        )?),
                     )
                 }
                 (false, false, _) => (
@@ -953,12 +1172,28 @@ impl Block {
                     architecture.norm_eps,
                     layer,
                 )?)),
-                (None, None) => Mixer::Attention(Attention::load(&builder, config, architecture, layer, adapters)?),
+                (None, None) => Mixer::Attention(Attention::load(
+                    &builder,
+                    config,
+                    architecture,
+                    layer,
+                    adapters,
+                )?),
             },
             attention_output_norm,
             // Gemma 4's paired block norms the residual itself.
-            feed_forward_norm: if architecture.side_experts.is_some() { None } else { feed_forward_norm },
-            feed_forward: Some(feed_forward_block(&builder, config, architecture, layer, adapters)?),
+            feed_forward_norm: if architecture.side_experts.is_some() {
+                None
+            } else {
+                feed_forward_norm
+            },
+            feed_forward: Some(feed_forward_block(
+                &builder,
+                config,
+                architecture,
+                layer,
+                adapters,
+            )?),
             feed_forward_output_norm: match feed_forward_output_norm {
                 Some(existing) => Some(existing),
                 None if architecture.routed_output_norm
@@ -977,7 +1212,12 @@ impl Block {
                 feed_forward: scales.feed_forward,
             }),
             laurel: match architecture.laurel_rank {
-                Some(rank) => Some(altup::Laurel::load(builder.pp("laurel"), config.hidden_size, rank, spec)?),
+                Some(rank) => Some(altup::Laurel::load(
+                    builder.pp("laurel"),
+                    config.hidden_size,
+                    rank,
+                    spec,
+                )?),
                 None => None,
             },
         })
@@ -994,14 +1234,16 @@ fn feed_forward_block(
     adapters: &Adapters,
 ) -> candle_core::Result<FeedForwardBlock> {
     if let Some(spec) = &architecture.inkling {
-        return Ok(FeedForwardBlock::Inkling(Box::new(inkling::FeedForward::load(
-            builder,
-            config.hidden_size,
-            config.intermediate_size,
-            spec,
-            architecture.activation,
-            layer,
-        )?)));
+        return Ok(FeedForwardBlock::Inkling(Box::new(
+            inkling::FeedForward::load(
+                builder,
+                config.hidden_size,
+                config.intermediate_size,
+                spec,
+                architecture.activation,
+                layer,
+            )?,
+        )));
     }
     if let Some(experts) = &architecture.side_experts {
         let spec = NormSpec::of(architecture);
@@ -1010,7 +1252,13 @@ fn feed_forward_block(
             dense: FeedForward::load(builder, config, architecture, layer, adapters)?,
             dense_norm: norm(architecture.names.feed_forward_norm)?,
             dense_output_norm: norm("post_feedforward_layernorm_1")?,
-            experts: Experts::load(builder, config.hidden_size, experts, architecture.activation, layer)?,
+            experts: Experts::load(
+                builder,
+                config.hidden_size,
+                experts,
+                architecture.activation,
+                layer,
+            )?,
             router_norm: spec.unscaled(config.hidden_size, builder)?,
             experts_norm: norm("pre_feedforward_layernorm_2")?,
             experts_output_norm: norm("post_feedforward_layernorm_2")?,
@@ -1021,7 +1269,13 @@ fn feed_forward_block(
     if let Some(experts) = &architecture.shortcut_experts {
         let dense = FeedForward::load(builder, config, architecture, layer, adapters)?;
         let shortcut = if layer % 2 == 0 {
-            Some(Experts::load(builder, config.hidden_size, experts, architecture.activation, layer)?)
+            Some(Experts::load(
+                builder,
+                config.hidden_size,
+                experts,
+                architecture.activation,
+                layer,
+            )?)
         } else {
             None
         };
@@ -1035,7 +1289,13 @@ fn feed_forward_block(
             architecture.activation,
             layer,
         )?),
-        _ => FeedForwardBlock::Dense(FeedForward::load(builder, config, architecture, layer, adapters)?),
+        _ => FeedForwardBlock::Dense(FeedForward::load(
+            builder,
+            config,
+            architecture,
+            layer,
+            adapters,
+        )?),
     })
 }
 
@@ -1076,7 +1336,8 @@ impl Block {
                 return Ok(hidden.clone());
             };
             let normed = optional_norm(self.feed_forward_norm.as_ref(), hidden, mode.pass)?;
-            return hidden + self.scaled(feed_forward_block.forward_at(&normed, mode, layer, cache)?)?;
+            return hidden
+                + self.scaled(feed_forward_block.forward_at(&normed, mode, layer, cache)?)?;
         }
         let normed = optional_norm(self.attention_norm.as_ref(), hidden, mode.pass)?;
         let mixed = self.mix(&normed, embedded, index_pos, layer, cache, mask, mode)?;
@@ -1087,14 +1348,23 @@ impl Block {
         // MiniMax-Text-01: `residual · alpha + output · beta` after each
         // sublayer, the residual being the sublayer's normed input under
         // `postnorm`.
-        if let Some(BlockScales { from_normed, mixer, feed_forward }) = self.scales {
+        if let Some(BlockScales {
+            from_normed,
+            mixer,
+            feed_forward,
+        }) = self.scales
+        {
             let join = |residual: &Tensor, output: Tensor, (alpha, beta): (f64, f64)| {
                 (residual * alpha)? + (output * beta)?
             };
             let hidden = join(if from_normed { &normed } else { hidden }, attention, mixer)?;
             let normed = optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?;
             let output = feed_forward_block.forward_at(&normed, mode, layer, cache)?;
-            return join(if from_normed { &normed } else { &hidden }, output, feed_forward);
+            return join(
+                if from_normed { &normed } else { &hidden },
+                output,
+                feed_forward,
+            );
         }
         if self.parallel {
             // GPT-NeoX normalises the feed-forward's input on its own; the
@@ -1103,19 +1373,27 @@ impl Block {
                 Some(norm) => norm.forward(hidden, mode.pass)?,
                 None => normed,
             };
-            let feed_forward = feed_forward_block.forward_at(&feed_forward_input, mode, layer, cache)?;
+            let feed_forward =
+                feed_forward_block.forward_at(&feed_forward_input, mode, layer, cache)?;
             return (hidden + self.scaled(attention)?)? + self.scaled(feed_forward)?;
         }
         let hidden = (hidden + self.scaled(attention)?)?;
         // Gemma 3n averages attention's residual with Laurel's.
         let hidden = match &self.laurel {
-            Some(laurel) => ((hidden + laurel.forward(&normed, mode.pass)?)? / std::f64::consts::SQRT_2)?,
+            Some(laurel) => {
+                ((hidden + laurel.forward(&normed, mode.pass)?)? / std::f64::consts::SQRT_2)?
+            }
             None => hidden,
         };
-        let feed_forward_input = optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?;
-        let feed_forward = feed_forward_block.forward_at(&feed_forward_input, mode, layer, cache)?;
+        let feed_forward_input =
+            optional_norm(self.feed_forward_norm.as_ref(), &hidden, mode.pass)?;
         let feed_forward =
-            optional_norm(self.feed_forward_output_norm.as_ref(), &feed_forward, mode.pass)?;
+            feed_forward_block.forward_at(&feed_forward_input, mode, layer, cache)?;
+        let feed_forward = optional_norm(
+            self.feed_forward_output_norm.as_ref(),
+            &feed_forward,
+            mode.pass,
+        )?;
         let output = (hidden + self.scaled(feed_forward)?)?;
         feed_forward_block.shortcut(&feed_forward_input, output, layer, cache)
     }
@@ -1141,21 +1419,35 @@ impl Block {
     ) -> candle_core::Result<Tensor> {
         Ok(match &self.mixer {
             Mixer::Skip => candle_core::bail!("layer {layer} has no attention to run"),
-            Mixer::Attention(attention) => attention.forward(normed, index_pos, layer, cache, mask, mode)?,
+            Mixer::Attention(attention) => {
+                attention.forward(normed, index_pos, layer, cache, mask, mode)?
+            }
             Mixer::StateSpace(state_space) => state_space.forward(normed, layer, cache)?,
             Mixer::Structured(structured) => structured.forward(normed, layer, cache)?,
             Mixer::ShortConv(convolution) => convolution.forward(normed, layer, cache)?,
             Mixer::DeltaRule(delta) => delta.forward(normed, layer, cache)?,
-            Mixer::Lightning(lightning) => lightning.forward(normed, index_pos, layer, cache, mode)?,
-            Mixer::FeedForward(feed_forward) => feed_forward.forward_at(normed, mode, layer, cache)?,
-            Mixer::Parallel(mixers) => mixers.forward(normed, index_pos, layer, cache, mask, mode)?,
+            Mixer::Lightning(lightning) => {
+                lightning.forward(normed, index_pos, layer, cache, mode)?
+            }
+            Mixer::FeedForward(feed_forward) => {
+                feed_forward.forward_at(normed, mode, layer, cache)?
+            }
+            Mixer::Parallel(mixers) => {
+                mixers.forward(normed, index_pos, layer, cache, mask, mode)?
+            }
             Mixer::Hybrid(hybrid) => {
-                let shared = hybrid.shared.forward(normed, embedded, index_pos, layer, cache, mask, mode)?;
+                let shared = hybrid
+                    .shared
+                    .forward(normed, embedded, index_pos, layer, cache, mask, mode)?;
                 let joined = hybrid.norm.forward(&(normed + shared)?, mode.pass)?;
                 hybrid.scan.forward(&joined, layer, cache)?
             }
-            Mixer::Relative(attention) => attention.forward(normed, index_pos, layer, cache, mask, mode)?,
-            Mixer::Compressed(attention) => attention.forward(normed, index_pos, layer, cache, mask, mode)?,
+            Mixer::Relative(attention) => {
+                attention.forward(normed, index_pos, layer, cache, mask, mode)?
+            }
+            Mixer::Compressed(attention) => {
+                attention.forward(normed, index_pos, layer, cache, mask, mode)?
+            }
         })
     }
 
@@ -1177,7 +1469,13 @@ impl Block {
     }
 
     /// The feed-forward's output alone, before any residual.
-    fn feed_forward_output(&self, input: &Tensor, layer: usize, cache: &mut Cache, mode: Mode) -> candle_core::Result<Tensor> {
+    fn feed_forward_output(
+        &self,
+        input: &Tensor,
+        layer: usize,
+        cache: &mut Cache,
+        mode: Mode,
+    ) -> candle_core::Result<Tensor> {
         let Some(feed_forward_block) = &self.feed_forward else {
             candle_core::bail!("layer {layer} has no feed-forward to run");
         };

@@ -54,8 +54,12 @@ pub(super) struct Mixing {
 }
 
 impl HyperConnection {
+    /// `builder` is the layer's and `kind` `attn` or `ffn`: Transformers
+    /// names the parameters `{kind}_hc.fn`, `.base` and `.scale`, DeepSeek's
+    /// and GLM's own checkpoints `hc_{kind}_fn`, `_base` and `_scale`.
     pub(super) fn load(
         builder: &VarBuilder<'_>,
+        kind: &str,
         hidden: usize,
         streams: usize,
         iterations: usize,
@@ -63,11 +67,29 @@ impl HyperConnection {
         norm_eps: f64,
     ) -> candle_core::Result<Self> {
         let width = (2 + streams) * streams;
-        let scales = builder.get(3, "scale")?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let module = format!("{kind}_hc");
+        let transformers = builder.contains_tensor(&format!("{module}.fn"));
+        let name = |part: &str| -> String {
+            if transformers {
+                format!("{module}.{part}")
+            } else {
+                format!("hc_{kind}_{part}")
+            }
+        };
+        let scales = builder
+            .get(3, &name("scale"))?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
         Ok(Self {
-            projection: builder.get((width, streams * hidden), "fn")?.to_dtype(DType::F32)?,
-            base: builder.get(width, "base")?.to_dtype(DType::F32)?,
-            scales: [f64::from(scales[0]), f64::from(scales[1]), f64::from(scales[2])],
+            projection: builder
+                .get((width, streams * hidden), &name("fn"))?
+                .to_dtype(DType::F32)?,
+            base: builder.get(width, &name("base"))?.to_dtype(DType::F32)?,
+            scales: [
+                f64::from(scales[0]),
+                f64::from(scales[1]),
+                f64::from(scales[2]),
+            ],
             streams,
             iterations,
             eps,
@@ -79,17 +101,24 @@ impl HyperConnection {
     pub(super) fn mixing(&self, streams: &Tensor) -> candle_core::Result<Mixing> {
         let (batch, sequence, count, hidden) = streams.dims4()?;
         let n = self.streams;
-        let flat = streams.reshape((batch, sequence, count * hidden))?.to_dtype(DType::F32)?;
+        let flat = streams
+            .reshape((batch, sequence, count * hidden))?
+            .to_dtype(DType::F32)?;
         let mixes = unscaled_rms(&flat, self.norm_eps)?.broadcast_matmul(&self.projection.t()?)?;
         let part = |start: usize, width: usize| -> candle_core::Result<(Tensor, Tensor)> {
-            Ok((mixes.narrow(D::Minus1, start, width)?, self.base.narrow(0, start, width)?))
+            Ok((
+                mixes.narrow(D::Minus1, start, width)?,
+                self.base.narrow(0, start, width)?,
+            ))
         };
         let (pre, pre_base) = part(0, n)?;
         let (post, post_base) = part(n, n)?;
         let (comb, comb_base) = part(2 * n, n * n)?;
         let pre = (sigmoid(&(pre * self.scales[0])?.broadcast_add(&pre_base)?)? + self.eps)?;
         let post = (sigmoid(&(post * self.scales[1])?.broadcast_add(&post_base)?)? * 2.0)?;
-        let comb = (comb * self.scales[2])?.broadcast_add(&comb_base)?.reshape((batch, sequence, n, n))?;
+        let comb = (comb * self.scales[2])?
+            .broadcast_add(&comb_base)?
+            .reshape((batch, sequence, n, n))?;
         let mut comb = (candle_nn::ops::softmax(&comb, D::Minus1)? + self.eps)?;
         comb = comb.broadcast_div(&(comb.sum_keepdim(2)? + self.eps)?)?;
         for _ in 1..self.iterations {
@@ -97,7 +126,11 @@ impl HyperConnection {
             comb = comb.broadcast_div(&(comb.sum_keepdim(2)? + self.eps)?)?;
         }
         let collapsed = collapse(streams, &pre)?;
-        Ok(Mixing { post, comb, collapsed })
+        Ok(Mixing {
+            post,
+            comb,
+            collapsed,
+        })
     }
 }
 
@@ -106,8 +139,17 @@ impl Mixing {
     /// hidden]` plus `comb`'s mix of the incoming `streams`.
     pub(super) fn spread(&self, output: &Tensor, streams: &Tensor) -> candle_core::Result<Tensor> {
         let dtype = streams.dtype();
-        let spread = self.post.to_dtype(dtype)?.unsqueeze(3)?.broadcast_mul(&output.unsqueeze(2)?)?;
-        let mixed = self.comb.to_dtype(dtype)?.transpose(2, 3)?.contiguous()?.matmul(&streams.contiguous()?)?;
+        let spread = self
+            .post
+            .to_dtype(dtype)?
+            .unsqueeze(3)?
+            .broadcast_mul(&output.unsqueeze(2)?)?;
+        let mixed = self
+            .comb
+            .to_dtype(dtype)?
+            .transpose(2, 3)?
+            .contiguous()?
+            .matmul(&streams.contiguous()?)?;
         spread + mixed
     }
 }
@@ -115,7 +157,11 @@ impl Mixing {
 /// `Σ_n weights[n] · streams[n]`, `weights` `[batch, sequence, N]` in F32.
 fn collapse(streams: &Tensor, weights: &Tensor) -> candle_core::Result<Tensor> {
     let dtype = streams.dtype();
-    streams.to_dtype(DType::F32)?.broadcast_mul(&weights.unsqueeze(3)?)?.sum(2)?.to_dtype(dtype)
+    streams
+        .to_dtype(DType::F32)?
+        .broadcast_mul(&weights.unsqueeze(3)?)?
+        .sum(2)?
+        .to_dtype(dtype)
 }
 
 /// The model's last collapse of its streams (`hc_head`).
@@ -130,11 +176,22 @@ pub(super) struct HyperHead {
 
 impl HyperHead {
     /// `builder` is the model root's.
-    pub(super) fn load(builder: &VarBuilder<'_>, hidden: usize, streams: usize, eps: f64, norm_eps: f64) -> candle_core::Result<Self> {
+    pub(super) fn load(
+        builder: &VarBuilder<'_>,
+        hidden: usize,
+        streams: usize,
+        eps: f64,
+        norm_eps: f64,
+    ) -> candle_core::Result<Self> {
         let head = builder.pp("hc_head");
-        let scale = head.get(1, "hc_scale")?.to_dtype(DType::F32)?.to_vec1::<f32>()?[0];
+        let scale = head
+            .get(1, "hc_scale")?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?[0];
         Ok(Self {
-            projection: head.get((streams, streams * hidden), "hc_fn")?.to_dtype(DType::F32)?,
+            projection: head
+                .get((streams, streams * hidden), "hc_fn")?
+                .to_dtype(DType::F32)?,
             base: head.get(streams, "hc_base")?.to_dtype(DType::F32)?,
             scale: f64::from(scale),
             eps,
@@ -144,7 +201,9 @@ impl HyperHead {
 
     pub(super) fn collapse(&self, streams: &Tensor) -> candle_core::Result<Tensor> {
         let (batch, sequence, count, hidden) = streams.dims4()?;
-        let flat = streams.reshape((batch, sequence, count * hidden))?.to_dtype(DType::F32)?;
+        let flat = streams
+            .reshape((batch, sequence, count * hidden))?
+            .to_dtype(DType::F32)?;
         let mixes = unscaled_rms(&flat, self.norm_eps)?.broadcast_matmul(&self.projection.t()?)?;
         let pre = (sigmoid(&(mixes * self.scale)?.broadcast_add(&self.base)?)? + self.eps)?;
         collapse(streams, &pre)

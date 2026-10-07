@@ -12,8 +12,8 @@ use candle_transformers::models::llama::Config;
 use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
-    Activation, Architecture, Cache, GateFunction, LatentAttention, Mode, NormKind, Pass, Positions, QkvLayout,
-    QueryKeyNorm, QueryTemperature, Readout, Route,
+    Activation, Architecture, Cache, GateFunction, LatentAttention, Mode, NormKind, Pass,
+    Positions, QkvLayout, QueryKeyNorm, QueryTemperature, Readout, Route,
     layer::{
         experts::Experts,
         norm::{Norm, NormSpec},
@@ -151,7 +151,14 @@ impl Attention {
         layer: usize,
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
-        Self::load_reading(layer_builder, config, architecture, layer, adapters, config.hidden_size)
+        Self::load_reading(
+            layer_builder,
+            config,
+            architecture,
+            layer,
+            adapters,
+            config.hidden_size,
+        )
     }
 
     /// [`Attention::load`] for an attention that reads `input` components
@@ -172,10 +179,16 @@ impl Attention {
         // MiMo-V2's and Gemma 4's their own key-value head count, Step 3.5's
         // their own head counts; DeciLM states each layer's key-value heads.
         let global = architecture.global_at(layer);
-        let heads = global.and_then(|global| global.heads).unwrap_or(config.num_attention_heads);
+        let heads = global
+            .and_then(|global| global.heads)
+            .unwrap_or(config.num_attention_heads);
         let key_value_heads = global
             .and_then(|global| global.key_value_heads)
-            .or_else(|| architecture.layer_plan(layer).and_then(|plan| plan.key_value_heads))
+            .or_else(|| {
+                architecture
+                    .layer_plan(layer)
+                    .and_then(|plan| plan.key_value_heads)
+            })
             .unwrap_or(config.num_key_value_heads);
         let head_dim = global.map_or(architecture.head_dim, |global| global.head_dim);
         let query_width = match global {
@@ -218,20 +231,30 @@ impl Attention {
             ),
             QueryKeyNorm::HeadWeights => (
                 Some(spec.load_head_weights(heads, head_dim, builder.pp(names.query_norm))?),
-                Some(spec.load_head_weights(key_value_heads, head_dim, builder.pp(names.key_norm))?),
+                Some(spec.load_head_weights(
+                    key_value_heads,
+                    head_dim,
+                    builder.pp(names.key_norm),
+                )?),
             ),
             QueryKeyNorm::HeadModules => (
                 Some(spec.load_head_modules(heads, head_dim, builder.pp("q_layernorm"))?),
-                Some(spec.load_head_modules(key_value_heads, head_dim, builder.pp("k_layernorm"))?),
+                Some(spec.load_head_modules(
+                    key_value_heads,
+                    head_dim,
+                    builder.pp("k_layernorm"),
+                )?),
             ),
             // Llama 4 norms only the rotating layers' queries and keys.
-            QueryKeyNorm::Unscaled if architecture.rotates(layer) => {
-                (Some(spec.unscaled(head_dim, &builder)?), Some(spec.unscaled(head_dim, &builder)?))
-            }
+            QueryKeyNorm::Unscaled if architecture.rotates(layer) => (
+                Some(spec.unscaled(head_dim, &builder)?),
+                Some(spec.unscaled(head_dim, &builder)?),
+            ),
             QueryKeyNorm::Unscaled => (None, None),
-            QueryKeyNorm::Weightless => {
-                (Some(spec.unscaled(head_dim, &builder)?), Some(spec.unscaled(head_dim, &builder)?))
-            }
+            QueryKeyNorm::Weightless => (
+                Some(spec.unscaled(head_dim, &builder)?),
+                Some(spec.unscaled(head_dim, &builder)?),
+            ),
         };
         let rotary = if !architecture.rotates(layer) {
             Rotary::None
@@ -243,9 +266,13 @@ impl Attention {
         let mut output_gate = None;
         // K2-Horizon's value experts, on its routed layers only.
         let value_experts = match &architecture.value_experts {
-            Some(spec) if architecture.routed(layer) => {
-                Some(Experts::load(layer_builder, input, spec, Activation::Silu, layer)?)
-            }
+            Some(spec) if architecture.routed(layer) => Some(Experts::load(
+                layer_builder,
+                input,
+                spec,
+                Activation::Silu,
+                layer,
+            )?),
             _ => None,
         };
         let projections = if let Some(source) = source {
@@ -264,139 +291,196 @@ impl Attention {
                 architecture.latent_scales.unwrap_or((1.0, 1.0)),
             )?)
         } else {
-        let (query, key, value) = match architecture.qkv_layout {
-            // Qwen3-Next's `q_proj` holds each head's query rows and then its
-            // gate rows; both are gathered once at load.
-            QkvLayout::Separate if architecture.output_gate => {
-                let rows = builder.pp(names.query);
-                let weight = rows
-                    .get((2 * query_width, input), "weight")?
-                    .reshape((heads, 2, head_dim, input))?;
-                let paired_bias = if bias {
-                    Some(rows.get(2 * query_width, "bias")?.reshape((heads, 2, head_dim))?)
-                } else {
-                    None
-                };
-                let part = |slot: usize| -> candle_core::Result<Linear> {
-                    Ok(Linear::new(
-                        weight.narrow(1, slot, 1)?.contiguous()?.reshape((query_width, input))?,
-                        paired_bias
-                            .as_ref()
-                            .map(|bias| bias.narrow(1, slot, 1)?.contiguous()?.reshape(query_width))
-                            .transpose()?,
-                    ))
-                };
-                output_gate = Some(part(1)?);
-                (
-                    part(0)?,
+            let (query, key, value) = match architecture.qkv_layout {
+                // Qwen3-Next's `q_proj` holds each head's query rows and then its
+                // gate rows; both are gathered once at load.
+                QkvLayout::Separate if architecture.output_gate => {
+                    let rows = builder.pp(names.query);
+                    let weight = rows
+                        .get((2 * query_width, input), "weight")?
+                        .reshape((heads, 2, head_dim, input))?;
+                    let paired_bias = if bias {
+                        Some(
+                            rows.get(2 * query_width, "bias")?
+                                .reshape((heads, 2, head_dim))?,
+                        )
+                    } else {
+                        None
+                    };
+                    let part = |slot: usize| -> candle_core::Result<Linear> {
+                        Ok(Linear::new(
+                            weight
+                                .narrow(1, slot, 1)?
+                                .contiguous()?
+                                .reshape((query_width, input))?,
+                            paired_bias
+                                .as_ref()
+                                .map(|bias| {
+                                    bias.narrow(1, slot, 1)?.contiguous()?.reshape(query_width)
+                                })
+                                .transpose()?,
+                        ))
+                    };
+                    output_gate = Some(part(1)?);
+                    (
+                        part(0)?,
+                        projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
+                        Some(projection(
+                            input,
+                            key_value_width,
+                            bias,
+                            conv1d,
+                            builder.pp(names.value),
+                        )?),
+                    )
+                }
+                QkvLayout::Separate => (
+                    projection(
+                        architecture.query_bottleneck.unwrap_or(input),
+                        query_width,
+                        bias,
+                        conv1d,
+                        builder.pp(names.query),
+                    )?,
                     projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
-                    Some(projection(input, key_value_width, bias, conv1d, builder.pp(names.value))?),
-                )
-            }
-            QkvLayout::Separate => (
-                projection(
-                    architecture.query_bottleneck.unwrap_or(input),
-                    query_width,
-                    bias,
-                    conv1d,
-                    builder.pp(names.query),
-                )?,
-                projection(input, key_value_width, bias, conv1d, builder.pp(names.key))?,
-                // Gemma 4's full-attention layers under `attention_k_eq_v`
-                // have no `v_proj`: the value is the key projection. Nor do
-                // K2-Horizon's routed layers, whose value experts give it.
-                if global.is_some_and(|global| global.key_is_value) || value_experts.is_some() {
-                    None
-                } else {
-                    Some(projection(input, value_width, bias, conv1d, builder.pp(names.value))?)
-                },
-            ),
-            // Phi-3, GPT-2 and GPT-BigCode store query, key and value as one
-            // matrix, rows in that order. Each projection is a row slice of it
-            // — a view of the mapped weight, not a copy — so every adapter
-            // site stays separate. GPT-2's `Conv1D` stores it transposed, so
-            // that one is laid out once at load.
-            // HRM-Text's `gqkv_proj` puts its elementwise gate's rows first.
-            QkvLayout::Stacked | QkvLayout::GateStacked => {
-                let gate_width = if architecture.qkv_layout == QkvLayout::GateStacked { heads * value_dim } else { 0 };
-                let rows = gate_width + query_width + key_value_width + value_width;
-                let fused = builder.pp(names.fused_qkv);
-                let weight = if conv1d {
-                    fused.get((input, rows), "weight")?.t()?.contiguous()?
-                } else {
-                    fused.get((rows, input), "weight")?
-                };
-                let bias = if bias { Some(fused.get(rows, "bias")?) } else { None };
-                let slice = |start: usize, width: usize| -> candle_core::Result<Linear> {
-                    Ok(Linear::new(
-                        weight.narrow(0, gate_width + start, width)?,
-                        bias.as_ref().map(|bias| bias.narrow(0, gate_width + start, width)).transpose()?,
-                    ))
-                };
-                (
-                    slice(0, query_width)?,
-                    slice(query_width, key_value_width)?,
-                    Some(slice(query_width + key_value_width, value_width)?),
-                )
-            }
-            // GPT-NeoX, BLOOM and Falcon lay the rows out by key-value group:
-            // each group's query heads, then its key head, then its value
-            // head. With as many groups as heads (GPT-NeoX, BLOOM) that is
-            // each head's query, key and value in turn. Gathering a
-            // projection's rows is a copy, made once at load.
-            QkvLayout::Grouped => {
-                let per_group = heads / key_value_heads;
-                let rows = query_width + 2 * key_value_width;
-                let fused = builder.pp(names.fused_qkv);
-                let weight = fused
-                    .get((rows, input), "weight")?
-                    .reshape((key_value_heads, per_group + 2, head_dim, input))?;
-                let bias = if bias {
-                    Some(fused.get(rows, "bias")?.reshape((key_value_heads, per_group + 2, head_dim))?)
-                } else {
-                    None
-                };
-                let part = |start: usize, count: usize| -> candle_core::Result<Linear> {
-                    let width = key_value_heads * count * head_dim;
-                    Ok(Linear::new(
-                        weight.narrow(1, start, count)?.contiguous()?.reshape((width, input))?,
-                        bias.as_ref()
-                            .map(|bias| bias.narrow(1, start, count)?.contiguous()?.reshape(width))
-                            .transpose()?,
-                    ))
-                };
-                (part(0, per_group)?, part(per_group, 1)?, Some(part(per_group + 1, 1)?))
-            }
-            // TeleChat2 keeps the query apart and stacks each key-value
-            // head's key rows, then its value rows, in one `key_value`
-            // matrix. Gathering the key and value rows is a copy, made once
-            // at load.
-            QkvLayout::PairedKeyValue => {
-                let fused = builder.pp(names.fused_qkv);
-                let paired = fused
-                    .get((2 * key_value_width, input), "weight")?
-                    .reshape((key_value_heads, 2, head_dim, input))?;
-                let paired_bias = if bias {
-                    Some(fused.get(2 * key_value_width, "bias")?.reshape((key_value_heads, 2, head_dim))?)
-                } else {
-                    None
-                };
-                let part = |slot: usize| -> candle_core::Result<Linear> {
-                    Ok(Linear::new(
-                        paired.narrow(1, slot, 1)?.contiguous()?.reshape((key_value_width, input))?,
-                        paired_bias
-                            .as_ref()
-                            .map(|bias| bias.narrow(1, slot, 1)?.contiguous()?.reshape(key_value_width))
-                            .transpose()?,
-                    ))
-                };
-                (
-                    projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
-                    part(0)?,
-                    Some(part(1)?),
-                )
-            }
-        };
+                    // Gemma 4's full-attention layers under `attention_k_eq_v`
+                    // have no `v_proj`: the value is the key projection. Nor do
+                    // K2-Horizon's routed layers, whose value experts give it.
+                    if global.is_some_and(|global| global.key_is_value) || value_experts.is_some() {
+                        None
+                    } else {
+                        Some(projection(
+                            input,
+                            value_width,
+                            bias,
+                            conv1d,
+                            builder.pp(names.value),
+                        )?)
+                    },
+                ),
+                // Phi-3, GPT-2 and GPT-BigCode store query, key and value as one
+                // matrix, rows in that order. Each projection is a row slice of it
+                // — a view of the mapped weight, not a copy — so every adapter
+                // site stays separate. GPT-2's `Conv1D` stores it transposed, so
+                // that one is laid out once at load.
+                // HRM-Text's `gqkv_proj` puts its elementwise gate's rows first.
+                QkvLayout::Stacked | QkvLayout::GateStacked => {
+                    let gate_width = if architecture.qkv_layout == QkvLayout::GateStacked {
+                        heads * value_dim
+                    } else {
+                        0
+                    };
+                    let rows = gate_width + query_width + key_value_width + value_width;
+                    let fused = builder.pp(names.fused_qkv);
+                    let weight = if conv1d {
+                        fused.get((input, rows), "weight")?.t()?.contiguous()?
+                    } else {
+                        fused.get((rows, input), "weight")?
+                    };
+                    let bias = if bias {
+                        Some(fused.get(rows, "bias")?)
+                    } else {
+                        None
+                    };
+                    let slice = |start: usize, width: usize| -> candle_core::Result<Linear> {
+                        Ok(Linear::new(
+                            weight.narrow(0, gate_width + start, width)?,
+                            bias.as_ref()
+                                .map(|bias| bias.narrow(0, gate_width + start, width))
+                                .transpose()?,
+                        ))
+                    };
+                    (
+                        slice(0, query_width)?,
+                        slice(query_width, key_value_width)?,
+                        Some(slice(query_width + key_value_width, value_width)?),
+                    )
+                }
+                // GPT-NeoX, BLOOM and Falcon lay the rows out by key-value group:
+                // each group's query heads, then its key head, then its value
+                // head. With as many groups as heads (GPT-NeoX, BLOOM) that is
+                // each head's query, key and value in turn. Gathering a
+                // projection's rows is a copy, made once at load.
+                QkvLayout::Grouped => {
+                    let per_group = heads / key_value_heads;
+                    let rows = query_width + 2 * key_value_width;
+                    let fused = builder.pp(names.fused_qkv);
+                    let weight = fused.get((rows, input), "weight")?.reshape((
+                        key_value_heads,
+                        per_group + 2,
+                        head_dim,
+                        input,
+                    ))?;
+                    let bias = if bias {
+                        Some(fused.get(rows, "bias")?.reshape((
+                            key_value_heads,
+                            per_group + 2,
+                            head_dim,
+                        ))?)
+                    } else {
+                        None
+                    };
+                    let part = |start: usize, count: usize| -> candle_core::Result<Linear> {
+                        let width = key_value_heads * count * head_dim;
+                        Ok(Linear::new(
+                            weight
+                                .narrow(1, start, count)?
+                                .contiguous()?
+                                .reshape((width, input))?,
+                            bias.as_ref()
+                                .map(|bias| {
+                                    bias.narrow(1, start, count)?.contiguous()?.reshape(width)
+                                })
+                                .transpose()?,
+                        ))
+                    };
+                    (
+                        part(0, per_group)?,
+                        part(per_group, 1)?,
+                        Some(part(per_group + 1, 1)?),
+                    )
+                }
+                // TeleChat2 keeps the query apart and stacks each key-value
+                // head's key rows, then its value rows, in one `key_value`
+                // matrix. Gathering the key and value rows is a copy, made once
+                // at load.
+                QkvLayout::PairedKeyValue => {
+                    let fused = builder.pp(names.fused_qkv);
+                    let paired = fused
+                        .get((2 * key_value_width, input), "weight")?
+                        .reshape((key_value_heads, 2, head_dim, input))?;
+                    let paired_bias = if bias {
+                        Some(fused.get(2 * key_value_width, "bias")?.reshape((
+                            key_value_heads,
+                            2,
+                            head_dim,
+                        ))?)
+                    } else {
+                        None
+                    };
+                    let part = |slot: usize| -> candle_core::Result<Linear> {
+                        Ok(Linear::new(
+                            paired
+                                .narrow(1, slot, 1)?
+                                .contiguous()?
+                                .reshape((key_value_width, input))?,
+                            paired_bias
+                                .as_ref()
+                                .map(|bias| {
+                                    bias.narrow(1, slot, 1)?
+                                        .contiguous()?
+                                        .reshape(key_value_width)
+                                })
+                                .transpose()?,
+                        ))
+                    };
+                    (
+                        projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
+                        part(0)?,
+                        Some(part(1)?),
+                    )
+                }
+            };
             Projections::Standard { query, key, value }
         };
         Ok(Self {
@@ -417,34 +501,67 @@ impl Attention {
             query_key_norm: architecture.query_key_norm,
             norm_after_rotary: architecture.norm_after_rotary,
             heads,
-            key_value_heads: if architecture.latent.is_some() { heads } else { key_value_heads },
+            key_value_heads: if architecture.latent.is_some() {
+                heads
+            } else {
+                key_value_heads
+            },
             head_dim,
             value_dim,
-            value_norm: if architecture.value_norm { Some(spec.unscaled(head_dim, &builder)?) } else { None },
+            value_norm: if architecture.value_norm {
+                Some(spec.unscaled(head_dim, &builder)?)
+            } else {
+                None
+            },
             stores_key_values: architecture.stores_key_values(layer),
-            index_shared: architecture.sparse_index.is_some_and(|spec| spec.shared(layer)),
+            index_shared: architecture
+                .sparse_index
+                .is_some_and(|spec| spec.shared(layer)),
             indexer: match (architecture.sparse_index, architecture.latent) {
                 (Some(spec), _) if spec.shared(layer) => None,
-                (Some(spec), Some(LatentAttention { query_rank: Some(rank), rotated, .. })) => {
-                    Some(indexer::Indexer::load(&builder, input, rank, rotated, spec)?)
-                }
+                (
+                    Some(spec),
+                    Some(LatentAttention {
+                        query_rank: Some(rank),
+                        rotated,
+                        ..
+                    }),
+                ) => Some(indexer::Indexer::load(
+                    &builder, input, rank, rotated, spec,
+                )?),
                 (Some(_), _) => candle_core::bail!(
                     "layer {layer}'s sparse-attention indexer reads a latent query, and this attention has no q_lora_rank"
                 ),
                 (None, _) => None,
             },
-            loop_mix: match architecture.loops.and_then(|loops| loops.gate_window.map(|window| (loops, window))) {
+            loop_mix: match architecture
+                .loops
+                .and_then(|loops| loops.gate_window.map(|window| (loops, window)))
+            {
                 Some((loops, window)) => {
                     // `gate_projections` sits beside `layers`, below the
                     // model root.
-                    let parent = names.layers.rsplit_once('.').map_or("", |(parent, _)| parent);
-                    let root = if parent.is_empty() { layer_builder.root() } else { layer_builder.root().pp(parent) };
+                    let parent = names
+                        .layers
+                        .rsplit_once('.')
+                        .map_or("", |(parent, _)| parent);
+                    let root = if parent.is_empty() {
+                        layer_builder.root()
+                    } else {
+                        layer_builder.root().pp(parent)
+                    };
                     let gate = root.pp("gate_projections").pp(layer.to_string());
                     Some(LoopMix {
                         physical: loops.physical,
                         window,
-                        weight: gate.get((heads, head_dim), "weight")?.to_dtype(DType::F32)?.reshape((1, heads, 1, head_dim))?,
-                        bias: gate.get(heads, "bias")?.to_dtype(DType::F32)?.reshape((1, heads, 1, 1))?,
+                        weight: gate
+                            .get((heads, head_dim), "weight")?
+                            .to_dtype(DType::F32)?
+                            .reshape((1, heads, 1, head_dim))?,
+                        bias: gate
+                            .get(heads, "bias")?
+                            .to_dtype(DType::F32)?
+                            .reshape((1, heads, 1, 1))?,
                     })
                 }
                 None => None,
@@ -459,26 +576,36 @@ impl Attention {
                 // Falcon adds the bias before dividing the scores, so its
                 // slopes are divided too.
                 Positions::Alibi { inside_scale } => {
-                    let scale = if inside_scale { 1.0 / architecture.score_divisor } else { 1.0 };
+                    let scale = if inside_scale {
+                        1.0 / architecture.score_divisor
+                    } else {
+                        1.0
+                    };
                     Some(
                         (Tensor::new(alibi_slopes(heads), layer_builder.device())?
                             .reshape((1, heads, 1, 1))?
                             * scale)?,
                     )
                 }
-                Positions::AlibiRoot => {
-                    Some(Tensor::new(alibi_slopes(heads), layer_builder.device())?.reshape((1, heads, 1, 1))?)
-                }
+                Positions::AlibiRoot => Some(
+                    Tensor::new(alibi_slopes(heads), layer_builder.device())?
+                        .reshape((1, heads, 1, 1))?,
+                ),
                 _ => None,
             },
             alibi_root: architecture.positions == Positions::AlibiRoot,
             clip_qkv: architecture.clip_qkv,
             key_scale: architecture.key_scale,
             value_scale: architecture.value_scale,
-            query_temperature: architecture.query_temperature.filter(|temperature| temperature.at(layer)),
+            query_temperature: architecture
+                .query_temperature
+                .filter(|temperature| temperature.at(layer)),
             output_gate,
             head_gate: match architecture.head_gate {
-                Some(function) => Some((projection(input, heads, false, conv1d, builder.pp("g_proj"))?, function)),
+                Some(function) => Some((
+                    projection(input, heads, false, conv1d, builder.pp("g_proj"))?,
+                    function,
+                )),
                 None => None,
             },
             elementwise_gate: match (architecture.attention_gate, architecture.qkv_layout) {
@@ -487,12 +614,23 @@ impl Attention {
                     let fused = builder.pp(names.fused_qkv);
                     let rows = width + query_width + key_value_width + value_width;
                     let weight = fused.get((rows, input), "weight")?.narrow(0, 0, width)?;
-                    let bias = if bias { Some(fused.get(rows, "bias")?.narrow(0, 0, width)?) } else { None };
+                    let bias = if bias {
+                        Some(fused.get(rows, "bias")?.narrow(0, 0, width)?)
+                    } else {
+                        None
+                    };
                     Some((Linear::new(weight, bias), function))
                 }
-                (Some(function), _) => {
-                    Some((projection(input, heads * value_dim, false, conv1d, builder.pp(names.attention_gate))?, function))
-                }
+                (Some(function), _) => Some((
+                    projection(
+                        input,
+                        heads * value_dim,
+                        false,
+                        conv1d,
+                        builder.pp(names.attention_gate),
+                    )?,
+                    function,
+                )),
                 (None, _) => None,
             },
             value_experts,
@@ -551,81 +689,98 @@ impl Attention {
         let mut latent_query = None;
         // `None` for a Gemma 4 key-value-sharing layer, which projects only
         // its query.
-        let (query, key_value) = match &self.projections {
-            Projections::Standard { query, key, value } => {
-                let query = match &self.query_bottleneck {
-                    Some((down, norm)) => {
-                        let narrowed = norm.forward(&down.forward(hidden)?, mode.pass)?;
-                        project(query, self.query_adapter.as_ref(), &narrowed, mode.route)?
-                    }
-                    None => project(query, self.query_adapter.as_ref(), hidden, mode.route)?,
-                };
-                let key = project(key, self.key_adapter.as_ref(), hidden, mode.route)?;
-                // Gemma 4's full-attention layers under `attention_k_eq_v`
-                // take the value from the key projection, before any norm;
-                // K2-Horizon's routed layers from their value experts.
-                let value = match (value, &self.value_experts) {
-                    (Some(value), _) => project(value, self.value_adapter.as_ref(), hidden, mode.route)?,
-                    (None, Some(experts)) => experts.forward(hidden)?,
-                    (None, None) => key.clone(),
-                };
-                // Zamba2's per-invocation low-rank terms belong to the base
-                // model, so they apply on every route.
-                let (query, key, value) = match &self.low_rank {
-                    Some(low_rank) => (
-                        (query + low_rank[0].forward(hidden)?)?,
-                        (key + low_rank[1].forward(hidden)?)?,
-                        (value + low_rank[2].forward(hidden)?)?,
-                    ),
-                    None => (query, key, value),
-                };
-                // Falcon-H1 multiplies every key by `key_multiplier`, MiMo-V2
-                // every value by `attention_value_scale`.
-                let key = match self.key_scale {
-                    Some(scale) => (key * scale)?,
-                    None => key,
-                };
-                let value = match self.value_scale {
-                    Some(scale) => (value * scale)?,
-                    None => value,
-                };
-                // OLMo 2 normalises the whole projection before it is split
-                // into heads; every other query and key norm works per head
-                // after it.
-                let (query, key) = if self.query_key_norm == QueryKeyNorm::Full {
+        let (query, key_value) =
+            match &self.projections {
+                Projections::Standard { query, key, value } => {
+                    let query = match &self.query_bottleneck {
+                        Some((down, norm)) => {
+                            let narrowed = norm.forward(&down.forward(hidden)?, mode.pass)?;
+                            project(query, self.query_adapter.as_ref(), &narrowed, mode.route)?
+                        }
+                        None => project(query, self.query_adapter.as_ref(), hidden, mode.route)?,
+                    };
+                    let key = project(key, self.key_adapter.as_ref(), hidden, mode.route)?;
+                    // Gemma 4's full-attention layers under `attention_k_eq_v`
+                    // take the value from the key projection, before any norm;
+                    // K2-Horizon's routed layers from their value experts.
+                    let value = match (value, &self.value_experts) {
+                        (Some(value), _) => {
+                            project(value, self.value_adapter.as_ref(), hidden, mode.route)?
+                        }
+                        (None, Some(experts)) => experts.forward(hidden)?,
+                        (None, None) => key.clone(),
+                    };
+                    // Zamba2's per-invocation low-rank terms belong to the base
+                    // model, so they apply on every route.
+                    let (query, key, value) = match &self.low_rank {
+                        Some(low_rank) => (
+                            (query + low_rank[0].forward(hidden)?)?,
+                            (key + low_rank[1].forward(hidden)?)?,
+                            (value + low_rank[2].forward(hidden)?)?,
+                        ),
+                        None => (query, key, value),
+                    };
+                    // Falcon-H1 multiplies every key by `key_multiplier`, MiMo-V2
+                    // every value by `attention_value_scale`.
+                    let key = match self.key_scale {
+                        Some(scale) => (key * scale)?,
+                        None => key,
+                    };
+                    let value = match self.value_scale {
+                        Some(scale) => (value * scale)?,
+                        None => value,
+                    };
+                    // OLMo 2 normalises the whole projection before it is split
+                    // into heads; every other query and key norm works per head
+                    // after it.
+                    let (query, key) = if self.query_key_norm == QueryKeyNorm::Full {
+                        (
+                            optional_norm(self.query_norm.as_ref(), query, mode.pass)?,
+                            optional_norm(self.key_norm.as_ref(), key, mode.pass)?,
+                        )
+                    } else {
+                        (query, key)
+                    };
+                    // OLMo, OLMoE and DBRX clip every query, key and value
+                    // component to `±clip_qkv` (after OLMoE's norms).
+                    let clip = |projected: Tensor| match self.clip_qkv {
+                        Some(limit) => projected.clamp(-limit, limit),
+                        None => Ok(projected),
+                    };
                     (
-                        optional_norm(self.query_norm.as_ref(), query, mode.pass)?,
-                        optional_norm(self.key_norm.as_ref(), key, mode.pass)?,
+                        clip(query)?.reshape((batch, sequence, self.heads, self.head_dim))?,
+                        Some((
+                            clip(key)?.reshape((
+                                batch,
+                                sequence,
+                                self.key_value_heads,
+                                self.head_dim,
+                            ))?,
+                            clip(value)?.reshape((
+                                batch,
+                                sequence,
+                                self.key_value_heads,
+                                self.value_dim,
+                            ))?,
+                        )),
                     )
-                } else {
-                    (query, key)
-                };
-                // OLMo, OLMoE and DBRX clip every query, key and value
-                // component to `±clip_qkv` (after OLMoE's norms).
-                let clip = |projected: Tensor| match self.clip_qkv {
-                    Some(limit) => projected.clamp(-limit, limit),
-                    None => Ok(projected),
-                };
-                (
-                    clip(query)?.reshape((batch, sequence, self.heads, self.head_dim))?,
-                    Some((
-                        clip(key)?.reshape((batch, sequence, self.key_value_heads, self.head_dim))?,
-                        clip(value)?.reshape((batch, sequence, self.key_value_heads, self.value_dim))?,
-                    )),
-                )
-            }
-            Projections::Latent(latent) => {
-                let (query, key, value, latent) = latent.forward(hidden, self.heads, self.query_adapter.as_ref(), mode)?;
-                latent_query = latent;
-                (query, Some((key, value)))
-            }
-            Projections::QueryOnly { query, .. } => (
-                project(query, self.query_adapter.as_ref(), hidden, mode.route)?
-                    .reshape((batch, sequence, self.heads, self.head_dim))?,
-                None,
-            ),
-        };
-        let norm_before_rotary = self.query_key_norm != QueryKeyNorm::Full && !self.norm_after_rotary;
+                }
+                Projections::Latent(latent) => {
+                    let (query, key, value, latent) =
+                        latent.forward(hidden, self.heads, self.query_adapter.as_ref(), mode)?;
+                    latent_query = latent;
+                    (query, Some((key, value)))
+                }
+                Projections::QueryOnly { query, .. } => {
+                    (
+                        project(query, self.query_adapter.as_ref(), hidden, mode.route)?
+                            .reshape((batch, sequence, self.heads, self.head_dim))?,
+                        None,
+                    )
+                }
+            };
+        let norm_before_rotary =
+            self.query_key_norm != QueryKeyNorm::Full && !self.norm_after_rotary;
         let query = if norm_before_rotary {
             optional_norm(self.query_norm.as_ref(), query, mode.pass)?
         } else {
@@ -643,7 +798,9 @@ impl Attention {
             Rotary::None => None,
         };
         // The angles of exactly the positions this call rotates.
-        let angles = table.map(|table| table.angles(index_pos, sequence)).transpose()?;
+        let angles = table
+            .map(|table| table.angles(index_pos, sequence))
+            .transpose()?;
         let rotate = |input: &Tensor, (cos, sin): &(Tensor, Tensor)| {
             apply_rotary(input, cos, sin, cache.weights, mode.pass, self.interleaved)
         };
@@ -659,11 +816,20 @@ impl Attention {
         // Llama 4's query temperature: each query at position `p` times
         // `1 + beta · ln(1 + floor((p + shift) / interval))`.
         let query = match self.query_temperature {
-            Some(QueryTemperature { beta, interval, shift, .. }) => {
+            Some(QueryTemperature {
+                beta,
+                interval,
+                shift,
+                ..
+            }) => {
                 let scales: Vec<f32> = (index_pos..index_pos + sequence)
-                    .map(|position| (1.0 + beta * (1.0 + ((position + shift) / interval.max(1)) as f64).ln()) as f32)
+                    .map(|position| {
+                        (1.0 + beta * (1.0 + ((position + shift) / interval.max(1)) as f64).ln())
+                            as f32
+                    })
                     .collect();
-                let scales = Tensor::from_vec(scales, (1, 1, sequence, 1), query.device())?.to_dtype(query.dtype())?;
+                let scales = Tensor::from_vec(scales, (1, 1, sequence, 1), query.device())?
+                    .to_dtype(query.dtype())?;
                 query.broadcast_mul(&scales)?
             }
             None => query,
@@ -707,7 +873,9 @@ impl Attention {
             // key and value this one may see, history included.
             None => {
                 let Projections::QueryOnly { source, .. } = &self.projections else {
-                    candle_core::bail!("layer {layer} has neither key and value projections nor a layer to share them from");
+                    candle_core::bail!(
+                        "layer {layer} has neither key and value projections nor a layer to share them from"
+                    );
                 };
                 cache.shared[*source].clone().ok_or_else(|| {
                     candle_core::Error::Msg(format!(
@@ -722,14 +890,23 @@ impl Attention {
         let index_hidden = match (&self.indexer, self.index_shared) {
             (Some(indexer), _) => {
                 let Some(latent_query) = &latent_query else {
-                    candle_core::bail!("layer {layer}'s indexer reads a latent query this attention has none of");
+                    candle_core::bail!(
+                        "layer {layer}'s indexer reads a latent query this attention has none of"
+                    );
                 };
                 let causal = match mask {
                     Some(full) => full.squeeze(1)?,
                     None => cache.mask(sequence, index_pos, self.window)?,
                 };
-                let hidden_keys =
-                    indexer.hidden_keys(hidden, latent_query, angles.as_ref(), &causal, layer, cache, mode)?;
+                let hidden_keys = indexer.hidden_keys(
+                    hidden,
+                    latent_query,
+                    angles.as_ref(),
+                    &causal,
+                    layer,
+                    cache,
+                    mode,
+                )?;
                 cache.index_mask = hidden_keys.clone();
                 hidden_keys
             }
@@ -739,7 +916,9 @@ impl Attention {
         let indexed_mask = match &index_hidden {
             Some(index_hidden) => Some(match mask {
                 Some(full) => full.broadcast_maximum(index_hidden)?,
-                None => cache.mask(sequence, index_pos, self.window)?.broadcast_maximum(index_hidden)?,
+                None => cache
+                    .mask(sequence, index_pos, self.window)?
+                    .broadcast_maximum(index_hidden)?,
             }),
             None => None,
         };
@@ -756,25 +935,57 @@ impl Attention {
                         "layer {layer} attends over layer {source}'s first-pass keys, which left none in this call"
                     ))
                 })?;
-                let global = self.attend(&query, global_key, global_value, None, mask, index_pos, cache, mode)?;
+                let global = self.attend(
+                    &query,
+                    global_key,
+                    global_value,
+                    None,
+                    mask,
+                    index_pos,
+                    cache,
+                    mode,
+                )?;
                 let local_mask = match mask {
                     Some(full) => Some(
-                        full.broadcast_maximum(&cache.mask(sequence, index_pos, Some(mix.window))?.to_dtype(full.dtype())?)?,
+                        full.broadcast_maximum(
+                            &cache
+                                .mask(sequence, index_pos, Some(mix.window))?
+                                .to_dtype(full.dtype())?,
+                        )?,
                     ),
                     None => None,
                 };
-                let local =
-                    self.attend(&query, key, value, Some(mix.window), local_mask.as_ref(), index_pos, cache, mode)?;
+                let local = self.attend(
+                    &query,
+                    key,
+                    value,
+                    Some(mix.window),
+                    local_mask.as_ref(),
+                    index_pos,
+                    cache,
+                    mode,
+                )?;
                 let logits = query
                     .to_dtype(DType::F32)?
                     .broadcast_mul(&mix.weight)?
                     .sum_keepdim(3)?
                     .broadcast_add(&mix.bias)?;
                 // sigmoid, composed so it has a backward pass.
-                let gate = (logits.neg()?.exp()? + 1.0)?.recip()?.to_dtype(global.dtype())?;
+                let gate = (logits.neg()?.exp()? + 1.0)?
+                    .recip()?
+                    .to_dtype(global.dtype())?;
                 (global.broadcast_mul(&gate)? + local.broadcast_mul(&(gate.neg()? + 1.0)?)?)?
             }
-            _ => self.attend(&query, key, value, self.window, mask, index_pos, cache, mode)?,
+            _ => self.attend(
+                &query,
+                key,
+                value,
+                self.window,
+                mask,
+                index_pos,
+                cache,
+                mode,
+            )?,
         };
         // Step 3.5's and Laguna's head-wise gate: each head's output times
         // its `g_proj` logit through the gate function.
@@ -785,9 +996,10 @@ impl Attention {
             }
             None => output,
         };
-        let output = output
-            .transpose(1, 2)?
-            .reshape((batch, sequence, self.heads * self.value_dim))?;
+        let output =
+            output
+                .transpose(1, 2)?
+                .reshape((batch, sequence, self.heads * self.value_dim))?;
         // K2-Horizon's and AFMoE's elementwise gate.
         let output = match &self.elementwise_gate {
             Some((gate, function)) => (output * gated(&gate.forward(hidden)?, *function)?)?,
@@ -795,7 +1007,9 @@ impl Attention {
         };
         // sigmoid, composed so it has a backward pass.
         let output = match &self.output_gate {
-            Some(gate) => output.broadcast_mul(&(gate.forward(hidden)?.neg()?.exp()? + 1.0)?.recip()?)?,
+            Some(gate) => {
+                output.broadcast_mul(&(gate.forward(hidden)?.neg()?.exp()? + 1.0)?.recip()?)?
+            }
             None => output,
         };
         project(
@@ -841,10 +1055,12 @@ impl Attention {
             Some(slopes) if self.alibi_root => {
                 let keys = attention.dim(candle_core::D::Minus1)?;
                 let first_key = (index_pos + sequence) as f64 - keys as f64;
-                let queries = (Tensor::arange(0u32, sequence as u32, attention.device())?.to_dtype(DType::F32)?
+                let queries = (Tensor::arange(0u32, sequence as u32, attention.device())?
+                    .to_dtype(DType::F32)?
                     + index_pos as f64)?
                     .reshape((1, 1, sequence, 1))?;
-                let key_positions = (Tensor::arange(0u32, keys as u32, attention.device())?.to_dtype(DType::F32)?
+                let key_positions = (Tensor::arange(0u32, keys as u32, attention.device())?
+                    .to_dtype(DType::F32)?
                     + first_key)?
                     .reshape((1, 1, 1, keys))?;
                 let distance = queries.broadcast_sub(&key_positions)?.relu()?.sqrt()?;
@@ -882,7 +1098,12 @@ impl Attention {
             // A prompt read whole from position zero under a PrefixLM mask
             // is one bidirectional block. A pass that scores every position
             // is not a prompt, and stays causal.
-            None if self.prefix_bidirectional && index_pos == 0 && mode.readout != Readout::EveryPosition => attention,
+            None if self.prefix_bidirectional
+                && index_pos == 0
+                && mode.readout != Readout::EveryPosition =>
+            {
+                attention
+            }
             None => {
                 let mask = cache
                     .mask(sequence, index_pos, window)?
@@ -912,7 +1133,9 @@ impl Attention {
             Some(keys) => attention.narrow(3, 0, keys)?,
             None => attention,
         };
-        attention.matmul(&value.contiguous()?)?.to_dtype(input_dtype)
+        attention
+            .matmul(&value.contiguous()?)?
+            .to_dtype(input_dtype)
     }
 }
 
@@ -964,11 +1187,16 @@ impl Latent {
             Some(rank) => (
                 Some((
                     projection(input, rank, bias, false, builder.pp("q_a_proj"))?,
-                    norms.load(rank, builder.pp("q_a_layernorm"))?.scaled(query_scale)?,
+                    norms
+                        .load(rank, builder.pp("q_a_layernorm"))?
+                        .scaled(query_scale)?,
                 )),
                 projection(rank, query_width, false, false, builder.pp("q_b_proj"))?,
             ),
-            None => (None, projection(input, query_width, false, false, builder.pp("q_proj"))?),
+            None => (
+                None,
+                projection(input, query_width, false, false, builder.pp("q_proj"))?,
+            ),
         };
         Ok(Self {
             query_down,
@@ -1028,8 +1256,26 @@ impl Latent {
             None => project(&self.query_up, query_adapter, hidden, mode.route)?,
         }
         .reshape((batch, sequence, heads, unrotated + rotated))?;
+        // A latent attention with no rotated part (GLM-5-Next's
+        // `qk_rope_head_dim` 0) is its position-free part alone.
+        if rotated == 0 {
+            let compressed = self.key_value_down.forward(hidden)?;
+            let expanded = self
+                .key_value_up
+                .forward(&self.key_value_norm.forward(
+                    &compressed.narrow(2, 0, key_value_rank)?.contiguous()?,
+                    mode.pass,
+                )?)?
+                .reshape((batch, sequence, heads, unrotated + value))?;
+            let key = expanded.narrow(3, 0, unrotated)?.contiguous()?;
+            let value = expanded.narrow(3, unrotated, value)?.contiguous()?;
+            return Ok((query, key, value, latent_query));
+        }
         let query = Tensor::cat(
-            &[&query.narrow(3, unrotated, rotated)?, &query.narrow(3, 0, unrotated)?],
+            &[
+                &query.narrow(3, unrotated, rotated)?,
+                &query.narrow(3, 0, unrotated)?,
+            ],
             3,
         )?;
         let compressed = self.key_value_down.forward(hidden)?;
@@ -1225,7 +1471,9 @@ pub(crate) const ALIBI_SPAN: f64 = 8.0;
 fn alibi_slopes(heads: usize) -> Vec<f32> {
     let closest = 1usize << heads.ilog2();
     let base = (-ALIBI_SPAN / closest as f64).exp2();
-    let mut slopes: Vec<f32> = (1..=closest).map(|power| base.powi(power as i32) as f32).collect();
+    let mut slopes: Vec<f32> = (1..=closest)
+        .map(|power| base.powi(power as i32) as f32)
+        .collect();
     if closest != heads {
         let extra = (-ALIBI_SPAN / (2 * closest) as f64).exp2();
         let remaining = closest.min(heads - closest);

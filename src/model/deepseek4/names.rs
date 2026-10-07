@@ -27,7 +27,10 @@ impl NativeNames {
             "hc_head.hc_fn" => "hc_head_fn".to_owned(),
             "hc_head.hc_base" => "hc_head_base".to_owned(),
             "hc_head.hc_scale" => "hc_head_scale".to_owned(),
-            _ => match rest.strip_prefix("layers.").and_then(|tail| tail.split_once('.')) {
+            _ => match rest
+                .strip_prefix("layers.")
+                .and_then(|tail| tail.split_once('.'))
+            {
                 Some((layer, tail)) => format!("layers.{layer}.{}", self.layer(tail)),
                 None => rest.to_owned(),
             },
@@ -39,12 +42,6 @@ impl NativeNames {
         let renamed = [
             ("input_layernorm.", "attn_norm."),
             ("post_attention_layernorm.", "ffn_norm."),
-            ("attn_hc.fn", "hc_attn_fn"),
-            ("attn_hc.base", "hc_attn_base"),
-            ("attn_hc.scale", "hc_attn_scale"),
-            ("ffn_hc.fn", "hc_ffn_fn"),
-            ("ffn_hc.base", "hc_ffn_base"),
-            ("ffn_hc.scale", "hc_ffn_scale"),
         ];
         for (from, to) in renamed {
             if let Some(rest) = tail.strip_prefix(from) {
@@ -83,7 +80,11 @@ impl NativeNames {
             "sinks" => "attn_sink",
             other => other,
         };
-        if leaf.is_empty() { module.to_owned() } else { format!("{module}.{leaf}") }
+        if leaf.is_empty() {
+            module.to_owned()
+        } else {
+            format!("{module}.{leaf}")
+        }
     }
 }
 
@@ -96,7 +97,11 @@ fn compressor(tail: &str) -> String {
         "kv_norm" => "norm",
         other => other,
     };
-    if leaf.is_empty() { module.to_owned() } else { format!("{module}.{leaf}") }
+    if leaf.is_empty() {
+        module.to_owned()
+    } else {
+        format!("{module}.{leaf}")
+    }
 }
 
 fn feed_forward(tail: &str) -> String {

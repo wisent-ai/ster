@@ -88,9 +88,9 @@ mod layer;
 pub use cache::Cache;
 pub use decoder::SteeringLlama;
 
+use crate::lora::Target;
 pub(crate) use attention::ALIBI_SPAN;
 pub(crate) use deepseek4::names::NativeNames;
-use crate::lora::Target;
 
 /// How a checkpoint's decoder differs from the plain Llama block.
 ///
@@ -322,8 +322,13 @@ pub struct Architecture {
     /// Inkling's relative-position attention, short convolutions and
     /// feed-forward.
     pub inkling: Option<InklingSpec>,
-    /// DeepSeek-V4's hyper-connections and compressed attention.
+    /// DeepSeek-V4's compressed attention.
     pub compressed: Option<CompressedSpec>,
+    /// DeepSeek-V4's and GLM-5-Next's hyper-connected residual streams.
+    pub hyper_connections: Option<HyperConnections>,
+    /// GLM-5-Next's dense feed-forward clamp: `silu(min(gate, limit)) ·
+    /// clamp(up, ±limit)` (`swiglu_limit`).
+    pub dense_swiglu_limit: Option<f64>,
     /// Inkling's `unpadded_vocab_size`: logits past it are never scored.
     pub vocabulary_limit: Option<usize>,
     /// DeciLM's per-layer plan, one entry per layer.
@@ -397,6 +402,21 @@ pub struct IndexerSpec {
     pub top_k: usize,
     pub interleaved: bool,
     pub shared_layers: u128,
+    /// GLM-5-Next's key pools (`index_kpool`): the indexer scores pools of
+    /// this many keys rather than keys.
+    pub pool: Option<KeyPool>,
+}
+
+/// GLM-5-Next's pooled indexer: every `size` consecutive keys are one
+/// candidate, its key the softmax-weighted sum of theirs by
+/// `index_kpool_compress_gate(x) + index_kpool_compress_ape`; a query keeps
+/// its `top_k / size` best pools that ended at or before it, and under
+/// `tail` (`index_kpool_always_select_tail`) the keys of its own unfinished
+/// pool besides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyPool {
+    pub size: usize,
+    pub tail: bool,
 }
 
 impl IndexerSpec {
@@ -458,7 +478,11 @@ impl Recurrence {
     /// the high stack's.
     pub fn stored(self, layer: usize) -> usize {
         let within = layer % self.per_stack;
-        if self.low(layer) { within } else { self.per_stack + within }
+        if self.low(layer) {
+            within
+        } else {
+            self.per_stack + within
+        }
     }
 }
 
@@ -491,7 +515,9 @@ impl SkipConnections {
         for slot in 0..2 {
             if listed(self.blend[slot]) {
                 let Some(earlier) = &kept[slot] else {
-                    candle_core::bail!("layer {layer} blends in a hidden state no earlier layer kept");
+                    candle_core::bail!(
+                        "layer {layer} blends in a hidden state no earlier layer kept"
+                    );
                 };
                 hidden = ((earlier * self.weight)? + (hidden * (1.0 - self.weight))?)?;
             }
@@ -692,17 +718,25 @@ pub struct InklingSpec {
     pub route_scale: f64,
 }
 
-/// DeepSeek-V4's decoder (`deepseek_v4`): `hc_mult` residual streams mixed
-/// by manifold-constrained hyper-connections around every sublayer, and an
-/// attention whose one key-value head is both key and value, attended
-/// through `sliding_window` and, on the compressed layers, beside entries
-/// that summarise every `rate` earlier tokens.
+/// Manifold-constrained hyper-connections (DeepSeek-V4, GLM-5-Next):
+/// `streams` residual streams (`hc_mult`), each sublayer reading them
+/// collapsed and its output spread back over them, mixed by a matrix
+/// `sinkhorn_iterations` Sinkhorn-Knopp rounds make doubly stochastic
+/// (`hc_sinkhorn_iters`, `hc_eps`). The model's last streams are collapsed
+/// by `hc_head` (DeepSeek-V4) or averaged (GLM-5-Next).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CompressedSpec {
-    /// `hc_mult`, `hc_sinkhorn_iters` and `hc_eps`.
+pub struct HyperConnections {
     pub streams: usize,
     pub sinkhorn_iterations: usize,
-    pub hyper_eps: f64,
+    pub eps: f64,
+    pub learned_head: bool,
+}
+
+/// DeepSeek-V4's attention (`deepseek_v4`): one key-value head that is both
+/// key and value, attended through `sliding_window` and, on the compressed
+/// layers, beside entries that summarise every `rate` earlier tokens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompressedSpec {
     pub heads: usize,
     pub head_dim: usize,
     /// The trailing slice of each head that rotates (`qk_rope_head_dim`).
@@ -804,7 +838,11 @@ pub enum LightningForm {
     /// `qk_norm`, the global rotation by halves, the query scaled by
     /// `head_dim^-0.5`, an RMS norm over `groups` equal groups of the
     /// read-out scaled by `g_norm`, a sigmoid `g_proj` gate, `dense`.
-    Bailing { groups: usize, silu: bool, qk_norm: bool },
+    Bailing {
+        groups: usize,
+        silu: bool,
+        qk_norm: bool,
+    },
 }
 
 /// MiniMax-Text-01's residual scaling: `(alpha, beta)` for the lightning
@@ -929,6 +967,8 @@ impl Architecture {
             depth_block_size: None,
             inkling: None,
             compressed: None,
+            hyper_connections: None,
+            dense_swiglu_limit: None,
             vocabulary_limit: None,
             layer_plans: None,
             sparse_index: None,
@@ -965,9 +1005,21 @@ impl Architecture {
     pub fn stored_layer(&self, layer: usize) -> (usize, Names) {
         if let Some(recurrence) = self.recurrence {
             return if layer < recurrence.per_stack {
-                (layer, Names { layers: Names::HRM_LOW_LAYERS, ..self.names })
+                (
+                    layer,
+                    Names {
+                        layers: Names::HRM_LOW_LAYERS,
+                        ..self.names
+                    },
+                )
             } else {
-                (layer - recurrence.per_stack, Names { layers: Names::HRM_HIGH_LAYERS, ..self.names })
+                (
+                    layer - recurrence.per_stack,
+                    Names {
+                        layers: Names::HRM_HIGH_LAYERS,
+                        ..self.names
+                    },
+                )
             };
         }
         match self.shortcut_experts {
@@ -979,13 +1031,16 @@ impl Architecture {
 
     /// DeciLM's plan for `layer`, when the family states one per layer.
     pub fn layer_plan(&self, layer: usize) -> Option<LayerPlan> {
-        self.layer_plans.as_ref().and_then(|plans| plans.get(layer).copied())
+        self.layer_plans
+            .as_ref()
+            .and_then(|plans| plans.get(layer).copied())
     }
 
     /// The full-attention spec layer `layer` uses: Gemma 4's or MiMo-V2's
     /// on a layer that attends past any window, `None` otherwise.
     pub fn global_at(&self, layer: usize) -> Option<GlobalAttention> {
-        self.global_attention.filter(|_| self.window(layer).is_none())
+        self.global_attention
+            .filter(|_| self.window(layer).is_none())
     }
 
     /// Whether layer `layer`'s softmax holds a learned sink logit per head.
@@ -997,7 +1052,8 @@ impl Architecture {
     /// layers' own rotated width under a global attention spec,
     /// `rotary_dim` otherwise.
     pub fn global_rotary_dim(&self) -> usize {
-        self.global_attention.map_or(self.rotary_dim, |global| global.rotary_dim)
+        self.global_attention
+            .map_or(self.rotary_dim, |global| global.rotary_dim)
     }
 
     /// The layer whose keys and values a Gemma 4 key-value-sharing layer
@@ -1006,7 +1062,9 @@ impl Architecture {
     pub fn key_value_source(&self, layer: usize) -> Option<usize> {
         let first = self.shared_key_values.filter(|first| layer >= *first)?;
         let kind = self.window(layer).is_some();
-        (0..first).rev().find(|earlier| self.window(*earlier).is_some() == kind)
+        (0..first)
+            .rev()
+            .find(|earlier| self.window(*earlier).is_some() == kind)
     }
 
     /// Whether `layer` is the one whose keys and values the sharing layers of
@@ -1067,7 +1125,11 @@ impl Architecture {
     /// chosen experts and width where the family states one.
     pub fn experts_at(&self, layer: usize) -> Option<MixtureOfExperts> {
         let mut experts = self.experts.clone()?;
-        if let Some(Some((top_k, intermediate))) = self.expert_overrides.as_ref().and_then(|all| all.get(layer)) {
+        if let Some(Some((top_k, intermediate))) = self
+            .expert_overrides
+            .as_ref()
+            .and_then(|all| all.get(layer))
+        {
             experts.top_k = *top_k;
             experts.intermediate = *intermediate;
         }
@@ -1076,9 +1138,9 @@ impl Architecture {
 
     /// Whether layer `layer`'s feed-forward is the mixture of experts.
     pub fn routed(&self, layer: usize) -> bool {
-        self.experts.as_ref().is_some_and(|experts| {
-            layer >= 128 || experts.dense_layers & (1u128 << layer) == 0
-        })
+        self.experts
+            .as_ref()
+            .is_some_and(|experts| layer >= 128 || experts.dense_layers & (1u128 << layer) == 0)
     }
 
     /// Width of one head's value: narrower than the query in latent
@@ -1181,7 +1243,11 @@ impl Architecture {
                             _ => (per_group + 1, 1, group),
                         };
                         (0..count).map(move |head| {
-                            (group * stride + (first + head) * head_dim, (own + head) * head_dim, head_dim)
+                            (
+                                group * stride + (first + head) * head_dim,
+                                (own + head) * head_dim,
+                                head_dim,
+                            )
                         })
                     })
                     .collect();
@@ -1250,9 +1316,9 @@ impl Architecture {
                 "this model runs its layers more than once (Nanbeige's num_loops, IQuest-LoopCoder's loop_num, HRM-Text's H_cycles and L_cycles), so one adapter would correct every pass of its layer; Ster steers it but trains no adapters on it"
             );
         }
-        if self.compressed.is_some() && !targets.is_empty() {
+        if (self.compressed.is_some() || self.hyper_connections.is_some()) && !targets.is_empty() {
             bail!(
-                "this model's residual is several hyper-connected streams and its attention DeepSeek-V4's compressed one (q_a_proj, kv_proj, o_a_proj in groups), which Ster's adapters do not attach to; Ster steers it but trains no adapters on it"
+                "this model's residual is several hyper-connected streams (DeepSeek-V4's and GLM-5-Next's hc_mult), which no adapter on one sublayer's projection sees whole; Ster steers it but trains no adapters on it"
             );
         }
         if self.inkling.is_some() && !targets.is_empty() {
@@ -1557,7 +1623,9 @@ pub enum Scoring {
     /// the best expert not yet chosen, and weighs it by its softmax among
     /// the experts left whose logit lies within `2 · jitter` of the best,
     /// relative to the larger of its own magnitude and the best logit.
-    SparseMixer { jitter: f32 },
+    SparseMixer {
+        jitter: f32,
+    },
     /// DeepSeek-V4's `sqrtsoftplus`: `sqrt(softplus(logit))` per expert.
     SqrtSoftplus,
 }
@@ -2244,7 +2312,10 @@ pub enum RopeScaling {
     /// Gemma 4's proportional rotation: the first `rotated` frequency pairs
     /// keep their value and the rest are zero, so those components pass
     /// through unrotated; every frequency is divided by `factor`.
-    Proportional { rotated: usize, factor: f32 },
+    Proportional {
+        rotated: usize,
+        factor: f32,
+    },
 }
 
 /// Where a query and key norm sits, if the family has one.
@@ -2289,7 +2360,10 @@ pub enum Activation {
     /// `activation_situ_linear_beta`): the gate's `beta · tanh(gate / beta) ·
     /// sigmoid(gate)` times the up projection's `linear_beta · tanh(up /
     /// linear_beta)` (the up projection itself without a `linear_beta`).
-    Situ { beta: f64, linear_beta: Option<f64> },
+    Situ {
+        beta: f64,
+        linear_beta: Option<f64>,
+    },
 }
 
 impl Activation {
@@ -2304,7 +2378,9 @@ impl Activation {
                 "xIELU takes its parameters from the feed-forward that holds them (mlp.act_fn), and this one holds none"
             ),
             // sigmoid, composed so it has a backward pass.
-            Self::Situ { beta, .. } => ((input / beta)?.tanh()? * beta)? * (input.neg()?.exp()? + 1.0)?.recip()?,
+            Self::Situ { beta, .. } => {
+                ((input / beta)?.tanh()? * beta)? * (input.neg()?.exp()? + 1.0)?.recip()?
+            }
         }
     }
 
@@ -2312,7 +2388,10 @@ impl Activation {
     /// projection, which only SiTU transforms first.
     pub(crate) fn gated(self, gate: &Tensor, up: &Tensor) -> candle_core::Result<Tensor> {
         let up = match self {
-            Self::Situ { linear_beta: Some(linear_beta), .. } => ((up / linear_beta)?.tanh()? * linear_beta)?,
+            Self::Situ {
+                linear_beta: Some(linear_beta),
+                ..
+            } => ((up / linear_beta)?.tanh()? * linear_beta)?,
             _ => up.clone(),
         };
         self.apply(gate)? * up
