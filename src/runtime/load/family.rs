@@ -18,7 +18,7 @@ use crate::model::{
     ParallelScan, ParameterNorm, PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm,
     QueryTemperature, Recurrence, RelativeHeads, RopeScaling, ScaledResiduals, Scoring,
     SharedBlocksSpec, SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec,
-    StoredNames, StructuredSpec, SwigluLimit,
+    StoredNames, StructuredSpec, SwigluLimit, WindowLatent,
 };
 
 /// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
@@ -160,6 +160,7 @@ pub(super) enum Family {
     DeepseekV4,
     Glm5NextText,
     HyV4,
+    Dots3Note,
 }
 
 impl Family {
@@ -294,6 +295,7 @@ impl Family {
         Self::DeepseekV4,
         Self::Glm5NextText,
         Self::HyV4,
+        Self::Dots3Note,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
@@ -457,6 +459,7 @@ impl Family {
             Self::DeepseekV4 => "deepseek_v4",
             Self::Glm5NextText => "glm5_next_text",
             Self::HyV4 => "hy_v4",
+            Self::Dots3Note => "dots3_note",
         }
     }
 
@@ -2821,7 +2824,7 @@ pub(super) fn family(
         // router without selection bias, under its own key names (read as
         // DeepSeek's), with sandwich norms.
         "deepseek_v2" | "deepseek_v3" | "minicpm3" | "glm4_moe_lite" | "deepseek_v32"
-        | "glm_moe_dsa" | "axk1" | "pangu_ultra_moe" => {
+        | "glm_moe_dsa" | "axk1" | "pangu_ultra_moe" | "dots3_note" => {
             if architecture.latent.is_none() {
                 bail!(
                     "{} declares no kv_lora_rank; Ster implements {model_type} with its latent attention",
@@ -2853,8 +2856,11 @@ pub(super) fn family(
             // Mistral Large 3 (read from Mistral's own format) adds Llama
             // 4's query temperature (`llama_4_scaling`).
             architecture.query_temperature = llama4_temperature(raw, scaling, layers, path)?;
-            if matches!(model_type, "deepseek_v32" | "glm_moe_dsa") {
+            if matches!(model_type, "deepseek_v32" | "glm_moe_dsa" | "dots3_note") {
                 architecture.sparse_index = Some(sparse_index(raw, model_type, layers, path)?);
+            }
+            if model_type == "dots3_note" {
+                dots3_note(raw, llama, &mut architecture, path)?;
             }
             // A.X-K1 normalises each routed layer's feed-forward output by
             // `post_mlp_layernorm` before the residual add.
@@ -3887,7 +3893,7 @@ fn deepseek_experts(
     let v3_router = v3_default
         || matches!(
             model_type,
-            "deepseek_v3" | "deepseek_v32" | "axk1" | "pangu_ultra_moe"
+            "deepseek_v3" | "deepseek_v32" | "axk1" | "pangu_ultra_moe" | "dots3_note"
         );
     routed.scoring = match text(raw, "scoring_func") {
         None if v3_default => Scoring::Sigmoid,
@@ -3909,6 +3915,17 @@ fn deepseek_experts(
     };
     routed.groups = match method {
         "greedy" => None,
+        // Dots3-Note's configs state no groups; its config class keeps every
+        // expert in one group (`Dots3NoteConfig` sets `n_group` and
+        // `topk_group` to one), so every expert competes on its score plus
+        // the selection bias.
+        "noaux_tc"
+            if model_type == "dots3_note"
+                && whole(raw, "n_group").is_none()
+                && whole(raw, "topk_group").is_none() =>
+        {
+            None
+        }
         "group_limited_greedy" | "noaux_tc" => {
             let (Some(groups), Some(chosen_groups)) =
                 (whole(raw, "n_group"), whole(raw, "topk_group"))
@@ -4269,7 +4286,7 @@ fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Re
         // vLLM's HY-V4 indexer rotates adjacent pairs (`is_neox_style=False`):
         // its checkpoints are in Megatron's layout.
         interleaved: hy
-            || glm
+            || (glm || model_type == "dots3_note")
                 && raw
                     .get("indexer_rope_interleave")
                     .and_then(Value::as_bool)
@@ -4448,6 +4465,91 @@ fn ling_kda(
             path.display()
         ),
     };
+    Ok(())
+}
+
+/// Dots3-Note (`dots3_note`, vLLM's `Dots3NoteForCausalLM`): DeepSeek-V3.2's
+/// block whose `full_attention` layers keep the sparse-attention indexer and
+/// whose `sliding_attention` layers run a dense latent attention of their
+/// own through `sliding_window_size` ([`WindowLatent`]: the `swa_*` heads,
+/// ranks and head parts, rotated by `swa_rope_theta`). Every latent
+/// attention norms its shared rotated key part (`k_rope_only_layernorm`),
+/// multiplies its bottlenecks' normed outputs by `sqrt(hidden_size / rank)`
+/// under `apply_mla_qkv_lora_rescale`, and gates each head's output by the
+/// sigmoid of its `g_proj` logit (`attention_gate_type` `headwise`). vLLM
+/// rotates both kinds by their plain base, whatever `rope_scaling` states.
+fn dots3_note(
+    raw: &Value,
+    llama: &LlamaConfig,
+    architecture: &mut Architecture,
+    path: &Path,
+) -> Result<()> {
+    let part = |key: &str| -> Result<usize> {
+        whole(raw, key).with_context(|| {
+            format!(
+                "{} declares a Dots3-Note model without {key}",
+                path.display()
+            )
+        })
+    };
+    let Some(full) = architecture
+        .latent
+        .filter(|latent| latent.query_rank.is_some())
+    else {
+        bail!(
+            "{} declares Dots3-Note attention without q_lora_rank; its latent attention always has a query bottleneck",
+            path.display()
+        );
+    };
+    let window = LatentAttention {
+        query_rank: Some(part("swa_q_lora_rank")?),
+        key_value_rank: part("swa_kv_lora_rank")?,
+        unrotated: part("swa_qk_nope_head_dim")?,
+        rotated: part("swa_qk_rope_head_dim")?,
+        value: part("swa_v_head_dim")?,
+    };
+    if window.rotated != full.rotated {
+        bail!(
+            "{} rotates {} components per sliding-window head and {} per full-attention head; Ster builds both rotations at one width",
+            path.display(),
+            window.rotated,
+            full.rotated
+        );
+    }
+    for key in ["attention_gate_type", "swa_attention_gate_type"] {
+        match text(raw, key) {
+            Some("headwise") => {}
+            other => bail!(
+                "{} declares {key} {other:?}; Ster implements Dots3-Note's headwise gate",
+                path.display()
+            ),
+        }
+    }
+    architecture.head_gate = Some(GateFunction::Sigmoid);
+    architecture.rotated_key_norm = true;
+    let hidden = llama.hidden_size as f64;
+    let rescale = flag(raw, "apply_mla_qkv_lora_rescale");
+    let scales = |latent: LatentAttention| {
+        latent.query_rank.filter(|_| rescale).map(|rank| {
+            (
+                (hidden / rank as f64).sqrt(),
+                (hidden / latent.key_value_rank as f64).sqrt(),
+            )
+        })
+    };
+    architecture.latent_scales = scales(full);
+    architecture.window_latent = Some(WindowLatent {
+        heads: part("swa_num_attention_heads")?,
+        latent: window,
+        scales: scales(window),
+    });
+    architecture.sliding_window =
+        whole(raw, "sliding_window_size").or_else(|| whole(raw, "sliding_window"));
+    architecture.local_rope_theta = number(raw, "swa_rope_theta")
+        .filter(|base| *base != f64::from(llama.rope_theta))
+        .map(|base| base as f32);
+    architecture.rope_scaling = RopeScaling::None;
+    architecture.score_divisor = (architecture.head_dim as f64).sqrt();
     Ok(())
 }
 

@@ -199,6 +199,16 @@ impl Attention {
             Some(global) => architecture.value_head_dim.unwrap_or(global.head_dim),
             None => architecture.value_dim(),
         };
+        // Dots3-Note's sliding-window layers run their own latent attention:
+        // their own query heads, head width and value width.
+        let window_latent = architecture.window_latent_at(layer);
+        let (heads, head_dim, query_width, value_dim) = match window_latent {
+            Some(own) => {
+                let own_head = own.latent.unrotated + own.latent.rotated;
+                (own.heads, own_head, own.heads * own_head, own.latent.value)
+            }
+            None => (heads, head_dim, query_width, value_dim),
+        };
         let key_value_width = head_dim * key_value_heads;
         let value_width = value_dim * key_value_heads;
         // A Gemma 4 key-value-sharing layer projects its query alone.
@@ -280,6 +290,17 @@ impl Attention {
                 query: projection(input, query_width, bias, conv1d, builder.pp(names.query))?,
                 source,
             }
+        } else if let Some(own) = window_latent {
+            Projections::Latent(Latent::load(
+                &builder,
+                input,
+                heads,
+                own.latent,
+                bias,
+                NormSpec::of(architecture),
+                own.scales,
+                architecture.rotated_key_norm,
+            )?)
         } else if let Some(spec) = architecture.latent {
             Projections::Latent(Latent::load(
                 &builder,
@@ -288,7 +309,8 @@ impl Attention {
                 spec,
                 bias,
                 NormSpec::of(architecture),
-                architecture.latent_scales.unwrap_or((1.0, 1.0)),
+                architecture.latent_scales,
+                architecture.rotated_key_norm,
             )?)
         } else {
             let (query, key, value) = match architecture.qkv_layout {
@@ -518,6 +540,8 @@ impl Attention {
                 .sparse_index
                 .is_some_and(|spec| spec.shared(layer)),
             indexer: match (architecture.sparse_index, architecture.latent) {
+                // Dots3-Note's sliding-window layers attend densely.
+                _ if window_latent.is_some() => None,
                 (Some(spec), _) if spec.shared(layer) => None,
                 (
                     Some(spec),
@@ -569,7 +593,11 @@ impl Attention {
             window,
             rotary,
             interleaved: architecture.interleaved_rotary,
-            score_divisor: architecture.score_divisor,
+            // A sliding-window latent attention scores over its own head.
+            score_divisor: match window_latent {
+                Some(_) => (head_dim as f64).sqrt(),
+                None => architecture.score_divisor,
+            },
             softcap: architecture.attention_softcap,
             prefix_bidirectional: architecture.prefix_lm,
             alibi: match architecture.positions {
@@ -1167,12 +1195,17 @@ struct Latent {
     key_value_down: Linear,
     key_value_norm: Norm,
     key_value_up: Linear,
+    /// Dots3-Note's `k_rope_only_layernorm` over the shared rotated key part.
+    rotated_norm: Option<Norm>,
     spec: LatentAttention,
 }
 
 impl Latent {
     /// `scales` multiply the query and key-value bottlenecks' normed
-    /// outputs (LongCat-Flash's `mla_scale_q_lora`, `mla_scale_kv_lora`).
+    /// outputs (LongCat-Flash's `mla_scale_q_lora`, `mla_scale_kv_lora`;
+    /// Dots3-Note's `apply_mla_qkv_lora_rescale`); `rotated_norm` loads
+    /// Dots3-Note's `k_rope_only_layernorm`.
+    #[allow(clippy::too_many_arguments)]
     fn load(
         builder: &VarBuilder<'_>,
         input: usize,
@@ -1180,16 +1213,18 @@ impl Latent {
         spec: LatentAttention,
         bias: bool,
         norms: NormSpec,
-        (query_scale, key_value_scale): (f64, f64),
+        scales: Option<(f64, f64)>,
+        rotated_norm: bool,
     ) -> candle_core::Result<Self> {
         let query_width = heads * (spec.unrotated + spec.rotated);
         let (query_down, query_up) = match spec.query_rank {
             Some(rank) => (
                 Some((
                     projection(input, rank, bias, false, builder.pp("q_a_proj"))?,
-                    norms
-                        .load(rank, builder.pp("q_a_layernorm"))?
-                        .scaled(query_scale)?,
+                    scaled_by(
+                        norms.load(rank, builder.pp("q_a_layernorm"))?,
+                        scales.map(|(query, _)| query),
+                    )?,
                 )),
                 projection(rank, query_width, false, false, builder.pp("q_b_proj"))?,
             ),
@@ -1208,9 +1243,10 @@ impl Latent {
                 false,
                 builder.pp("kv_a_proj_with_mqa"),
             )?,
-            key_value_norm: norms
-                .load(spec.key_value_rank, builder.pp("kv_a_layernorm"))?
-                .scaled(key_value_scale)?,
+            key_value_norm: scaled_by(
+                norms.load(spec.key_value_rank, builder.pp("kv_a_layernorm"))?,
+                scales.map(|(_, key_value)| key_value),
+            )?,
             key_value_up: projection(
                 spec.key_value_rank,
                 heads * (spec.unrotated + spec.value),
@@ -1218,6 +1254,11 @@ impl Latent {
                 false,
                 builder.pp("kv_b_proj"),
             )?,
+            rotated_norm: if rotated_norm {
+                Some(norms.load(spec.rotated, builder.pp("k_rope_only_layernorm"))?)
+            } else {
+                None
+            },
             spec,
         })
     }
@@ -1282,6 +1323,12 @@ impl Latent {
         let latent = compressed.narrow(2, 0, key_value_rank)?.contiguous()?;
         let shared = compressed
             .narrow(2, key_value_rank, rotated)?
+            .contiguous()?;
+        let shared = match &self.rotated_norm {
+            Some(norm) => norm.forward(&shared, mode.pass)?,
+            None => shared,
+        };
+        let shared = shared
             .unsqueeze(2)?
             .broadcast_as((batch, sequence, heads, rotated))?
             .contiguous()?;
@@ -1292,6 +1339,14 @@ impl Latent {
         let key = Tensor::cat(&[&shared, &expanded.narrow(3, 0, unrotated)?], 3)?;
         let value = expanded.narrow(3, unrotated, value)?.contiguous()?;
         Ok((query, key, value, latent_query))
+    }
+}
+
+/// `norm` with its output multiplied by `scale`, or as it is without one.
+fn scaled_by(norm: Norm, scale: Option<f64>) -> candle_core::Result<Norm> {
+    match scale {
+        Some(scale) => norm.scaled(scale),
+        None => Ok(norm),
     }
 }
 

@@ -376,6 +376,12 @@ pub struct Architecture {
     /// latent query and key-value bottlenecks' normed outputs multiplied by
     /// these, `(query, key_value)`.
     pub latent_scales: Option<(f64, f64)>,
+    /// Dots3-Note's sliding-window layers' own latent attention, in place of
+    /// `latent` on the layers that attend through the window.
+    pub window_latent: Option<WindowLatent>,
+    /// Dots3-Note's `k_rope_only_layernorm`: latent attention norms the
+    /// rotated key part it shares across heads before rotating it.
+    pub rotated_key_norm: bool,
     /// LongCat-Flash's shortcut-connected experts: each stored layer is two
     /// Ster layers (attention and feed-forward each), and the experts read
     /// the first half's feed-forward input and join the residual at the end
@@ -932,6 +938,18 @@ pub struct LatentAttention {
     pub value: usize,
 }
 
+/// Dots3-Note's sliding-window attention (`swa_num_attention_heads`,
+/// `swa_q_lora_rank`, `swa_kv_lora_rank`, `swa_qk_nope_head_dim`,
+/// `swa_qk_rope_head_dim`, `swa_v_head_dim`): `heads` query heads of its own
+/// latent attention, scored over its own head width, with its own
+/// bottleneck scales (`apply_mla_qkv_lora_rescale` against its own ranks).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowLatent {
+    pub heads: usize,
+    pub latent: LatentAttention,
+    pub scales: Option<(f64, f64)>,
+}
+
 impl Architecture {
     /// The plain Llama block with a head width derived from the residual one.
     pub fn llama(hidden_size: usize, heads: usize, norm_eps: f64) -> Self {
@@ -1024,6 +1042,8 @@ impl Architecture {
             expert_overrides: None,
             latent: None,
             latent_scales: None,
+            window_latent: None,
+            rotated_key_norm: false,
             shortcut_experts: None,
             state_space: None,
             short_convolution: None,
@@ -1078,6 +1098,12 @@ impl Architecture {
     pub fn global_at(&self, layer: usize) -> Option<GlobalAttention> {
         self.global_attention
             .filter(|_| self.window(layer).is_none())
+    }
+
+    /// The sliding-window latent attention layer `layer` runs, when the
+    /// family gives its windowed layers their own (Dots3-Note).
+    pub fn window_latent_at(&self, layer: usize) -> Option<WindowLatent> {
+        self.window_latent.filter(|_| self.window(layer).is_some())
     }
 
     /// Whether layer `layer`'s softmax holds a learned sink logit per head.
@@ -1216,9 +1242,10 @@ impl Architecture {
             return None;
         }
         // Gemma 4's full-attention heads are wider than its sliding-window
-        // ones, and MiMo-V2's have fewer key-value heads, so no attention
-        // projection has one shape on every layer.
-        if self.global_attention.is_some() && !feed_forward {
+        // ones, MiMo-V2's have fewer key-value heads, and Dots3-Note's
+        // sliding-window layers run a latent attention of their own, so no
+        // attention projection has one shape on every layer.
+        if (self.global_attention.is_some() || self.window_latent.is_some()) && !feed_forward {
             return None;
         }
         // K2-Horizon's routed layers take their value from value experts,
@@ -1390,8 +1417,10 @@ impl Architecture {
             let choices = choices.join(", ");
             let why = if self.query_bottleneck.is_some() && *target == Target::Query {
                 "its query passes a bottleneck and a norm (Step3's q_proj and inter_norm) before wq"
-            } else if self.global_attention.is_some() && !feed_forward_target(*target) {
-                "its full-attention layers' heads differ from its sliding-window layers' in count or width (Gemma 4's global_head_dim, MiMo-V2's swa_num_key_value_heads, Step 3.5's attention_other_setting)"
+            } else if (self.global_attention.is_some() || self.window_latent.is_some())
+                && !feed_forward_target(*target)
+            {
+                "its full-attention layers' heads differ from its sliding-window layers' in count or width (Gemma 4's global_head_dim, MiMo-V2's swa_num_key_value_heads, Step 3.5's attention_other_setting, Dots3-Note's swa_* latent attention)"
             } else if self.value_experts.is_some() && *target == Target::Value {
                 "its routed layers take their value from value experts (K2-Horizon's v_experts) with no v_proj"
             } else if self.latent.is_some() && !feed_forward_target(*target) {
