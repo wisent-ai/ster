@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use crate::artifact::SteeringArtifact;
 
 mod compare;
+mod curve;
 mod evaluate;
 mod extract;
 mod optimize;
@@ -22,6 +23,7 @@ mod project;
 mod train;
 
 pub use compare::{CompareOptions, ComparisonReport, compare};
+pub use curve::{CurvePoint, CurveReport, Enough, curve};
 pub use evaluate::{EvaluationReport, LayerEvaluation, evaluate};
 pub use extract::{PromptSet, extract};
 pub use optimize::{Candidate, Holdout, Selection, optimize};

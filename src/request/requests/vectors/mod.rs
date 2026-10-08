@@ -293,3 +293,35 @@ impl Validate for ProjectRequest {
         require(&self.vector, "vector/project requires a steering artifact".to_owned())
     }
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::request) struct CurveRequest {
+    #[serde(flatten)]
+    pub(in crate::request) model: ModelRequest,
+    #[serde(default)]
+    pub(in crate::request) pairs: String,
+    #[serde(default = "default_layers")]
+    pub(in crate::request) layers: String,
+    /// caa, pca or logistic; required.
+    pub(in crate::request) method: String,
+    /// Fraction of the pairs held out to score on; required.
+    pub(in crate::request) holdout: f64,
+    /// Numbers of pairs to fit on; required.
+    pub(in crate::request) sizes: Vec<std::num::NonZeroUsize>,
+    #[serde(default = "default_chat_template")]
+    pub(in crate::request) chat_template: String,
+    #[serde(default = "default_precision")]
+    pub(in crate::request) precision: String,
+}
+
+impl Validate for CurveRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("vector/curve")?;
+        require(&self.pairs, "vector/curve requires a pairs file".to_owned())?;
+        if self.sizes.is_empty() {
+            return Err("vector/curve requires at least one size to fit on".to_owned());
+        }
+        Ok(())
+    }
+}

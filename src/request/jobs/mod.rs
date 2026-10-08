@@ -14,8 +14,8 @@ use crate::{
 };
 
 use super::requests::{
-    CompareRequest, EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest,
-    OptimizeRequest, ParityRequest, ProjectRequest, TrainRequest,
+    CompareRequest, CurveRequest, EvaluateRequest, ExtractRequest, GenerateRequest,
+    InspectRequest, OptimizeRequest, ParityRequest, ProjectRequest, TrainRequest,
 };
 
 mod decide;
@@ -195,6 +195,20 @@ pub(in crate::request) fn project_job(request: ProjectRequest) -> Result<Value> 
         components: request.components,
     };
     let mut report = serde_json::to_value(workflow::project(&runtime, &pair_set, &artifact, &options)?)?;
+    chat.annotate(&mut report)?;
+    Ok(report)
+}
+
+/// Mirrors `ster vector curve`: the same capture, the same fits, and the
+/// document the CLI prints.
+pub(in crate::request) fn curve_job(request: CurveRequest) -> Result<Value> {
+    let pair_set = PairSet::load(Path::new(&request.pairs))?;
+    let method = TrainingMethod::parse(&request.method)?;
+    let mut runtime = request.model.load_runtime_at(&request.precision)?;
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    let layers = parse_layers(&request.layers, runtime.layer_count())?;
+    let report = workflow::curve(&runtime, &pair_set, &layers, method, request.holdout, &request.sizes)?;
+    let mut report = serde_json::to_value(report)?;
     chat.annotate(&mut report)?;
     Ok(report)
 }

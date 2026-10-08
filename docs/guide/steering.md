@@ -19,6 +19,10 @@ ster vector train --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
 ster vector optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT> --holdout <FRACTION>
                      [--revision <REVISION>] [--device cpu] [--layers all]
                      [--chat-template auto|off] [--precision f32|f16|bf16]
+ster vector curve --model <MODEL> --pairs <PAIRS> --method caa|pca|logistic
+                  --holdout <FRACTION> --sizes <N,N,...> [--layers all]
+                  [--revision <REVISION>] [--device cpu]
+                  [--chat-template auto|off] [--precision f32|f16|bf16]
 ster vector evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
                      [--strengths <S,S,...> --batch-size <N> --max-sequence <TOKENS>]
                      [--revision <REVISION>] [--device cpu]
@@ -46,7 +50,7 @@ direction, or a logistic probe. `--chat-template` and `--precision` are on
 every one of these commands except `vector inspect` and `vector compare`,
 which load no model. Each command prints a pretty JSON document on stdout,
 and each is also an operation of `ster request`: `ster request vector/train`,
-`vector/optimize`, `vector/evaluate`, `vector/inspect`, `vector/compare`, `vector/project`,
+`vector/optimize`, `vector/curve`, `vector/evaluate`, `vector/inspect`, `vector/compare`, `vector/project`,
 `generate` and `extract` read the request body as one JSON document on stdin,
 where every flag above is a camelCase field, `chatTemplate` and `precision`
 included, each defaulting to what the CLI defaults to, and print NDJSON log
@@ -126,6 +130,28 @@ means the `train_accuracy` and `train_margin` the artifact carries are the
 refit's numbers over the whole set rather than the holdout scores in the table:
 the table is the evidence for the choice, and the artifact's own numbers
 describe the direction that was written.
+
+## Pair count
+
+`ster vector curve` answers how many pairs a direction needs, the question
+wisent's `optimize-sample-size` asked. The last `--holdout` fraction of the
+set is held out exactly as `vector optimize` holds it out; `--method` is then
+fitted at every layer on the first `N` pairs of the rest for every `N` in
+`--sizes`, and every fit is scored on the same held-out pairs. The answer
+lists one point per size and layer (`size`, `layer`, `holdout_accuracy`,
+`holdout_margin`), the `holdout` it was cut with, and per layer under
+`enough` the smallest size that reached the best held-out accuracy any size
+reached there. Ster states no size, method or fraction. A size larger than
+the pairs left to fit on is refused as
+`a size of <N> pairs does not fit in the <FIT> pairs left to fit on after holding out <HELD>`,
+and the fraction is refused exactly as `vector optimize` refuses it.
+
+wisent's `optimize-classification` ranked probes per layer; `vector optimize`
+ranks the logistic probe beside caa and pca at every layer on the same
+holdout. Its `optimize` ran every search at once; here that is `vector
+optimize` and `vector curve` run one after the other. Its
+`optimization-cache` kept those runs' results; here each run's result is the
+artifact or report it writes.
 
 ## Strength
 

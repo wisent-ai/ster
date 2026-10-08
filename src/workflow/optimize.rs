@@ -74,24 +74,9 @@ pub fn optimize(
     layers: &[usize],
     holdout: f64,
 ) -> Result<Selection> {
-    if !(holdout > 0.0 && holdout < 1.0) {
-        bail!("the held-out fraction must be above zero and below one");
-    }
-    let total = pairs.pairs.len();
-    let holdout_pairs = (total as f64 * holdout).round() as usize;
-    if holdout_pairs == 0 || holdout_pairs >= total {
-        bail!(
-            "a held-out fraction of {holdout} over {total} contrastive pairs leaves {} pairs to fit and {holdout_pairs} to rank on; both need at least one",
-            total.saturating_sub(holdout_pairs)
-        );
-    }
+    let holdout = split_holdout(pairs.pairs.len(), holdout)?;
     let captured = capture_pairs(runtime, pairs, layers)?;
-    let split = total - holdout_pairs;
-    let holdout = Holdout {
-        fraction: holdout,
-        fit_pairs: split,
-        holdout_pairs,
-    };
+    let split = holdout.fit_pairs;
     progress(format!(
         "fitting each candidate on {} pairs and ranking on a {}-pair holdout",
         holdout.fit_pairs, holdout.holdout_pairs
@@ -178,5 +163,26 @@ pub fn optimize(
         artifact,
         holdout,
         candidates,
+    })
+}
+
+/// The last `holdout` fraction of `total` pairs in file order, rounded to
+/// whole pairs, held out to rank on and the rest to fit on. Ster assumes no
+/// fraction; one that leaves either side without a pair is refused.
+pub(super) fn split_holdout(total: usize, holdout: f64) -> Result<Holdout> {
+    if !(holdout > 0.0 && holdout < 1.0) {
+        bail!("the held-out fraction must be above zero and below one");
+    }
+    let holdout_pairs = (total as f64 * holdout).round() as usize;
+    if holdout_pairs == 0 || holdout_pairs >= total {
+        bail!(
+            "a held-out fraction of {holdout} over {total} contrastive pairs leaves {} pairs to fit and {holdout_pairs} to rank on; both need at least one",
+            total.saturating_sub(holdout_pairs)
+        );
+    }
+    Ok(Holdout {
+        fraction: holdout,
+        fit_pairs: total - holdout_pairs,
+        holdout_pairs,
     })
 }

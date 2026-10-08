@@ -371,6 +371,7 @@ ster vector optimize  select method and layer on a held-out fraction the caller 
 ster vector evaluate  measure a vector on a contrastive pair set
 ster vector inspect   summarize and validate a steering artifact
 ster vector compare   compare vectors fitted for different traits on one model
+ster vector curve     score one method on growing numbers of pairs
 ster vector project   show where a vector moves the model's states at one layer
 ster generate         run normal or steered generation, with any number of vectors
 ster extract          export hidden states for an arbitrary prompt set

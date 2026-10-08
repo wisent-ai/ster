@@ -72,7 +72,7 @@ pub(super) enum Command {
     /// stdin, NDJSON log events and one result event on stdout, and the
     /// result's status as the exit status.
     Request {
-        /// The operation: vector/train, vector/optimize, vector/evaluate,
+        /// The operation: vector/train, vector/optimize, vector/curve, vector/evaluate,
         /// vector/inspect, vector/compare, vector/project, generate, extract, parity, decide,
         /// calibrate, workspace/import-pairs, workspace/show,
         /// workspace/select, workspace/remove, pairs/import, pairs/inspect,

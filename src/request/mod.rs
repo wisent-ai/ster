@@ -70,6 +70,7 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
         "workspace/remove" => run_job(body, workspace_remove_job),
         "vector/train" => run_job(body, train_job),
         "vector/optimize" => run_job(body, optimize_job),
+        "vector/curve" => run_job(body, curve_job),
         "vector/evaluate" => run_job(body, evaluate_job),
         "vector/inspect" => run_job(body, inspect_job),
         "vector/compare" => run_job(body, compare_job),

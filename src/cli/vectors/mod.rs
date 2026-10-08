@@ -14,6 +14,7 @@ use ster::{
 use super::onboarding;
 
 mod compare;
+mod curve;
 mod generate;
 mod project;
 mod strength;
@@ -29,6 +30,9 @@ pub(super) enum VectorCommand {
     Train(TrainArgs),
     /// Select the best method and layer on a holdout of the pairs.
     Optimize(OptimizeArgs),
+    /// Fit one method on growing numbers of pairs and score each on the same
+    /// held-out pairs: how many pairs a direction needs.
+    Curve(curve::CurveArgs),
     /// Measure pair ordering for a steering artifact.
     Evaluate(EvaluateArgs),
     /// Summarize and validate a Ster steering artifact.
@@ -47,6 +51,7 @@ pub(super) fn run(command: VectorCommand) -> Result<()> {
     match command {
         VectorCommand::Train(args) => train(args),
         VectorCommand::Optimize(args) => optimize(args),
+        VectorCommand::Curve(args) => curve::curve(args),
         VectorCommand::Evaluate(args) => evaluate(args),
         VectorCommand::Inspect(args) => inspect(args),
         VectorCommand::Compare(args) => compare::compare(args),
