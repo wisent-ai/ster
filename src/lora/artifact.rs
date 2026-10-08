@@ -146,12 +146,10 @@ impl Artifact {
         Ok(value)
     }
 
-    /// Refuses every artifact a forward pass could not honour.
+    /// Refuses malformed artifacts using the dimensions recorded in the sidecar.
     ///
-    /// Shape checks are as tight as the document allows: the sidecar records
-    /// `hidden_size` but not the grouped-query or feed-forward widths, so a
-    /// key or gate factor can be checked against `rank` alone while a query or
-    /// down factor is checked against both.
+    /// Attention and feed-forward widths come from the checkpoint, not hidden_size.
+    /// Query outputs need not have the residual width.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != ARTIFACT_SCHEMA_VERSION {
             bail!(
@@ -236,6 +234,24 @@ impl Artifact {
                 "adapter artifact carries a {REWARD_HEAD_TENSOR} tensor but declares kind adapter"
             ),
             (Kind::Adapter, None) => {}
+        }
+        Ok(())
+    }
+
+    /// Checks the remaining factor axes against the checkpoint before attaching it.
+    pub(crate) fn validate_widths(&self, widths: super::Widths) -> Result<()> {
+        for &layer in &self.layers {
+            for &target in &self.targets {
+                let (outputs, inputs) = target.widths(widths);
+                let (a, b) = Adapter::tensor_names(layer, target);
+                for (name, expected) in [(a, [self.rank, inputs]), (b, [outputs, self.rank])] {
+                    let tensor = self.tensors.get(&name)
+                        .with_context(|| format!("adapter artifact is missing tensor {name}"))?;
+                    if tensor.dims() != expected {
+                        bail!("adapter tensor {name} has shape {:?}, expected {expected:?} for the model projection", tensor.dims());
+                    }
+                }
+            }
         }
         Ok(())
     }

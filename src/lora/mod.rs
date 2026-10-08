@@ -34,6 +34,22 @@ pub struct Widths {
     pub intermediate: usize,
 }
 
+impl Widths {
+    /// Projection dimensions of the shared causal decoder, including unequal head widths.
+    pub(crate) fn for_decoder(
+        config: &candle_transformers::models::llama::Config,
+        architecture: &crate::model::Architecture,
+    ) -> Self {
+        Self {
+            hidden: config.hidden_size,
+            attention: architecture.attention_width(config.num_attention_heads),
+            attention_output: config.num_attention_heads * architecture.value_dim(),
+            key_value: config.num_key_value_heads * architecture.head_dim,
+            intermediate: config.intermediate_size,
+        }
+    }
+}
+
 /// Which projections carry adapters.
 ///
 /// `Ord` is derived because [`Adapters`] keys a [`BTreeMap`] by
@@ -120,8 +136,9 @@ impl Target {
     }
 
     /// Whether the projection writes the residual stream, so `b` is `[hidden_size, rank]`.
+    /// Query writes the attention width, which need not equal the residual width.
     fn writes_hidden(self) -> bool {
-        matches!(self, Self::Query | Self::Output | Self::Down)
+        matches!(self, Self::Output | Self::Down)
     }
 }
 

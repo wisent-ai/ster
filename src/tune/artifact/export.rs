@@ -80,6 +80,7 @@ pub fn export_peft(
     }
     let (config, architecture, _) = source.decoder_config()?;
     architecture.check_targets(&artifact.targets, &config)?;
+    artifact.validate_widths(lora::Widths::for_decoder(&config, &architecture))?;
 
     let mut tensors: HashMap<String, Tensor> = HashMap::new();
     let mut modules: Vec<String> = Vec::new();

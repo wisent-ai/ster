@@ -152,6 +152,7 @@ impl Runtime {
         validate_layers(&artifact.layers, base.config.num_hidden_layers)?;
         base.architecture
             .check_targets(&artifact.targets, &base.config)?;
+        artifact.validate_widths(lora::Widths::for_decoder(&base.config, &base.architecture))?;
         let adapters = lora::Adapters::from_artifact(&artifact, &base.device, base.dtype)?;
         let builder = base.builder()?;
         let model_impl = SteeringLlama::load_with_adapters(
@@ -204,7 +205,7 @@ impl Runtime {
         base.architecture
             .check_targets(&spec.targets, &base.config)?;
         let spec = spec.resolved(base.config.num_hidden_layers);
-        let widths = projection_widths(&base.config, &base.architecture);
+        let widths = lora::Widths::for_decoder(&base.config, &base.architecture);
         let varmap = VarMap::new();
         let adapters =
             lora::Adapters::fresh(&spec, &varmap, widths, &base.device, base.param_dtype)?;
@@ -360,20 +361,3 @@ impl BaseLoad {
     }
 }
 
-/// The width of every projection an adapter can sit on.
-///
-/// Grouped-query attention gives the key and value projections fewer heads
-/// than the query projection, so their output is `num_key_value_heads *
-/// head_dim` wide rather than `hidden_size` wide, and a config that states
-/// `head_dim` can make the query and output projections differ from the
-/// residual width too. An adapter sized from `hidden_size` would fail to
-/// matmul against them.
-pub(super) fn projection_widths(config: &Config, architecture: &Architecture) -> lora::Widths {
-    lora::Widths {
-        hidden: config.hidden_size,
-        attention: architecture.attention_width(config.num_attention_heads),
-        attention_output: config.num_attention_heads * architecture.value_dim(),
-        key_value: config.num_key_value_heads * architecture.head_dim,
-        intermediate: config.intermediate_size,
-    }
-}

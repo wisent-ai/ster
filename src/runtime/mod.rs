@@ -25,7 +25,6 @@ pub use device::{DeviceChoice, Precision};
 pub use infer::{Completion, GenerationOptions};
 pub use load::{Checkpoint, Layout};
 
-use load::projection_widths;
 
 pub struct Runtime {
     pub model_id: String,
@@ -66,7 +65,7 @@ impl Runtime {
     /// attention width differ from the residual one, which is why none of
     /// them can be derived from `hidden_size`.
     pub fn config_dims(&self) -> crate::lora::Widths {
-        projection_widths(self.model.config(), self.model.architecture())
+        crate::lora::Widths::for_decoder(self.model.config(), self.model.architecture())
     }
 
     pub fn device(&self) -> &Device {

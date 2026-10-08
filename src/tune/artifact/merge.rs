@@ -131,6 +131,7 @@ pub fn merge(
             config.num_hidden_layers.saturating_sub(1)
         );
     }
+    artifact.validate_widths(lora::Widths::for_decoder(&config, &architecture))?;
 
     workflow::progress(format!(
         "reading {} weight file(s) from {model}",
