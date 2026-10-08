@@ -20,6 +20,7 @@ mod extract;
 mod optimize;
 mod parity;
 mod project;
+mod responses;
 mod train;
 
 pub use compare::{CompareOptions, ComparisonReport, compare};
@@ -29,6 +30,7 @@ pub use extract::{PromptSet, extract};
 pub use optimize::{Candidate, Holdout, Selection, optimize};
 pub use parity::{ParityReport, parity};
 pub use project::{ProjectOptions, ProjectionReport, Side, project};
+pub use responses::{Response, ResponseEntry, ResponsesReport, inspect_responses};
 pub use train::train;
 
 /// Progress lines the workflows print while running. The CLI leaves the sink

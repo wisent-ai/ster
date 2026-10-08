@@ -123,7 +123,8 @@ pub fn inspect(pairs: &PairSet, options: &InspectOptions) -> Result<SetReport> {
     })
 }
 
-fn flag(text: &str, threshold: f32) -> Option<RefusalFlag> {
+/// The refusal finding for `text`, or none when it scores below `threshold`.
+pub(crate) fn flag(text: &str, threshold: f32) -> Option<RefusalFlag> {
     let scored = refusal::score(text);
     if scored.score < threshold {
         return None;

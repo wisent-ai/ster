@@ -29,5 +29,6 @@ mod synthesis;
 
 pub use generator::Generator;
 pub use inspect::{EntryReport, InspectOptions, RefusalFlag, SetReport, inspect};
+pub(crate) use inspect::flag as refusal_flag;
 pub use merge::{MergeReport, MergedSource, merge};
 pub use synthesis::{SynthesisOptions, SynthesisReport, synthesize};
