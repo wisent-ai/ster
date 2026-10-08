@@ -389,6 +389,40 @@ answer as `path: value` lines for a person. Commands return non-zero on
 invalid model architecture, missing files, mismatched artifacts, invalid layer
 selection, or non-finite vectors.
 
+Ster replaced the Python `wisent` CLI, whose twenty-nine hyphenated verbs
+each spelled an object into a command name. Each is now a verb of the object
+it acts on, or a composition of them:
+
+| wisent | Ster |
+| --- | --- |
+| `generate-pairs`, `synthetic` | `pairs synthesize` |
+| `generate-pairs-from-task` | `pairs import` |
+| `diagnose-pairs` | `pairs inspect` |
+| `generate-vector`, `create-steering-vector` | `vector train` |
+| `generate-vector-from-task`, `generate-vector-from-synthetic` | `pairs import` or `pairs synthesize`, then `vector train` |
+| `diagnose-vectors` | `vector inspect` |
+| `verify-steering` | `vector evaluate` |
+| `compare-steering` | `vector compare` |
+| `steering-viz` | `vector project` |
+| `multi-steer` | `generate` with several `--vector`/`--strength` pairs |
+| `generate-responses` | `generate --prompts` |
+| `optimize-steering`, `find-best-method`, `discover-steering`, `optimize-classification` | `vector optimize` |
+| `optimize-sample-size` | `vector curve` |
+| `optimize` | `vector optimize`, then `vector curve` |
+| `optimization-cache` | the artifact or report each run writes |
+| `check-linearity` | `vector optimize`'s `holdout_effect_size` |
+| `cluster-benchmarks` | `vector train` per benchmark, then `vector compare --clusters` |
+| `geometry-search`, `train-unified-goodness` | `pairs merge`, then `vector optimize` or `vector train` |
+| `zwiad` | `vector optimize`, `vector compare` and `vector project` |
+| `modify-weights` | `vector ablate` |
+| `get-activations` | `extract` |
+| `tasks` | `pairs import` for the pairs, `decisions benchmark` for the score |
+| `inference-config` | none: every sampling setting is a flag of the run that uses it |
+| `agent` | none: autonomous work is Singularity's |
+
+`evaluate-refusal` and `evaluate-responses` read what a model answered; their
+Ster form audits the file `generate --prompts` writes and is not declared yet.
+
 Each command family has its own page in this repository:
 
 - [Pair sets](docs/guide/pair-sets.md) — the file every command reads, and
