@@ -211,8 +211,9 @@ policy emitted — a deterministic function with no model behind it, which is
 what makes the loop runnable and checkable with no judge, no artifact and no
 download. If reward does not rise under it, the bug is in the loop. An
 `http://` or `https://` address is an outside scorer, for a quality Ster holds
-no model of (an AI-text detector, a house judge): every completion is posted as
-`{"text": "<completion>"}`, with `STER_REWARD_BEARER` as the bearer when it is
+no model of (an AI-text detector, a house judge, a game environment that pays
+a move): every completion is posted as `{"prompt": "<prompt>", "text": "<completion>"}`,
+the prompt being the one its group was sampled from, with `STER_REWARD_BEARER` as the bearer when it is
 set, and the reward is the number at the JSON pointer the address's fragment
 names — `--reward 'https://detector.example/score#/ai_probability'`; the
 fragment is not sent. An address without a fragment is refused with

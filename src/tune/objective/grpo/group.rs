@@ -67,7 +67,7 @@ pub(super) fn sample_group(
         .turns;
         let mut total = 0f64;
         for turn in &turns {
-            total += reward.score(turn)?;
+            total += reward.score(prompt, turn)?;
         }
         rewards.push(total);
         conversations.push(turns);

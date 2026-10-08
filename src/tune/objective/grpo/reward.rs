@@ -24,7 +24,8 @@ use super::scorer::Scorer;
 pub enum Reward {
     Length,
     Model(Box<RewardModel>),
-    /// An outside scorer over HTTP ([`Scorer`]); the completion's text only.
+    /// An outside scorer over HTTP ([`Scorer`]): the prompt and the
+    /// completion's text.
     Scorer(Scorer),
 }
 
@@ -72,14 +73,16 @@ impl Reward {
         }
     }
 
-    /// Scores one completion.
+    /// Scores one completion of `prompt`.
     ///
     /// The length reward counts the tokens the policy actually emitted, not the
     /// characters it decoded to: tokens are what the objective can move, and a
     /// character count would reward whichever token happens to be spelled
     /// longest. The model reward sees the whole sequence, prompt included,
-    /// because a response is only good or bad relative to what it answers.
-    pub(super) fn score(&self, completion: &Completion) -> Result<f64> {
+    /// because a response is only good or bad relative to what it answers; the
+    /// outside scorer is sent the prompt beside the completion for the same
+    /// reason.
+    pub(super) fn score(&self, prompt: &str, completion: &Completion) -> Result<f64> {
         match self {
             Self::Length => Ok(completion.tokens.len() as f64),
             Self::Model(model) => {
@@ -87,7 +90,7 @@ impl Reward {
                 ids.extend_from_slice(&completion.tokens);
                 model.score(&ids)
             }
-            Self::Scorer(scorer) => scorer.score(&completion.text),
+            Self::Scorer(scorer) => scorer.score(prompt, &completion.text),
         }
     }
 }

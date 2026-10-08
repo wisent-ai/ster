@@ -1,13 +1,16 @@
 //! A reward read from an outside scorer over HTTP, for a quality Ster has no
-//! model of (an AI-text detector, a moderation score, a house judge).
+//! model of (an AI-text detector, a moderation score, a house judge, a game
+//! environment that pays a move).
 //!
 //! `--reward https://host/score#/ai_probability` posts each completion as
-//! `{"text": "<completion>"}` to `https://host/score` and reads the reward at
-//! the JSON pointer the fragment names (`/ai_probability`); the fragment is
-//! never sent. `STER_REWARD_BEARER`, when set, is sent as the bearer. A
-//! scorer that refuses, answers something other than JSON, or has no number
-//! at the pointer stops the run with what it answered: a reward that is
-//! missing is not zero.
+//! `{"prompt": "<prompt>", "text": "<completion>"}` to `https://host/score`
+//! and reads the reward at the JSON pointer the fragment names
+//! (`/ai_probability`); the fragment is never sent. The prompt is the one the
+//! group was sampled from: a scorer that judges an answer needs the question.
+//! `STER_REWARD_BEARER`, when set, is sent as the bearer. A scorer that
+//! refuses, answers something other than JSON, or has no number at the
+//! pointer stops the run with what it answered: a reward that is missing is
+//! not zero.
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -44,15 +47,15 @@ impl Scorer {
         }))
     }
 
-    /// The scorer's reward for `text`.
-    pub fn score(&self, text: &str) -> Result<f64> {
+    /// The scorer's reward for `text`, the answer to `prompt`.
+    pub fn score(&self, prompt: &str, text: &str) -> Result<f64> {
         let mut request = self.agent.post(&self.url);
         if let Some(bearer) = &self.bearer {
             request = request.set("Authorization", &format!("Bearer {bearer}"));
         }
         let body = match request
             .set("content-type", "application/json")
-            .send_string(&json!({"text": text}).to_string())
+            .send_string(&json!({"prompt": prompt, "text": text}).to_string())
         {
             Ok(response) => response
                 .into_string()
