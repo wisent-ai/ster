@@ -100,10 +100,20 @@ a chooser that publishes only its choice is asking to be trusted.
 The document is the artifact summary plus a `selection` object holding
 `holdout`, with `fraction`, `fit_pairs` and `holdout_pairs`, and `candidates`, one row per
 layer and method carrying `layer`, `method`, `holdout_accuracy`,
-`holdout_margin` and `selected`. Exactly one row has `selected` true. The rows
+`holdout_margin`, `holdout_effect_size` and `selected`. Exactly one row has
+`selected` true. The rows
 stay in the order the search walked them rather than sorted by score, so two
 runs over the same layers diff line for line. The scores cost nothing to carry:
 they were computed to make the decision.
+
+`holdout_effect_size` is Cohen's d of the held-out sides along the
+candidate's direction: the mean positive projection minus the mean negative
+one, over their spread pooled around each side's own mean, `null` when the
+projections do not spread at all. It is the answer wisent's
+`check-linearity` gave — whether a trait lies along a line at a layer — as a
+number at every layer and method instead of a LINEAR or WEAKLY_LINEAR label
+cut at thresholds nobody stated; the caller reads it against whatever bar
+their use needs.
 
 The split is the caller's: `--holdout` is the fraction of the pairs held out,
 rounded to whole pairs, and what decides whether the ranking means anything is
@@ -141,7 +151,7 @@ set is held out exactly as `vector optimize` holds it out; `--method` is then
 fitted at every layer on the first `N` pairs of the rest for every `N` in
 `--sizes`, and every fit is scored on the same held-out pairs. The answer
 lists one point per size and layer (`size`, `layer`, `holdout_accuracy`,
-`holdout_margin`), the `holdout` it was cut with, and per layer under
+`holdout_margin`, `holdout_effect_size`), the `holdout` it was cut with, and per layer under
 `enough` the smallest size that reached the best held-out accuracy any size
 reached there. Ster states no size, method or fraction. A size larger than
 the pairs left to fit on is refused as
@@ -154,6 +164,16 @@ holdout. Its `optimize` ran every search at once; here that is `vector
 optimize` and `vector curve` run one after the other. Its
 `optimization-cache` kept those runs' results; here each run's result is the
 artifact or report it writes.
+
+wisent's analysis commands are these primitives composed. Its
+`cluster-benchmarks` grouped benchmarks by how alike their directions are:
+fit one artifact per benchmark's pairs with `vector train` and group them
+with `vector compare --clusters`. Its `geometry-search` looked for one
+direction good across benchmarks: `pairs merge` the benchmarks' sets and
+`vector optimize` the result, whose holdout spans all of them. Its `zwiad`
+report — layer sensitivity, method comparison, similarity between traits —
+is `vector optimize`'s table (every layer and method on one holdout), `vector
+compare` between traits, and `vector project` for the picture of one.
 
 ## Strength
 

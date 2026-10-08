@@ -48,8 +48,35 @@ pub struct Candidate {
     pub method: String,
     pub holdout_accuracy: f32,
     pub holdout_margin: f32,
+    /// How far apart the held-out positive and negative sides lie along the
+    /// direction, in units of their pooled spread (Cohen's d, the spread
+    /// pooled over both sides around their own means); none when the
+    /// projections do not spread at all. The answer to whether a trait is
+    /// linear at a layer, without a threshold nobody stated.
+    pub holdout_effect_size: Option<f64>,
     /// True for exactly one row: the candidate this run picked.
     pub selected: bool,
+}
+
+/// Cohen's d of the projections of `positive` and `negative` on
+/// `direction`, the spread pooled over both sides around their own means.
+pub(super) fn effect_size(positive: &[Vec<f32>], negative: &[Vec<f32>], direction: &[f32]) -> Option<f64> {
+    let project = |rows: &[Vec<f32>]| -> Vec<f64> {
+        rows.iter()
+            .map(|row| row.iter().zip(direction).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum())
+            .collect()
+    };
+    let (positive, negative) = (project(positive), project(negative));
+    let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len() as f64;
+    let (positive_mean, negative_mean) = (mean(&positive), mean(&negative));
+    let deviations: Vec<f64> = positive
+        .iter()
+        .map(|value| value - positive_mean)
+        .chain(negative.iter().map(|value| value - negative_mean))
+        .map(|deviation| deviation * deviation)
+        .collect();
+    let spread = mean(&deviations).sqrt();
+    spread.is_normal().then(|| (positive_mean - negative_mean) / spread)
 }
 
 /// How the pair set was cut.
@@ -110,6 +137,11 @@ pub fn optimize(
                 method: method.name().to_owned(),
                 holdout_accuracy: accuracy,
                 holdout_margin: margin,
+                holdout_effect_size: effect_size(
+                    &layer.positive[split..],
+                    &layer.negative[split..],
+                    &direction,
+                ),
                 selected: false,
             });
             if best.as_ref().is_none_or(|current| {

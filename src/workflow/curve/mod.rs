@@ -14,7 +14,12 @@ use crate::{
     runtime::Runtime,
 };
 
-use super::{Holdout, optimize::split_holdout, progress, train::capture_pairs};
+use super::{
+    Holdout,
+    optimize::{effect_size, split_holdout},
+    progress,
+    train::capture_pairs,
+};
 
 /// One size at one layer, scored on the held-out pairs.
 #[derive(Debug, Clone, Serialize)]
@@ -23,6 +28,8 @@ pub struct CurvePoint {
     pub layer: usize,
     pub holdout_accuracy: f32,
     pub holdout_margin: f32,
+    /// Cohen's d of the held-out projections, as `vector optimize` reports it.
+    pub holdout_effect_size: Option<f64>,
 }
 
 /// Per layer, the smallest size that reached the best held-out accuracy any
@@ -88,6 +95,7 @@ pub fn curve(
                 layer,
                 holdout_accuracy: accuracy,
                 holdout_margin: margin,
+                holdout_effect_size: effect_size(&read.positive[split..], &read.negative[split..], &direction),
             });
         }
     }
