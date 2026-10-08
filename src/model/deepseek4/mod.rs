@@ -10,6 +10,11 @@
 //! streams into the outgoing ones: `out[k] = post[k] · y + Σ_j comb[j, k] ·
 //! in[j]`. The model's last streams are collapsed by `hc_head` the same way
 //! `pre` collapses them.
+//!
+//! HY-V4's independent hyper-connections (`HYV4HyperConnection`) read only
+//! `pre` and `post` from the same projection and keep each incoming stream
+//! as it is: `out[k] = post[k] · y + in[k]`, with `post` scaled by
+//! `hc_magnitude` and lifted by `hc_eps`.
 
 pub(super) mod attention;
 mod compressor;
@@ -19,6 +24,8 @@ pub(super) use compressor::CompressorState;
 
 use candle_core::{D, DType, Tensor};
 use candle_nn::VarBuilder;
+
+use super::HyperForm;
 
 /// The unscaled RMS norm DeepSeek-V4 reads its streams through.
 fn unscaled_rms(input: &Tensor, eps: f64) -> candle_core::Result<Tensor> {
@@ -33,23 +40,25 @@ fn sigmoid(input: &Tensor) -> candle_core::Result<Tensor> {
 /// One sublayer's hyper-connection (`attn_hc` or `ffn_hc`).
 #[derive(Debug, Clone)]
 pub(super) struct HyperConnection {
-    /// `fn`, `[(2 + N) · N, N · hidden]`, `base` and the three `scale`s, in
-    /// F32.
+    /// `fn`, `[(2 + N) · N, N · hidden]` for the manifold form and
+    /// `[2 · N, N · hidden]` for the independent one, `base` and the `scale`s
+    /// (three and two), in F32.
     projection: Tensor,
     base: Tensor,
-    scales: [f64; 3],
+    scales: Vec<f64>,
     streams: usize,
-    iterations: usize,
+    form: HyperForm,
     eps: f64,
     norm_eps: f64,
 }
 
 /// What a hyper-connection makes of the streams: `post` `[batch, sequence,
-/// N]`, `comb` `[batch, sequence, N, N]` and the collapsed input `[batch,
-/// sequence, hidden]`.
+/// N]`, `comb` `[batch, sequence, N, N]` (none for the independent form,
+/// which keeps every stream) and the collapsed input `[batch, sequence,
+/// hidden]`.
 pub(super) struct Mixing {
     pub post: Tensor,
-    pub comb: Tensor,
+    pub comb: Option<Tensor>,
     pub collapsed: Tensor,
 }
 
@@ -62,11 +71,16 @@ impl HyperConnection {
         kind: &str,
         hidden: usize,
         streams: usize,
-        iterations: usize,
+        form: HyperForm,
         eps: f64,
         norm_eps: f64,
     ) -> candle_core::Result<Self> {
-        let width = (2 + streams) * streams;
+        // The manifold form reads `pre`, `post` and an N × N `comb`, each
+        // with its own scale; the independent form `pre` and `post` only.
+        let (width, scale_count) = match form {
+            HyperForm::Manifold { .. } => ((2 + streams) * streams, 3),
+            HyperForm::Independent { .. } => (2 * streams, 2),
+        };
         let module = format!("{kind}_hc");
         let transformers = builder.contains_tensor(&format!("{module}.fn"));
         let name = |part: &str| -> String {
@@ -77,21 +91,20 @@ impl HyperConnection {
             }
         };
         let scales = builder
-            .get(3, &name("scale"))?
+            .get(scale_count, &name("scale"))?
             .to_dtype(DType::F32)?
-            .to_vec1::<f32>()?;
+            .to_vec1::<f32>()?
+            .into_iter()
+            .map(f64::from)
+            .collect();
         Ok(Self {
             projection: builder
                 .get((width, streams * hidden), &name("fn"))?
                 .to_dtype(DType::F32)?,
             base: builder.get(width, &name("base"))?.to_dtype(DType::F32)?,
-            scales: [
-                f64::from(scales[0]),
-                f64::from(scales[1]),
-                f64::from(scales[2]),
-            ],
+            scales,
             streams,
-            iterations,
+            form,
             eps,
             norm_eps,
         })
@@ -113,22 +126,35 @@ impl HyperConnection {
         };
         let (pre, pre_base) = part(0, n)?;
         let (post, post_base) = part(n, n)?;
-        let (comb, comb_base) = part(2 * n, n * n)?;
         let pre = (sigmoid(&(pre * self.scales[0])?.broadcast_add(&pre_base)?)? + self.eps)?;
-        let post = (sigmoid(&(post * self.scales[1])?.broadcast_add(&post_base)?)? * 2.0)?;
+        let gate = sigmoid(&(post * self.scales[1])?.broadcast_add(&post_base)?)?;
+        let collapsed = collapse(streams, &pre)?;
+        let iterations = match self.form {
+            HyperForm::Manifold {
+                sinkhorn_iterations,
+            } => sinkhorn_iterations,
+            HyperForm::Independent { magnitude } => {
+                return Ok(Mixing {
+                    post: ((gate * magnitude)? + self.eps)?,
+                    comb: None,
+                    collapsed,
+                });
+            }
+        };
+        let post = (gate * 2.0)?;
+        let (comb, comb_base) = part(2 * n, n * n)?;
         let comb = (comb * self.scales[2])?
             .broadcast_add(&comb_base)?
             .reshape((batch, sequence, n, n))?;
         let mut comb = (candle_nn::ops::softmax(&comb, D::Minus1)? + self.eps)?;
         comb = comb.broadcast_div(&(comb.sum_keepdim(2)? + self.eps)?)?;
-        for _ in 1..self.iterations {
+        for _ in 1..iterations {
             comb = comb.broadcast_div(&(comb.sum_keepdim(3)? + self.eps)?)?;
             comb = comb.broadcast_div(&(comb.sum_keepdim(2)? + self.eps)?)?;
         }
-        let collapsed = collapse(streams, &pre)?;
         Ok(Mixing {
             post,
-            comb,
+            comb: Some(comb),
             collapsed,
         })
     }
@@ -136,7 +162,8 @@ impl HyperConnection {
 
 impl Mixing {
     /// The outgoing streams: `post` spreading `output` `[batch, sequence,
-    /// hidden]` plus `comb`'s mix of the incoming `streams`.
+    /// hidden]` plus `comb`'s mix of the incoming `streams`, or the incoming
+    /// streams as they are.
     pub(super) fn spread(&self, output: &Tensor, streams: &Tensor) -> candle_core::Result<Tensor> {
         let dtype = streams.dtype();
         let spread = self
@@ -144,13 +171,17 @@ impl Mixing {
             .to_dtype(dtype)?
             .unsqueeze(3)?
             .broadcast_mul(&output.unsqueeze(2)?)?;
-        let mixed = self
-            .comb
-            .to_dtype(dtype)?
-            .transpose(2, 3)?
-            .contiguous()?
-            .matmul(&streams.contiguous()?)?;
-        spread + mixed
+        match &self.comb {
+            Some(comb) => {
+                let mixed = comb
+                    .to_dtype(dtype)?
+                    .transpose(2, 3)?
+                    .contiguous()?
+                    .matmul(&streams.contiguous()?)?;
+                spread + mixed
+            }
+            None => spread + streams,
+        }
     }
 }
 

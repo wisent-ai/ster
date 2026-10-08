@@ -1,10 +1,11 @@
-//! DeepSeek Sparse Attention's indexer (DeepSeek-V3.2, GLM-5): which keys
-//! each query attends to once a layer sees more of them than `index_topk`.
+//! DeepSeek Sparse Attention's indexer (DeepSeek-V3.2, GLM-5, HY-V4): which
+//! keys each query attends to once a layer sees more of them than
+//! `index_topk`.
 //!
 //! The indexer scores every key for every query with its own lightweight
 //! projections — `wq_b` over the latent query `q_a_layernorm(q_a_proj(x))`,
 //! `wk` and the LayerNorm `k_norm` over the hidden state, the first
-//! `qk_rope_head_dim` components of each rotated — as
+//! `qk_rope_head_dim` components of each rotated (the last, for HY-V4) — as
 //! `Σ_h w_h · relu(q_h · k / sqrt(index_head_dim))`, with
 //! `w = weights_proj(x) / sqrt(index_n_heads)`, and keeps each query's top
 //! `index_topk` keys; the attention hides the rest. With no more keys than
@@ -99,6 +100,7 @@ impl Indexer {
             head_dim,
             top_k,
             interleaved,
+            rotate_tail,
             ..
         } = self.spec;
         let rotate = |input: Tensor| -> candle_core::Result<Tensor> {
@@ -111,7 +113,24 @@ impl Indexer {
                             self.rotated
                         );
                     }
-                    apply_rotary(&input, cos, sin, DType::F32, mode.pass, interleaved)
+                    if !rotate_tail {
+                        return apply_rotary(&input, cos, sin, DType::F32, mode.pass, interleaved);
+                    }
+                    // The position-free components come first and the rotated
+                    // ones last, so the tail rotates and the head passes.
+                    let kept = head_dim - self.rotated;
+                    let rotated = apply_rotary(
+                        &input.narrow(3, kept, self.rotated)?,
+                        cos,
+                        sin,
+                        DType::F32,
+                        mode.pass,
+                        interleaved,
+                    )?;
+                    Tensor::cat(
+                        &[&input.narrow(3, 0, kept)?.to_dtype(DType::F32)?, &rotated],
+                        3,
+                    )
                 }
                 None => input.to_dtype(DType::F32),
             }

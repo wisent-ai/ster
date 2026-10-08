@@ -13,12 +13,12 @@ use serde_json::Value;
 use crate::model::{
     ALIBI_SPAN, Activation, Architecture, CompressYarn, CompressedSpec, DeltaRuleForm,
     DeltaRuleSpec, ExpertGroups, ExpertLayout, FeedForwardKind, GateFunction, GlobalAttention,
-    HyperConnections, IndexerSpec, InklingSpec, KeyPool, LatentAttention, LatentExperts, LayerPlan,
-    LightningForm, LightningSpec, Loops, MixtureOfExperts, Names, NgramSpec, NormKind,
+    HyperConnections, HyperForm, IndexerSpec, InklingSpec, KeyPool, LatentAttention, LatentExperts,
+    LayerPlan, LightningForm, LightningSpec, Loops, MixtureOfExperts, Names, NgramSpec, NormKind,
     ParallelScan, ParameterNorm, PerLayerInputSpec, Positions, QkvLayout, QueryKeyNorm,
     QueryTemperature, Recurrence, RelativeHeads, RopeScaling, ScaledResiduals, Scoring,
     SharedBlocksSpec, SharedExpert, SharedForm, ShortConvolution, SkipConnections, StateSpaceSpec,
-    StructuredSpec, SwigluLimit,
+    StoredNames, StructuredSpec, SwigluLimit,
 };
 
 /// Mamba's `time_step_rank: "auto"` is the model width over this, rounded up,
@@ -159,10 +159,12 @@ pub(super) enum Family {
     InklingText,
     DeepseekV4,
     Glm5NextText,
+    HyV4,
 }
 
 impl Family {
-    pub(super) const ALL: [Self; 128] = [
+    /// Every family, in the order a refusal lists them.
+    pub(super) const ALL: &[Self] = &[
         Self::Llama,
         Self::Mistral,
         Self::Mixtral,
@@ -291,12 +293,14 @@ impl Family {
         Self::InklingText,
         Self::DeepseekV4,
         Self::Glm5NextText,
+        Self::HyV4,
     ];
 
     /// The family a config's `model_type` names, if Ster implements it.
     pub(super) fn of(model_type: &str) -> Option<Self> {
         Self::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|family| family.model_type() == model_type)
     }
 
@@ -305,7 +309,7 @@ impl Family {
     /// configs leave `model_type` to their remote-code config class.
     pub(super) fn of_architectures(raw: &Value) -> Option<Self> {
         let names = raw.get("architectures")?.as_array()?;
-        Self::ALL.into_iter().find(|family| {
+        Self::ALL.iter().copied().find(|family| {
             family
                 .remote_class()
                 .is_some_and(|class| names.iter().any(|name| name.as_str() == Some(class)))
@@ -452,6 +456,7 @@ impl Family {
             Self::InklingText => "inkling_text",
             Self::DeepseekV4 => "deepseek_v4",
             Self::Glm5NextText => "glm5_next_text",
+            Self::HyV4 => "hy_v4",
         }
     }
 
@@ -3586,6 +3591,7 @@ pub(super) fn family(
         "inkling_text" => inkling(raw, layers, &mut architecture, path)?,
         "deepseek_v4" => deepseek_v4(raw, scaling, layers, &mut architecture, path)?,
         "glm5_next_text" => glm5_next(raw, layers, &mut architecture, path)?,
+        "hy_v4" => hy_v4(raw, layers, &mut architecture, path)?,
         "gemma4_text" | "gemma4_unified_text" => {
             // Gemma 4: Gemma 3's norms around both sublayers and per-head
             // query and key norms, but norms that scale by their weight
@@ -3791,6 +3797,7 @@ fn experts(
         weight_input: false,
         latent: None,
         hash_layers: 0,
+        routed_activation: None,
     })
 }
 
@@ -4150,17 +4157,27 @@ const DEEPSEEK_INDEX_HEADS: usize = 64;
 const GLM_INDEX_HEADS: usize = 32;
 const INDEX_FREQUENCY: usize = 1;
 const INDEX_SKIP_OFFSET: usize = 2;
+/// HY-V4's indexer heads when its config leaves `index_n_heads` out
+/// (`HYV4Config`, https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/configs/hy_v4.py).
+const HY_V4_INDEX_HEADS: usize = 16;
+/// How often HY-V4's layers index when its config lists no `indexer_types`:
+/// layer 0 and every fourth layer from layer 1, which is GLM-5's rule with
+/// this frequency and its offset (`HYV4Config.__post_init__`,
+/// https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/configs/hy_v4.py).
+const HY_V4_INDEX_EVERY: usize = 4;
 
-/// DeepSeek Sparse Attention's indexer from the config. GLM-5 marks each
-/// layer `full` or `shared` in `indexer_types` (or as `F` and `S` in
-/// `index_topk_pattern`), or derives it from `index_topk_freq` and
+/// DeepSeek Sparse Attention's indexer from the config. GLM-5 and HY-V4 mark
+/// each layer `full` or `shared` in `indexer_types` (GLM-5 also as `F` and
+/// `S` in `index_topk_pattern`), or derive it from `index_topk_freq` and
 /// `index_skip_topk_offset` as `GlmMoeDsaConfig.__post_init__` does: layer
 /// `i` indexes when `max(i − offset + 1, 0)` is a multiple of the frequency.
+/// HY-V4's indexer rotates adjacent pairs at the end of each head.
 fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Result<IndexerSpec> {
     fits(layers, path)?;
     let glm = matches!(model_type, "glm_moe_dsa" | "glm5_next_text");
+    let hy = model_type == "hy_v4";
     let mut shared_layers = 0u128;
-    if glm {
+    if glm || hy {
         let listed: Option<Vec<bool>> = match (raw.get("indexer_types"), raw.get("index_topk_pattern")) {
             (Some(Value::Array(kinds)), _) => Some(
                 kinds
@@ -4195,9 +4212,12 @@ fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Re
         let shared: Vec<bool> = match listed {
             Some(shared) => shared,
             None => {
-                let frequency = whole(raw, "index_topk_freq")
-                    .unwrap_or(INDEX_FREQUENCY)
-                    .max(1);
+                let frequency = match whole(raw, "index_topk_freq") {
+                    Some(stated) => stated,
+                    None if hy => HY_V4_INDEX_EVERY,
+                    None => INDEX_FREQUENCY,
+                }
+                .max(1);
                 let offset = whole(raw, "index_skip_topk_offset").unwrap_or(INDEX_SKIP_OFFSET);
                 (0..layers)
                     .map(|layer| (layer + 1).saturating_sub(offset) % frequency != 0)
@@ -4238,20 +4258,25 @@ fn sparse_index(raw: &Value, model_type: &str, layers: usize, path: &Path) -> Re
         None
     };
     Ok(IndexerSpec {
-        heads: whole(raw, "index_n_heads").unwrap_or(if glm {
-            GLM_INDEX_HEADS
-        } else {
-            DEEPSEEK_INDEX_HEADS
-        }),
+        heads: match whole(raw, "index_n_heads") {
+            Some(stated) => stated,
+            None if hy => HY_V4_INDEX_HEADS,
+            None if glm => GLM_INDEX_HEADS,
+            None => DEEPSEEK_INDEX_HEADS,
+        },
         head_dim: whole(raw, "index_head_dim").unwrap_or(INDEX_HEAD_DIM),
         top_k: whole(raw, "index_topk").unwrap_or(INDEX_TOP_K),
-        interleaved: glm
-            && raw
-                .get("indexer_rope_interleave")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
+        // vLLM's HY-V4 indexer rotates adjacent pairs (`is_neox_style=False`):
+        // its checkpoints are in Megatron's layout.
+        interleaved: hy
+            || glm
+                && raw
+                    .get("indexer_rope_interleave")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
         shared_layers,
         pool,
+        rotate_tail: hy,
     })
 }
 
@@ -5063,6 +5088,7 @@ fn k2_horizon(
             weight_input: false,
             latent: None,
             hash_layers: 0,
+            routed_activation: None,
         });
     }
     architecture.experts = Some(routed);
@@ -6698,6 +6724,158 @@ fn glm5_next(
     Ok(())
 }
 
+/// How many leading layers keep a dense feed-forward when an HY-V4 config
+/// lists no `mlp_layer_types` (`HYV4Config.__post_init__`,
+/// https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/configs/hy_v4.py).
+const HY_V4_DENSE_LAYERS: usize = 1;
+/// HY-V4's `hc_mult` when its config leaves it out (`HYV4Config`,
+/// https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/configs/hy_v4.py).
+const HY_V4_STREAMS: usize = 4;
+/// HY-V4's `hc_magnitude` when its config leaves it out (`HYV4Config`,
+/// https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/configs/hy_v4.py).
+const HY_V4_MAGNITUDE: f64 = 2.0;
+/// HY-V4's `hc_eps` when its config leaves it out (`HYV4Config`,
+/// https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/configs/hy_v4.py).
+const HY_V4_HC_EPS: f64 = 1e-6;
+/// HY-V4's `n_shared_experts` when its config leaves it out (`HYV4Config`,
+/// https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/configs/hy_v4.py).
+const HY_V4_SHARED_EXPERTS: usize = 1;
+/// HY-V4's `routed_scaling_factor` when its config leaves it out
+/// (`HYV4Config`, https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/configs/hy_v4.py).
+const HY_V4_ROUTED_SCALE: f64 = 2.827;
+/// HY-V4's `swiglu_limit` when its config leaves it out (`HYV4Config`,
+/// https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/configs/hy_v4.py).
+const HY_V4_SWIGLU_LIMIT: f64 = 10.0;
+
+/// HY-V4 (`hy_v4`, Tencent's Hy4), read as vLLM's `vllm/models/hy_v4`
+/// serves it: DeepSeek-V3's latent attention rotating adjacent pairs, with a
+/// learned sink logit per head in every softmax (`learnable_sink`) and,
+/// under `gated_mla`, its output multiplied elementwise by
+/// `sigmoid(linear_gate(x))` before `o_proj`; DeepSeek Sparse Attention
+/// whose `indexer_types` `shared` layers reuse the last indexed layer's
+/// choice, its indexer rotating the last `qk_rope_head_dim` components of
+/// each head; under `enable_ihc`, `hc_mult` independent hyper-connected
+/// streams collapsed by `hc_head`; a dense feed-forward on the layers
+/// `mlp_layer_types` marks `dense`, elsewhere experts scored by a sigmoid,
+/// chosen with `mlp.gate.e_score_correction_bias`, renormalised under
+/// `norm_topk_prob` and scaled by `routed_scaling_factor`, beside
+/// `n_shared_experts` shared experts. The routed experts are SwiGLU clamped
+/// by `swiglu_limit` (unclamped at zero); the dense and shared feed-forwards
+/// run `hidden_act` unclamped. Under `soft_logits_capping` the logits are
+/// soft-capped at `soft_logits_capping_logits`. A key the config class
+/// states a default for reads as that default when the config leaves it
+/// out. The release's tensor names are read through Transformers' `hy_v4`
+/// renames ([`StoredNames::HyV4`]).
+fn hy_v4(raw: &Value, layers: usize, architecture: &mut Architecture, path: &Path) -> Result<()> {
+    fits(layers, path)?;
+    if architecture
+        .latent
+        .is_none_or(|latent| latent.query_rank.is_none())
+    {
+        bail!(
+            "{} declares HY-V4 attention without kv_lora_rank and q_lora_rank; Ster implements its latent attention, whose indexer reads the latent query",
+            path.display()
+        );
+    }
+    // The switches `HYV4Config` turns on unless the config turns them off.
+    let on = |key: &str| raw.get(key).and_then(Value::as_bool) != Some(false);
+    architecture.stored_names = StoredNames::HyV4;
+    // vLLM rotates adjacent pairs in the attention as in the indexer
+    // (`is_neox_style=False`): the checkpoint is in Megatron's layout.
+    architecture.interleaved_rotary = true;
+    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    architecture.output_bias = architecture.query_key_value_bias;
+    if on("learnable_sink") {
+        architecture.attention_sinks = every_layer(layers, path)?;
+    }
+    if on("gated_mla") {
+        match text(raw, "gating_type") {
+            None | Some("elementwise") => {
+                architecture.attention_gate = Some(GateFunction::Sigmoid);
+            }
+            other => bail!(
+                "{} declares gating_type {other:?}; Ster implements HY-V4's elementwise output gate",
+                path.display()
+            ),
+        }
+    }
+    architecture.sparse_index = Some(sparse_index(raw, "hy_v4", layers, path)?);
+    if on("enable_ihc") {
+        let streams = match whole(raw, "hc_mult") {
+            Some(stated) => stated,
+            None => HY_V4_STREAMS,
+        };
+        if std::num::NonZeroUsize::new(streams).is_none() {
+            bail!(
+                "{} declares hc_mult zero under enable_ihc; hyper-connections need at least one stream",
+                path.display()
+            );
+        }
+        architecture.hyper_connections = Some(HyperConnections {
+            streams,
+            form: HyperForm::Independent {
+                magnitude: match number(raw, "hc_magnitude") {
+                    Some(stated) => stated,
+                    None => HY_V4_MAGNITUDE,
+                },
+            },
+            eps: match number(raw, "hc_eps") {
+                Some(stated) => stated,
+                None => HY_V4_HC_EPS,
+            },
+            learned_head: true,
+        });
+    }
+    if flag(raw, "soft_logits_capping") {
+        let Some(cap) = number(raw, "soft_logits_capping_logits") else {
+            bail!(
+                "{} declares soft_logits_capping without soft_logits_capping_logits",
+                path.display()
+            );
+        };
+        architecture.final_softcap = Some(cap);
+    }
+    let dense_layers = match raw.get("mlp_layer_types") {
+        Some(_) => qwen_dense_layers(raw, layers, path)?,
+        None => every_layer(HY_V4_DENSE_LAYERS.min(layers), path)?,
+    };
+    let mut routed = experts(
+        raw,
+        "n_routed_experts",
+        "moe_intermediate_size",
+        on("norm_topk_prob"),
+        ExpertLayout::Qwen,
+        dense_layers,
+        path,
+    )?;
+    routed.scoring = Scoring::Sigmoid;
+    routed.selection_bias = Some("mlp.gate.e_score_correction_bias");
+    routed.routed_scale = Some(match number(raw, "routed_scaling_factor") {
+        Some(stated) => stated,
+        None => HY_V4_ROUTED_SCALE,
+    });
+    let limit = match number(raw, "swiglu_limit") {
+        Some(stated) => stated,
+        None => HY_V4_SWIGLU_LIMIT,
+    };
+    // vLLM clamps the routed experts only under a positive limit.
+    routed.swiglu_limit =
+        (limit.is_normal() && limit.is_sign_positive()).then_some(SwigluLimit::RoutedInner(limit));
+    routed.routed_activation = Some(Activation::Silu);
+    let shared = match whole(raw, "n_shared_experts") {
+        Some(stated) => stated,
+        None => HY_V4_SHARED_EXPERTS,
+    };
+    routed.shared = std::num::NonZeroUsize::new(shared).map(|shared| SharedExpert {
+        intermediate: shared.get() * routed.intermediate,
+        module: "mlp.shared_experts",
+        gated: false,
+        form: SharedForm::GateUpDown,
+    });
+    architecture.experts = Some(routed);
+    Ok(())
+}
+
 /// The hyper-connections DeepSeek-V4 and GLM-5-Next state: `hc_mult`
 /// streams, `hc_sinkhorn_iters` rounds, `hc_eps`; `learned_head` when the
 /// model collapses its last streams through `hc_head`.
@@ -6718,7 +6896,9 @@ fn hyper_connections(raw: &Value, learned_head: bool, path: &Path) -> Result<Hyp
     };
     Ok(HyperConnections {
         streams: size("hc_mult")?,
-        sinkhorn_iterations: size("hc_sinkhorn_iters")?,
+        form: HyperForm::Manifold {
+            sinkhorn_iterations: size("hc_sinkhorn_iters")?,
+        },
         eps,
         learned_head,
     })

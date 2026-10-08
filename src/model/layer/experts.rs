@@ -109,7 +109,11 @@ pub(in crate::model) struct Experts {
     /// renormalisation.
     expert_scales: Option<Tensor>,
     spec: MixtureOfExperts,
+    /// The shared expert's activation, the model's `hidden_act`.
     activation: Activation,
+    /// The routed experts' activation: the model's, unless the family
+    /// states its own (HY-V4's SwiGLU experts).
+    routed_activation: Activation,
     /// The routed experts' and the shared expert's clamps on this layer.
     clamps: (Option<Clamp>, Option<Clamp>),
     /// The latent experts' projection down, the norm over their sum, and the
@@ -492,6 +496,7 @@ impl Experts {
             Some(SwigluLimit::Inner(limit)) => {
                 (Some(Clamp::Inner(*limit)), Some(Clamp::Inner(*limit)))
             }
+            Some(SwigluLimit::RoutedInner(limit)) => (Some(Clamp::Inner(*limit)), None),
             None => (None, None),
         };
         // Latent projections sit beside the experts, with a bias when the
@@ -572,6 +577,10 @@ impl Experts {
             expert_scales,
             spec: spec.clone(),
             activation,
+            routed_activation: match spec.routed_activation {
+                Some(stated) => stated,
+                None => activation,
+            },
             clamps,
             latent,
             hash,
@@ -791,7 +800,7 @@ impl Experts {
                 (inputs, Some(weight))
             };
             let produced = match self.experts.get(expert) {
-                Some(stored) => stored.forward(&inputs, self.activation, self.clamps.0)?,
+                Some(stored) => stored.forward(&inputs, self.routed_activation, self.clamps.0)?,
                 None => inputs,
             };
             let produced = match weight {

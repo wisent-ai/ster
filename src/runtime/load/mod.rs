@@ -14,7 +14,7 @@ use tokenizers::Tokenizer;
 
 use crate::{
     chat, lora,
-    model::{Architecture, SteeringLlama},
+    model::{Architecture, SteeringLlama, StoredNames},
 };
 
 use super::{DeviceChoice, Runtime, device::Precision, validate_layers};
@@ -23,6 +23,7 @@ mod checkpoint;
 mod config;
 mod family;
 mod gguf;
+mod hy_v4;
 mod mistral;
 
 pub use checkpoint::Checkpoint;
@@ -278,8 +279,9 @@ impl BaseLoad {
     /// Maps the base weights read-only. Nothing here is registered in a
     /// `VarMap`, so the base stays frozen whichever loader called it. A
     /// Mistral-format checkpoint answers each Transformers name from its own,
-    /// and so does a DeepSeek-V4 checkpoint in DeepSeek's own layout
-    /// (`embed`, `layers.{i}.attn.wq_a`, `ffn.experts`).
+    /// and so do an HY-V4 checkpoint under its release names and a
+    /// DeepSeek-V4 checkpoint in DeepSeek's own layout (`embed`,
+    /// `layers.{i}.attn.wq_a`, `ffn.experts`).
     fn builder(&self) -> Result<VarBuilder<'static>> {
         let layout = self.layout;
         let builder = match layout {
@@ -305,9 +307,15 @@ impl BaseLoad {
                 .with_context(|| {
                     format!("failed to map {} model weight files", self.weights.len())
                 })?;
-                match layout {
-                    Layout::Mistral => mapped.rename_f(move |name: &str| layout.stored_name(name)),
-                    _ => mapped,
+                match (layout, self.architecture.stored_names) {
+                    (Layout::Mistral, _) => {
+                        mapped.rename_f(move |name: &str| layout.stored_name(name))
+                    }
+                    (_, StoredNames::HyV4) => {
+                        let names = hy_v4::StoredNames::read(&self.weights)?;
+                        mapped.rename_f(move |name: &str| names.stored(name))
+                    }
+                    (_, StoredNames::Transformers) => mapped,
                 }
             }
         };

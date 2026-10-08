@@ -387,6 +387,24 @@ pub struct Architecture {
     /// LFM2's gated short convolution in place of attention on the layers it
     /// covers.
     pub short_convolution: Option<ShortConvolution>,
+    /// How the checkpoint spells the tensors Ster asks for by Transformers'
+    /// names.
+    pub stored_names: StoredNames,
+}
+
+/// How a checkpoint's tensor names relate to the Transformers names Ster
+/// reads by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredNames {
+    /// Transformers' own names (or a layout the loader recognises from its
+    /// files: Mistral's consolidated weights, DeepSeek-V4's native names).
+    Transformers,
+    /// HY-V4's release names, which Transformers renames on load
+    /// (`conversion_mapping.py`, `hy_v4`): `hc_pre` around each
+    /// hyper-connection, `hc_attn_layer` and `hc_mlp_layer` for `attn_hc`
+    /// and `ffn_hc`, `hc_head_*` for the head's `hc_*`,
+    /// `learnable_sink_param` for `sinks` and `linear_gate` for `gate_proj`.
+    HyV4,
 }
 
 /// DeepSeek Sparse Attention's indexer: `heads` heads of `head_dim`
@@ -405,6 +423,10 @@ pub struct IndexerSpec {
     /// GLM-5-Next's key pools (`index_kpool`): the indexer scores pools of
     /// this many keys rather than keys.
     pub pool: Option<KeyPool>,
+    /// The rotated components are each head's last `qk_rope_head_dim`
+    /// rather than its first (HY-V4, whose checkpoints keep the indexer's
+    /// position-free part first: vLLM's `hy_v4` `Indexer.prepare_inputs`).
+    pub rotate_tail: bool,
 }
 
 /// GLM-5-Next's pooled indexer: every `size` consecutive keys are one
@@ -718,18 +740,32 @@ pub struct InklingSpec {
     pub route_scale: f64,
 }
 
-/// Manifold-constrained hyper-connections (DeepSeek-V4, GLM-5-Next):
-/// `streams` residual streams (`hc_mult`), each sublayer reading them
-/// collapsed and its output spread back over them, mixed by a matrix
-/// `sinkhorn_iterations` Sinkhorn-Knopp rounds make doubly stochastic
-/// (`hc_sinkhorn_iters`, `hc_eps`). The model's last streams are collapsed
-/// by `hc_head` (DeepSeek-V4) or averaged (GLM-5-Next).
+/// Hyper-connections (DeepSeek-V4, GLM-5-Next, HY-V4): `streams` residual
+/// streams (`hc_mult`), each sublayer reading them collapsed and its output
+/// spread back over them, as `form` says (`hc_eps` beside the gates). The
+/// model's last streams are collapsed by `hc_head` (DeepSeek-V4, HY-V4) or
+/// averaged (GLM-5-Next).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HyperConnections {
     pub streams: usize,
-    pub sinkhorn_iterations: usize,
+    pub form: HyperForm,
     pub eps: f64,
     pub learned_head: bool,
+}
+
+/// How a hyper-connection spreads a sublayer's output back over the
+/// streams.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HyperForm {
+    /// Manifold-constrained (DeepSeek-V4, GLM-5-Next): the incoming streams
+    /// are mixed by a matrix `sinkhorn_iterations` Sinkhorn-Knopp rounds make
+    /// doubly stochastic (`hc_sinkhorn_iters`), and the output joins them
+    /// weighted by twice a sigmoid.
+    Manifold { sinkhorn_iterations: usize },
+    /// Independent (HY-V4's `enable_ihc`): no mixing matrix, each incoming
+    /// stream passes as it is, and the output joins it weighted by
+    /// `magnitude` (`hc_magnitude`) times a sigmoid, plus `hc_eps`.
+    Independent { magnitude: f64 },
 }
 
 /// DeepSeek-V4's attention (`deepseek_v4`): one key-value head that is both
@@ -974,6 +1010,7 @@ impl Architecture {
             sparse_index: None,
             routed_output_norm: false,
             activation: Activation::Silu,
+            stored_names: StoredNames::Transformers,
             pre_norms: true,
             output_norms: false,
             output_norm_eps: None,
@@ -1524,6 +1561,10 @@ pub struct MixtureOfExperts {
     /// experts are its row of `{module}.gate.tid2eid`, fixed by its id; the
     /// router still weighs them.
     pub hash_layers: u128,
+    /// The activation the routed experts run through when it is not the
+    /// model's `hidden_act`: HY-V4's routed experts are SwiGLU whatever its
+    /// dense and shared feed-forwards use (`HYV4Experts._apply_gate`).
+    pub routed_activation: Option<Activation>,
 }
 
 /// Where a mixture's latent experts read and return: Nemotron-H's
@@ -1585,6 +1626,9 @@ pub enum SwigluLimit {
     /// DeepSeek-V4: `silu(min(gate, limit)) · clamp(up, ±limit)`, on the
     /// routed and the shared experts.
     Inner(f64),
+    /// HY-V4: the same clamp as [`SwigluLimit::Inner`], on the routed
+    /// experts only; the shared expert is unclamped (vLLM's `HYV4MoEFused`).
+    RoutedInner(f64),
 }
 
 /// A shared expert's inner width and whether a sigmoid gate scales it.

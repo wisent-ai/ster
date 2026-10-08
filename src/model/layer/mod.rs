@@ -555,7 +555,7 @@ impl DecoderLayer {
                         kind,
                         config.hidden_size,
                         spec.streams,
-                        spec.sinkhorn_iterations,
+                        spec.form,
                         spec.eps,
                         architecture.norm_eps,
                     )
