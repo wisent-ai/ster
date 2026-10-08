@@ -15,7 +15,7 @@ use crate::lora::{Adapter, Adapters, Target};
 
 use super::{
     Activation, Architecture, Cache, DeltaRuleForm, FeedForwardKind, Mode, ParallelScan, Pass,
-    Route,
+    Route, SwigluLimit,
     attention::{Attention, project, relative::RelativeAttention},
     deepseek4::{HyperConnection, attention::CompressedAttention},
     depth::{DepthMix, DepthMixes},
@@ -179,9 +179,10 @@ pub(super) struct FeedForward {
     /// Gemma 3n's activation sparsity: the gate keeps only what lies above
     /// its mean plus this many standard deviations.
     sparsity: Option<f64>,
-    /// GLM-5-Next's `swiglu_limit`: the gate clamped above and the up
-    /// projection both ways before they meet.
-    clamp: Option<f64>,
+    /// The clamped SwiGLU of the dense feed-forward: GLM-5-Next's gate
+    /// clamped above and up projection both ways before they meet, or
+    /// MiniMax-M3's SwiGLU-OAI.
+    clamp: Option<SwigluLimit>,
 }
 
 /// xIELU's parameters from the feed-forward's `act_fn`, as Transformers'
@@ -313,7 +314,7 @@ impl FeedForward {
                 .activation_sparsity
                 .filter(|(_, layers)| layer < 128 && layers & (1u128 << layer) != 0)
                 .map(|(multiplier, _)| multiplier),
-            clamp: architecture.dense_swiglu_limit,
+            clamp: architecture.dense_swiglu_limit.clone(),
         })
     }
 
@@ -331,13 +332,18 @@ impl FeedForward {
                     None => gate,
                 };
                 let gate = self.sparse(gate)?;
-                let (gate, up) = match self.clamp {
-                    Some(limit) => (gate.minimum(limit)?, up.clamp(-limit, limit)?),
-                    None => (gate, up),
-                };
-                match &self.xielu {
-                    Some(xielu) => (xielu.apply(&gate)? * up)?,
-                    None => self.activation.gated(&gate, &up)?,
+                match (&self.clamp, &self.xielu) {
+                    (Some(SwigluLimit::Oai { limit, alpha }), _) => {
+                        experts::swiglu_oai(gate, up, *limit, *alpha)?
+                    }
+                    (Some(SwigluLimit::Inner(limit)), _) => self
+                        .activation
+                        .gated(&gate.minimum(*limit)?, &up.clamp(-limit, *limit)?)?,
+                    (Some(other), _) => candle_core::bail!(
+                        "a dense feed-forward clamps its SwiGLU as GLM-5-Next or MiniMax-M3 does, not as {other:?}"
+                    ),
+                    (None, Some(xielu)) => (xielu.apply(&gate)? * up)?,
+                    (None, None) => self.activation.gated(&gate, &up)?,
                 }
             }
             None => self.activate(&up)?,

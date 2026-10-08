@@ -6,6 +6,8 @@
 
 use std::path::Path;
 
+mod minimax_m3;
+
 use anyhow::{Context, Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
@@ -160,6 +162,7 @@ pub(super) enum Family {
     DeepseekV4,
     Glm5NextText,
     HyV4,
+    MinimaxM3VlText,
     Dots3Note,
 }
 
@@ -295,6 +298,7 @@ impl Family {
         Self::DeepseekV4,
         Self::Glm5NextText,
         Self::HyV4,
+        Self::MinimaxM3VlText,
         Self::Dots3Note,
     ];
 
@@ -323,6 +327,7 @@ impl Family {
     fn remote_class(self) -> Option<&'static str> {
         match self {
             Self::LongcatFlashNgram => Some("LongcatFlashNgramForCausalLM"),
+            Self::MinimaxM3VlText => Some("MiniMaxM3SparseForCausalLM"),
             _ => None,
         }
     }
@@ -459,6 +464,7 @@ impl Family {
             Self::DeepseekV4 => "deepseek_v4",
             Self::Glm5NextText => "glm5_next_text",
             Self::HyV4 => "hy_v4",
+            Self::MinimaxM3VlText => "minimax_m3_vl_text",
             Self::Dots3Note => "dots3_note",
         }
     }
@@ -646,6 +652,9 @@ pub(super) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
                 object.insert("intermediate_size".to_owned(), dense);
             }
         }
+    }
+    if model_type == "minimax_m3_vl_text" {
+        minimax_m3::fill_keys(raw);
     }
     // DeepSeek-V4 states only `moe_intermediate_size`, which Transformers
     // reads as `intermediate_size` too (`DeepseekV4Config.attribute_map`):
@@ -2900,6 +2909,7 @@ pub(super) fn family(
         "sarvam_mla" => sarvam_mla(raw, layers, &mut architecture, path)?,
         "cohere2_moe" => cohere2_moe(raw, layers, &mut architecture, path)?,
         "llama4_text" => llama4(raw, layers, &mut architecture, path)?,
+        "minimax_m3_vl_text" => minimax_m3::family(raw, layers, &mut architecture, path)?,
         "afmoe" => afmoe(raw, layers, llama, &mut architecture, path)?,
         "laguna" => laguna(raw, scaling, layers, llama, &mut architecture, path)?,
         "muse_glimmer_text" => muse_glimmer(raw, layers, llama, &mut architecture, path)?,
@@ -6785,7 +6795,7 @@ fn glm5_next(
     architecture.sparse_index = Some(sparse_index(raw, "glm5_next_text", layers, path)?);
     architecture.hyper_connections = Some(hyper_connections(raw, false, path)?);
     let limit = number(raw, "swiglu_limit");
-    architecture.dense_swiglu_limit = limit;
+    architecture.dense_swiglu_limit = limit.map(SwigluLimit::Inner);
     let every = every_layer(layers, path)?;
     let mut routed = experts(
         raw,

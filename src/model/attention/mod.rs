@@ -2,6 +2,7 @@
 //! rotary angles they are taken at, and the masks that hide what a position
 //! may not see.
 
+mod blocks;
 mod indexer;
 pub(super) mod relative;
 
@@ -102,6 +103,8 @@ pub(super) struct Attention {
     indexer: Option<indexer::Indexer>,
     /// A GLM-5 `shared` layer: it reuses the last indexed layer's choice.
     index_shared: bool,
+    /// MiniMax Sparse Attention's block indexer on this layer (MiniMax-M3).
+    block_indexer: Option<blocks::BlockIndexer>,
 }
 
 /// IQuest-LoopCoder's mix: on a layer past the first `physical`, the
@@ -558,6 +561,12 @@ impl Attention {
                 ),
                 (None, _) => None,
             },
+            block_indexer: match architecture.block_index {
+                Some(index) if index.indexes(layer) => Some(blocks::BlockIndexer::load(
+                    &builder, input, spec, index,
+                )?),
+                _ => None,
+            },
             loop_mix: match architecture
                 .loops
                 .and_then(|loops| loops.gate_window.map(|window| (loops, window)))
@@ -940,6 +949,20 @@ impl Attention {
             }
             (None, true) => cache.index_mask.clone(),
             (None, false) => None,
+        };
+        // MiniMax Sparse Attention: past `sparse_topk_blocks` key blocks, each
+        // query head sees only the blocks its group's index ranks highest.
+        let index_hidden = match &self.block_indexer {
+            Some(blocks) => blocks.hidden_keys(
+                hidden,
+                angles.as_ref(),
+                self.heads,
+                index_pos,
+                layer,
+                cache,
+                mode,
+            )?,
+            None => index_hidden,
         };
         let indexed_mask = match &index_hidden {
             Some(index_hidden) => Some(match mask {

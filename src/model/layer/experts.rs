@@ -32,9 +32,10 @@ const GPT_OSS_GATE_SHARPNESS: f64 = 1.702;
 /// One expert's clamped SwiGLU, resolved for its layer.
 #[derive(Debug, Clone, Copy)]
 enum Clamp {
-    /// GPT-OSS's `(clamp(up, -limit, limit) + 1) · g · sigmoid(1.702 g)`
-    /// where `g = min(gate, limit)`.
-    GptOss(f64),
+    /// GPT-OSS's `(clamp(up, -limit, limit) + 1) · g · sigmoid(alpha · g)`
+    /// where `g = min(gate, limit)`: [`GPT_OSS_GATE_SHARPNESS`] for GPT-OSS,
+    /// `swiglu_alpha` for MiniMax-M3.
+    GptOss { limit: f64, alpha: f64 },
     /// Step 3.5's `min(act(gate), limit) · clamp(up, -limit, limit)`.
     Step(f64),
     /// DeepSeek-V4's `act(min(gate, limit)) · clamp(up, -limit, limit)`.
@@ -52,11 +53,8 @@ impl Expert {
     ) -> candle_core::Result<Tensor> {
         let up = self.up.forward(input)?;
         let gated = match (&self.gate, clamp) {
-            (Some(gate), Some(Clamp::GptOss(limit))) => {
-                let gate = gate.forward(input)?.minimum(limit)?;
-                let up = (up.clamp(-limit, limit)? + 1.0)?;
-                let sigmoid = ((gate.clone() * -GPT_OSS_GATE_SHARPNESS)?.exp()? + 1.0)?.recip()?;
-                ((gate * sigmoid)? * up)?
+            (Some(gate), Some(Clamp::GptOss { limit, alpha })) => {
+                swiglu_oai(gate.forward(input)?, up, limit, alpha)?
             }
             (Some(gate), Some(Clamp::Step(limit))) => {
                 let gate = activation.apply(&gate.forward(input)?)?.minimum(limit)?;
@@ -92,6 +90,21 @@ impl Expert {
             down: Some(linear_no_bias(intermediate, hidden, builder.pp(down))?),
         })
     }
+}
+
+/// GPT-OSS's clamped SwiGLU, which MiniMax-M3 calls SwiGLU-OAI:
+/// `(clamp(up, ±limit) + 1) · g · sigmoid(alpha · g)` with
+/// `g = min(gate, limit)`, the sigmoid written out so it has a backward pass.
+pub(super) fn swiglu_oai(
+    gate: Tensor,
+    up: Tensor,
+    limit: f64,
+    alpha: f64,
+) -> candle_core::Result<Tensor> {
+    let gate = gate.minimum(limit)?;
+    let up = (up.clamp(-limit, limit)? + 1.0)?;
+    let sigmoid = ((gate.clone() * -alpha)?.exp()? + 1.0)?.recip()?;
+    (gate * sigmoid)? * up
 }
 
 #[derive(Debug, Clone)]
@@ -491,7 +504,20 @@ impl Experts {
                 .map(Clamp::Step)
         };
         let clamps = match &spec.swiglu_limit {
-            Some(SwigluLimit::GptOss(limit)) => (Some(Clamp::GptOss(*limit)), None),
+            Some(SwigluLimit::GptOss(limit)) => (
+                Some(Clamp::GptOss {
+                    limit: *limit,
+                    alpha: GPT_OSS_GATE_SHARPNESS,
+                }),
+                None,
+            ),
+            Some(SwigluLimit::Oai { limit, alpha }) => {
+                let clamp = Clamp::GptOss {
+                    limit: *limit,
+                    alpha: *alpha,
+                };
+                (Some(clamp), Some(clamp))
+            }
             Some(SwigluLimit::Step { routed, shared }) => (at(routed), at(shared)),
             Some(SwigluLimit::Inner(limit)) => {
                 (Some(Clamp::Inner(*limit)), Some(Clamp::Inner(*limit)))

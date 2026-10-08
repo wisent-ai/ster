@@ -326,15 +326,18 @@ pub struct Architecture {
     pub compressed: Option<CompressedSpec>,
     /// DeepSeek-V4's and GLM-5-Next's hyper-connected residual streams.
     pub hyper_connections: Option<HyperConnections>,
-    /// GLM-5-Next's dense feed-forward clamp: `silu(min(gate, limit)) ·
-    /// clamp(up, ±limit)` (`swiglu_limit`).
-    pub dense_swiglu_limit: Option<f64>,
+    /// The dense feed-forward's clamped SwiGLU: GLM-5-Next's
+    /// [`SwigluLimit::Inner`] (`swiglu_limit`) or MiniMax-M3's
+    /// [`SwigluLimit::Oai`] (`swiglu_limit`, `swiglu_alpha`).
+    pub dense_swiglu_limit: Option<SwigluLimit>,
     /// Inkling's `unpadded_vocab_size`: logits past it are never scored.
     pub vocabulary_limit: Option<usize>,
     /// DeciLM's per-layer plan, one entry per layer.
     pub layer_plans: Option<Vec<LayerPlan>>,
     /// DeepSeek Sparse Attention's indexer (DeepSeek-V3.2, GLM-5).
     pub sparse_index: Option<IndexerSpec>,
+    /// MiniMax-M3's block indexer (MiniMax Sparse Attention).
+    pub block_index: Option<BlockIndexSpec>,
     /// A norm over each routed layer's feed-forward output, named by
     /// `names.feed_forward_output_norm` (A.X-K1's `post_mlp_layernorm`).
     pub routed_output_norm: bool,
@@ -445,6 +448,32 @@ pub struct IndexerSpec {
 pub struct KeyPool {
     pub size: usize,
     pub tail: bool,
+}
+
+/// MiniMax Sparse Attention's block indexer (MiniMax-M3): on the layers in
+/// `layers` (`sparse_attention_freq`), `heads` index heads of `head_dim`
+/// (`sparse_num_index_heads`, one per key-value head, `sparse_index_dim`)
+/// score every key against one shared index key, without a scale. A block
+/// of `block` keys (`sparse_block_size`) scores as its best visible key, and
+/// each query of a key-value group keeps its group's best `top_blocks`
+/// blocks (`sparse_topk_blocks`), its own block and the `local_blocks - 1`
+/// before it (`sparse_local_block`) always among them. Blocks are counted
+/// from the first key slot, as Transformers' `MiniMaxM3VLIndexer` counts
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockIndexSpec {
+    pub heads: usize,
+    pub head_dim: usize,
+    pub block: std::num::NonZeroUsize,
+    pub top_blocks: usize,
+    pub local_blocks: usize,
+    pub layers: u128,
+}
+
+impl BlockIndexSpec {
+    pub fn indexes(&self, layer: usize) -> bool {
+        layer < u128::BITS as usize && self.layers & (1u128 << layer) != 0
+    }
 }
 
 impl IndexerSpec {
@@ -1026,6 +1055,7 @@ impl Architecture {
             vocabulary_limit: None,
             layer_plans: None,
             sparse_index: None,
+            block_index: None,
             routed_output_norm: false,
             activation: Activation::Silu,
             stored_names: StoredNames::Transformers,
@@ -1658,6 +1688,10 @@ pub enum SwigluLimit {
     /// HY-V4: the same clamp as [`SwigluLimit::Inner`], on the routed
     /// experts only; the shared expert is unclamped (vLLM's `HYV4MoEFused`).
     RoutedInner(f64),
+    /// MiniMax-M3's SwiGLU-OAI: GPT-OSS's clamp with the gate's sharpness
+    /// stated (`swiglu_alpha`), `(clamp(up, ±limit) + 1) · g · sigmoid(alpha
+    /// g)` with `g = min(gate, limit)`, on the routed and the shared experts.
+    Oai { limit: f64, alpha: f64 },
 }
 
 /// A shared expert's inner width and whether a sigmoid gate scales it.
