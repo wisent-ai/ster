@@ -15,6 +15,7 @@ use super::onboarding;
 
 mod compare;
 mod generate;
+mod project;
 mod strength;
 
 pub(super) use generate::{GenerateArgs, generate};
@@ -36,6 +37,10 @@ pub(super) enum VectorCommand {
     /// similarity per layer, what each holds that the others do not span,
     /// and the groups they fall into.
     Compare(compare::CompareArgs),
+    /// Show where an artifact moves the model's states at one layer: every
+    /// pair side read with and without it, projected onto the principal
+    /// components of the unsteered reads.
+    Project(project::ProjectArgs),
 }
 
 pub(super) fn run(command: VectorCommand) -> Result<()> {
@@ -45,6 +50,7 @@ pub(super) fn run(command: VectorCommand) -> Result<()> {
         VectorCommand::Evaluate(args) => evaluate(args),
         VectorCommand::Inspect(args) => inspect(args),
         VectorCommand::Compare(args) => compare::compare(args),
+        VectorCommand::Project(args) => project::project(args),
     }
 }
 

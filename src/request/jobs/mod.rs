@@ -15,7 +15,7 @@ use crate::{
 
 use super::requests::{
     CompareRequest, EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest,
-    OptimizeRequest, ParityRequest, TrainRequest,
+    OptimizeRequest, ParityRequest, ProjectRequest, TrainRequest,
 };
 
 mod decide;
@@ -96,13 +96,15 @@ pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value
     // already refused this early because it is attached during the load; a
     // steering vector was not, and the wrong file there paid for a full
     // checkpoint load before being told.
-    let vector = request
-        .vector
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    let artifact = vector
-        .map(|value| SteeringArtifact::load(Path::new(value)))
-        .transpose()?;
+    let artifacts = request
+        .steering
+        .iter()
+        .map(|part| SteeringArtifact::load(Path::new(&part.vector)))
+        .collect::<Result<Vec<_>>>()?;
+    let parts: Vec<(&SteeringArtifact, f64)> = artifacts
+        .iter()
+        .zip(request.steering.iter().map(|part| part.strength))
+        .collect();
     // An adapter rewrites the projections themselves, so it is attached while
     // the weights are mapped rather than applied per token the way a steering
     // vector is.
@@ -121,14 +123,14 @@ pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value
         None => request.model.load_runtime_at(&request.precision)?,
     };
     runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
-    if let Some(vector) = vector {
-        tune_lib::warn_on_provenance(Path::new(vector), "direction", &runtime);
+    for part in &request.steering {
+        tune_lib::warn_on_provenance(Path::new(&part.vector), "direction", &runtime);
     }
-    let generated = runtime.generate(
+    let generated = runtime.generate_mixed(
         &request.prompt,
-        artifact.as_ref(),
+        &parts,
         GenerationOptions {
-            strength: request.strength,
+            strength: None,
             max_new_tokens: request.max_new_tokens,
             temperature: request.temperature,
             top_p: request.top_p,
@@ -177,4 +179,22 @@ pub(in crate::request) fn compare_job(request: CompareRequest) -> Result<Value> 
         clusters: request.clusters,
     };
     Ok(serde_json::to_value(workflow::compare(&artifacts, &options)?)?)
+}
+
+/// Mirrors `ster vector project`: the same reads, the same projection, and
+/// the document the CLI prints.
+pub(in crate::request) fn project_job(request: ProjectRequest) -> Result<Value> {
+    let pair_set = PairSet::load(Path::new(&request.pairs))?;
+    let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
+    let mut runtime = request.model.load_runtime_at(&request.precision)?;
+    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
+    let options = workflow::ProjectOptions {
+        layer: request.layer,
+        strength: request.strength,
+        components: request.components,
+    };
+    let mut report = serde_json::to_value(workflow::project(&runtime, &pair_set, &artifact, &options)?)?;
+    chat.annotate(&mut report)?;
+    Ok(report)
 }

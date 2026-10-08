@@ -1,5 +1,6 @@
-//! `ster generate`: text from a model, with an optional steering vector or
-//! adapter, for one prompt or a prompt set.
+//! `ster generate`: text from a model, steered by any number of steering
+//! artifacts each at its own strength, or through an adapter, for one prompt
+//! or a prompt set.
 
 use std::path::PathBuf;
 
@@ -29,8 +30,10 @@ pub(in crate::cli) struct GenerateArgs {
     /// template absent or `--chat-template off` it is refused.
     #[arg(long)]
     system: Option<PathBuf>,
+    /// Steering artifact to add during generation; repeat it to steer
+    /// several traits at once, each with the --strength in the same place.
     #[arg(long)]
-    vector: Option<PathBuf>,
+    vector: Vec<PathBuf>,
     /// Frozen LoRA adapter artifact to load the model with. It must have
     /// been trained for this exact model: Ster refuses a mismatch rather
     /// than steering the wrong residual stream.
@@ -47,10 +50,10 @@ pub(in crate::cli) struct GenerateArgs {
     /// is cast to it on the way in. bf16 needs --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
-    /// Scale on the steering vector; required with --vector, which it
+    /// Scale on the --vector in the same place; one per --vector, which it
     /// belongs to, and Ster assumes none.
     #[arg(long, requires = "vector")]
-    strength: Option<f64>,
+    strength: Vec<f64>,
     #[arg(long)]
     max_new_tokens: usize,
     /// Zero selects deterministic argmax generation.
@@ -87,10 +90,18 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
     // wrong file paid for a full checkpoint load before being told.
     // `Reward::parse` resolves its source ahead of the policy load for
     // this reason and says so.
-    let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
-    if artifact.is_some() && strength.is_none() {
-        anyhow::bail!("--vector needs --strength; Ster assumes no steering scale");
+    let artifacts = vector
+        .iter()
+        .map(|path| SteeringArtifact::load(path))
+        .collect::<Result<Vec<_>>>()?;
+    if artifacts.len() != strength.len() {
+        anyhow::bail!(
+            "every --vector needs its own --strength: got {} vector(s) and {} strength(s); Ster assumes no steering scale",
+            artifacts.len(),
+            strength.len()
+        );
     }
+    let parts: Vec<(&SteeringArtifact, f64)> = artifacts.iter().zip(strength.iter().copied()).collect();
     // The system turn is read here for the same reason: an unreadable or
     // empty file is refused before the checkpoint is paid for.
     let system = match system.as_deref() {
@@ -127,11 +138,12 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
         None => model.load_at(precision)?,
     };
     runtime.set_chat_template(chat_template)?;
-    if let Some(vector) = vector.as_deref() {
-        tune::warn_on_provenance(vector, "direction", &runtime);
+    for path in &vector {
+        tune::warn_on_provenance(path, "direction", &runtime);
     }
+    // Every part carries its own strength, so the options carry none.
     let options = GenerationOptions {
-        strength,
+        strength: None,
         max_new_tokens,
         temperature,
         top_p,
@@ -150,11 +162,9 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
                         content: prompt,
                     },
                 ])?;
-                runtime
-                    .sample_tokens(context, artifact.as_ref(), options)?
-                    .text
+                runtime.sample_tokens_mixed(context, &parts, options)?.text
             }
-            None => runtime.generate(prompt, artifact.as_ref(), options)?,
+            None => runtime.generate_mixed(prompt, &parts, options)?,
         })
     };
     match (prompt_set, output) {

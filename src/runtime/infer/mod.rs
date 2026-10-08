@@ -277,11 +277,23 @@ impl Runtime {
     /// a direction from raw pair text and then adding it during a templated
     /// decode measures one space and steers another.
     pub fn activations(&self, prompt: &str, layers: &[usize]) -> Result<Vec<(usize, Vec<f32>)>> {
+        self.activations_steered(prompt, layers, None)
+    }
+
+    /// [`Runtime::activations`] read while `steering` is added to the
+    /// residual stream, so a caller can see where a steered run's states
+    /// land beside the unsteered ones. `None` is the unsteered read itself.
+    pub fn activations_steered(
+        &self,
+        prompt: &str,
+        layers: &[usize],
+        steering: Option<&SteeringPlan>,
+    ) -> Result<Vec<(usize, Vec<f32>)>> {
         validate_layers(layers, self.layer_count())?;
         let ids = self.encode_prompt(prompt)?;
         let input = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?;
         let mut cache = self.cache(false)?;
-        let output = self.model.forward(&input, 0, &mut cache, None, layers)?;
+        let output = self.model.forward(&input, 0, &mut cache, steering, layers)?;
         Ok(output.activations.into_iter().collect())
     }
 

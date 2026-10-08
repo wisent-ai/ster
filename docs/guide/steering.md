@@ -25,8 +25,11 @@ ster vector evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
                      [--chat-template auto|off] [--precision f32|f16|bf16]
 ster vector inspect <ARTIFACT>
 ster vector compare <ARTIFACT> <ARTIFACT>... --clusters <N> [--layers <L,L,...>]
+ster vector project --model <MODEL> --pairs <PAIRS> --vector <VECTOR> --layer <L>
+                    --strength <S> --components <N> [--revision <REVISION>]
+                    [--device cpu] [--chat-template auto|off] [--precision f32|f16|bf16]
 ster generate --model <MODEL> (--prompt <PROMPT> | --prompts <SET> --output <FILE>)
-              [--vector <VECTOR> --strength <S>] [--system <FILE>]
+              [--vector <VECTOR> --strength <S>]... [--system <FILE>]
               [--adapter <ADAPTER>] [--revision <REVISION>] [--device cpu]
               [--chat-template auto|off] [--precision f32|f16|bf16]
               --max-new-tokens <N> --temperature <T>
@@ -43,18 +46,28 @@ direction, or a logistic probe. `--chat-template` and `--precision` are on
 every one of these commands except `vector inspect` and `vector compare`,
 which load no model. Each command prints a pretty JSON document on stdout,
 and each is also an operation of `ster request`: `ster request vector/train`,
-`vector/optimize`, `vector/evaluate`, `vector/inspect`, `vector/compare`,
+`vector/optimize`, `vector/evaluate`, `vector/inspect`, `vector/compare`, `vector/project`,
 `generate` and `extract` read the request body as one JSON document on stdin,
 where every flag above is a camelCase field, `chatTemplate` and `precision`
 included, each defaulting to what the CLI defaults to, and print NDJSON log
 events and one result event carrying the same document. The numbers have no
 default on either side: `--holdout`, `--max-new-tokens`, `--temperature` and
 `--seed` (and `holdout`, `maxNewTokens`, `temperature`, `seed`) are required,
-and leaving one out is refused naming it. `--strength` (`strength`) scales a
-steering vector and exists only with one: required with `--vector`, refused
-without it. `--top-p` is optional; without it generation samples the whole
+and leaving one out is refused naming it. `--strength` scales the `--vector`
+in the same place and exists only with one: every `--vector` needs its own,
+and a strength without a vector is refused. The request carries the same
+pairs as `steering: [{"vector": …, "strength": …}]`, each strength required.
+`--top-p` is optional; without it generation samples the whole
 distribution, and a temperature of zero is argmax. The process ends with
 the operation; see [desktop requests](desktop-requests.md).
+
+Several `--vector`/`--strength` pairs steer several traits at once, as
+wisent's `multi-steer` did: at every layer any of them carries, the sum of
+each vector times its strength is added to the residual stream. A direction
+and its negation at equal strengths cancel to the unsteered answer, and one
+vector named twice at a strength steers as it does once at twice that
+strength; every artifact passes the checks a single one does, and strengths
+that are all zero are refused, since such a mix would steer nothing.
 
 `ster generate --prompts <SET> --output <FILE>` answers a whole prompt set
 (`{"prompts": ["…"]}`, as [`docs/examples/prompts.json`](../examples/prompts.json)) with
@@ -192,6 +205,25 @@ group, or `null` when none does. Ster chooses no group count. Refusals:
 fewer than two artifacts, artifacts of different models or widths, more
 groups than artifacts, a named layer an artifact does not carry, no layer
 every artifact carries, and a direction with no usable length.
+
+## Projection
+
+`ster vector project` shows where an artifact moves the model's states, the
+picture wisent's `steering-viz` drew, as numbers a caller can plot or check.
+Every side of every pair is read at `--layer` twice, unsteered and with the
+artifact added at `--strength`, and both reads are projected onto the first
+`--components` principal components of the unsteered reads; Ster chooses
+neither number. A read at a layer is taken before that layer's own vector is
+added, so the movement it shows comes from the vectors at the layers before
+it. The answer lists every point (`pair`, `side`, `steered`, `coordinates`),
+the share of the unsteered variance each component carries (`explained`,
+fewer entries when the reads span fewer directions), the mean movement along
+the artifact's own unit direction at that layer (`shift_along_direction`,
+`null` when the artifact carries no vector there), the mean distance of the
+negative sides from the mean positive side before and after steering, and
+the share of negatives steering brought nearer. Refusals: a layer the model
+lacks, no components, an artifact of another model or width, and reads that
+do not vary at all.
 
 ## Provenance
 

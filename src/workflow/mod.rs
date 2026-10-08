@@ -18,6 +18,7 @@ mod evaluate;
 mod extract;
 mod optimize;
 mod parity;
+mod project;
 mod train;
 
 pub use compare::{CompareOptions, ComparisonReport, compare};
@@ -25,6 +26,7 @@ pub use evaluate::{EvaluationReport, LayerEvaluation, evaluate};
 pub use extract::{PromptSet, extract};
 pub use optimize::{Candidate, Holdout, Selection, optimize};
 pub use parity::{ParityReport, parity};
+pub use project::{ProjectOptions, ProjectionReport, Side, project};
 pub use train::train;
 
 /// Progress lines the workflows print while running. The CLI leaves the sink

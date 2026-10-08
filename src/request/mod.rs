@@ -73,6 +73,7 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
         "vector/evaluate" => run_job(body, evaluate_job),
         "vector/inspect" => run_job(body, inspect_job),
         "vector/compare" => run_job(body, compare_job),
+        "vector/project" => run_job(body, project_job),
         "generate" => run_job(body, generate_job),
         "extract" => run_job(body, extract_job),
         "parity" => run_job(body, parity_job),

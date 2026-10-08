@@ -129,17 +129,15 @@ pub(in crate::request) struct GenerateRequest {
     pub(in crate::request) model: ModelRequest,
     #[serde(default)]
     pub(in crate::request) prompt: String,
+    /// Steering artifacts added during generation, each at its own
+    /// strength; empty generates unsteered. Token budget, temperature and
+    /// seed are the caller's; Ster assumes none. Temperature zero is argmax.
     #[serde(default)]
-    pub(in crate::request) vector: Option<String>,
+    pub(in crate::request) steering: Vec<SteeringPart>,
     /// A frozen LoRA adapter artifact trained for this exact model. Ster
     /// refuses a mismatch rather than steering the wrong residual stream.
     #[serde(default)]
     pub(in crate::request) adapter: Option<String>,
-    /// Scale on the steering vector: required with `vector`, which it
-    /// belongs to, and meaningless without one. Token budget, temperature and
-    /// seed are the caller's; Ster assumes none. Temperature zero is argmax.
-    #[serde(default)]
-    pub(in crate::request) strength: Option<f64>,
     pub(in crate::request) max_new_tokens: usize,
     pub(in crate::request) temperature: f64,
     /// Nucleus mass; absent samples from the whole distribution.
@@ -155,18 +153,20 @@ pub(in crate::request) struct GenerateRequest {
     pub(in crate::request) precision: String,
 }
 
+/// One steering artifact and the scale it is added at. The strength has no
+/// default: Ster assumes no steering scale.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(in crate::request) struct SteeringPart {
+    pub(in crate::request) vector: String,
+    pub(in crate::request) strength: f64,
+}
+
 impl Validate for GenerateRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("generate")?;
-        let steers = self
-            .vector
-            .as_deref()
-            .is_some_and(|vector| !vector.trim().is_empty());
-        if steers && self.strength.is_none() {
-            return Err(
-                "generate with a vector requires a strength; Ster assumes no steering scale"
-                    .to_owned(),
-            );
+        for part in &self.steering {
+            require(&part.vector, "generate names a steering part with no vector".to_owned())?;
         }
         require(&self.prompt, "generate requires a prompt".to_owned())
     }
@@ -262,5 +262,34 @@ impl Validate for CompareRequest {
                 self.artifacts.len()
             )),
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::request) struct ProjectRequest {
+    #[serde(flatten)]
+    pub(in crate::request) model: ModelRequest,
+    #[serde(default)]
+    pub(in crate::request) pairs: String,
+    #[serde(default)]
+    pub(in crate::request) vector: String,
+    /// The layer every side is read at; required.
+    pub(in crate::request) layer: usize,
+    /// The strength the artifact is added at; required, Ster assumes none.
+    pub(in crate::request) strength: f64,
+    /// Principal components to project onto; required.
+    pub(in crate::request) components: std::num::NonZeroUsize,
+    #[serde(default = "default_chat_template")]
+    pub(in crate::request) chat_template: String,
+    #[serde(default = "default_precision")]
+    pub(in crate::request) precision: String,
+}
+
+impl Validate for ProjectRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("vector/project")?;
+        require(&self.pairs, "vector/project requires a pairs file".to_owned())?;
+        require(&self.vector, "vector/project requires a steering artifact".to_owned())
     }
 }
