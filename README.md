@@ -304,11 +304,17 @@ ster pairs synthesize \
 ```
 
 `ster pairs import` reads a published benchmark export (TruthfulQA,
-Do-Not-Answer, LiveCodeBench) into a set:
+Do-Not-Answer, LiveCodeBench, the BiPO behaviour CSVs) into a set, or the
+multiple-choice rows of any dataset whose schema you point it at:
 
 ```bash
 ster pairs import --benchmark truthfulqa --source TruthfulQA_en.csv --count 200 --seed <SEED> --output pairs.json
+ster pairs import --benchmark choices --source arc_easy.jsonl --seed <SEED> --output arc.pairs.json \
+  --question /question --choices /choices/text --answer /answerKey --answer-form label --labels /choices/label
 ```
+
+See the [pair-sets guide](docs/guide/pair-sets.md) for each benchmark's pairing,
+the answer forms and every refusal.
 
 Run `ster pairs inspect --pairs pairs.json --dedupe-bits <BITS> --dedupe-bands
 <BANDS> --refusal-threshold <SCORE> --unbalanced-ratio <RATIO>` before
@@ -322,7 +328,7 @@ Train a direction for layers 12 through 19. The explicit `--pairs` below works
 for the manually created file; omit it to use the active imported set:
 
 ```bash
-ster train \
+ster vector train \
   --model meta-llama/Llama-3.2-1B \
   --pairs pairs.json \
   --layers 12..20 \
@@ -360,12 +366,13 @@ under its Transformers name, so steering and capture work on it too.
 ## CLI
 
 ```text
-ster train      learn one vector per selected layer
-ster optimize   select method and layer on a held-out fraction the caller states
-ster evaluate   measure a vector on a contrastive pair set
-ster generate   run normal or steered autoregressive generation
-ster extract    export hidden states for an arbitrary prompt set
-ster inspect    summarize and validate a steering artifact
+ster vector train     learn one vector per selected layer
+ster vector optimize  select method and layer on a held-out fraction the caller states
+ster vector evaluate  measure a vector on a contrastive pair set
+ster vector inspect   summarize and validate a steering artifact
+ster vector compare   compare vectors fitted for different traits on one model
+ster generate         run normal or steered autoregressive generation
+ster extract          export hidden states for an arbitrary prompt set
 ster onboarding import or replay first use
 ster decide     answer typed questions about a state from one forward pass
 ster calibrate  fit the temperature that makes decision probabilities honest

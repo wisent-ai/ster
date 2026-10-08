@@ -54,6 +54,13 @@ pub(in crate::request) fn pairs_import_job(request: PairsImportRequest) -> Resul
             .unwrap_or_else(|| request.benchmark.clone()),
         source: request.source.into(),
         examples: request.examples.map(Into::into),
+        fields: pairs::benchmark::ChoiceFields::from_parts(
+            request.question,
+            request.choices,
+            request.answer,
+            request.answer_form,
+            request.labels,
+        )?,
         count: request.count,
         seed: request.seed,
     };

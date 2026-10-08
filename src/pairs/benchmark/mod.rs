@@ -1,7 +1,9 @@
 //! Contrastive pair sets read from published benchmark exports: TruthfulQA,
-//! Do-Not-Answer (DnA) and LiveCodeBench. This is the pair generation the
-//! retired Python `wisent-benchmark` package did, in the pair-set format every
-//! Ster command already reads.
+//! Do-Not-Answer (DnA), LiveCodeBench, the BiPO behaviour CSVs, and the
+//! multiple-choice rows of any dataset whose schema the caller names. This is
+//! the pair generation the retired Python `wisent-benchmark` and
+//! `wisent-extractors` packages did, in the pair-set format every Ster command
+//! already reads.
 //!
 //! Each benchmark row becomes one pair written the way `pairs synthesize`
 //! writes one — `Question: …\nAnswer: …` on both sides — so an imported set and
@@ -9,7 +11,10 @@
 //! cannot be read fails the import instead of yielding an empty list, and a row
 //! that cannot become a pair is reported by number with the reason.
 
+mod choices;
 mod csv;
+
+pub use choices::{AnswerForm, ChoiceFields};
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +37,10 @@ pub enum Benchmark {
     /// The BiPO paper's behaviour CSVs (question, matching, not_matching):
     /// positive the answer matching the behaviour, negative the other.
     Bipo,
+    /// Multiple-choice rows (JSON Lines or a JSON list) of any dataset:
+    /// positive the correct choice, negative another choice drawn with the
+    /// seed, each part read where [`ChoiceFields`] says it sits.
+    Choices,
 }
 
 impl Benchmark {
@@ -41,8 +50,11 @@ impl Benchmark {
             "dna" => Ok(Self::Dna),
             "livecodebench" => Ok(Self::Livecodebench),
             "bipo" => Ok(Self::Bipo),
+            "choices" => Ok(Self::Choices),
             other => {
-                bail!("unknown benchmark {other}: choose truthfulqa, dna, livecodebench or bipo")
+                bail!(
+                    "unknown benchmark {other}: choose truthfulqa, dna, livecodebench, bipo or choices"
+                )
             }
         }
     }
@@ -57,11 +69,15 @@ const DNA_ANSWERS: (&str, &str) = (
 
 pub struct ImportOptions {
     pub benchmark: Benchmark,
-    /// The benchmark export: TruthfulQA_en.csv, DnA_en.csv or problems.json.
+    /// The benchmark export: TruthfulQA_en.csv, DnA_en.csv, problems.json, a
+    /// BiPO CSV, or multiple-choice rows.
     pub source: PathBuf,
     /// LiveCodeBench's question_examples.json; defaults to the file of that
     /// name beside `source`.
     pub examples: Option<PathBuf>,
+    /// Where a multiple-choice row holds its parts; required by
+    /// [`Benchmark::Choices`] and refused by every other benchmark.
+    pub fields: Option<ChoiceFields>,
     /// Keep this many pairs, drawn with `seed`; every pair when absent.
     pub count: Option<usize>,
     pub seed: u64,
@@ -100,6 +116,15 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
     let mut skipped = Vec::new();
     let mut pairs = Vec::new();
     let rows;
+    match (options.benchmark, &options.fields) {
+        (Benchmark::Choices, None) => bail!(
+            "--benchmark choices needs --question, --choices, --answer and --answer-form: where each part of a row sits"
+        ),
+        (Benchmark::Choices, Some(_)) | (_, None) => {}
+        (_, Some(_)) => bail!(
+            "--question, --choices, --answer, --answer-form and --labels apply only to --benchmark choices"
+        ),
+    }
     match options.benchmark {
         Benchmark::Truthfulqa | Benchmark::Dna | Benchmark::Bipo => {
             let records = csv::records(&read(&options.source)?, &label)?;
@@ -217,6 +242,20 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                     });
                 } else {
                     pairs.push(pair(content, &good, &bad));
+                }
+            }
+        }
+        Benchmark::Choices => {
+            let fields = options
+                .fields
+                .as_ref()
+                .context("--benchmark choices needs its row fields")?;
+            let records = choices::rows(&read(&options.source)?, &label)?;
+            rows = records.len();
+            for (row, record) in records {
+                match choices::pair_of(&record, fields, &mut rng) {
+                    Ok(found) => pairs.push(found),
+                    Err(reason) => skipped.push(Skipped { row, reason }),
                 }
             }
         }

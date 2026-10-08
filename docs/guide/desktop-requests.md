@@ -20,10 +20,10 @@ a body that leaves one out is refused before anything runs, naming it:
 
 | Operation | CLI command it mirrors |
 |---|---|
-| `train`, `optimize`, `evaluate`, `generate`, `extract`, `inspect` | the [steering](steering.md) commands |
+| `vector/train`, `vector/optimize`, `vector/evaluate`, `vector/inspect`, `vector/compare`, `generate`, `extract` | the [steering](steering.md) commands (`vector/compare` takes `artifacts`, two or more paths, `clusters` and optional `layers`) |
 | `decide`, `calibrate` | [`ster decide`](decisions.md), [`ster calibrate`](decisions/calibration.md) |
 | `workspace/import-pairs`, `workspace/show`, `workspace/select`, `workspace/remove` | `ster workspace import-pairs`, `show`, `select`, `remove` (`select` and `remove` take the set's `id`; all three answer `ster workspace show`'s document) |
-| `pairs/import`, `pairs/inspect`, `pairs/save`, `pairs/synthesize` | the [pair-set](pair-sets.md) commands (`pairs/import` takes `benchmark`, `source`, `output`, `seed` and optional `examples`, `count`, `traitName`, and answers `ster pairs import`'s document with the skipped-row report) |
+| `pairs/import`, `pairs/inspect`, `pairs/save`, `pairs/synthesize` | the [pair-set](pair-sets.md) commands (`pairs/import` takes `benchmark`, `source`, `output`, `seed` and optional `examples`, `count`, `traitName`, and for `benchmark: "choices"` the row fields `question`, `choices`, `answer`, `answerForm` and `labels`; it answers `ster pairs import`'s document with the skipped-row report) |
 | `tune/sft`, `tune/dpo`, `tune/reward`, `tune/grpo`, `tune/merge`, `tune/evaluate`, `tune/inspect` | the [adapter](tuning/adapters.md) commands |
 
 `decide` takes its request document inline under `request`, and `pairs/save`
@@ -62,10 +62,10 @@ that has already closed.
 ## Example
 
 ```bash
-echo '{"artifact": "vectors/honesty.json"}' | ster request inspect
+echo '{"artifact": "vectors/honesty.json"}' | ster request vector/inspect
 ```
 
-prints one `result` event whose `json` is the summary `ster inspect` prints,
+prints one `result` event whose `json` is the summary `ster vector inspect` prints,
 and exits `0`. The same body with the operation misspelled prints
-`{"type":"result","status":2,"json":{"error":"unknown operation: inspct"}}`
+`{"type":"result","status":2,"json":{"error":"unknown operation: vector/inspct"}}`
 and exits `2`.

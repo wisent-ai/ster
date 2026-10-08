@@ -23,8 +23,10 @@ ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTP
                       --dedupe-bands <BANDS> --refusal-threshold <SCORE>
                       --max-new-tokens <N> --temperature <T>
                       --top-p <P> --seed <SEED>
-ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo --source <FILE> --output <FILE>
+ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo|choices --source <FILE> --output <FILE>
                   [--examples <FILE>] [--count <N>] --seed <SEED> [--trait <NAME>]
+                  [--question <POINTER> --choices <POINTER> --answer <POINTER>
+                   --answer-form index|label|text [--labels <POINTER>]]
 ```
 
 Every number is the caller's: Ster assumes no deduplication distance, band
@@ -54,14 +56,16 @@ categories is already a contrastive pair, so its exporter writes a document
 
 ```bash
 preferences export --arena wisent --category tagline --format ster-pairs > pairs.json
-ster train --model meta-llama/Llama-3.2-1B --pairs pairs.json --output taste.ster.json
+ster vector train --model meta-llama/Llama-3.2-1B --pairs pairs.json --output taste.ster.json
 ```
 
 `ster pairs import` reads a published benchmark export into a set:
 
 ```text
-ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo --source <FILE> --output <FILE>
+ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo|choices --source <FILE> --output <FILE>
                   [--examples <FILE>] [--count <N>] --seed <SEED> [--trait <NAME>]
+                  [--question <POINTER> --choices <POINTER> --answer <POINTER>
+                   --answer-form index|label|text [--labels <POINTER>]]
 ```
 
 Every row becomes one pair written as `pairs synthesize` writes one,
@@ -82,6 +86,46 @@ not_matching answer`); an unreadable file, a CSV
 record whose field count differs from its header, or `--count` above the pairs
 the export yields refuses the import and writes nothing. The exports themselves
 live in the `wisent-benchmark` repository under `benchmarks/`.
+
+`--benchmark choices` reads the multiple-choice rows of any dataset — ARC,
+HellaSwag, MMLU and the other tasks the retired `wisent-extractors` Python
+package had one extractor each for — exported as JSON Lines (one object per
+line) or as one JSON list. The dataset's own schema says where a row keeps its
+parts, so the caller names them as JSON pointers: `--question` the question
+text, `--choices` the list of choices, `--answer` the correct answer, and
+`--answer-form` how that answer names its choice: `index` (its position from
+zero, as a number or as text holding one), `label` (one of the row's labels,
+found through `--labels`, which must line up with the choices) or `text` (the
+choice itself). The pair is the correct choice (positive) against one of the
+other choices drawn with `--seed`. Ster guesses none of it: a row with no
+question, choices that are not all non-empty text, no answer, or an answer
+that does not resolve is skipped with `no question`, `choices are not a list
+of non-empty text`, `no answer`, `answer is not a whole-number index`,
+`answer is not a label`, `answer is not one of the labels`, `labels are not a
+list of non-empty text`, `labels and choices differ in length`, `answer is not
+text`, `answer is not one of the choices`, `answer index is outside the
+choices` or `no incorrect choice`, and its row is its line (JSON Lines) or its
+position from one (a list). Every row is read unless `--count` keeps fewer.
+
+```bash
+# ARC-Easy: {"question": …, "choices": {"text": [...], "label": ["A", …]}, "answerKey": "B"}
+ster pairs import --benchmark choices --source arc_easy.jsonl --seed <SEED> --output arc.pairs.json \
+  --question /question --choices /choices/text --answer /answerKey --answer-form label --labels /choices/label
+# HellaSwag: {"ctx": …, "endings": [...], "label": "2"}
+ster pairs import --benchmark choices --source hellaswag.jsonl --seed <SEED> --output hellaswag.pairs.json \
+  --question /ctx --choices /endings --answer /label --answer-form index
+```
+
+The row flags are refused on any other benchmark (`--question, --choices,
+--answer, --answer-form and --labels apply only to --benchmark choices`), and
+`choices` without them is refused (`--benchmark choices needs --question,
+--choices, --answer and --answer-form: where each part of a row sits`), as are
+a missing one (`multiple-choice rows need --answer: …`), a pointer that does not
+start with `/`, `--answer-form label` without `--labels`, and `--labels` with
+any other form. A file that is neither a JSON list nor JSON Lines refuses the
+import and names the line that is not JSON. `tests/pairs/import-choices.mjs`
+runs the built binary over ARC- and HellaSwag-shaped rows and every refusal
+above, and keeps each command and its result in `report.json`.
 
 Nothing else in the suite produces pair sets. Every other set is one you wrote,
 one `ster pairs add` built, one `ster pairs synthesize` generated, or one

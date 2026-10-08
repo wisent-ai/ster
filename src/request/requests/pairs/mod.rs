@@ -188,6 +188,16 @@ pub(in crate::request) struct PairsImportRequest {
     #[serde(default)]
     pub(in crate::request) examples: Option<String>,
     #[serde(default)]
+    pub(in crate::request) question: Option<String>,
+    #[serde(default)]
+    pub(in crate::request) choices: Option<String>,
+    #[serde(default)]
+    pub(in crate::request) answer: Option<String>,
+    #[serde(default)]
+    pub(in crate::request) answer_form: Option<String>,
+    #[serde(default)]
+    pub(in crate::request) labels: Option<String>,
+    #[serde(default)]
     pub(in crate::request) count: Option<usize>,
     pub(in crate::request) seed: u64,
     #[serde(default)]
@@ -200,6 +210,14 @@ impl Validate for PairsImportRequest {
     fn validate(&self) -> Result<(), String> {
         crate::pairs::benchmark::Benchmark::parse(&self.benchmark)
             .map_err(|error| error.to_string())?;
+        crate::pairs::benchmark::ChoiceFields::from_parts(
+            self.question.clone(),
+            self.choices.clone(),
+            self.answer.clone(),
+            self.answer_form.clone(),
+            self.labels.clone(),
+        )
+        .map_err(|error| error.to_string())?;
         require(
             &self.source,
             "pairs import requires a source export".to_owned(),
