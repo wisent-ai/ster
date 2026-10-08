@@ -40,8 +40,8 @@ mod objective;
 mod preflight;
 
 pub use artifact::{
-    EvaluateOptions, EvaluateReport, EvaluatedExample, ExportReport, MergeReport, evaluate,
-    export_peft, merge, warn_on_provenance,
+    AblationReport, EvaluateOptions, EvaluateReport, EvaluatedExample, ExportReport, MergeReport,
+    ablate, evaluate, export_peft, merge, warn_on_provenance,
 };
 pub use examples::{Example, ExampleSet};
 pub use objective::{

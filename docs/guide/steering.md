@@ -32,6 +32,8 @@ ster vector compare <ARTIFACT> <ARTIFACT>... --clusters <N> [--layers <L,L,...>]
 ster vector project --model <MODEL> --pairs <PAIRS> --vector <VECTOR> --layer <L>
                     --strength <S> --components <N> [--revision <REVISION>]
                     [--device cpu] [--chat-template auto|off] [--precision f32|f16|bf16]
+ster vector ablate --model <MODEL> --vector <VECTOR> --strength <S> --output <DIR>
+                   [--revision <REVISION>]
 ster generate --model <MODEL> (--prompt <PROMPT> | --prompts <SET> --output <FILE>)
               [--vector <VECTOR> --strength <S>]... [--system <FILE>]
               [--adapter <ADAPTER>] [--revision <REVISION>] [--device cpu]
@@ -50,7 +52,7 @@ direction, or a logistic probe. `--chat-template` and `--precision` are on
 every one of these commands except `vector inspect` and `vector compare`,
 which load no model. Each command prints a pretty JSON document on stdout,
 and each is also an operation of `ster request`: `ster request vector/train`,
-`vector/optimize`, `vector/curve`, `vector/evaluate`, `vector/inspect`, `vector/compare`, `vector/project`,
+`vector/optimize`, `vector/curve`, `vector/evaluate`, `vector/inspect`, `vector/compare`, `vector/project`, `vector/ablate`,
 `generate` and `extract` read the request body as one JSON document on stdin,
 where every flag above is a camelCase field, `chatTemplate` and `precision`
 included, each defaulting to what the CLI defaults to, and print NDJSON log
@@ -250,6 +252,24 @@ negative sides from the mean positive side before and after steering, and
 the share of negatives steering brought nearer. Refusals: a layer the model
 lacks, no components, an artifact of another model or width, and reads that
 do not vary at all.
+
+## Writing a direction into the weights
+
+`ster vector ablate` makes a direction permanent, as wisent's
+`modify-weights` did by directional projection. At every layer the
+artifact carries, the two projections that write the residual stream — the
+attention output and the feed-forward down projection — become
+`W - strength * v (v^T W)` for the layer's unit direction `v`: at strength
+one the layer can no longer write along the direction, a smaller strength
+removes that share of it, and a negative one amplifies it. Ster states no
+strength. The output is an ordinary checkpoint directory written by the
+same code `tune merge` writes with — the rewritten weights beside the
+source's own config, tokenizer and chat template — so every loader reads
+it, and no decoder is built to write it. The answer names every rewritten
+tensor, the copied ones and the files written. Refusals: a zero or
+non-finite strength, an artifact fitted on another model or width, a layer
+the model lacks, a GGUF checkpoint, and a write stored fused with another
+projection.
 
 ## Provenance
 

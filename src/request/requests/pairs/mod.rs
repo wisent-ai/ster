@@ -228,3 +228,23 @@ impl Validate for PairsImportRequest {
         )
     }
 }
+
+/// Several pair sets written as one: the same fields as `ster pairs merge`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(in crate::request) struct PairsMergeRequest {
+    /// The pair sets to merge, two or more, in order.
+    pub(in crate::request) sources: Vec<String>,
+    pub(in crate::request) trait_name: String,
+    #[serde(default)]
+    pub(in crate::request) output: String,
+}
+
+impl Validate for PairsMergeRequest {
+    fn validate(&self) -> Result<(), String> {
+        for source in &self.sources {
+            require(source, "pairs merge names an empty pair-set path".to_owned())?;
+        }
+        require(&self.output, "pairs merge requires an output path".to_owned())
+    }
+}

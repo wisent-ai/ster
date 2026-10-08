@@ -12,9 +12,18 @@ use crate::{
 };
 
 use super::super::requests::{
-    PairsImportRequest, PairsInspectRequest, PairsSaveRequest, PairsSynthesizeRequest,
-    WorkspaceImportPairsRequest, WorkspacePairSetRequest, WorkspaceShowRequest,
+    PairsImportRequest, PairsInspectRequest, PairsMergeRequest, PairsSaveRequest,
+    PairsSynthesizeRequest, WorkspaceImportPairsRequest, WorkspacePairSetRequest,
+    WorkspaceShowRequest,
 };
+
+/// The same merge as `ster pairs merge`, and the same document.
+pub(in crate::request) fn pairs_merge_job(request: PairsMergeRequest) -> Result<Value> {
+    let sources: Vec<std::path::PathBuf> = request.sources.iter().map(std::path::PathBuf::from).collect();
+    let (set, report) = pairs::merge(&sources, &request.trait_name)?;
+    set.save(Path::new(&request.output))?;
+    Ok(json!({"output": request.output, "report": report}))
+}
 
 pub(in crate::request) fn workspace_import_pairs_job(
     request: WorkspaceImportPairsRequest,

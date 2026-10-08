@@ -24,8 +24,10 @@ pub mod quality;
 
 mod generator;
 mod inspect;
+mod merge;
 mod synthesis;
 
 pub use generator::Generator;
 pub use inspect::{EntryReport, InspectOptions, RefusalFlag, SetReport, inspect};
+pub use merge::{MergeReport, MergedSource, merge};
 pub use synthesis::{SynthesisOptions, SynthesisReport, synthesize};

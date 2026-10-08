@@ -14,8 +14,9 @@ use crate::{
 };
 
 use super::requests::{
-    CompareRequest, CurveRequest, EvaluateRequest, ExtractRequest, GenerateRequest,
-    InspectRequest, OptimizeRequest, ParityRequest, ProjectRequest, TrainRequest,
+    AblateRequest, CompareRequest, CurveRequest, EvaluateRequest, ExtractRequest,
+    GenerateRequest, InspectRequest, OptimizeRequest, ParityRequest, ProjectRequest,
+    TrainRequest,
 };
 
 mod decide;
@@ -26,7 +27,7 @@ mod tune_flags;
 pub(super) use decide::{calibrate_job, decide_job};
 
 pub(super) use pairs::{
-    pairs_import_job, pairs_inspect_job, pairs_save_job, pairs_synthesize_job,
+    pairs_import_job, pairs_inspect_job, pairs_merge_job, pairs_save_job, pairs_synthesize_job,
     workspace_import_pairs_job, workspace_remove_job, workspace_select_job, workspace_show_job,
 };
 pub(super) use tune::{
@@ -211,4 +212,17 @@ pub(in crate::request) fn curve_job(request: CurveRequest) -> Result<Value> {
     let mut report = serde_json::to_value(report)?;
     chat.annotate(&mut report)?;
     Ok(report)
+}
+
+/// Mirrors `ster vector ablate`: the same rewrite, and the report the CLI
+/// prints. Like `tune/merge`, no decoder is built.
+pub(in crate::request) fn ablate_job(request: AblateRequest) -> Result<Value> {
+    let report = tune_lib::ablate(
+        &request.model.model,
+        request.model.revision.as_deref(),
+        Path::new(&request.vector),
+        request.strength,
+        Path::new(&request.output),
+    )?;
+    Ok(serde_json::to_value(report)?)
 }

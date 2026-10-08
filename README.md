@@ -373,6 +373,7 @@ ster vector inspect   summarize and validate a steering artifact
 ster vector compare   compare vectors fitted for different traits on one model
 ster vector curve     score one method on growing numbers of pairs
 ster vector project   show where a vector moves the model's states at one layer
+ster vector ablate    write a vector's direction out of a checkpoint's weights
 ster generate         run normal or steered generation, with any number of vectors
 ster extract          export hidden states for an arbitrary prompt set
 ster onboarding import or replay first use

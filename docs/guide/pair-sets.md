@@ -49,6 +49,23 @@ saved: the file is left untouched and the refusal is `pair set {path} contains n
 edit changes nothing without --positive, --negative or --trait`, and an index
 outside the set with the same refusal `remove` gives.
 
+`ster pairs merge` writes one set out of several, for a direction fitted
+across all of them — the unified direction wisent's `train-unified-goodness`
+fitted across benchmarks:
+
+```text
+ster pairs merge --pairs <SET> --pairs <SET> [--pairs <SET>...] --trait <NAME> --output <FILE>
+```
+
+Every pair of every set is written in the order the sets were named, under
+the trait name given, and the answer lists each source with its own trait
+name and pair count. Each source passes the validation every pair set
+passes. Fewer than two sets are refused with
+`pairs merge needs at least two pair sets and got <N>`, and an empty trait
+name with `pairs merge needs the trait name the merged set is fitted for`.
+Through `ster request pairs/merge` the body is
+`{"sources": [...], "traitName": "…", "output": "…"}`.
+
 A pair set can also arrive from another product, and exactly one produces them:
 Preferences, Wisent's pairwise voting tool. Every choice in one of its text
 categories is already a contrastive pair, so its exporter writes a document

@@ -325,3 +325,24 @@ impl Validate for CurveRequest {
         Ok(())
     }
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::request) struct AblateRequest {
+    #[serde(flatten)]
+    pub(in crate::request) model: ModelRequest,
+    #[serde(default)]
+    pub(in crate::request) vector: String,
+    /// Share of the direction removed from every write; required.
+    pub(in crate::request) strength: f64,
+    #[serde(default)]
+    pub(in crate::request) output: String,
+}
+
+impl Validate for AblateRequest {
+    fn validate(&self) -> Result<(), String> {
+        self.model.check("vector/ablate")?;
+        require(&self.vector, "vector/ablate requires a steering artifact".to_owned())?;
+        require(&self.output, "vector/ablate requires an output directory".to_owned())
+    }
+}

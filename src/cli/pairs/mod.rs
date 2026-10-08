@@ -16,6 +16,7 @@ use super::resolve_pairs;
 
 mod edit;
 mod import;
+mod merge;
 
 #[derive(Debug, Subcommand)]
 pub(super) enum PairsCommand {
@@ -144,6 +145,9 @@ pub(super) enum PairsCommand {
     },
     /// Write a pair set from a TruthfulQA, Do-Not-Answer or LiveCodeBench export.
     Import(import::ImportArgs),
+    /// Write one pair set out of several, every pair of each in order, for
+    /// a direction fitted across all of them.
+    Merge(merge::MergeArgs),
 }
 
 /// The `ster pairs` arms. Each one does the work and prints one pretty JSON
@@ -169,6 +173,7 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
             super::answer(&report)?;
         }
         PairsCommand::Import(args) => import::run(args)?,
+        PairsCommand::Merge(args) => merge::run(args)?,
         PairsCommand::Add {
             pairs: file,
             positive,
