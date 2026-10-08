@@ -104,11 +104,11 @@ impl ChoiceFields {
                 );
             }
         }
-        match (fields.answer_form, &fields.labels) {
-            (AnswerForm::Label, None) => {
+        match (fields.answer_form, fields.labels.is_some()) {
+            (AnswerForm::Label, false) => {
                 bail!("--answer-form label needs --labels, the list of labels the answer names")
             }
-            (AnswerForm::Index | AnswerForm::Text, Some(_)) => {
+            (AnswerForm::Index | AnswerForm::Text, true) => {
                 bail!("--labels applies only to --answer-form label")
             }
             _ => Ok(Some(fields)),
