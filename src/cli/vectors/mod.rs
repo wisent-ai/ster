@@ -1,23 +1,54 @@
-//! The steering arms of `ster`: training a direction, choosing one, scoring
-//! one, generating with it, exporting representations, reading an artifact,
-//! and the first-use walkthrough beside them.
+//! `ster vector` — training a direction, choosing one, scoring one, reading
+//! one, and comparing several — beside the commands that use a model the
+//! same way: generating with it, exporting representations, parity, and
+//! the first-use walkthrough.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use ster::{
-    ChatChoice, GenerationOptions, PairSet, Precision, Runtime, SteeringArtifact, TrainingMethod,
-    tune,
+    ChatChoice, PairSet, Precision, SteeringArtifact, TrainingMethod, tune,
     workflow::{self, parse_layers},
 };
 
 use super::onboarding;
 
+mod compare;
+mod generate;
 mod strength;
+
+pub(super) use generate::{GenerateArgs, generate};
 
 use super::{ModelArgs, resolve_pairs};
 
-/// `ster train`
+/// `ster vector`: every operation on a steering artifact.
+#[derive(Debug, clap::Subcommand)]
+pub(super) enum VectorCommand {
+    /// Train steering vectors from positive and negative prompts.
+    Train(TrainArgs),
+    /// Select the best method and layer on a holdout of the pairs.
+    Optimize(OptimizeArgs),
+    /// Measure pair ordering for a steering artifact.
+    Evaluate(EvaluateArgs),
+    /// Summarize and validate a Ster steering artifact.
+    Inspect(InspectArgs),
+    /// Compare artifacts fitted for different traits on one model: cosine
+    /// similarity per layer, what each holds that the others do not span,
+    /// and the groups they fall into.
+    Compare(compare::CompareArgs),
+}
+
+pub(super) fn run(command: VectorCommand) -> Result<()> {
+    match command {
+        VectorCommand::Train(args) => train(args),
+        VectorCommand::Optimize(args) => optimize(args),
+        VectorCommand::Evaluate(args) => evaluate(args),
+        VectorCommand::Inspect(args) => inspect(args),
+        VectorCommand::Compare(args) => compare::compare(args),
+    }
+}
+
+/// `ster vector train`
 #[derive(Debug, clap::Args)]
 pub(super) struct TrainArgs {
     #[command(flatten)]
@@ -50,7 +81,7 @@ pub(super) struct TrainArgs {
     precision: Precision,
 }
 
-/// `ster optimize`
+/// `ster vector optimize`
 #[derive(Debug, clap::Args)]
 pub(super) struct OptimizeArgs {
     #[command(flatten)]
@@ -76,7 +107,7 @@ pub(super) struct OptimizeArgs {
     holdout: f64,
 }
 
-/// `ster evaluate`
+/// `ster vector evaluate`
 #[derive(Debug, clap::Args)]
 pub(super) struct EvaluateArgs {
     #[command(flatten)]
@@ -99,61 +130,6 @@ pub(super) struct EvaluateArgs {
     precision: Precision,
     #[command(flatten)]
     strength: strength::StrengthArgs,
-}
-
-/// `ster generate`
-#[derive(Debug, clap::Args)]
-pub(super) struct GenerateArgs {
-    #[command(flatten)]
-    model: ModelArgs,
-    /// The one prompt to answer; the answer is printed.
-    #[arg(long, required_unless_present = "prompts", conflicts_with = "prompts")]
-    prompt: Option<String>,
-    /// A prompt set ({"prompts": ["..."]}) to answer one after the other
-    /// with the model loaded once; the answers are written to --output.
-    #[arg(long, requires = "output")]
-    prompts: Option<PathBuf>,
-    /// JSON file a --prompts run writes: one {"prompt", "model_output"} per
-    /// prompt, in the set's order.
-    #[arg(long, requires = "prompts")]
-    output: Option<PathBuf>,
-    /// File whose text is the system turn the prompt is answered under. It is
-    /// rendered by the model's own chat template, so it needs one: with the
-    /// template absent or `--chat-template off` it is refused.
-    #[arg(long)]
-    system: Option<PathBuf>,
-    #[arg(long)]
-    vector: Option<PathBuf>,
-    /// Frozen LoRA adapter artifact to load the model with. It must have
-    /// been trained for this exact model: Ster refuses a mismatch rather
-    /// than steering the wrong residual stream.
-    #[arg(long)]
-    adapter: Option<PathBuf>,
-    /// auto renders the prompt through the model's own chat template when
-    /// it publishes one, off sends the prompt as raw text. An instruct
-    /// checkpoint asked a bare question continues the text instead of
-    /// answering it, which is what auto exists to prevent.
-    #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
-    chat_template: ChatChoice,
-    /// Dtype the base weights are mapped at: f32, f16, or bf16. Half
-    /// precision holds a checkpoint in half the memory; a steering vector
-    /// is cast to it on the way in. bf16 needs --device metal.
-    #[arg(long, default_value = "f32", value_parser = Precision::parse)]
-    precision: Precision,
-    /// Scale on the steering vector; required with --vector, which it
-    /// belongs to, and Ster assumes none.
-    #[arg(long, requires = "vector")]
-    strength: Option<f64>,
-    #[arg(long)]
-    max_new_tokens: usize,
-    /// Zero selects deterministic argmax generation.
-    #[arg(long)]
-    temperature: f64,
-    /// Nucleus mass; omitted samples from the whole distribution.
-    #[arg(long)]
-    top_p: Option<f64>,
-    #[arg(long)]
-    seed: u64,
 }
 
 /// `ster extract`
@@ -200,7 +176,7 @@ pub(super) struct ParityArgs {
     precision: Precision,
 }
 
-/// `ster inspect`
+/// `ster vector inspect`
 #[derive(Debug, clap::Args)]
 pub(super) struct InspectArgs {
     #[arg(value_name = "ARTIFACT")]
@@ -293,132 +269,6 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
     }
     chat.annotate(&mut report)?;
     super::answer(&report)?;
-    Ok(())
-}
-pub(super) fn generate(args: GenerateArgs) -> Result<()> {
-    let GenerateArgs {
-        model,
-        prompt,
-        prompts,
-        output,
-        system,
-        vector,
-        adapter,
-        chat_template,
-        precision,
-        strength,
-        max_new_tokens,
-        temperature,
-        top_p,
-        seed,
-    } = args;
-    // Both documents are read before a single weight is mapped, so
-    // the two halves of the wrong-document refusal cost the same. An
-    // adapter was already refused this early because it is attached
-    // during the load; a steering vector was not, and handing one the
-    // wrong file paid for a full checkpoint load before being told.
-    // `Reward::parse` resolves its source ahead of the policy load for
-    // this reason and says so.
-    let artifact = vector.as_deref().map(SteeringArtifact::load).transpose()?;
-    if artifact.is_some() && strength.is_none() {
-        anyhow::bail!("--vector needs --strength; Ster assumes no steering scale");
-    }
-    // The system turn is read here for the same reason: an unreadable or
-    // empty file is refused before the checkpoint is paid for.
-    let system = match system.as_deref() {
-        Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("cannot read the system turn {}", path.display()))?;
-            if text.trim().is_empty() {
-                anyhow::bail!("the system turn {} is empty", path.display());
-            }
-            if prompt
-                .as_deref()
-                .is_some_and(|prompt| prompt.trim().is_empty())
-            {
-                anyhow::bail!("prompt must not be empty");
-            }
-            Some(text)
-        }
-        None => None,
-    };
-    // A prompt set is read before the weights too, so a malformed or empty
-    // set is refused before the checkpoint is paid for.
-    let prompt_set = prompts.as_deref().map(ster::PromptSet::load).transpose()?;
-    // An adapter rewrites the projections themselves, so it is
-    // attached while the weights are mapped rather than applied per
-    // token the way a steering vector is.
-    let mut runtime = match adapter.as_deref() {
-        Some(adapter) => Runtime::load_with_adapter_at(
-            &model.model,
-            model.revision.as_deref(),
-            model.device,
-            adapter,
-            precision,
-        )?,
-        None => model.load_at(precision)?,
-    };
-    runtime.set_chat_template(chat_template)?;
-    if let Some(vector) = vector.as_deref() {
-        tune::warn_on_provenance(vector, "direction", &runtime);
-    }
-    let options = GenerationOptions {
-        strength,
-        max_new_tokens,
-        temperature,
-        top_p,
-        seed,
-    };
-    let answer = |prompt: &str| -> Result<String> {
-        Ok(match system.as_deref() {
-            Some(system) => {
-                let context = runtime.encode_conversation(&[
-                    ster::chat::Message {
-                        role: "system",
-                        content: system,
-                    },
-                    ster::chat::Message {
-                        role: "user",
-                        content: prompt,
-                    },
-                ])?;
-                runtime
-                    .sample_tokens(context, artifact.as_ref(), options)?
-                    .text
-            }
-            None => runtime.generate(prompt, artifact.as_ref(), options)?,
-        })
-    };
-    match (prompt_set, output) {
-        (Some(set), Some(output)) => {
-            let answers = set
-                .prompts
-                .iter()
-                .enumerate()
-                .map(|(index, prompt)| {
-                    workflow::progress(format!(
-                        "answering prompt {index} of {}",
-                        set.prompts.len()
-                    ));
-                    Ok(serde_json::json!({ "prompt": prompt, "model_output": answer(prompt)? }))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            if let Some(parent) = output
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            std::fs::write(&output, serde_json::to_vec_pretty(&answers)?)
-                .with_context(|| format!("failed to write {}", output.display()))?;
-            println!("{}", output.display());
-        }
-        _ => {
-            let prompt = prompt.context("ster generate needs --prompt or --prompts")?;
-            println!("{}", answer(&prompt)?);
-        }
-    }
     Ok(())
 }
 pub(super) fn extract(args: ExtractArgs) -> Result<()> {

@@ -34,9 +34,9 @@ pub(in crate::request) struct TrainRequest {
 
 impl Validate for TrainRequest {
     fn validate(&self) -> Result<(), String> {
-        self.model.check("train")?;
-        require(&self.pairs, "train requires a pairs file".to_owned())?;
-        require(&self.output, "train requires an output path".to_owned())
+        self.model.check("vector/train")?;
+        require(&self.pairs, "vector/train requires a pairs file".to_owned())?;
+        require(&self.output, "vector/train requires an output path".to_owned())
     }
 }
 
@@ -61,9 +61,9 @@ pub(in crate::request) struct OptimizeRequest {
 
 impl Validate for OptimizeRequest {
     fn validate(&self) -> Result<(), String> {
-        self.model.check("optimize")?;
-        require(&self.pairs, "optimize requires a pairs file".to_owned())?;
-        require(&self.output, "optimize requires an output path".to_owned())
+        self.model.check("vector/optimize")?;
+        require(&self.pairs, "vector/optimize requires a pairs file".to_owned())?;
+        require(&self.output, "vector/optimize requires an output path".to_owned())
     }
 }
 
@@ -96,26 +96,26 @@ pub(in crate::request) struct EvaluateRequest {
 
 impl Validate for EvaluateRequest {
     fn validate(&self) -> Result<(), String> {
-        self.model.check("evaluate")?;
-        require(&self.pairs, "evaluate requires a pairs file".to_owned())?;
+        self.model.check("vector/evaluate")?;
+        require(&self.pairs, "vector/evaluate requires a pairs file".to_owned())?;
         require(
             &self.vector,
-            "evaluate requires a steering artifact".to_owned(),
+            "vector/evaluate requires a steering artifact".to_owned(),
         )?;
         if self.strengths.is_empty() {
             if self.batch_size.is_some() || self.max_sequence.is_some() {
                 return Err(
-                    "evaluate takes batchSize and maxSequence only with strengths".to_owned(),
+                    "vector/evaluate takes batchSize and maxSequence only with strengths".to_owned(),
                 );
             }
             return Ok(());
         }
         if self.batch_size.is_none() {
-            return Err("evaluate with strengths requires batchSize; Ster assumes none".to_owned());
+            return Err("vector/evaluate with strengths requires batchSize; Ster assumes none".to_owned());
         }
         if self.max_sequence.is_none() {
             return Err(
-                "evaluate with strengths requires maxSequence; Ster assumes none".to_owned(),
+                "vector/evaluate with strengths requires maxSequence; Ster assumes none".to_owned(),
             );
         }
         Ok(())
@@ -233,7 +233,34 @@ impl Validate for InspectRequest {
     fn validate(&self) -> Result<(), String> {
         require(
             &self.artifact,
-            "inspect requires a steering artifact".to_owned(),
+            "vector/inspect requires a steering artifact".to_owned(),
         )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(in crate::request) struct CompareRequest {
+    /// Steering artifacts fitted on one model, two or more.
+    pub(in crate::request) artifacts: Vec<String>,
+    /// Layers every artifact carries; all they share when absent.
+    #[serde(default)]
+    pub(in crate::request) layers: Option<Vec<usize>>,
+    /// Groups the artifacts are cut into, at most their count.
+    pub(in crate::request) clusters: std::num::NonZeroUsize,
+}
+
+impl Validate for CompareRequest {
+    fn validate(&self) -> Result<(), String> {
+        for artifact in &self.artifacts {
+            require(artifact, "vector/compare names an empty artifact path".to_owned())?;
+        }
+        match self.artifacts.as_slice() {
+            [_, _, ..] => Ok(()),
+            _ => Err(format!(
+                "vector/compare needs at least two artifacts and got {}",
+                self.artifacts.len()
+            )),
+        }
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real test of `ster evaluate --strengths` and `ster request evaluate` with
+# Real test of `ster vector evaluate --strengths` and `ster request vector/evaluate` with
 # strengths, through the built binary, on a toy checkpoint it writes under this
 # run's directory.
 #
@@ -66,8 +66,8 @@ CONTEXT=$(jq .max_position_embeddings "$TOY/config.json")
 LAST=$(jq '.num_hidden_layers - (.num_hidden_layers / .num_hidden_layers)' "$TOY/config.json")
 STRENGTHS="-$ONE,$ONE,$COUNT"
 
-run accepted train --model "$TOY" --pairs "$PAIRS" --output "$ARTIFACT" --layers "$LAST"
-run accepted evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" \
+run accepted vector train --model "$TOY" --pairs "$PAIRS" --output "$ARTIFACT" --layers "$LAST"
+run accepted vector evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" \
   --strengths "$STRENGTHS" --batch-size "$COUNT" --max-sequence "$CONTEXT"
 cp "$ROOT/output" "$ROOT/selection.json"
 check "every strength is reported in the order given" \
@@ -83,37 +83,37 @@ check "every share lies between none and all" \
 check "the representation report is still there" \
   "$(jq 'has("layers")' "$ROOT/selection.json")" "true"
 
-run refused evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" --strengths "$STRENGTHS" --max-sequence "$CONTEXT"
+run refused vector evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" --strengths "$STRENGTHS" --max-sequence "$CONTEXT"
 refused "--strengths needs --batch-size; Ster assumes none"
-run refused evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" --strengths "$STRENGTHS" --batch-size "$COUNT"
+run refused vector evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" --strengths "$STRENGTHS" --batch-size "$COUNT"
 refused "--strengths needs --max-sequence; Ster assumes none"
-run refused evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" --batch-size "$COUNT"
+run refused vector evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" --batch-size "$COUNT"
 refused "--strengths"
-run refused evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" \
+run refused vector evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" \
   --strengths "$ONE,inf" --batch-size "$COUNT" --max-sequence "$CONTEXT"
 refused "strength selection needs finite strengths, not inf"
-run refused evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" \
+run refused vector evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" \
   --strengths "$STRENGTHS" --batch-size "$NONE" --max-sequence "$CONTEXT"
 refused "strength selection requires batch size of at least one"
-run refused evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" \
+run refused vector evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" \
   --strengths "$STRENGTHS" --batch-size "$COUNT" --max-sequence "$ONE"
 refused "every pair is longer than the sequence limit"
 
-# The desktop's path: the same measurement through `ster request evaluate`,
+# The desktop's path: the same measurement through `ster request vector/evaluate`,
 # and its refusal before anything runs.
 BODY=$(jq -cn --arg model "$TOY" --arg pairs "$PAIRS" --arg vector "$ARTIFACT" \
   --argjson strengths "[$STRENGTHS]" --argjson batch "$COUNT" --argjson sequence "$CONTEXT" \
   '{model: $model, pairs: $pairs, vector: $vector, strengths: $strengths, batchSize: $batch, maxSequence: $sequence}')
-if echo "$BODY" | "$BIN" request evaluate >"$ROOT/request.ndjson"; then outcome=accepted; else outcome=refused; fi
-printf '$ ster request evaluate <<< %s\noutcome: %s\noutput: %s\n\n' "$BODY" "$outcome" "$(tail -n "$ONE" "$ROOT/request.ndjson")" >>"$REPORT"
+if echo "$BODY" | "$BIN" request vector/evaluate >"$ROOT/request.ndjson"; then outcome=accepted; else outcome=refused; fi
+printf '$ ster request vector/evaluate <<< %s\noutcome: %s\noutput: %s\n\n' "$BODY" "$outcome" "$(tail -n "$ONE" "$ROOT/request.ndjson")" >>"$REPORT"
 check "the request completes" "$outcome" "accepted"
 check "the request selects the strength the CLI selected" \
   "$(tail -n "$ONE" "$ROOT/request.ndjson" | jq .json.strength.selected_strength)" \
   "$(jq .strength.selected_strength "$ROOT/selection.json")"
 UNSIZED=$(echo "$BODY" | jq -c 'del(.batchSize)')
-if echo "$UNSIZED" | "$BIN" request evaluate >"$ROOT/request.ndjson"; then outcome=accepted; else outcome=refused; fi
+if echo "$UNSIZED" | "$BIN" request vector/evaluate >"$ROOT/request.ndjson"; then outcome=accepted; else outcome=refused; fi
 out=$(cat "$ROOT/request.ndjson")
-printf '$ ster request evaluate <<< %s\noutcome: %s\noutput: %s\n\n' "$UNSIZED" "$outcome" "$out" >>"$REPORT"
+printf '$ ster request vector/evaluate <<< %s\noutcome: %s\noutput: %s\n\n' "$UNSIZED" "$outcome" "$out" >>"$REPORT"
 check "a body without batchSize is refused" "$outcome" "refused"
 refused "evaluate with strengths requires batchSize; Ster assumes none"
 

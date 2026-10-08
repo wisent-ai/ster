@@ -1,8 +1,9 @@
 //! `ster request <operation>`: one JSON request from a desktop app, run to
 //! completion by this process.
 //!
-//! Ster Desktop starts one of these per operation (`ster request train`,
-//! `ster request pairs/inspect`, `ster request tune/sft`, and so on), writes
+//! Ster Desktop starts one of these per operation (`ster request
+//! vector/train`, `ster request pairs/inspect`, `ster request tune/sft`, and
+//! so on), writes
 //! the request body to stdin as one JSON document, and reads the events this
 //! prints on stdout. The process ends when the operation ends, so nothing of
 //! Ster stays resident between two operations. Every operation reuses the
@@ -67,13 +68,14 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
         "workspace/show" => run_job(body, workspace_show_job),
         "workspace/select" => run_job(body, workspace_select_job),
         "workspace/remove" => run_job(body, workspace_remove_job),
-        "train" => run_job(body, train_job),
-        "optimize" => run_job(body, optimize_job),
-        "evaluate" => run_job(body, evaluate_job),
+        "vector/train" => run_job(body, train_job),
+        "vector/optimize" => run_job(body, optimize_job),
+        "vector/evaluate" => run_job(body, evaluate_job),
+        "vector/inspect" => run_job(body, inspect_job),
+        "vector/compare" => run_job(body, compare_job),
         "generate" => run_job(body, generate_job),
         "extract" => run_job(body, extract_job),
         "parity" => run_job(body, parity_job),
-        "inspect" => run_job(body, inspect_job),
         "decide" => run_job(body, decide_job),
         "calibrate" => run_job(body, calibrate_job),
         "pairs/import" => run_job(body, pairs_import_job),

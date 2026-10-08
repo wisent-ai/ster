@@ -45,7 +45,7 @@ in which nothing fits the limit with
 ## Preference optimization
 
 `ster tune dpo` trains the same adapters against a preference instead of a
-target. It takes `--pairs`, the contrastive pair set `ster train` already
+target. It takes `--pairs`, the contrastive pair set `ster vector train` already
 reads: the positive side is the chosen response and the negative side the
 rejected one, so a set written for steering trains a preference without being
 rewritten and [`docs/examples/pairs.json`](../../examples/pairs.json) runs

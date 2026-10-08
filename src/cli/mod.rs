@@ -115,13 +115,10 @@ pub(crate) fn run() -> Result<()> {
     let cli = Cli::parse();
     let _ = TEXT.set(cli.text);
     match cli.command {
-        Command::Train(args) => vectors::train(args),
-        Command::Optimize(args) => vectors::optimize(args),
-        Command::Evaluate(args) => vectors::evaluate(args),
+        Command::Vector { command } => vectors::run(command),
         Command::Generate(args) => vectors::generate(args),
         Command::Extract(args) => vectors::extract(args),
         Command::Parity(args) => vectors::parity(args),
-        Command::Inspect(args) => vectors::inspect(args),
         Command::Onboarding(args) => vectors::onboarding(args),
         Command::Decide(args) => decide::decide(args),
         Command::Calibrate(args) => decide::calibrate(args),

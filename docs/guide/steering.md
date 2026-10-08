@@ -7,20 +7,24 @@ its command list.
 
 
 The steering half of Ster reads hidden states, fits directions from them,
-scores those directions, and adds them during generation. Six commands:
+scores and compares those directions, and adds them during generation. Every
+operation on a steering artifact is a verb of `ster vector`; generating and
+exporting states sit beside it:
 
 ```text
-ster train --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
-           [--revision <REVISION>] [--device cpu] [--layers all]
-           [--method caa|pca|logistic] [--chat-template auto|off]
-           [--precision f32|f16|bf16]
-ster optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT> --holdout <FRACTION>
-              [--revision <REVISION>] [--device cpu] [--layers all]
-              [--chat-template auto|off] [--precision f32|f16|bf16]
-ster evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
-              [--strengths <S,S,...> --batch-size <N> --max-sequence <TOKENS>]
-              [--revision <REVISION>] [--device cpu]
-              [--chat-template auto|off] [--precision f32|f16|bf16]
+ster vector train --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
+                  [--revision <REVISION>] [--device cpu] [--layers all]
+                  [--method caa|pca|logistic] [--chat-template auto|off]
+                  [--precision f32|f16|bf16]
+ster vector optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT> --holdout <FRACTION>
+                     [--revision <REVISION>] [--device cpu] [--layers all]
+                     [--chat-template auto|off] [--precision f32|f16|bf16]
+ster vector evaluate --model <MODEL> --pairs <PAIRS> --vector <VECTOR>
+                     [--strengths <S,S,...> --batch-size <N> --max-sequence <TOKENS>]
+                     [--revision <REVISION>] [--device cpu]
+                     [--chat-template auto|off] [--precision f32|f16|bf16]
+ster vector inspect <ARTIFACT>
+ster vector compare <ARTIFACT> <ARTIFACT>... --clusters <N> [--layers <L,L,...>]
 ster generate --model <MODEL> (--prompt <PROMPT> | --prompts <SET> --output <FILE>)
               [--vector <VECTOR> --strength <S>] [--system <FILE>]
               [--adapter <ADAPTER>] [--revision <REVISION>] [--device cpu]
@@ -30,18 +34,17 @@ ster generate --model <MODEL> (--prompt <PROMPT> | --prompts <SET> --output <FIL
 ster extract --model <MODEL> --input <INPUT> --output <OUTPUT>
              [--revision <REVISION>] [--device cpu] [--layers all]
              [--chat-template auto|off] [--precision f32|f16|bf16]
-ster inspect <ARTIFACT>
 ```
 
 `--layers` takes `all`, a comma list, or a half-open range such as `8..16`,
 exactly as it does under `ster tune`, and `--method` names the estimator
-`train` fits: contrastive activation addition, the leading principal
+`vector train` fits: contrastive activation addition, the leading principal
 direction, or a logistic probe. `--chat-template` and `--precision` are on
-every one of these commands except `inspect`, which loads no model. Each
-command prints a pretty JSON document on stdout, and each is also an operation
-of `ster request`: `ster request train`, `ster request optimize`,
-`ster request evaluate`, `ster request generate`, `ster request extract` and
-`ster request inspect` read the request body as one JSON document on stdin,
+every one of these commands except `vector inspect` and `vector compare`,
+which load no model. Each command prints a pretty JSON document on stdout,
+and each is also an operation of `ster request`: `ster request vector/train`,
+`vector/optimize`, `vector/evaluate`, `vector/inspect`, `vector/compare`,
+`generate` and `extract` read the request body as one JSON document on stdin,
 where every flag above is a camelCase field, `chatTemplate` and `precision`
 included, each defaulting to what the CLI defaults to, and print NDJSON log
 events and one result event carrying the same document. The numbers have no
@@ -69,7 +72,7 @@ ster generate --model toy-model --prompts docs/examples/prompts.json --output an
 
 ## Selection
 
-`ster optimize` fits every layer-and-method combination on part of the pair
+`ster vector optimize` fits every layer-and-method combination on part of the pair
 set, ranks the candidates on pairs none of them were fitted on, and writes the
 winner. What is new is that it publishes the ranking. It used to print the
 choice — layer 9, method pca — which is a result with no evidence attached, and
@@ -114,7 +117,7 @@ describe the direction that was written.
 ## Strength
 
 A direction says which way to move the residual stream; how far is a separate
-question, and `ster generate` refuses to guess it. `ster evaluate --strengths`
+question, and `ster generate` refuses to guess it. `ster vector evaluate --strengths`
 answers it on pairs. Each strength named is added with the artifact to the
 frozen model, and every pair is scored twice: the steered model's
 log-probability of each side minus the unsteered model's. A pair is ordered
@@ -125,8 +128,8 @@ cannot see.
 
 ```bash
 ster toy-model toy-model
-ster train --model toy-model --pairs docs/examples/pairs.json --output calm.ster.json --layers 2
-ster evaluate --model toy-model --pairs docs/examples/pairs.json --vector calm.ster.json \
+ster vector train --model toy-model --pairs docs/examples/pairs.json --output calm.ster.json --layers 2
+ster vector evaluate --model toy-model --pairs docs/examples/pairs.json --vector calm.ster.json \
   --strengths -1,0.5,1,2,4 --batch-size 4 --max-sequence 256
 ```
 
@@ -147,12 +150,12 @@ The refusals: `--strengths needs --batch-size; Ster assumes none`,
 `strength selection needs finite strengths, not inf`,
 `strength selection requires batch size of at least one`, and the artifact
 checks generation makes (another model, another width, a layer the model
-lacks). Through `ster request evaluate` the fields are `strengths`,
+lacks). Through `ster request vector/evaluate` the fields are `strengths`,
 `batchSize` and `maxSequence`, with the same requirements.
 
 ## Inspection
 
-`ster inspect` validates an artifact and prints a summary of it. It used to
+`ster vector inspect` validates an artifact and prints a summary of it. It used to
 serialize the artifact itself, which on a twenty-two-layer 2048-wide checkpoint
 is forty-five thousand floats down a terminal, while `ster tune inspect` beside
 it printed tensor names and shapes. A steering vector's content is not readable
@@ -169,10 +172,31 @@ Ster writes is unit-normalized, so a norm that is not 1.0 to within rounding is
 the fastest available sign that a file was written by something other than
 Ster.
 
+## Comparison
+
+`ster vector compare A B [C ...] --clusters <N>` compares steering artifacts
+fitted for different traits on one model. It loads no model: the directions
+are read from the artifacts. At every layer all of them carry (or every layer
+`--layers` names, a comma list each artifact must carry) it reports each
+pair's cosine similarity, then their mean over those layers as `similarity`
+and the most similar and most different pair. `uniqueness` is, per artifact,
+the length of the part of its directions that the other artifacts'
+directions at the same layers do not span, over their whole length: one for
+a direction nothing else explains, none for one the others already contain.
+`distance` is the mean distance between unit directions, taking whichever of
+a pair's two signs lies nearer, because a direction and its negation pick
+out one axis; average linkage on it cuts the artifacts into `--clusters`
+groups (`clusters`, one group number per artifact in argument order), and
+`silhouette` is that cut's mean silhouette over the artifacts that share a
+group, or `null` when none does. Ster chooses no group count. Refusals:
+fewer than two artifacts, artifacts of different models or widths, more
+groups than artifacts, a named layer an artifact does not carry, no layer
+every artifact carries, and a direction with no usable length.
+
 ## Provenance
 
 A steering artifact records the precision and the chat-template decision of the
-run that fitted it, and `ster evaluate` and `ster generate` check them against
+run that fitted it, and `ster vector evaluate` and `ster generate` check them against
 the run that is consuming it. Both call the same helper the tune half has used
 for adapters, so a direction read in a space it was not fitted in says so on
 the progress stream:
@@ -208,7 +232,7 @@ all 22 layers, with the four-pair set at `~/.stado/work/loop/pairs.json` for
 the trait `calm and measured, never alarmed`. One direction was fitted with
 `--chat-template off` and another with `auto`, and each was evaluated under
 both. The two columns are the mean over the 22 layers of the per-layer accuracy
-and margin `ster evaluate` reports:
+and margin `ster vector evaluate` reports:
 
 | fitted | evaluated | mean accuracy | mean margin |
 | --- | --- | --- | --- |

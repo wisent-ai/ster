@@ -1,8 +1,9 @@
 //! The things Ster does with a model, each in its own module: reading pairs
 //! into a steering artifact (`train`), scoring one (`evaluate`), choosing a
 //! layer and method on a holdout (`optimize`), exporting raw
-//! representations (`extract`), and comparing its forward pass with a
-//! reference implementation's (`parity`). This entry keeps only what they
+//! representations (`extract`), comparing its forward pass with a
+//! reference implementation's (`parity`), and comparing steering artifacts
+//! fitted for different traits (`compare`). This entry keeps only what they
 //! share — the progress channel, the artifact summary every command prints,
 //! and the layer-selection parser.
 
@@ -12,12 +13,14 @@ use anyhow::{Context, Result, bail};
 
 use crate::artifact::SteeringArtifact;
 
+mod compare;
 mod evaluate;
 mod extract;
 mod optimize;
 mod parity;
 mod train;
 
+pub use compare::{CompareOptions, ComparisonReport, compare};
 pub use evaluate::{EvaluationReport, LayerEvaluation, evaluate};
 pub use extract::{PromptSet, extract};
 pub use optimize::{Candidate, Holdout, Selection, optimize};
@@ -44,7 +47,7 @@ pub fn progress(message: String) {
 
 /// The document `train`, `optimize` and `inspect` print.
 ///
-/// It describes every vector rather than printing one: `ster inspect` used to
+/// It describes every vector rather than printing one: `ster vector inspect` used to
 /// serialize the artifact itself, which on a twenty-two-layer checkpoint is
 /// forty-five thousand floats down a terminal, while `ster tune inspect`
 /// printed shapes. A steering vector's content is not readable and its shape

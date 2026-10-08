@@ -9,19 +9,18 @@ use super::decisions::DecisionsCommand;
 use super::pairs::PairsCommand;
 use super::tune::TuneCommand;
 use super::vectors::{
-    EvaluateArgs, ExtractArgs, GenerateArgs, InspectArgs, OnboardingArgs, OptimizeArgs, ParityArgs,
-    TrainArgs,
+    ExtractArgs, GenerateArgs, OnboardingArgs, ParityArgs, VectorCommand,
 };
 use super::workspace::WorkspaceCommand;
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
-    /// Train steering vectors from positive and negative prompts.
-    Train(TrainArgs),
-    /// Select the best method and layer on an 80/20 holdout.
-    Optimize(OptimizeArgs),
-    /// Measure pair ordering for a steering artifact.
-    Evaluate(EvaluateArgs),
+    /// Train, select, score, read, and compare steering vectors: the
+    /// directions every steered run adds to the residual stream.
+    Vector {
+        #[command(subcommand)]
+        command: VectorCommand,
+    },
     /// Generate text with an optional steering artifact.
     Generate(GenerateArgs),
     /// Export hidden representations for arbitrary prompts.
@@ -29,8 +28,6 @@ pub(super) enum Command {
     /// Compare this model's states after the final norm with the ones
     /// another implementation recorded for the same token ids.
     Parity(ParityArgs),
-    /// Summarize and validate a Ster steering artifact.
-    Inspect(InspectArgs),
     /// Play conversations between a model and a simulated user and write
     /// each as {"messages": [...]}: the rollout tune grpo --turns trains on,
     /// with no gradient.
@@ -75,11 +72,12 @@ pub(super) enum Command {
     /// stdin, NDJSON log events and one result event on stdout, and the
     /// result's status as the exit status.
     Request {
-        /// The operation: train, optimize, evaluate, generate, extract, parity,
-        /// inspect, decide, calibrate, workspace/import-pairs, workspace/show,
-        /// workspace/select, workspace/remove, pairs/inspect, pairs/save,
-        /// pairs/synthesize, or tune/sft, tune/dpo, tune/reward, tune/grpo,
-        /// tune/merge, tune/evaluate, tune/inspect.
+        /// The operation: vector/train, vector/optimize, vector/evaluate,
+        /// vector/inspect, vector/compare, generate, extract, parity, decide,
+        /// calibrate, workspace/import-pairs, workspace/show,
+        /// workspace/select, workspace/remove, pairs/import, pairs/inspect,
+        /// pairs/save, pairs/synthesize, or tune/sft, tune/dpo, tune/reward,
+        /// tune/grpo, tune/merge, tune/evaluate, tune/inspect.
         operation: String,
     },
 }

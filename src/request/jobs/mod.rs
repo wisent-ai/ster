@@ -14,8 +14,8 @@ use crate::{
 };
 
 use super::requests::{
-    EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest, OptimizeRequest,
-    ParityRequest, TrainRequest,
+    CompareRequest, EvaluateRequest, ExtractRequest, GenerateRequest, InspectRequest,
+    OptimizeRequest, ParityRequest, TrainRequest,
 };
 
 mod decide;
@@ -160,4 +160,21 @@ pub(in crate::request) fn inspect_job(request: InspectRequest) -> Result<Value> 
     let artifact = SteeringArtifact::load(Path::new(&request.artifact))
         .with_context(|| format!("failed to inspect {}", request.artifact))?;
     Ok(workflow::artifact_summary(&artifact))
+}
+
+/// Mirrors `ster vector compare`: the artifacts are read as the CLI reads
+/// them, and the report is the document it prints.
+pub(in crate::request) fn compare_job(request: CompareRequest) -> Result<Value> {
+    let artifacts = request
+        .artifacts
+        .iter()
+        .map(|path| {
+            SteeringArtifact::load(Path::new(path)).with_context(|| format!("failed to compare {path}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let options = workflow::CompareOptions {
+        layers: request.layers,
+        clusters: request.clusters,
+    };
+    Ok(serde_json::to_value(workflow::compare(&artifacts, &options)?)?)
 }

@@ -1,9 +1,9 @@
-//! `ster evaluate --strengths`: measuring how hard to push an artifact.
+//! `ster vector evaluate --strengths`: measuring how hard to push an artifact.
 
 use anyhow::{Context, Result};
 use ster::{PairSet, Runtime, SteeringArtifact, tune};
 
-/// The flags that turn `ster evaluate` into a strength selection as well.
+/// The flags that turn `ster vector evaluate` into a strength selection as well.
 #[derive(Debug, clap::Args)]
 pub(super) struct StrengthArgs {
     /// Strengths to measure the artifact at, comma-separated. With them,
