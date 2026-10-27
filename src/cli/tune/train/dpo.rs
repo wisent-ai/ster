@@ -7,6 +7,7 @@ use serde_json::json;
 use ster::{ChatChoice, DpoLoss, DpoOptions, PairSet, Precision, Runtime, lora, tune};
 
 use super::super::super::{ModelArgs, resolve_pairs};
+use super::super::durable::DurableArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
 
 /// `ster tune dpo`
@@ -51,8 +52,9 @@ pub(in crate::cli) struct DpoArgs {
     /// Pairs folded into one optimizer step.
     #[arg(long)]
     accumulation: usize,
-    /// Steps over which the learning rate ramps up from zero.
-    #[arg(long, default_value_t = 0)]
+    /// Steps over which the learning rate ramps up from zero; none by
+    /// default, which starts at the full learning rate.
+    #[arg(long, default_value_t)]
     warmup_steps: usize,
     /// Pairs with a side longer than this many tokens are skipped rather
     /// than truncated; a cut response is not the response that was preferred.
@@ -73,6 +75,8 @@ pub(in crate::cli) struct DpoArgs {
     precision: Precision,
     #[arg(long)]
     seed: u64,
+    #[command(flatten)]
+    durable: DurableArgs,
 }
 
 pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<()> {
@@ -95,6 +99,7 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<()> {
         batch_size,
         precision,
         seed,
+        durable,
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let device = model.device;
@@ -117,6 +122,13 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<()> {
     )?;
     let chat = runtime.set_chat_template(chat_template)?;
     let pair_set = PairSet::load(&pairs)?;
+    let identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("pairs", pairs.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
     let options = DpoOptions {
         spec: spec.clone(),
         loss: DpoLoss::parse(&loss)?,
@@ -128,6 +140,8 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<()> {
         warmup_steps,
         max_sequence,
         seed,
+        durable: durable.durable(),
+        identity,
     };
     let report = tune::dpo(&runtime, &varmap, &pair_set, &options)?;
     let mut report = serde_json::to_value(&report)?;

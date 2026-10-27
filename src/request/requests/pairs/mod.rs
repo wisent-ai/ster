@@ -135,13 +135,15 @@ pub(in crate::request) struct PairsSynthesizeRequest {
     /// a chat API.
     #[serde(default = "default_chat_template")]
     pub(in crate::request) chat_template: String,
+    /// Above zero; serde refuses a zero, and a body without one is refused in `validate`.
     #[serde(default)]
-    pub(in crate::request) count: usize,
+    pub(in crate::request) count: Option<NonZeroUsize>,
     #[serde(default)]
     pub(in crate::request) output: String,
     /// Every sampling and filtering number below is the caller's; Ster
     /// assumes none, and a body without one is refused by name.
-    pub(in crate::request) retry_multiplier: usize,
+    /// Above zero; serde refuses a zero or a missing multiplier by name.
+    pub(in crate::request) retry_multiplier: NonZeroUsize,
     pub(in crate::request) dedupe_bits: u32,
     pub(in crate::request) dedupe_bands: u32,
     pub(in crate::request) max_new_tokens: usize,
@@ -175,10 +177,9 @@ impl Validate for PairsSynthesizeRequest {
             &self.output,
             "pairs synthesize requires an output path".to_owned(),
         )?;
-        // Both are refused again inside the run, but only after a local
-        // model has loaded; stated here, the refusal arrives before it.
-        if NonZeroUsize::new(self.count).is_none() {
-            return Err("pairs synthesize requires a pair count above zero".to_owned());
+        // Refused here, before a local model loads, rather than inside the run.
+        if self.count.is_none() {
+            return Err("pairs synthesize requires count, a pair count above zero".to_owned());
         }
         DedupeOptions::new(self.dedupe_bits, self.dedupe_bands)
             .validate()

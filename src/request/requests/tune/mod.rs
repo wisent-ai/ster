@@ -8,8 +8,10 @@ use super::defaults::*;
 use super::{ModelRequest, Validate, require};
 
 mod artifacts;
+mod durable;
 
 pub(in crate::request) use artifacts::{TuneEvaluateRequest, TuneInspectRequest, TuneMergeRequest};
+pub(in crate::request) use durable::DurableRequest;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +48,9 @@ pub(in crate::request) struct TuneSftRequest {
     /// whatever this says. `bf16` needs the `metal` device.
     #[serde(default = "default_precision")]
     pub(in crate::request) precision: String,
+    /// Where the run keeps its checkpoints and which one it continues.
+    #[serde(flatten)]
+    pub(in crate::request) durable: DurableRequest,
 }
 
 impl Validate for TuneSftRequest {
@@ -55,6 +60,7 @@ impl Validate for TuneSftRequest {
             &self.examples,
             "tune sft requires an example set".to_owned(),
         )?;
+        self.durable.check("tune sft")?;
         require(&self.output, "tune sft requires an output path".to_owned())
     }
 }
@@ -93,12 +99,16 @@ pub(in crate::request) struct TuneDpoRequest {
     pub(in crate::request) batch_size: usize,
     #[serde(default = "default_precision")]
     pub(in crate::request) precision: String,
+    /// Where the run keeps its checkpoints and which one it continues.
+    #[serde(flatten)]
+    pub(in crate::request) durable: DurableRequest,
 }
 
 impl Validate for TuneDpoRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("tune dpo")?;
         require(&self.pairs, "tune dpo requires a pairs file".to_owned())?;
+        self.durable.check("tune dpo")?;
         require(&self.output, "tune dpo requires an output path".to_owned())
     }
 }
@@ -133,12 +143,16 @@ pub(in crate::request) struct TuneRewardRequest {
     pub(in crate::request) batch_size: usize,
     #[serde(default = "default_precision")]
     pub(in crate::request) precision: String,
+    /// Where the run keeps its checkpoints and which one it continues.
+    #[serde(flatten)]
+    pub(in crate::request) durable: DurableRequest,
 }
 
 impl Validate for TuneRewardRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("tune reward")?;
         require(&self.pairs, "tune reward requires a pairs file".to_owned())?;
+        self.durable.check("tune reward")?;
         require(
             &self.output,
             "tune reward requires an output path".to_owned(),
@@ -193,12 +207,16 @@ pub(in crate::request) struct TuneGrpoRequest {
     pub(in crate::request) chat_template: String,
     #[serde(default = "default_precision")]
     pub(in crate::request) precision: String,
+    /// Where the run keeps its checkpoints and which one it continues.
+    #[serde(flatten)]
+    pub(in crate::request) durable: DurableRequest,
 }
 
 impl Validate for TuneGrpoRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("tune grpo")?;
         require(&self.prompts, "tune grpo requires a prompt set".to_owned())?;
+        self.durable.check("tune grpo")?;
         require(&self.output, "tune grpo requires an output path".to_owned())?;
         require(
             &self.reward,

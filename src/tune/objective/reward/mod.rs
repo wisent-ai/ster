@@ -29,76 +29,31 @@
 //! under one optimizer, and is written into the same safetensors file. A head
 //! is a function of the residual stream the adapters shaped; pairing one with
 //! adapters it never saw would produce scores that mean nothing, so the
-//! artifact does not offer that as a possibility.
+//! artifact does not offer that as a possibility. The head is in that map, so
+//! a checkpoint carries it and its moments with the adapters.
 
 use anyhow::{Context, Result, bail};
 use candle_core::Tensor;
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
+use candle_nn::{ParamsAdamW, VarMap};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
-use serde::Serialize;
 
 use super::super::{
     batch,
+    checkpoint::{Position, optimizer::AdamW},
     preflight::{Preflight, Trainable, encode_pairs, pair_set_label},
     schedule,
 };
-use crate::{artifact::PairSet, lora, runtime::Runtime, workflow};
+use crate::{artifact::PairSet, runtime::Runtime, workflow};
 
 mod head;
+mod options;
 mod step;
 
 pub use head::{RewardHead, RewardModel};
+pub use options::{RewardOptions, RewardReport};
 
+use options::{Running, Totals};
 use step::{Summary, step_loss};
-
-#[derive(Debug, Clone)]
-pub struct RewardOptions {
-    pub spec: lora::Spec,
-    pub epochs: usize,
-    pub learning_rate: f64,
-    pub accumulation: usize,
-    /// Pairs folded into one forward pass. A pair is two rows, so a batch of
-    /// four pairs is a forward of eight sequences; one is the unbatched pass
-    /// every run recorded before batching existed.
-    pub batch: usize,
-    pub warmup_steps: usize,
-    pub max_sequence: usize,
-    pub seed: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RewardReport {
-    pub pairs: usize,
-    pub trained_pairs: usize,
-    pub skipped_long: usize,
-    pub epochs: usize,
-    pub steps: usize,
-    pub trainable_tensors: usize,
-    pub trainable_parameters: usize,
-    pub first_loss: f32,
-    pub final_loss: f32,
-    pub mean_final_epoch_loss: f32,
-    /// The share of pairs the head already ranks correctly, over the final
-    /// epoch — so it describes the head that was written, not an average over
-    /// a head that was still moving.
-    pub accuracy: f32,
-    /// How many of those pairs the head scored exactly equal, over the same
-    /// final epoch — the pairs `accuracy` counts as not-correct without them
-    /// being wrong. A fresh head is zeros, so a run short enough that it never
-    /// moved reports every pair tied here and 0.0 there; a head that learned
-    /// the order backwards reports the same accuracy with no ties at all.
-    pub tied_pairs: usize,
-    pub mean_chosen_score: f32,
-    pub mean_rejected_score: f32,
-    pub mean_score_margin: f32,
-    pub rank: usize,
-    pub alpha: f64,
-    pub targets: Vec<String>,
-    pub layers: Vec<usize>,
-    pub learning_rate: f64,
-    pub accumulation: usize,
-    pub batch: usize,
-}
 
 /// Trains `head` and the adapters `varmap` owns to rank each pair.
 ///
@@ -114,13 +69,7 @@ pub fn reward(
     options: &RewardOptions,
 ) -> Result<RewardReport> {
     pairs.validate(&pair_set_label(pairs))?;
-    let Trainable {
-        spec,
-        vars,
-        tensors,
-        parameters,
-        limit,
-    } = Preflight {
+    let Trainable { spec, vars: _, tensors, parameters, limit } = Preflight {
         subject: "reward modeling",
         unit: "pair",
         pass: "epoch",
@@ -135,70 +84,76 @@ pub fn reward(
     .open(runtime, varmap, &options.spec)?;
 
     let encoded = encode_pairs(runtime, pairs, limit)?;
-    let skipped_long = pairs.pairs.len() - encoded.len();
 
-    let mut optimizer = AdamW::new(
-        vars,
-        ParamsAdamW {
-            lr: options.learning_rate,
-            ..Default::default()
-        },
-    )
-    .context("failed to initialize the AdamW optimizer")?;
+    let fingerprint = options.fingerprint();
+    let mut optimizer = AdamW::over(varmap, ParamsAdamW { lr: options.learning_rate, ..Default::default() })
+        .context("failed to initialize the AdamW optimizer")?;
+    let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
+    let mut running: Running = match &resumed {
+        Some(position) => serde_json::from_value(position.running.clone())
+            .context("the checkpoint's running report is not one reward modeling wrote")?,
+        None => Running::default(),
+    };
+    let mut checkpoints = Vec::new();
 
     // Both sides of a pair go through the same forward, so the width its rows
     // are padded to is the longer of the two.
-    let lengths: Vec<usize> = encoded
-        .iter()
-        .map(|pair| pair.chosen.len().max(pair.rejected.len()))
-        .collect();
+    let lengths: Vec<usize> = encoded.iter().map(|pair| pair.chosen.len().max(pair.rejected.len())).collect();
     let scale = batch::divisor(options.batch, options.accumulation);
-    let steps_per_epoch =
-        batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation);
-    let total_steps = steps_per_epoch * options.epochs;
-    let mut order: Vec<usize> = (0..encoded.len()).collect();
-    let mut step = 0usize;
-    let mut first_loss: Option<f32> = None;
-    let mut final_loss = 0f32;
-    let mut epoch_summary = Summary::default();
+    let total_steps = batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
+    let mut order: Vec<usize> = encoded.iter().enumerate().map(|(slot, _)| slot).collect();
 
-    for epoch in 0..options.epochs {
+    for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
+        // Reseeded per epoch; a resumed run replays the shuffles of the
+        // epochs it skips.
         let mut rng = StdRng::seed_from_u64(options.seed + epoch as u64);
         order.shuffle(&mut rng);
-        let mut summary = Summary::default();
+        let plans = batch::plan(&order, &lengths, options.batch, options.accumulation);
+        let remaining = match &resumed {
+            Some(position) if position.pass > epoch => continue,
+            Some(position) if position.pass == epoch => plans.get(position.within..).with_context(|| {
+                format!("the checkpoint stands {} steps into epoch {epoch}, which has {} steps", position.within, plans.len())
+            })?,
+            _ => {
+                running.steps.clear();
+                running.epoch = Totals::default();
+                &plans[..]
+            }
+        };
+        let mut summary = Summary::from(&running.epoch);
 
-        for plan in batch::plan(&order, &lengths, options.batch, options.accumulation) {
+        for plan in remaining {
             optimizer.set_learning_rate(schedule(
                 options.learning_rate,
-                step,
+                optimizer.rates.len(),
                 total_steps,
                 options.warmup_steps,
             ));
-
-            // `batch` pairs per forward — two rows each, chosen then rejected,
-            // right-padded to a common width and masked so neither side reads
-            // the other's filler — and `accumulation` forwards per optimizer
-            // step. The head still reads one row's last real position, because
-            // `batch::row` slices each row back to its own length before the
-            // head sees it. Each pair's loss is divided by the constant
-            // `accumulation * batch`, so a short tail steps proportionally
-            // smaller.
+            // `batch` pairs per forward — the chosen side then the rejected
+            // one, right-padded to a common width and masked so neither side
+            // reads the other's filler — and `accumulation` forwards per
+            // optimizer step. The head still reads one row's last real
+            // position, because `batch::row` slices each row back to its own
+            // length before the head sees it. Each pair's loss is divided by
+            // the constant `accumulation * batch`, so a short tail steps
+            // proportionally smaller.
             let mut summed: Option<Tensor> = None;
-            let mut group_loss = 0f64;
+            let mut losses: Vec<f64> = Vec::with_capacity(plan.units);
             for forward in &plan.forwards {
-                let mut rows: Vec<&[u32]> = Vec::with_capacity(forward.len() * 2);
-                for &slot in forward {
-                    rows.push(&encoded[slot].chosen);
-                    rows.push(&encoded[slot].rejected);
-                }
-                let read = batch::read_rows(&rows, options.batch, 2, |pass| {
-                    runtime.forward_hidden_rows(pass)
-                })?;
-                for (position, &slot) in forward.iter().enumerate() {
+                let rows: Vec<&[u32]> = forward
+                    .iter()
+                    .flat_map(|&slot| [encoded[slot].chosen.as_slice(), encoded[slot].rejected.as_slice()])
+                    .collect();
+                let sides = rows.len() / forward.len();
+                let read = batch::read_rows(&rows, options.batch, sides, |pass| runtime.forward_hidden_rows(pass))?;
+                for (pair_rows, &slot) in read.chunks_exact(sides).zip(forward) {
                     let pair = &encoded[slot];
-                    let value = step_loss(head, &read[position * 2], &read[position * 2 + 1])
+                    let [chosen, rejected] = pair_rows else {
+                        bail!("pair {} was read as {} rows, not its two sides", pair.index, pair_rows.len());
+                    };
+                    let value = step_loss(head, chosen, rejected)
                         .with_context(|| format!("pair {} produced no usable loss", pair.index))?;
-                    group_loss += value.loss;
+                    losses.push(value.loss);
                     summary.record(&value);
                     let scaled = (value.tensor / scale)?;
                     summed = Some(match summed {
@@ -212,29 +167,34 @@ pub fn reward(
                 // forward with no rows; refusing beats stepping on nothing.
                 bail!("an accumulation group contained no pairs");
             };
-            optimizer
-                .backward_step(&summed)
-                .context("failed to backpropagate the accumulated loss")?;
+            optimizer.backward_step(&summed).context("failed to backpropagate the accumulated loss")?;
 
-            let group_mean = (group_loss / plan.units as f64) as f32;
-            step += 1;
-            if first_loss.is_none() {
-                first_loss = Some(group_mean);
-            }
-            final_loss = group_mean;
+            let group_mean = (losses.iter().sum::<f64>() / plan.units as f64) as f32;
+            running.first_loss.get_or_insert(group_mean);
+            running.final_loss = Some(group_mean);
+            running.steps.push(group_mean);
+            running.epoch = Totals::from(&summary);
+            let step = optimizer.rates.len();
             workflow::progress(format!(
-                "epoch {}/{} step {step}/{total_steps} pair {}/{} loss {group_mean:.4} accuracy {:.3}",
-                epoch + 1,
+                "epochs done {}/{} step {step}/{total_steps} pair {}/{} loss {group_mean:.4} accuracy {:.3}",
+                running.finished.len(),
                 options.epochs,
                 summary.pairs,
                 encoded.len(),
                 summary.accuracy()
             ));
+            if options.durable.due(step) {
+                let position =
+                    Position { pass: epoch, step, within: running.steps.len(), running: serde_json::to_value(&running)? };
+                options.durable.save(&optimizer, &fingerprint, &position)?;
+                checkpoints.push(step);
+            }
         }
 
+        running.finished.push(Totals::from(&summary));
         workflow::progress(format!(
-            "epoch {}/{} mean loss {:.4} accuracy {:.3} ties {}/{} score margin {:.4}",
-            epoch + 1,
+            "epochs done {}/{} mean loss {:.4} accuracy {:.3} ties {}/{} score margin {:.4}",
+            running.finished.len(),
             options.epochs,
             summary.mean_loss(),
             summary.accuracy(),
@@ -242,21 +202,23 @@ pub fn reward(
             summary.pairs,
             summary.mean_margin()
         ));
-        epoch_summary = summary;
     }
 
+    let (Some(first_loss), Some(final_loss), Some(last)) =
+        (running.first_loss, running.final_loss, running.finished.last())
+    else {
+        bail!("the run took no step, so it has no loss to report");
+    };
+    let epoch_summary = Summary::from(last);
     Ok(RewardReport {
         pairs: pairs.pairs.len(),
         trained_pairs: encoded.len(),
-        skipped_long,
+        skipped_long: pairs.pairs.len() - encoded.len(),
         epochs: options.epochs,
-        steps: step,
+        steps: optimizer.rates.len(),
         trainable_tensors: tensors,
         trainable_parameters: parameters,
-        // At least one group ran: `encode_pairs` refuses an empty result and
-        // `epochs` is at least one. The fallback keeps the report
-        // serializable rather than emitting a JSON null for a float field.
-        first_loss: first_loss.unwrap_or(final_loss),
+        first_loss,
         final_loss,
         mean_final_epoch_loss: epoch_summary.mean_loss(),
         accuracy: epoch_summary.accuracy(),
@@ -266,14 +228,12 @@ pub fn reward(
         mean_score_margin: epoch_summary.mean_margin(),
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec
-            .targets
-            .iter()
-            .map(|target| target.name().to_owned())
-            .collect(),
+        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,
         batch: options.batch,
+        resumed_from: resumed.map(|position| position.step),
+        checkpoints,
     })
 }

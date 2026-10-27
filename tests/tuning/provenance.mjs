@@ -1,7 +1,7 @@
 // Real evaluation of a caller-supplied checkpoint, adapter and held-out examples.
 // Mutates only owned copies of the adapter pair; never changes the input files.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, parse, resolve } from 'node:path';
@@ -15,8 +15,10 @@ const required = name => {
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const binary = resolve(required('STER'));
 const revision = required('STER_TEST_SOURCE_REVISION');
-const success = Number(required('STER_TEST_SUCCESS_EXIT'));
-assert.ok(Number.isInteger(success));
+// The status a program that succeeded exits with, measured on this machine
+// from `true` rather than asked of whoever runs the test.
+const success = spawnSync('true').status;
+assert.ok(Number.isInteger(success), 'true did not exit with a status');
 const adapter = resolve(required('STER_TEST_ADAPTER'));
 const sidecar = join(dirname(adapter), `${parse(adapter).name}.json`);
 assert.notEqual(adapter, sidecar, 'name the safetensors weights, not the sidecar');

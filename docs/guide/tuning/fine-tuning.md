@@ -18,18 +18,21 @@ ster tune sft --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
               [--revision <REVISION>] [--device cpu] [--targets query,value]
               [--layers all] [--warmup-steps 0] [--chat-template auto|off]
               [--precision f32|f16|bf16]
+              [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
 ster tune dpo --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
               --rank <R> --alpha <A> --beta <B> --epochs <N> --learning-rate <LR>
               --accumulation <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
               [--revision <REVISION>] [--device cpu] [--targets query,value]
               [--layers all] [--loss dpo|ipo] [--warmup-steps 0]
               [--chat-template auto|off] [--precision f32|f16|bf16]
+              [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
 ster tune reward --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
                  --rank <R> --alpha <A> --epochs <N> --learning-rate <LR>
                  --accumulation <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
                  [--revision <REVISION>] [--device cpu] [--targets query,value]
                  [--layers all] [--warmup-steps 0] [--chat-template auto|off]
                  [--precision f32|f16|bf16]
+                 [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
 ster tune grpo --model <MODEL> --prompts <PROMPTS> --output <OUTPUT>
                --group <N> --iterations <N> --beta <B> --rank <R> --alpha <A>
                --learning-rate <LR> --accumulation <N> --max-new-tokens <N>
@@ -38,6 +41,7 @@ ster tune grpo --model <MODEL> --prompts <PROMPTS> --output <OUTPUT>
                [--turns 1] [--user-model <MODEL>] [--user-revision <REVISION>]
                [--targets query,value] [--layers all] [--warmup-steps 0]
                [--chat-template auto|off] [--precision f32|f16|bf16]
+               [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
 ster tune merge --model <MODEL> --adapter <ADAPTER> --output <DIR>
                 [--revision <REVISION>] [--device cpu]
 ster tune evaluate --model <MODEL> --examples <EXAMPLES>
@@ -55,21 +59,81 @@ command without one is a usage error naming the flag (exit 2), and the
 (`missing field \`learningRate\``). Each run's report records the values it
 trained with.
 
-## A run that is interrupted is lost
+## Checkpoints and resuming a run
 
-There is one adapter writer in the product, `lora::Artifact::save`, and every
-objective reaches it exactly once — after `tune::sft`, `tune::dpo`,
-`tune::reward` or `tune::grpo` has returned its finished report. Nothing is
-written before that: no periodic checkpoint, no snapshot per epoch, no partial
-adapter. Ster installs no signal handler either, so `Ctrl-C`, a closed terminal,
-an OOM kill or a lost machine ends the process with nothing on disk. A run
-killed in its sixth hour leaves the sixth hour and the five before it
-unrecoverable, and there is no `--resume`: the only way to continue is to start
-again from the base checkpoint.
+`ster tune sft`, `ster tune dpo`, `ster tune reward` and `ster tune grpo` take
+`--checkpoint <DIR> --checkpoint-every <STEPS>`, and write the run's state into
+`DIR` after every `STEPS`-th optimizer step: the trained tensors (a reward run's
+head among them), both AdamW moments of each, the learning rate of every step
+taken, where the run stands (epoch or iteration, steps taken, steps taken in
+this pass, the running loss totals — for `dpo` and `reward` their accuracy, tie
+and score totals too; for `grpo` the count of completions drawn, which seeds
+the next draw, the totals of the iteration in progress and every finished
+iteration) and a fingerprint of what the run was started from — the model and
+its revision, a digest of the examples, pairs or prompts file, the
+chat-template choice, the precision, every training option and the seed, and
+for `grpo` the reward source and the model playing the user. Each checkpoint is
+written under a unique temporary attempt name and renamed into its completed
+directory, `DIR/<checkpoint>`. `DIR/latest` selects that directory; only after
+publishing it does Ster remove the checkpoint it replaces. A process stop
+before publication leaves the previous checkpoint selected and whole.
+Interrupted temporary or unpublished directories can remain, but cannot
+collide with a later attempt to save the same step. Directory names are not
+step identifiers: read `state.json` for the saved position. Giving one of the
+two flags without the other is a usage error naming the missing one (exit 2),
+and `--checkpoint-every 0` is refused as no step count.
 
-Size a run to what you are willing to lose. Fewer `--epochs` over a smaller
-`--examples` file, written to separate outputs, is recoverable work; one long
-run is not.
+`--resume <DIR>` continues the stopped run from `DIR/latest`. Ster owns the
+optimizer for this (`tune::checkpoint::optimizer`, the same AdamW update as
+Candle's, whose moments Candle keeps private), so the resumed run steps with
+the moments the stopped one had: it replays the shuffles of the epochs it
+skips, skips the steps already taken, and ends with the same adapter and the
+same losses as a run that never stopped. A resumed `grpo` run draws exactly the
+completions the stopped run would have drawn next, because the draw count is
+carried; a reward that answers differently on a second call (an outside scorer
+whose service changed) is the one thing a checkpoint cannot replay. The run
+being started must be the
+run that wrote the checkpoint; otherwise it is refused before a step is
+taken:
+
+- `checkpoint <DIR>/<checkpoint> belongs to another run, so continuing it would train an adapter no single run produced: <field> was <old> and is <new>; …`, naming every field that differs;
+- `--resume <DIR> holds no checkpoint: <DIR>/latest could not be read`;
+- `<DIR>/latest names invalid checkpoint "<name>"; expected one step directory inside <DIR>` when the pointer escapes the checkpoint directory or does not name a checkpoint;
+- `<DIR>/<checkpoint>/state.json is not a Ster checkpoint state`, or `… says it is "<kind>", not a ster tune checkpoint`;
+- `<DIR>/<checkpoint>/tensors.safetensors holds no <part>/<tensor>, which this run trains`, or `… holds <name>, which this run does not train`.
+
+The report of a resumed run carries `resumed_from` (the step it continued
+from) and every report carries `checkpoints` (the steps after which one was
+written).
+
+`ster tune decide` takes the same three flags and keeps the same state as
+`sft`, its fingerprint adding `--permutations` and digesting the labelled
+decisions file. `ster tune bipo` takes them too; what its checkpoint holds is
+in [BiPO](../steering/bipo.md#checkpoints-and-resuming-a-run). Every training
+objective Ster has therefore survives a stop.
+
+The request API takes the same three settings as `checkpoint`,
+`checkpointEvery` and `resume` on `tune/sft`, `tune/dpo`, `tune/reward` and
+`tune/grpo`, refusing a directory without a step count (`tune sft names a
+checkpoint directory without checkpointEvery`) and the reverse (`tune sft names
+checkpointEvery without a checkpoint directory`), and Ster Desktop's Tune
+screen shows them in its Checkpoints section for every objective it trains. A run
+started from one surface resumes from the other: both build the same
+fingerprint.
+
+The repository's real CLI journey is
+`STER=target/debug/ster tests/tuning/checkpoint.sh`, using a binary built from
+the source under qualification. It trains every objective on a real local
+toy-model artifact, interrupts the checkpointed process with SIGTERM after a
+completed checkpoint is reported, then resumes the persisted state. It
+compares final tensors and final loss with uninterrupted training, exercises
+an unpublished older-format checkpoint directory, and checks mismatched-run,
+missing-setting, missing-checkpoint and escaping-pointer refusals. A process
+that finishes before interruption is not accepted as interruption evidence.
+The isolated `target/real-tests/tuning/checkpoint-<run>/` retains commands,
+exit statuses, progress, the saved state, the source revision and archive,
+the executable digest and the comparison result. A `passed` marker is written
+only after the journey has actually executed and every comparison succeeded.
 
 ## Reproducibility
 

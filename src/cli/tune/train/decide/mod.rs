@@ -7,6 +7,7 @@ use serde_json::json;
 use ster::{ChatChoice, DecideTuneOptions, Precision, Runtime, decide::ExampleSet, lora, tune};
 
 use super::super::super::ModelArgs;
+use super::super::durable::DurableArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
 
 /// `ster tune decide`
@@ -42,8 +43,9 @@ pub(in crate::cli) struct DecideArgs {
     /// Forwards folded into one optimizer step.
     #[arg(long)]
     accumulation: usize,
-    /// Steps over which the learning rate ramps up from zero.
-    #[arg(long, default_value_t = 0)]
+    /// Steps over which the learning rate ramps up from zero; none by
+    /// default, which starts at the full learning rate.
+    #[arg(long, default_value_t)]
     warmup_steps: usize,
     /// Renderings longer than this many tokens are skipped rather than
     /// truncated; a cut state is a different state.
@@ -52,7 +54,7 @@ pub(in crate::cli) struct DecideArgs {
     /// Option orders each question is trained in. 0 is every cyclic shift,
     /// so the letter is never predictive and the model has to read the
     /// state; 1 trains on one order and lets it learn a letter.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value = "0")]
     permutations: usize,
     /// auto renders every prompt through the model's own chat template
     /// when it publishes one, off sends raw text. Train in the format the
@@ -69,6 +71,8 @@ pub(in crate::cli) struct DecideArgs {
     precision: Precision,
     #[arg(long)]
     seed: u64,
+    #[command(flatten)]
+    durable: DurableArgs,
 }
 
 pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
@@ -90,6 +94,7 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
         batch_size,
         precision,
         seed,
+        durable,
     } = args;
     // The examples are read before a weight is mapped, so a bad label is
     // refused in milliseconds.
@@ -110,6 +115,13 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
         precision,
     )?;
     let chat = runtime.set_chat_template(chat_template)?;
+    let identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("examples", examples.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
     let options = DecideTuneOptions {
         spec: spec.clone(),
         epochs,
@@ -120,6 +132,8 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
         max_sequence,
         permutations,
         seed,
+        durable: durable.durable(),
+        identity,
     };
     let report = tune::decide(&runtime, &varmap, &example_set, &options)?;
     let mut report = serde_json::to_value(&report)?;

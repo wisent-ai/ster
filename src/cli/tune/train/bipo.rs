@@ -9,6 +9,7 @@ use serde_json::json;
 use ster::{BipoOptions, ChatChoice, DpoLoss, PairSet, Precision, Runtime, tune};
 
 use super::super::super::{ModelArgs, resolve_pairs};
+use super::super::durable::DurableArgs;
 use super::super::note_precision;
 
 /// `ster tune bipo`
@@ -67,6 +68,8 @@ pub(in crate::cli) struct BipoArgs {
     precision: Precision,
     #[arg(long)]
     seed: u64,
+    #[command(flatten)]
+    durable: DurableArgs,
 }
 
 pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<()> {
@@ -87,6 +90,7 @@ pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<()> {
         batch_size,
         precision,
         seed,
+        durable,
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let mut runtime = Runtime::load_at(
@@ -97,6 +101,15 @@ pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<()> {
     )?;
     let chat = runtime.set_chat_template(chat_template)?;
     let pair_set = PairSet::load(&pairs)?;
+    // The pair file is fingerprinted by its contents, so the active
+    // imported set and the same file named with --pairs resume each other.
+    let identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("pairs", pairs.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
     let options = BipoOptions {
         layer,
         strength,
@@ -109,6 +122,8 @@ pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<()> {
         warmup_steps,
         max_sequence,
         seed,
+        durable: durable.durable(),
+        identity,
     };
     let (artifact, report) = tune::bipo(&runtime, &pair_set, &options)?;
     let mut report = serde_json::to_value(&report)?;

@@ -11,6 +11,7 @@ use ster::{
 };
 
 use super::super::super::ModelArgs;
+use super::super::durable::DurableArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
 
 /// `ster tune grpo`
@@ -38,7 +39,7 @@ pub(in crate::cli) struct GrpoArgs {
     /// Assistant turns per sampled conversation. Above one, --user-model
     /// writes each user turn in between, and a conversation's reward is
     /// the sum of its assistant turns' rewards.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value = "1")]
     turns: usize,
     /// The model that plays the user when --turns is above one: it
     /// answers the conversation with the roles swapped, at this run's
@@ -74,8 +75,9 @@ pub(in crate::cli) struct GrpoArgs {
     /// --group sequences.
     #[arg(long)]
     accumulation: usize,
-    /// Steps over which the learning rate ramps up from zero.
-    #[arg(long, default_value_t = 0)]
+    /// Steps over which the learning rate ramps up from zero; none by
+    /// default, which starts at the full learning rate.
+    #[arg(long, default_value_t)]
     warmup_steps: usize,
     /// Token budget of one sampled completion.
     #[arg(long)]
@@ -102,6 +104,8 @@ pub(in crate::cli) struct GrpoArgs {
     precision: Precision,
     #[arg(long)]
     seed: u64,
+    #[command(flatten)]
+    durable: DurableArgs,
 }
 
 pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
@@ -130,6 +134,7 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
         chat_template,
         precision,
         seed,
+        durable,
     } = args;
     let device = model.device;
     let spec = lora::Spec {
@@ -156,6 +161,13 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
     )?;
     let chat = runtime.set_chat_template(chat_template)?;
     let prompt_set = PromptSet::load(&prompts)?;
+    let identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("prompts", prompts.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
     let options = GrpoOptions {
         spec: spec.clone(),
         group,
@@ -173,6 +185,8 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
             top_p: Some(top_p),
             seed,
         },
+        durable: durable.durable(),
+        identity,
     };
     let report = tune::grpo(
         &runtime,

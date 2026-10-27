@@ -1,8 +1,10 @@
 //! The CSV the benchmark exports use: RFC 4180 records, comma separated,
 //! fields optionally quoted, a quote inside a quoted field doubled, and line
-//! breaks allowed inside quotes. The first record names the columns.
+//! breaks allowed inside quotes. The first record names the columns; a
+//! leading byte-order mark is not part of the first column's name.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 
 use anyhow::{Result, bail};
 
@@ -13,17 +15,23 @@ pub(super) struct Record {
 }
 
 impl Record {
-    pub fn get(&self, column: &str) -> &str {
-        self.fields
-            .get(column)
-            .map(|value| value.trim())
-            .unwrap_or_default()
+    /// The trimmed value of `column`. A column the header does not name is
+    /// refused with the columns it does name: a file without it is another
+    /// export, not one whose every row lacks the value.
+    pub fn get(&self, column: &str) -> Result<&str> {
+        match self.fields.get(column) {
+            Some(value) => Ok(value.trim()),
+            None => bail!(
+                "record {} has no column {column:?}; the header names {}",
+                self.number,
+                self.fields.keys().map(|name| format!("{name:?}")).collect::<Vec<_>>().join(", ")
+            ),
+        }
     }
 }
 
 pub(super) fn records(text: &str, label: &str) -> Result<Vec<Record>> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let mut rows = rows(text, label)?.into_iter();
+    let mut rows = rows(text.trim_start_matches('\u{feff}'), label)?.into_iter();
     let Some(header) = rows.next() else {
         bail!("{label} holds no header row");
     };
@@ -32,20 +40,20 @@ pub(super) fn records(text: &str, label: &str) -> Result<Vec<Record>> {
         .map(|name| name.trim().to_string())
         .collect();
     let mut records = Vec::new();
-    for (index, row) in rows.enumerate() {
-        if row.len() == 1 && row[0].is_empty() {
+    for (number, row) in (NonZeroUsize::MIN.get()..).zip(rows) {
+        // A blank line is one empty field: it holds no record.
+        if matches!(row.as_slice(), [only] if only.is_empty()) {
             continue;
         }
         if row.len() != header.len() {
             bail!(
-                "{label} record {} has {} fields where the header names {}",
-                index + 1,
+                "{label} record {number} has {} fields where the header names {}",
                 row.len(),
                 header.len()
             );
         }
         records.push(Record {
-            number: index + 1,
+            number,
             fields: header.iter().cloned().zip(row).collect(),
         });
     }

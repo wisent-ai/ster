@@ -19,8 +19,8 @@ pub(super) struct ImportArgs {
     /// or multiple-choice rows as JSON Lines or a JSON list.
     #[arg(long)]
     source: PathBuf,
-    /// LiveCodeBench good/bad example code; defaults to question_examples.json
-    /// beside SOURCE.
+    /// livecodebench: the question_examples.json holding each question's good
+    /// and bad example code; required for that benchmark.
     #[arg(long)]
     examples: Option<PathBuf>,
     /// choices: the JSON pointer to a row's question, e.g. /question.

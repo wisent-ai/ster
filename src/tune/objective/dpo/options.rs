@@ -1,8 +1,14 @@
-//! What a preference run is asked for, and what it reports back.
+//! What a preference run is asked for, what it reports back, and what a
+//! checkpoint of it carries.
+
+use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use super::super::super::checkpoint::Durable;
+use super::scoring::Summary;
 use crate::lora;
 
 /// Which preference objective the log-ratio margin is fed into.
@@ -63,6 +69,87 @@ pub struct DpoOptions {
     pub warmup_steps: usize,
     pub max_sequence: usize,
     pub seed: u64,
+    /// Where checkpoints are written and which one the run continues from.
+    pub durable: Durable,
+    /// What the run was started from beyond these options (model, revision,
+    /// the digest of the pair set, encoding, precision); a checkpoint of a
+    /// run with another fingerprint is refused.
+    pub identity: BTreeMap<String, Value>,
+}
+
+impl DpoOptions {
+    /// Everything a resumed run must share with the run that wrote the
+    /// checkpoint.
+    pub(super) fn fingerprint(&self) -> BTreeMap<String, Value> {
+        let mut fingerprint = self.identity.clone();
+        let targets: Vec<&str> = self.spec.targets.iter().map(|target| target.name()).collect();
+        let options = [
+            ("objective", Value::from("dpo")),
+            ("loss", Value::from(self.loss.name())),
+            ("beta", Value::from(self.beta)),
+            ("rank", Value::from(self.spec.rank)),
+            ("alpha", Value::from(self.spec.alpha)),
+            ("targets", Value::from(targets)),
+            ("layers", Value::from(self.spec.layers.clone())),
+            ("epochs", Value::from(self.epochs)),
+            ("learning_rate", Value::from(self.learning_rate)),
+            ("accumulation", Value::from(self.accumulation)),
+            ("batch", Value::from(self.batch)),
+            ("warmup_steps", Value::from(self.warmup_steps)),
+            ("max_sequence", Value::from(self.max_sequence)),
+            ("seed", Value::from(self.seed)),
+        ];
+        fingerprint.extend(options.into_iter().map(|(field, value)| (field.to_owned(), value)));
+        fingerprint
+    }
+}
+
+/// What the loop keeps for its report, and what a checkpoint carries of it:
+/// the first and latest step losses, and the totals of the epoch in progress
+/// as [`Summary`] keeps them.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(super) struct Running {
+    pub first_loss: Option<f32>,
+    pub final_loss: Option<f32>,
+    /// The mean loss of every step of the epoch in progress, and its totals.
+    pub steps: Vec<f32>,
+    pub epoch: Totals,
+    /// The finished epochs, the last one's totals among them.
+    pub finished: Vec<Totals>,
+}
+
+/// [`Summary`]'s totals, as a checkpoint writes them.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub(super) struct Totals {
+    pairs: usize,
+    loss: f64,
+    correct: usize,
+    chosen_reward: f64,
+    rejected_reward: f64,
+}
+
+impl From<&Summary> for Totals {
+    fn from(summary: &Summary) -> Self {
+        Self {
+            pairs: summary.pairs,
+            loss: summary.loss,
+            correct: summary.correct,
+            chosen_reward: summary.chosen_reward,
+            rejected_reward: summary.rejected_reward,
+        }
+    }
+}
+
+impl From<&Totals> for Summary {
+    fn from(totals: &Totals) -> Self {
+        Self {
+            pairs: totals.pairs,
+            loss: totals.loss,
+            correct: totals.correct,
+            chosen_reward: totals.chosen_reward,
+            rejected_reward: totals.rejected_reward,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,4 +180,8 @@ pub struct DpoReport {
     pub learning_rate: f64,
     pub accumulation: usize,
     pub batch: usize,
+    /// The step the run continued from, when it was resumed.
+    pub resumed_from: Option<usize>,
+    /// The steps after which a checkpoint was written.
+    pub checkpoints: Vec<usize>,
 }

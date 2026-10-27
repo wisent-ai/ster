@@ -72,8 +72,8 @@ pub struct ImportOptions {
     /// The benchmark export: TruthfulQA_en.csv, DnA_en.csv, problems.json, a
     /// BiPO CSV, or multiple-choice rows.
     pub source: PathBuf,
-    /// LiveCodeBench's question_examples.json; defaults to the file of that
-    /// name beside `source`.
+    /// LiveCodeBench's question_examples.json; `--benchmark livecodebench`
+    /// refuses without it.
     pub examples: Option<PathBuf>,
     /// Where a multiple-choice row holds its parts; required by
     /// [`Benchmark::Choices`] and refused by every other benchmark.
@@ -132,7 +132,7 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
             for record in &records {
                 let row = record.number.to_string();
                 if options.benchmark == Benchmark::Dna {
-                    match record.get("question") {
+                    match record.get("question")? {
                         "" => skipped.push(Skipped {
                             row,
                             reason: "no question",
@@ -143,9 +143,9 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                 }
                 if options.benchmark == Benchmark::Bipo {
                     match (
-                        record.get("question"),
-                        record.get("matching"),
-                        record.get("not_matching"),
+                        record.get("question")?,
+                        record.get("matching")?,
+                        record.get("not_matching")?,
                     ) {
                         ("", _, _) => skipped.push(Skipped {
                             row,
@@ -163,9 +163,9 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                     }
                     continue;
                 }
-                let (question, best) = (record.get("Question"), record.get("Best Answer"));
+                let (question, best) = (record.get("Question")?, record.get("Best Answer")?);
                 let incorrect: Vec<&str> = record
-                    .get("Incorrect Answers")
+                    .get("Incorrect Answers")?
                     .split(';')
                     .map(str::trim)
                     .filter(|answer| !answer.is_empty())
@@ -190,58 +190,65 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
         Benchmark::Livecodebench => {
             let problems: Vec<Value> = serde_json::from_str(&read(&options.source)?)
                 .with_context(|| format!("{label} is not a JSON list of problems"))?;
-            let examples_path = options
-                .examples
-                .clone()
-                .unwrap_or_else(|| options.source.with_file_name("question_examples.json"));
+            let examples_path = options.examples.clone().context(
+                "--benchmark livecodebench needs --examples, the question_examples.json holding each question's good and bad code",
+            )?;
             let examples: Value = serde_json::from_str(&read(&examples_path)?)
                 .with_context(|| format!("{} is not JSON", examples_path.display()))?;
             let examples = examples
                 .get("questions")
                 .and_then(Value::as_array)
                 .with_context(|| format!("{} has no questions list", examples_path.display()))?;
-            let code = |example: &Value, side: &str| {
+            let code = |example: &Value, side: &str| -> Option<String> {
                 example
                     .pointer(&format!("/{side}/code"))
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string()
+                    .map(str::trim)
+                    .filter(|code| !code.is_empty())
+                    .map(str::to_string)
             };
             rows = problems.len();
             for problem in &problems {
-                let id = problem
+                let Some(id) = problem
                     .get("question_id")
                     .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let row = if id.is_empty() {
-                    "(no question_id)".to_string()
-                } else {
-                    id.to_string()
+                    .filter(|id| !id.is_empty())
+                else {
+                    skipped.push(Skipped {
+                        row: "(no question_id)".to_string(),
+                        reason: "no question_id",
+                    });
+                    continue;
                 };
-                let content = problem
+                let row = id.to_string();
+                let Some(content) = problem
                     .get("question_content")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .trim();
-                let example = examples.iter().find(|example| {
-                    !id.is_empty() && example.get("question_id").and_then(Value::as_str) == Some(id)
-                });
-                let (good, bad) = example
-                    .map(|example| (code(example, "good_example"), code(example, "bad_example")))
-                    .unwrap_or_default();
-                if content.is_empty() {
+                    .map(str::trim)
+                    .filter(|content| !content.is_empty())
+                else {
                     skipped.push(Skipped {
                         row,
                         reason: "no question_content",
                     });
-                } else if good.is_empty() || bad.is_empty() {
+                    continue;
+                };
+                let Some(example) = examples
+                    .iter()
+                    .find(|example| example.get("question_id").and_then(Value::as_str) == Some(id))
+                else {
                     skipped.push(Skipped {
                         row,
-                        reason: "no good and bad example code",
+                        reason: "no example for the question_id",
                     });
-                } else {
-                    pairs.push(pair(content, &good, &bad));
+                    continue;
+                };
+                match (code(example, "good_example"), code(example, "bad_example")) {
+                    (Some(good), Some(bad)) => pairs.push(pair(content, &good, &bad)),
+                    (None, _) | (_, None) => skipped.push(Skipped {
+                        row,
+                        reason: "no good and bad example code",
+                    }),
                 }
             }
         }

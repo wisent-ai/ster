@@ -19,9 +19,10 @@
 //!
 //! * **The reference is scored once for the whole run.** A frozen model cannot
 //!   move, so its log-probability of a fixed sequence is a constant. Computing
-//!   it in one pass up front costs `2 * pairs` forwards instead of
-//!   `2 * pairs * epochs`, and it means a run that is going to fail on a
-//!   too-long pair fails before the first gradient.
+//!   it in one pass up front costs a forward per side of every pair instead of
+//!   one per side per epoch, and it means a run that is going to fail on a
+//!   too-long pair fails before the first gradient. A resumed run scores it
+//!   again, which gives the same constants.
 //!
 //! * **A pair is scored whole, not split into prompt and completion.** A
 //!   [`PairSet`] carries two complete texts and no prompt field, and it does
@@ -29,17 +30,20 @@
 //!   what `ster pairs synthesize` writes, `Question: …\nAnswer: …` — that
 //!   prefix sits at the same positions in both sequences, so its
 //!   log-probability is the same expression on both sides of the margin and
-//!   cancels out of the value *and* the gradient. Scoring the whole text is
-//!   therefore not an approximation of a prompt-conditioned objective; on a
-//!   prefix-sharing set it is the same objective.
+//!   cancels out of the value *and* the gradient.
+//!
+//! A run given a checkpoint directory writes its state every
+//! `--checkpoint-every` steps and `--resume` continues it exactly, as
+//! supervised fine-tuning does ([`super::super::checkpoint`]).
 
 use anyhow::{Context, Result, bail};
 use candle_core::Tensor;
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
+use candle_nn::{ParamsAdamW, VarMap};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 use super::super::{
     batch,
+    checkpoint::{Position, optimizer::AdamW},
     preflight::{Preflight, Trainable, encode_pairs, pair_set_label},
     schedule,
 };
@@ -54,6 +58,7 @@ pub use bipo::{BipoOptions, BipoReport, bipo};
 pub use options::{DpoLoss, DpoOptions, DpoReport};
 pub use strength::{StrengthCandidate, StrengthOptions, StrengthReport, strengths};
 
+use options::{Running, Totals};
 use scoring::{Preference, Scored, Summary, reference_scores, step_loss};
 
 /// Trains the adapters `varmap` owns to prefer each pair's positive side.
@@ -62,23 +67,14 @@ use scoring::{Preference, Scored, Summary, reference_scores, step_loss};
 /// `varmap`; the two are a pair, and passing a plain `Runtime` here would
 /// produce a run whose optimizer has no variables to step and whose reference
 /// pass is indistinguishable from its policy pass.
-pub fn dpo(
-    runtime: &Runtime,
-    varmap: &VarMap,
-    pairs: &PairSet,
-    options: &DpoOptions,
-) -> Result<DpoReport> {
-    if !options.beta.is_finite() || options.beta <= 0.0 {
+pub fn dpo(runtime: &Runtime, varmap: &VarMap, pairs: &PairSet, options: &DpoOptions) -> Result<DpoReport> {
+    // Above zero: positive in sign and not its own negation, which only zero is.
+    let above_zero = options.beta.is_sign_positive() && options.beta != -options.beta;
+    if !(options.beta.is_finite() && above_zero) {
         bail!("direct preference optimization requires a finite beta above zero");
     }
     pairs.validate(&pair_set_label(pairs))?;
-    let Trainable {
-        spec,
-        vars,
-        tensors,
-        parameters,
-        limit,
-    } = Preflight {
+    let Trainable { spec, vars: _, tensors, parameters, limit } = Preflight {
         subject: "direct preference optimization",
         unit: "pair",
         pass: "epoch",
@@ -91,84 +87,79 @@ pub fn dpo(
     }
     .open(runtime, varmap, &options.spec)?;
 
-    let mut encoded: Vec<Scored> = encode_pairs(runtime, pairs, limit)?
-        .into_iter()
-        .map(Scored::new)
-        .collect();
-    let skipped_long = pairs.pairs.len() - encoded.len();
+    let mut encoded: Vec<Scored> = encode_pairs(runtime, pairs, limit)?.into_iter().map(Scored::new).collect();
     reference_scores(runtime, &mut encoded, options.batch)?;
 
-    let mut optimizer = AdamW::new(
-        vars,
-        ParamsAdamW {
-            lr: options.learning_rate,
-            ..Default::default()
-        },
-    )
-    .context("failed to initialize the AdamW optimizer")?;
+    let fingerprint = options.fingerprint();
+    let mut optimizer = AdamW::over(varmap, ParamsAdamW { lr: options.learning_rate, ..Default::default() })
+        .context("failed to initialize the AdamW optimizer")?;
+    let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
+    let mut running: Running = match &resumed {
+        Some(position) => serde_json::from_value(position.running.clone())
+            .context("the checkpoint's running report is not one preference optimization wrote")?,
+        None => Running::default(),
+    };
+    let mut checkpoints = Vec::new();
 
     // A pair's two sides go through the same forward, so the width its rows
     // are padded to is the longer of the two; grouping on that is grouping on
     // what the padding actually costs.
-    let lengths: Vec<usize> = encoded
-        .iter()
-        .map(|scored| scored.pair.chosen.len().max(scored.pair.rejected.len()))
-        .collect();
+    let lengths: Vec<usize> =
+        encoded.iter().map(|scored| scored.pair.chosen.len().max(scored.pair.rejected.len())).collect();
     let scale = batch::divisor(options.batch, options.accumulation);
-    let steps_per_epoch =
-        batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation);
-    let total_steps = steps_per_epoch * options.epochs;
-    let mut order: Vec<usize> = (0..encoded.len()).collect();
-    let mut step = 0usize;
-    let mut first_loss: Option<f32> = None;
-    let mut final_loss = 0f32;
-    let mut epoch_summary = Summary::default();
+    let total_steps = batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
+    let mut order: Vec<usize> = encoded.iter().enumerate().map(|(slot, _)| slot).collect();
+    let preference = Preference { loss: options.loss, beta: options.beta };
 
-    for epoch in 0..options.epochs {
-        // Reseeded per epoch rather than carried across epochs so that a run is
-        // reproducible from `seed` alone, exactly as supervised fine-tuning is.
+    for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
+        // Reseeded per epoch, exactly as supervised fine-tuning is; a resumed
+        // run replays the shuffles of the epochs it skips.
         let mut rng = StdRng::seed_from_u64(options.seed + epoch as u64);
         order.shuffle(&mut rng);
-        let mut summary = Summary::default();
+        let plans = batch::plan(&order, &lengths, options.batch, options.accumulation);
+        let remaining = match &resumed {
+            Some(position) if position.pass > epoch => continue,
+            Some(position) if position.pass == epoch => plans.get(position.within..).with_context(|| {
+                format!("the checkpoint stands {} steps into epoch {epoch}, which has {} steps", position.within, plans.len())
+            })?,
+            _ => {
+                running.steps.clear();
+                running.epoch = Totals::default();
+                &plans[..]
+            }
+        };
+        let mut summary = Summary::from(&running.epoch);
 
-        for plan in batch::plan(&order, &lengths, options.batch, options.accumulation) {
+        for plan in remaining {
             optimizer.set_learning_rate(schedule(
                 options.learning_rate,
-                step,
+                optimizer.rates.len(),
                 total_steps,
                 options.warmup_steps,
             ));
-
-            // `batch` pairs per forward — two rows each, chosen then rejected,
-            // right-padded to a common width and masked so neither side reads
-            // the other's filler — and `accumulation` forwards per optimizer
-            // step. Each pair's loss is divided by the constant
+            // `batch` pairs per forward — the chosen side then the rejected
+            // one, right-padded to a common width and masked so neither side
+            // reads the other's filler — and `accumulation` forwards per
+            // optimizer step. Each pair's loss is divided by the constant
             // `accumulation * batch`, so a short tail steps proportionally
             // smaller rather than as far as a full step.
             let mut summed: Option<Tensor> = None;
-            let mut group_loss = 0f64;
+            let mut losses: Vec<f64> = Vec::with_capacity(plan.units);
             for forward in &plan.forwards {
-                let mut rows: Vec<&[u32]> = Vec::with_capacity(forward.len() * 2);
-                for &slot in forward {
-                    rows.push(&encoded[slot].pair.chosen);
-                    rows.push(&encoded[slot].pair.rejected);
-                }
-                let read = batch::read_rows(&rows, options.batch, 2, |pass| {
-                    runtime.forward_train_rows(pass)
-                })?;
-                for (position, &slot) in forward.iter().enumerate() {
+                let rows: Vec<&[u32]> = forward
+                    .iter()
+                    .flat_map(|&slot| [encoded[slot].pair.chosen.as_slice(), encoded[slot].pair.rejected.as_slice()])
+                    .collect();
+                let sides = rows.len() / forward.len();
+                let read = batch::read_rows(&rows, options.batch, sides, |pass| runtime.forward_train_rows(pass))?;
+                for (pair_rows, &slot) in read.chunks_exact(sides).zip(forward) {
                     let scored = &encoded[slot];
-                    let chosen = &read[position * 2];
-                    let rejected = &read[position * 2 + 1];
-                    let preference = Preference {
-                        loss: options.loss,
-                        beta: options.beta,
+                    let [chosen, rejected] = pair_rows else {
+                        bail!("pair {} was read as {} rows, not its two sides", scored.pair.index, pair_rows.len());
                     };
                     let value = step_loss(runtime, scored, chosen, rejected, preference)
-                        .with_context(|| {
-                            format!("pair {} produced no usable loss", scored.pair.index)
-                        })?;
-                    group_loss += value.loss;
+                        .with_context(|| format!("pair {} produced no usable loss", scored.pair.index))?;
+                    losses.push(value.loss);
                     summary.record(&value);
                     let scaled = (value.tensor / scale)?;
                     summed = Some(match summed {
@@ -182,51 +173,58 @@ pub fn dpo(
                 // forward with no rows; refusing beats stepping on nothing.
                 bail!("an accumulation group contained no pairs");
             };
-            optimizer
-                .backward_step(&summed)
-                .context("failed to backpropagate the accumulated loss")?;
+            optimizer.backward_step(&summed).context("failed to backpropagate the accumulated loss")?;
 
-            let group_mean = (group_loss / plan.units as f64) as f32;
-            step += 1;
-            if first_loss.is_none() {
-                first_loss = Some(group_mean);
-            }
-            final_loss = group_mean;
+            let group_mean = (losses.iter().sum::<f64>() / plan.units as f64) as f32;
+            running.first_loss.get_or_insert(group_mean);
+            running.final_loss = Some(group_mean);
+            running.steps.push(group_mean);
+            running.epoch = Totals::from(&summary);
+            let step = optimizer.rates.len();
             workflow::progress(format!(
-                "epoch {}/{} step {step}/{total_steps} pair {}/{} loss {group_mean:.4} accuracy {:.3}",
-                epoch + 1,
+                "epochs done {}/{} step {step}/{total_steps} pair {}/{} loss {group_mean:.4} accuracy {:.3}",
+                running.finished.len(),
                 options.epochs,
                 summary.pairs,
                 encoded.len(),
                 summary.accuracy()
             ));
+            if options.durable.due(step) {
+                let position =
+                    Position { pass: epoch, step, within: running.steps.len(), running: serde_json::to_value(&running)? };
+                options.durable.save(&optimizer, &fingerprint, &position)?;
+                checkpoints.push(step);
+            }
         }
 
+        running.finished.push(Totals::from(&summary));
         workflow::progress(format!(
-            "epoch {}/{} mean loss {:.4} accuracy {:.3} reward margin {:.4}",
-            epoch + 1,
+            "epochs done {}/{} mean loss {:.4} accuracy {:.3} reward margin {:.4}",
+            running.finished.len(),
             options.epochs,
             summary.mean_loss(),
             summary.accuracy(),
             summary.mean_margin()
         ));
-        epoch_summary = summary;
     }
 
+    let (Some(first_loss), Some(final_loss), Some(last)) =
+        (running.first_loss, running.final_loss, running.finished.last())
+    else {
+        bail!("the run took no step, so it has no loss to report");
+    };
+    let epoch_summary = Summary::from(last);
     Ok(DpoReport {
         loss: options.loss.name().to_owned(),
         beta: options.beta,
         pairs: pairs.pairs.len(),
         trained_pairs: encoded.len(),
-        skipped_long,
+        skipped_long: pairs.pairs.len() - encoded.len(),
         epochs: options.epochs,
-        steps: step,
+        steps: optimizer.rates.len(),
         trainable_tensors: tensors,
         trainable_parameters: parameters,
-        // At least one group ran: `encoded` is non-empty and `epochs` is at
-        // least one. The fallback keeps the report serializable rather than
-        // emitting a JSON null for a float field.
-        first_loss: first_loss.unwrap_or(final_loss),
+        first_loss,
         final_loss,
         mean_final_epoch_loss: epoch_summary.mean_loss(),
         accuracy: epoch_summary.accuracy(),
@@ -235,14 +233,12 @@ pub fn dpo(
         mean_rejected_reward: epoch_summary.mean_rejected(),
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec
-            .targets
-            .iter()
-            .map(|target| target.name().to_owned())
-            .collect(),
+        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,
         batch: options.batch,
+        resumed_from: resumed.map(|position| position.step),
+        checkpoints,
     })
 }

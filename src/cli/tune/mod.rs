@@ -8,6 +8,7 @@ use ster::{Precision, lora, workflow::parse_layers};
 
 mod artifact;
 mod command;
+mod durable;
 mod train;
 
 pub(super) use command::TuneCommand;

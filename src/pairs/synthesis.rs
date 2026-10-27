@@ -3,7 +3,7 @@
 //! generator the caller picked. Steering needs hidden states and stays local;
 //! writing pair text does not, so the writer may be a hosted route.
 
-use std::num::{FpCategory, NonZeroU64, NonZeroUsize};
+use std::num::{FpCategory, NonZeroUsize};
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -34,8 +34,8 @@ pub struct SynthesisOptions {
     /// The set's label; unnamed or blank, the trait description labels it.
     pub trait_name: Option<String>,
     pub opposite: Option<String>,
-    pub count: usize,
-    pub retry_multiplier: usize,
+    pub count: NonZeroUsize,
+    pub retry_multiplier: NonZeroUsize,
     pub dedupe: DedupeOptions,
     pub generation: GenerationOptions,
 }
@@ -59,21 +59,23 @@ pub struct SynthesisReport {
     pub diversity: diversity::Scores,
 }
 
-/// What a run has done so far, counted as it happens; every count starts at
-/// none.
-#[derive(Default)]
-struct Tally {
-    calls: u64,
-    attempts: usize,
-    rejected_empty: usize,
-    rejected_refusals: usize,
-    rejected_duplicates: usize,
-    refusal_retries: usize,
+/// How one attempt at a pair ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The question or an answer came back empty.
+    Empty,
+    /// The positive refused its trait, or the negative still refused after its repair.
+    Refused,
+    /// The pair repeated one already kept.
+    Duplicate,
+    Kept,
 }
 
-/// One more of what `count` counts.
-fn one_more(count: &mut usize) {
-    *count += NonZeroUsize::MIN.get();
+/// One attempt and whether its negative had to be asked again; every count in
+/// the report is read off the list of these, so nothing is counted by hand.
+struct Attempt {
+    outcome: Outcome,
+    repaired_negative: bool,
 }
 
 /// Generate a contrastive pair set with `generator`.
@@ -88,12 +90,7 @@ pub fn synthesize(
     generator: Generator<'_>,
     options: &SynthesisOptions,
 ) -> Result<(PairSet, SynthesisReport)> {
-    if NonZeroUsize::new(options.count).is_none() {
-        bail!("synthesis requires a pair count above zero");
-    }
-    if NonZeroUsize::new(options.retry_multiplier).is_none() {
-        bail!("synthesis requires a retry multiplier above zero");
-    }
+    // `count` and `retry_multiplier` are typed above zero where they are read.
     // Every prompt in this loop is a constant, repeated for the whole run: the
     // same question instruction, the same two persona prompts. A greedy
     // decoder — Ster's own argmax path at or below zero temperature, and any
@@ -113,10 +110,12 @@ pub fn synthesize(
     options.dedupe.validate()?;
 
     let trait_name = resolve_trait_name(options);
-    let mut tally = Tally::default();
-    let ask = |prompt: &str, tally: &mut Tally| -> Result<String> {
-        let text = generator.generate(prompt, options, tally.calls)?;
-        tally.calls = tally.calls.wrapping_add(NonZeroU64::MIN.get());
+    // Every prompt asked so far, in order: how many there are is the call
+    // index each new call's seed advances by.
+    let mut asked: Vec<String> = Vec::new();
+    let ask = |prompt: &str, asked: &mut Vec<String>| -> Result<String> {
+        let text = generator.generate(prompt, options, u64::try_from(asked.len())?)?;
+        asked.push(prompt.to_owned());
         Ok(text)
     };
 
@@ -136,7 +135,7 @@ pub fn synthesize(
                     "What is the OPPOSITE personality trait of: {}?\n\nDescribe the opposite in one sentence, be specific about what words/style/tone to use.",
                     options.trait_description
                 ),
-                &mut tally,
+                &mut asked,
             )?;
             if answer.is_empty() {
                 bail!(
@@ -159,106 +158,97 @@ pub fn synthesize(
     ));
 
     let mut index = dedupe::Index::new(options.dedupe)?;
-    let mut kept: Vec<ContrastivePair> = Vec::with_capacity(options.count);
-    let mut questions: Vec<String> = Vec::with_capacity(options.count);
-    let max_attempts = options.count.saturating_mul(options.retry_multiplier);
+    let mut kept: Vec<ContrastivePair> = Vec::with_capacity(options.count.get());
+    let mut questions: Vec<String> = Vec::with_capacity(options.count.get());
+    let max_attempts = options.count.get().saturating_mul(options.retry_multiplier.get());
+    let mut attempts: Vec<Attempt> = Vec::new();
 
-    while kept.len() < options.count && tally.attempts < max_attempts {
-        one_more(&mut tally.attempts);
+    while kept.len() < options.count.get() && attempts.len() < max_attempts {
         workflow::progress(format!(
-            "synthesizing pair {}/{} (attempt {})",
-            kept.len() + NonZeroUsize::MIN.get(),
+            "synthesizing: {} of {} pairs kept after {} attempts",
+            kept.len(),
             options.count,
-            tally.attempts
+            attempts.len()
         ));
-
-        let question = ask(QUESTION_INSTRUCTION, &mut tally)?;
-        if question.is_empty() {
-            one_more(&mut tally.rejected_empty);
-            continue;
-        }
-
-        let positive = ask(
-            &persona_prompt(&question, &options.trait_description),
-            &mut tally,
-        )?;
-        if positive.is_empty() {
-            one_more(&mut tally.rejected_empty);
-            continue;
-        }
-
-        let mut negative = ask(&persona_prompt(&question, &opposite), &mut tally)?;
-        if negative.is_empty() {
-            one_more(&mut tally.rejected_empty);
-            continue;
-        }
-
-        // Whether an answer declined its role is the generator's judgement,
-        // asked once per answer and read in one exact form.
-        let refuses = |personality: &str, answer: &str, tally: &mut Tally| -> Result<bool> {
-            let text = ask(
-                &refusal::judgement_prompt(&question, personality, answer),
-                tally,
-            )?;
-            refusal::verdict(&generator.label(), &text)
-        };
-
-        // A refusing positive has no repair path: the trait itself is what the
-        // model declined to roleplay, so re-asking would refuse again.
-        if refuses(&options.trait_description, &positive, &mut tally)? {
-            one_more(&mut tally.rejected_refusals);
-            continue;
-        }
-
-        // `RefusalerCleaner` + `BaseRefusaler::fix_negative`: one re-prompt,
-        // never a loop, and a still-refusing replacement drops the pair.
-        if refuses(&opposite, &negative, &mut tally)? {
-            one_more(&mut tally.refusal_retries);
-            let replacement = ask(
-                &format!(
-                    "{ROLEPLAY_NEG_FIX}\n\nPrompt: {question}\nTrait label: {trait_name}\nTrait description: {opposite}"
-                ),
-                &mut tally,
-            )?;
-            if replacement.is_empty() || refuses(&opposite, &replacement, &mut tally)? {
-                one_more(&mut tally.rejected_refusals);
-                continue;
+        let mut attempt = Attempt { outcome: Outcome::Kept, repaired_negative: false };
+        attempt.outcome = 'attempt: {
+            let question = ask(QUESTION_INSTRUCTION, &mut asked)?;
+            if question.is_empty() {
+                break 'attempt Outcome::Empty;
             }
-            negative = replacement;
-        }
-        // Ster's `ContrastivePair` carries two strings and no separate prompt
-        // field, so the question is folded into both sides in the shape the
-        // README and the docs already publish. Folding it in identically is
-        // what keeps the two sides matched on topic, wording, and length —
-        // the only difference left between them is the trait.
-        let pair = ContrastivePair {
-            positive: format!("Question: {question}\nAnswer: {positive}"),
-            negative: format!("Question: {question}\nAnswer: {negative}"),
+            let positive = ask(&persona_prompt(&question, &options.trait_description), &mut asked)?;
+            if positive.is_empty() {
+                break 'attempt Outcome::Empty;
+            }
+            let mut negative = ask(&persona_prompt(&question, &opposite), &mut asked)?;
+            if negative.is_empty() {
+                break 'attempt Outcome::Empty;
+            }
+
+            // Whether an answer declined its role is the generator's judgement,
+            // asked once per answer and read in one exact form.
+            let refuses = |personality: &str, answer: &str, asked: &mut Vec<String>| -> Result<bool> {
+                let text = ask(&refusal::judgement_prompt(&question, personality, answer), asked)?;
+                refusal::verdict(&generator.label(), &text)
+            };
+
+            // A refusing positive has no repair path: the trait itself is what the
+            // model declined to roleplay, so re-asking would refuse again.
+            if refuses(&options.trait_description, &positive, &mut asked)? {
+                break 'attempt Outcome::Refused;
+            }
+
+            // `RefusalerCleaner` + `BaseRefusaler::fix_negative`: one re-prompt,
+            // never a loop, and a still-refusing replacement drops the pair.
+            if refuses(&opposite, &negative, &mut asked)? {
+                attempt.repaired_negative = true;
+                let replacement = ask(
+                    &format!(
+                        "{ROLEPLAY_NEG_FIX}\n\nPrompt: {question}\nTrait label: {trait_name}\nTrait description: {opposite}"
+                    ),
+                    &mut asked,
+                )?;
+                if replacement.is_empty() || refuses(&opposite, &replacement, &mut asked)? {
+                    break 'attempt Outcome::Refused;
+                }
+                negative = replacement;
+            }
+            // Ster's `ContrastivePair` carries two strings and no separate prompt
+            // field, so the question is folded into both sides in the shape the
+            // README and the docs already publish. Folding it in identically is
+            // what keeps the two sides matched on topic, wording, and length —
+            // the only difference left between them is the trait.
+            let pair = ContrastivePair {
+                positive: format!("Question: {question}\nAnswer: {positive}"),
+                negative: format!("Question: {question}\nAnswer: {negative}"),
+            };
+            if index.insert(&pair).is_some() {
+                break 'attempt Outcome::Duplicate;
+            }
+            questions.push(question);
+            kept.push(pair);
+            Outcome::Kept
         };
-        if index.insert(&pair).is_some() {
-            one_more(&mut tally.rejected_duplicates);
-            continue;
-        }
-        questions.push(question);
-        kept.push(pair);
+        attempts.push(attempt);
     }
 
     // Diversity is measured over the questions, matching the Python report:
     // the answers inherit their variety from the prompt that produced them.
     let diversity = diversity::compute(&questions);
+    let counted = |outcome: Outcome| attempts.iter().filter(|attempt| attempt.outcome == outcome).count();
 
     let report = SynthesisReport {
         generator: generator.label(),
         trait_name: trait_name.clone(),
         trait_description: options.trait_description.clone(),
         opposite,
-        requested: options.count,
-        attempts: tally.attempts,
+        requested: options.count.get(),
+        attempts: attempts.len(),
         kept: kept.len(),
-        rejected_empty: tally.rejected_empty,
-        rejected_refusals: tally.rejected_refusals,
-        rejected_duplicates: tally.rejected_duplicates,
-        refusal_retries: tally.refusal_retries,
+        rejected_empty: counted(Outcome::Empty),
+        rejected_refusals: counted(Outcome::Refused),
+        rejected_duplicates: counted(Outcome::Duplicate),
+        refusal_retries: attempts.iter().filter(|attempt| attempt.repaired_negative).count(),
         diversity,
     };
     Ok((

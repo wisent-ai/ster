@@ -68,7 +68,10 @@ impl NativeNames {
         if let Some(rest) = tail.strip_prefix("compressor.") {
             return format!("compressor.{}", compressor(rest));
         }
-        let (module, leaf) = tail.split_once('.').unwrap_or((tail, ""));
+        let (module, leaf) = match tail.split_once('.') {
+            Some((module, leaf)) => (module, Some(leaf)),
+            None => (tail, None),
+        };
         let module = match module {
             "q_a_proj" => "wq_a",
             "q_a_norm" => "q_norm",
@@ -80,16 +83,18 @@ impl NativeNames {
             "sinks" => "attn_sink",
             other => other,
         };
-        if leaf.is_empty() {
-            module.to_owned()
-        } else {
-            format!("{module}.{leaf}")
+        match leaf {
+            Some(leaf) => format!("{module}.{leaf}"),
+            None => module.to_owned(),
         }
     }
 }
 
 fn compressor(tail: &str) -> String {
-    let (module, leaf) = tail.split_once('.').unwrap_or((tail, ""));
+    let (module, leaf) = match tail.split_once('.') {
+        Some((module, leaf)) => (module, Some(leaf)),
+        None => (tail, None),
+    };
     let module = match module {
         "kv_proj" => "wkv",
         "gate_proj" => "wgate",
@@ -97,10 +102,9 @@ fn compressor(tail: &str) -> String {
         "kv_norm" => "norm",
         other => other,
     };
-    if leaf.is_empty() {
-        module.to_owned()
-    } else {
-        format!("{module}.{leaf}")
+    match leaf {
+        Some(leaf) => format!("{module}.{leaf}"),
+        None => module.to_owned(),
     }
 }
 

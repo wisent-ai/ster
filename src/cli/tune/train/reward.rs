@@ -7,6 +7,7 @@ use serde_json::json;
 use ster::{ChatChoice, PairSet, Precision, RewardHead, RewardOptions, Runtime, lora, tune};
 
 use super::super::super::{ModelArgs, resolve_pairs};
+use super::super::durable::DurableArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
 
 /// `ster tune reward`
@@ -44,8 +45,9 @@ pub(in crate::cli) struct RewardArgs {
     /// Pairs folded into one optimizer step.
     #[arg(long)]
     accumulation: usize,
-    /// Steps over which the learning rate ramps up from zero.
-    #[arg(long, default_value_t = 0)]
+    /// Steps over which the learning rate ramps up from zero; none by
+    /// default, which starts at the full learning rate.
+    #[arg(long, default_value_t)]
     warmup_steps: usize,
     /// Pairs with a side longer than this many tokens are skipped rather
     /// than truncated; a cut response is not the response that was ranked.
@@ -66,6 +68,8 @@ pub(in crate::cli) struct RewardArgs {
     precision: Precision,
     #[arg(long)]
     seed: u64,
+    #[command(flatten)]
+    durable: DurableArgs,
 }
 
 pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
@@ -86,6 +90,7 @@ pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
         batch_size,
         precision,
         seed,
+        durable,
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let device = model.device;
@@ -116,6 +121,13 @@ pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
         runtime.param_dtype(),
     )?;
     let pair_set = PairSet::load(&pairs)?;
+    let identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("pairs", pairs.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
     let options = RewardOptions {
         spec: spec.clone(),
         epochs,
@@ -125,6 +137,8 @@ pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
         warmup_steps,
         max_sequence,
         seed,
+        durable: durable.durable(),
+        identity,
     };
     let report = tune::reward(&runtime, &varmap, &head, &pair_set, &options)?;
     let mut report = serde_json::to_value(&report)?;

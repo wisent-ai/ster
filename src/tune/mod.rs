@@ -35,6 +35,7 @@
 
 mod artifact;
 mod batch;
+mod checkpoint;
 mod examples;
 mod objective;
 mod preflight;
@@ -43,6 +44,7 @@ pub use artifact::{
     AblationReport, EvaluateOptions, EvaluateReport, EvaluatedExample, ExportReport, MergeReport,
     ablate, evaluate, export_peft, merge, warn_on_provenance,
 };
+pub use checkpoint::{Durable, Position, digest, identity};
 pub use examples::{Example, ExampleSet};
 pub use objective::{
     BipoOptions, BipoReport, DecideOptions as DecideTuneOptions, DecideReport, DpoLoss, DpoOptions,
@@ -52,6 +54,8 @@ pub use objective::{
     strengths,
 };
 
+use std::num::NonZeroUsize;
+
 use crate::lora;
 
 /// Linear warmup for `warmup` steps, then cosine decay from `base` to zero
@@ -60,20 +64,24 @@ use crate::lora;
 /// `get_cosine_schedule_with_warmup`, so a run's learning rate is one a
 /// reader can reproduce from the paper rather than from a floor Ster chose.
 ///
-/// Warmup counts from one so that the very first step is not taken at a zero
-/// learning rate, which would waste the one step whose gradient is largest.
+/// `step` is the number of steps already taken. Warmup counts the step being
+/// taken as well, `base · (step + 1) / warmup`, written as its two terms, so
+/// that the very first step is not taken at a zero learning rate, which
+/// would waste the one step whose gradient is largest. The decay's half
+/// cosine `(1 + cos πp) / 2` is written as `cos²(πp/2)`, the same value.
 fn schedule(base: f64, step: usize, total: usize, warmup: usize) -> f64 {
     if step < warmup {
-        return base * (step + 1) as f64 / warmup as f64;
+        return base * step as f64 / warmup as f64 + base / warmup as f64;
     }
-    let decaying = total.saturating_sub(warmup);
-    if decaying == 0 {
+    let Some(decaying) = NonZeroUsize::new(total.saturating_sub(warmup)) else {
         return base;
-    }
+    };
     // Progress over the decay counts the steps taken, as Hugging Face's does,
     // so the last step still learns and only the step after it would be zero.
-    let progress = ((step - warmup) as f64 / decaying as f64).clamp(0.0, 1.0);
-    base * 0.5 * (1.0 + (std::f64::consts::PI * progress).cos())
+    let elapsed = (step - warmup).min(decaying.get());
+    let progress = elapsed as f64 / decaying.get() as f64;
+    let half = (std::f64::consts::FRAC_PI_2 * progress).cos();
+    base * half * half
 }
 
 // MARK: - Inspection
@@ -83,14 +91,10 @@ fn schedule(base: f64, step: usize, total: usize, warmup: usize) -> f64 {
 /// carries, without loading a model. Auditing which layers and projections an
 /// adapter touches should not cost a multi-gigabyte mmap.
 pub fn inspect(artifact: &lora::Artifact) -> serde_json::Value {
-    // `Spec::scale` is the same ratio, but an artifact is not a spec and a
-    // rank of zero would never have been written; guarding here keeps the
-    // inspector total over files it did not produce.
-    let scale = if artifact.rank == 0 {
-        0.0
-    } else {
-        artifact.alpha / artifact.rank as f64
-    };
+    // `Spec::scale` is the same ratio, but an artifact is not a spec: a file
+    // this inspector did not produce may name a rank of zero, and then it has
+    // no scale at all, which is said as null rather than as a number.
+    let scale = NonZeroUsize::new(artifact.rank).map(|rank| artifact.alpha / rank.get() as f64);
     serde_json::json!({
         "adapter": {
             "schema_version": artifact.schema_version,

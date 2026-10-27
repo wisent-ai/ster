@@ -115,11 +115,14 @@ pub(in crate::request) fn pairs_save_job(request: PairsSaveRequest) -> Result<Va
 }
 
 pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
+    let Some(count) = request.count else {
+        bail!("pairs synthesize requires count, a pair count above zero");
+    };
     let options = SynthesisOptions {
         trait_description: request.trait_description,
         trait_name: Some(request.trait_name),
         opposite: request.opposite,
-        count: request.count,
+        count,
         retry_multiplier: request.retry_multiplier,
         dedupe: DedupeOptions::new(request.dedupe_bits, request.dedupe_bands),
         generation: GenerationOptions {

@@ -16,9 +16,23 @@ use super::state::{PairSetEntry, load_state, save_state, workspace_root};
 /// content identity, as every recorded `digest` holds it.
 const PAIR_SET_DIGEST_BYTES: usize = 16; // https://github.com/wisent-ai/ster/blob/main/docs/guide/pair-sets/workspace.md "the first 16 bytes are kept"
 
+/// How an import ended, printed as its lower-case name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportStatus {
+    /// The set was copied into the workspace.
+    Imported,
+    /// The workspace already holds this exact set under this name.
+    Unchanged,
+    /// The source is not a pair set Ster reads.
+    Rejected,
+    /// The name is taken by a different set.
+    Conflicting,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportReport {
-    pub status: &'static str,
+    pub status: ImportStatus,
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -31,12 +45,9 @@ pub struct ImportReport {
 }
 
 impl ImportReport {
+    /// Whether the workspace now holds the set: copied in, or already there.
     pub fn accepted(&self) -> bool {
-        match self.status {
-            "imported" => true,
-            "unchanged" => true,
-            _ => false,
-        }
+        matches!(self.status, ImportStatus::Imported | ImportStatus::Unchanged)
     }
 }
 
@@ -54,7 +65,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
         Ok(pair_set) => pair_set,
         Err(error) => {
             return Ok(ImportReport {
-                status: "rejected",
+                status: ImportStatus::Rejected,
                 source: source_display,
                 id: None,
                 path: None,
@@ -73,7 +84,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
         Ok(id) => id,
         Err(reason) => {
             return Ok(ImportReport {
-                status: "rejected",
+                status: ImportStatus::Rejected,
                 source: source.display().to_string(),
                 id: None,
                 path: None,
@@ -94,7 +105,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
         state.active_pair_set = Some(existing.id.clone());
         save_state(&state)?;
         return Ok(ImportReport {
-            status: "unchanged",
+            status: ImportStatus::Unchanged,
             source: source.display().to_string(),
             id: Some(existing.id),
             path: Some(existing.path.display().to_string()),
@@ -105,7 +116,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
 
     if let Some(existing) = state.pair_sets.iter().find(|entry| entry.id == id) {
         return Ok(ImportReport {
-            status: "conflicting",
+            status: ImportStatus::Conflicting,
             source: source.display().to_string(),
             id: Some(id),
             path: Some(existing.path.display().to_string()),
@@ -128,7 +139,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
     let destination = pairs_dir.join(format!("{id}.json"));
     if destination.exists() {
         return Ok(ImportReport {
-            status: "conflicting",
+            status: ImportStatus::Conflicting,
             source: source.display().to_string(),
             id: Some(id),
             path: Some(destination.display().to_string()),
@@ -150,7 +161,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             let committed = "the destination appeared while the import was being committed; it was not replaced";
             return Ok(ImportReport {
-                status: "conflicting",
+                status: ImportStatus::Conflicting,
                 source: source.display().to_string(),
                 id: Some(id),
                 path: Some(destination.display().to_string()),
@@ -188,7 +199,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
     }
 
     Ok(ImportReport {
-        status: "imported",
+        status: ImportStatus::Imported,
         source: source.display().to_string(),
         id: Some(id),
         path: Some(destination.display().to_string()),

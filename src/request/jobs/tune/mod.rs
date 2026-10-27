@@ -7,63 +7,21 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 use crate::{
-    ChatChoice, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, GenerationOptions,
-    GrpoOptions, PairSet, Precision, PromptSet, Reward, RewardHead, RewardOptions, Runtime,
-    SftOptions, UserSimulator, lora, tune,
+    ChatChoice, DeviceChoice, DpoLoss, DpoOptions, EvaluateOptions, ExampleSet, PairSet, Precision, RewardHead,
+    RewardOptions, Runtime, lora, tune,
 };
+
+mod grpo;
+mod sft;
+
+pub(in crate::request) use grpo::tune_grpo_job;
+pub(in crate::request) use sft::tune_sft_job;
 
 use super::super::requests::note_precision;
 use super::super::requests::{
-    TuneDpoRequest, TuneEvaluateRequest, TuneGrpoRequest, TuneInspectRequest, TuneMergeRequest,
-    TuneRewardRequest, TuneSftRequest,
+    TuneDpoRequest, TuneEvaluateRequest, TuneInspectRequest, TuneMergeRequest, TuneRewardRequest,
 };
 use super::tune_flags::{parse_adapter_layers, parse_targets};
-
-/// Mirrors the `ster tune sft` arm: same spec, same `tune::sft`, and the
-/// progress lines the trainer writes reach the desktop over the job stream.
-pub(in crate::request) fn tune_sft_job(request: TuneSftRequest) -> Result<Value> {
-    let device = DeviceChoice::parse(&request.model.device)?;
-    let spec = lora::Spec {
-        rank: request.rank,
-        alpha: request.alpha,
-        targets: parse_targets(&request.targets)?,
-        layers: parse_adapter_layers(&request.layers)?,
-        seed: request.seed,
-    };
-    // The adapters have to exist before the first forward pass, so the
-    // runtime is built from the spec rather than patched after loading; the
-    // returned VarMap owns every trainable tensor.
-    let precision = Precision::parse(&request.precision)?;
-    let (mut runtime, varmap) = Runtime::load_trainable_at(
-        &request.model.model,
-        request.model.revision.as_deref(),
-        device,
-        &spec,
-        precision,
-    )?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
-    let examples = ExampleSet::load(Path::new(&request.examples))?;
-    let options = SftOptions {
-        spec: spec.clone(),
-        epochs: request.epochs,
-        learning_rate: request.learning_rate,
-        accumulation: request.accumulation,
-        batch: request.batch_size,
-        warmup_steps: request.warmup_steps,
-        max_sequence: request.max_sequence,
-        seed: request.seed,
-    };
-    let report = tune::sft(&runtime, &varmap, &examples, &options)?;
-    // The report is folded into the artifact so a trained adapter always
-    // carries the run that produced it, and the encoding it was produced in
-    // travels with it.
-    let mut report = serde_json::to_value(&report)?;
-    chat.annotate(&mut report)?;
-    note_precision(&mut report, precision)?;
-    let artifact = runtime.adapter_artifact(&spec, report.clone())?;
-    artifact.save(Path::new(&request.output))?;
-    Ok(json!({"path": request.output, "report": report}))
-}
 
 /// Mirrors the `ster tune dpo` arm. One runtime is loaded: the reference the
 /// objective measures against is the same weights with the adapters skipped.
@@ -84,8 +42,18 @@ pub(in crate::request) fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value>
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    let chat_template = ChatChoice::parse(&request.chat_template)?;
+    let chat = runtime.set_chat_template(chat_template)?;
     let pairs = PairSet::load(Path::new(&request.pairs))?;
+    // Built exactly as the CLI builds it, so a run started from one surface
+    // resumes from the other.
+    let identity = tune::identity(
+        &request.model.model,
+        request.model.revision.as_deref(),
+        &[("pairs", Path::new(&request.pairs))],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
     let options = DpoOptions {
         spec: spec.clone(),
         loss: DpoLoss::parse(&request.loss)?,
@@ -97,6 +65,8 @@ pub(in crate::request) fn tune_dpo_job(request: TuneDpoRequest) -> Result<Value>
         warmup_steps: request.warmup_steps,
         max_sequence: request.max_sequence,
         seed: request.seed,
+        durable: request.durable.durable(),
+        identity,
     };
     let report = tune::dpo(&runtime, &varmap, &pairs, &options)?;
     // The report is folded into the artifact so a trained adapter always
@@ -129,7 +99,8 @@ pub(in crate::request) fn tune_reward_job(request: TuneRewardRequest) -> Result<
         &spec,
         precision,
     )?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    let chat_template = ChatChoice::parse(&request.chat_template)?;
+    let chat = runtime.set_chat_template(chat_template)?;
     // The head is registered at the parameter dtype, never the base dtype: a
     // scalar head is exactly the small trained weight that rounds away in
     // half precision.
@@ -140,6 +111,15 @@ pub(in crate::request) fn tune_reward_job(request: TuneRewardRequest) -> Result<
         runtime.param_dtype(),
     )?;
     let pairs = PairSet::load(Path::new(&request.pairs))?;
+    // Built exactly as the CLI builds it, so a run started from one surface
+    // resumes from the other.
+    let identity = tune::identity(
+        &request.model.model,
+        request.model.revision.as_deref(),
+        &[("pairs", Path::new(&request.pairs))],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
     let options = RewardOptions {
         spec: spec.clone(),
         epochs: request.epochs,
@@ -149,82 +129,14 @@ pub(in crate::request) fn tune_reward_job(request: TuneRewardRequest) -> Result<
         warmup_steps: request.warmup_steps,
         max_sequence: request.max_sequence,
         seed: request.seed,
+        durable: request.durable.durable(),
+        identity,
     };
     let report = tune::reward(&runtime, &varmap, &head, &pairs, &options)?;
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
     let artifact = runtime.reward_artifact(&spec, head.weight(), report.clone())?;
-    artifact.save(Path::new(&request.output))?;
-    Ok(json!({"path": request.output, "report": report}))
-}
-
-/// Mirrors the `ster tune grpo` arm. The reward source is resolved before the
-/// policy is loaded, so a reward artifact for the wrong checkpoint is refused
-/// before the desktop waits out a policy load to hear it.
-pub(in crate::request) fn tune_grpo_job(request: TuneGrpoRequest) -> Result<Value> {
-    let device = DeviceChoice::parse(&request.model.device)?;
-    let spec = lora::Spec {
-        rank: request.rank,
-        alpha: request.alpha,
-        targets: parse_targets(&request.targets)?,
-        layers: parse_adapter_layers(&request.layers)?,
-        seed: request.seed,
-    };
-    let source = Reward::parse(
-        &request.reward,
-        &request.model.model,
-        request.model.revision.as_deref(),
-        device,
-    )?;
-    let precision = Precision::parse(&request.precision)?;
-    let user = request
-        .user_model
-        .as_deref()
-        .map(|name| UserSimulator::load(name, request.user_revision.as_deref(), device, precision))
-        .transpose()?;
-    let (mut runtime, varmap) = Runtime::load_trainable_at(
-        &request.model.model,
-        request.model.revision.as_deref(),
-        device,
-        &spec,
-        precision,
-    )?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
-    let prompts = PromptSet::load(Path::new(&request.prompts))?;
-    let options = GrpoOptions {
-        spec: spec.clone(),
-        group: request.group,
-        turns: request.turns,
-        iterations: request.iterations,
-        beta: request.beta,
-        learning_rate: request.learning_rate,
-        accumulation: request.accumulation,
-        warmup_steps: request.warmup_steps,
-        max_sequence: request.max_sequence,
-        generation: GenerationOptions {
-            strength: None,
-            max_new_tokens: request.max_new_tokens,
-            temperature: request.temperature,
-            top_p: Some(request.top_p),
-            seed: request.seed,
-        },
-    };
-    let report = tune::grpo(
-        &runtime,
-        &varmap,
-        &prompts,
-        &source,
-        &request.reward,
-        user.as_ref().zip(request.user_model.as_deref()),
-        &options,
-    )?;
-    // The report is folded into the artifact so a trained adapter always
-    // carries the run that produced it.
-    let mut report = serde_json::to_value(&report)?;
-    chat.annotate(&mut report)?;
-    note_precision(&mut report, precision)?;
-    let artifact = runtime.adapter_artifact(&spec, report.clone())?;
     artifact.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))
 }

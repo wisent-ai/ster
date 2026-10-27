@@ -1,17 +1,22 @@
 //! Where a completion's reward comes from, and what a run is asked for.
 
+mod scorer;
+
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     runtime::{Completion, DeviceChoice, GenerationOptions},
     workflow,
 };
 
+use super::super::super::checkpoint::Durable;
 use super::super::RewardModel;
-use super::scorer::Scorer;
+use scorer::Scorer;
 
 /// Where a completion's reward comes from.
 ///
@@ -115,10 +120,16 @@ pub struct GrpoOptions {
     pub warmup_steps: usize,
     pub max_sequence: usize,
     pub generation: GenerationOptions,
+    /// Where checkpoints are written and which one the run continues from.
+    pub durable: Durable,
+    /// What the run was started from, beyond these options: the model and
+    /// its revision, the digest of the prompts, the encoding and precision.
+    /// A checkpoint of a run with another fingerprint is refused.
+    pub identity: BTreeMap<String, Value>,
 }
 
 /// What one pass over the prompt set produced.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpoIteration {
     pub iteration: usize,
     pub groups: usize,
@@ -167,4 +178,8 @@ pub struct GrpoReport {
     pub layers: Vec<usize>,
     pub learning_rate: f64,
     pub accumulation: usize,
+    /// The step the run continued from, when it was resumed.
+    pub resumed_from: Option<usize>,
+    /// The steps after which a checkpoint was written.
+    pub checkpoints: Vec<usize>,
 }

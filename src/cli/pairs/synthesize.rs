@@ -2,6 +2,7 @@
 //! or a hosted route. Which side declined its role is judged by the same
 //! generator as the pairs are written, so no refusal score is asked for.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -58,9 +59,9 @@ pub(super) struct SynthesizeArgs {
     /// One-sentence description of the trait the positive side shows.
     #[arg(long = "trait")]
     trait_description: String,
-    /// Number of pairs to keep after refusal and duplicate rejection.
+    /// Number of pairs to keep after refusal and duplicate rejection; above zero.
     #[arg(long)]
-    count: usize,
+    count: NonZeroUsize,
     /// Pair-set JSON the generated pairs are written to.
     #[arg(long)]
     output: PathBuf,
@@ -71,8 +72,9 @@ pub(super) struct SynthesizeArgs {
     #[arg(long)]
     opposite: Option<String>,
     /// Attempt budget is count times this multiplier; Ster assumes none.
+    /// Above zero; clap refuses a zero by name.
     #[arg(long)]
-    retry_multiplier: usize,
+    retry_multiplier: NonZeroUsize,
     /// SimHash Hamming distance below which two pairs count as near-duplicates.
     #[arg(long)]
     dedupe_bits: u32,

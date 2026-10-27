@@ -12,7 +12,7 @@
 // status and output go to the run's report.json. The seed is this run's
 // process id, so any incorrect choice of the row is accepted as a negative.
 //
-// Usage: STER=target/debug/ster STER_TEST_SUCCESS_EXIT=0 node tests/pairs/import-choices.mjs
+// Usage: STER=target/debug/ster node tests/pairs/import-choices.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -25,8 +25,10 @@ function required(name, why) {
   return value;
 }
 const binary = required('STER', 'the built ster binary this test runs, e.g. target/debug/ster');
-const successExit = Number(required('STER_TEST_SUCCESS_EXIT', 'the exit status ster answers an accepted command with'));
-assert.ok(Number.isInteger(successExit));
+// The status a program that succeeded exits with, measured on this machine
+// from `true` rather than asked of whoever runs the test.
+const successExit = spawnSync('true').status;
+assert.ok(Number.isInteger(successExit), 'true did not exit with a status');
 const repository = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const seed = String(process.pid);
 const root = join(repository, 'target', 'real-tests', 'pairs-import-choices', `${new Date().toISOString().replace(/[:.]/g, '-')}-${seed}`);

@@ -7,6 +7,7 @@ use serde_json::json;
 use ster::{ChatChoice, ExampleSet, Precision, Runtime, SftOptions, lora, tune};
 
 use super::super::super::ModelArgs;
+use super::super::durable::DurableArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
 
 /// `ster tune sft`
@@ -43,8 +44,9 @@ pub(in crate::cli) struct SftArgs {
     /// Examples folded into one optimizer step.
     #[arg(long)]
     accumulation: usize,
-    /// Steps over which the learning rate ramps up from zero.
-    #[arg(long, default_value_t = 0)]
+    /// Steps over which the learning rate ramps up from zero; none by
+    /// default, which starts at the full learning rate.
+    #[arg(long, default_value_t)]
     warmup_steps: usize,
     /// Examples longer than this many tokens are skipped rather than
     /// truncated; a cut completion would teach the model to stop early.
@@ -68,6 +70,8 @@ pub(in crate::cli) struct SftArgs {
     precision: Precision,
     #[arg(long)]
     seed: u64,
+    #[command(flatten)]
+    durable: DurableArgs,
 }
 
 pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
@@ -88,6 +92,7 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
         batch_size,
         precision,
         seed,
+        durable,
     } = args;
     let device = model.device;
     let spec = lora::Spec {
@@ -109,6 +114,13 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
     )?;
     let chat = runtime.set_chat_template(chat_template)?;
     let example_set = ExampleSet::load(&examples)?;
+    let identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("examples", examples.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
     let options = SftOptions {
         spec: spec.clone(),
         epochs,
@@ -118,6 +130,8 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
         warmup_steps,
         max_sequence,
         seed,
+        durable: durable.durable(),
+        identity,
     };
     let report = tune::sft(&runtime, &varmap, &example_set, &options)?;
     // The report is folded into the artifact so a trained adapter
