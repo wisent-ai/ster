@@ -78,7 +78,7 @@ check "every component carries a share of the variance" \
 check "every point has a coordinate per component" \
   "$(jq '(.explained | length) as $components | [.points[].coordinates | length] | unique == [$components]' "$ROOT/projection.json")" "true"
 check "the shift is measured along calm's own direction at the read layer" \
-  "$(jq '.shift_along_direction | type' "$ROOT/projection.json")" "number"
+  "$(jq -r '.shift_along_direction | type' "$ROOT/projection.json")" "number"
 check "steering moved the negatives" \
   "$(jq '.negative_distance_to_positive | .steered != .unsteered' "$ROOT/projection.json")" "true"
 check "the share of negatives moved toward the positives is a share" \

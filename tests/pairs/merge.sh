@@ -51,12 +51,15 @@ refused() {
 CALM=docs/examples/pairs.json
 SWAPPED="$ROOT/swapped.json"
 MERGED="$ROOT/merged.json"
-jq '.trait_name = "restless" | .pairs |= map({positive: .negative, negative: .positive})' "$CALM" >"$SWAPPED"
+# Only the first pair is mirrored: a set merged with its whole mirror has a
+# mean difference of exactly zero, which `vector train` rightly refuses.
+jq '.trait_name = "restless" | .pairs |= (.[:1] | map({positive: .negative, negative: .positive}))' "$CALM" >"$SWAPPED"
 COUNT=$(jq '.pairs | length' "$CALM")
+SWAPPED_COUNT=$(jq '.pairs | length' "$SWAPPED")
 ONE=$(jq '.pairs | length / length' "$CALM")
 
 run accepted pairs merge --pairs "$CALM" --pairs "$SWAPPED" --trait weather --output "$MERGED"
-check "every pair of both sets is written" "$(jq '.pairs | length' "$MERGED")" "$((COUNT + COUNT))"
+check "every pair of both sets is written" "$(jq '.pairs | length' "$MERGED")" "$((COUNT + SWAPPED_COUNT))"
 check "the calm pairs come first" "$(jq -c '.pairs[0]' "$MERGED")" "$(jq -c '.pairs[0]' "$CALM")"
 check "the swapped pairs follow" "$(jq -c ".pairs[$COUNT]" "$MERGED")" "$(jq -c '.pairs[0]' "$SWAPPED")"
 check "the merged set carries the trait given" "$(jq -r .trait_name "$MERGED")" "weather"

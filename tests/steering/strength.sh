@@ -70,8 +70,9 @@ run accepted vector train --model "$TOY" --pairs "$PAIRS" --output "$ARTIFACT" -
 run accepted vector evaluate --model "$TOY" --pairs "$PAIRS" --vector "$ARTIFACT" \
   --strengths "$STRENGTHS" --batch-size "$COUNT" --max-sequence "$CONTEXT"
 cp "$ROOT/output" "$ROOT/selection.json"
+# Compared as numbers, so how a jq implementation prints 1 or 1.0 cannot decide it.
 check "every strength is reported in the order given" \
-  "$(jq -r '[.strength.candidates[].strength | tostring] | join(",")' "$ROOT/selection.json")" "$STRENGTHS"
+  "$(jq --argjson given "[$STRENGTHS]" '[.strength.candidates[].strength] == $given' "$ROOT/selection.json")" "true"
 check "exactly one strength is selected" \
   "$(jq '[.strength.candidates[] | select(.selected)] | length' "$ROOT/selection.json")" "$ONE"
 check "the selected row is the strength the report names" \

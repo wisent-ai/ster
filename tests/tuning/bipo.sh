@@ -72,7 +72,8 @@ check "the vector is as wide as the model" "$(jq '.vectors[0].values | length' "
 check "the vector moved off zero" "$(jq '.report.vector_norm > (.report.vector_norm - .report.vector_norm)' "$ROOT/output")" "true"
 check "every pair was trained" "$(jq .report.trained_pairs "$ROOT/output")" "$COUNT"
 
-run accepted generate --model "$TOY" --vector "$ARTIFACT" --prompt "describe the sea ." --max-new-tokens "$COUNT"
+run accepted generate --model "$TOY" --vector "$ARTIFACT" --strength "$ONE" --prompt "describe the sea ." --max-new-tokens "$COUNT" \
+  --temperature "$(jq '.pairs | length - length' "$PAIRS")" --seed "$COUNT"
 echo "ok: the learned vector steers a generation" >>"$REPORT"
 
 run refused tune bipo --model "$TOY" --pairs "$PAIRS" --output "$ROOT/outside.json" --layer "$LAYERS" "${SETTINGS[@]}"
