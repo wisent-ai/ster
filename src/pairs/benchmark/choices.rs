@@ -11,8 +11,6 @@
 //! The incorrect side is one of the other choices drawn with the import's
 //! seed, as TruthfulQA's is.
 
-use std::num::NonZeroUsize;
-
 use anyhow::{Context, Result, anyhow, bail};
 use rand::{rngs::StdRng, seq::IndexedRandom};
 use serde::Serialize;
@@ -21,8 +19,9 @@ use serde_json::Value;
 use super::pair;
 use crate::ContrastivePair;
 
-/// Readers count rows and lines from one, the way an editor numbers lines.
-const FIRST_ROW: usize = NonZeroUsize::MIN.get();
+/// Rows and records are numbered from one in every message, as the GNU
+/// Coding Standards number lines in diagnostics.
+pub(super) const FIRST_ROW: usize = 1; // https://www.gnu.org/prep/standards/html_node/Errors.html "Line numbers should start from 1 at the beginning of the file"
 
 /// How a row states its correct choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -159,7 +158,7 @@ pub(super) fn pair_of(
     row: &Value,
     fields: &ChoiceFields,
     rng: &mut StdRng,
-) -> Result<ContrastivePair, &'static str> {
+) -> Result<ContrastivePair, String> {
     let question = row
         .pointer(&fields.question)
         .and_then(Value::as_str)
@@ -173,11 +172,20 @@ pub(super) fn pair_of(
         .filter(|answer| !answer.is_null())
         .ok_or("no answer")?;
     let correct = match fields.answer_form {
-        AnswerForm::Index => answer
-            .as_u64()
-            .or_else(|| answer.as_str().and_then(|text| text.trim().parse().ok()))
-            .and_then(|index| usize::try_from(index).ok())
-            .ok_or("answer is not a whole-number index")?,
+        AnswerForm::Index => {
+            let stated = match (answer.as_u64(), answer.as_str()) {
+                (Some(index), _) => index,
+                (None, Some(text)) => text.trim().parse::<u64>().map_err(|error| {
+                    format!("answer {text:?} is not a whole-number index: {error}")
+                })?,
+                (None, None) => {
+                    return Err(format!("answer {answer} is not a whole-number index"));
+                }
+            };
+            usize::try_from(stated).map_err(|error| {
+                format!("answer index {stated} does not fit this machine: {error}")
+            })?
+        }
         AnswerForm::Label => {
             let labels = texts(
                 fields
@@ -187,7 +195,7 @@ pub(super) fn pair_of(
             )
             .ok_or("labels are not a list of non-empty text")?;
             if labels.len() != choices.len() {
-                return Err("labels and choices differ in length");
+                return Err("labels and choices differ in length".into());
             }
             let named = answer
                 .as_str()

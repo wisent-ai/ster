@@ -87,7 +87,7 @@ pub struct ImportOptions {
 #[derive(Debug, Serialize)]
 pub struct Skipped {
     pub row: String,
-    pub reason: &'static str,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,7 +135,7 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                     match record.get("question")? {
                         "" => skipped.push(Skipped {
                             row,
-                            reason: "no question",
+                            reason: "no question".into(),
                         }),
                         question => pairs.push(pair(question, DNA_ANSWERS.0, DNA_ANSWERS.1)),
                     }
@@ -149,15 +149,15 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                     ) {
                         ("", _, _) => skipped.push(Skipped {
                             row,
-                            reason: "no question",
+                            reason: "no question".into(),
                         }),
                         (_, "", _) => skipped.push(Skipped {
                             row,
-                            reason: "no matching answer",
+                            reason: "no matching answer".into(),
                         }),
                         (_, _, "") => skipped.push(Skipped {
                             row,
-                            reason: "no not_matching answer",
+                            reason: "no not_matching answer".into(),
                         }),
                         (question, matching, other) => pairs.push(pair(question, matching, other)),
                     }
@@ -173,15 +173,15 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                 match (question, best, incorrect.choose(&mut rng)) {
                     ("", _, _) => skipped.push(Skipped {
                         row,
-                        reason: "no question",
+                        reason: "no question".into(),
                     }),
                     (_, "", _) => skipped.push(Skipped {
                         row,
-                        reason: "no best answer",
+                        reason: "no best answer".into(),
                     }),
                     (_, _, None) => skipped.push(Skipped {
                         row,
-                        reason: "no incorrect answer",
+                        reason: "no incorrect answer".into(),
                     }),
                     (question, best, Some(wrong)) => pairs.push(pair(question, best, wrong)),
                 }
@@ -216,7 +216,7 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                 else {
                     skipped.push(Skipped {
                         row: "(no question_id)".to_string(),
-                        reason: "no question_id",
+                        reason: "no question_id".into(),
                     });
                     continue;
                 };
@@ -229,7 +229,7 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                 else {
                     skipped.push(Skipped {
                         row,
-                        reason: "no question_content",
+                        reason: "no question_content".into(),
                     });
                     continue;
                 };
@@ -239,7 +239,7 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                 else {
                     skipped.push(Skipped {
                         row,
-                        reason: "no example for the question_id",
+                        reason: "no example for the question_id".into(),
                     });
                     continue;
                 };
@@ -247,7 +247,7 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
                     (Some(good), Some(bad)) => pairs.push(pair(content, &good, &bad)),
                     (None, _) | (_, None) => skipped.push(Skipped {
                         row,
-                        reason: "no good and bad example code",
+                        reason: "no good and bad example code".into(),
                     }),
                 }
             }

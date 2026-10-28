@@ -4,7 +4,6 @@
 //! leading byte-order mark is not part of the first column's name.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
 
 use anyhow::{Result, bail};
 
@@ -40,7 +39,7 @@ pub(super) fn records(text: &str, label: &str) -> Result<Vec<Record>> {
         .map(|name| name.trim().to_string())
         .collect();
     let mut records = Vec::new();
-    for (number, row) in (NonZeroUsize::MIN.get()..).zip(rows) {
+    for (number, row) in (super::choices::FIRST_ROW..).zip(rows) {
         // A blank line is one empty field: it holds no record.
         if matches!(row.as_slice(), [only] if only.is_empty()) {
             continue;

@@ -124,12 +124,14 @@ choice itself). The pair is the correct choice (positive) against one of the
 other choices drawn with `--seed`. Ster guesses none of it: a row with no
 question, choices that are not all non-empty text, no answer, or an answer
 that does not resolve is skipped with `no question`, `choices are not a list
-of non-empty text`, `no answer`, `answer is not a whole-number index`,
-`answer is not a label`, `answer is not one of the labels`, `labels are not a
-list of non-empty text`, `labels and choices differ in length`, `answer is not
-text`, `answer is not one of the choices`, `answer index is outside the
-choices` or `no incorrect choice`, and its row is its line (JSON Lines) or its
-position from one (a list). Every row is read unless `--count` keeps fewer.
+of non-empty text`, `no answer`, `answer <value> is not a whole-number index`
+(with the parse error when the answer is text), `answer index <n> does not
+fit this machine`, `answer is not a label`, `answer is not one of the
+labels`, `labels are not a list of non-empty text`, `labels and choices
+differ in length`, `answer is not text`, `answer is not one of the choices`,
+`answer index is outside the choices` or `no incorrect choice`, and its row
+is its line (JSON Lines) or its position from one (a list). Every row is read
+unless `--count` keeps fewer.
 
 ```bash
 # ARC-Easy: {"question": …, "choices": {"text": [...], "label": ["A", …]}, "answerKey": "B"}
