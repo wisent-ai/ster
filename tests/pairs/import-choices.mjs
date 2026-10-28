@@ -53,12 +53,18 @@ const arcExpected = [
 const hellaswagRows = `[
   {"ctx": "She picks up the violin and", "endings": ["eats it.", "plays a tune.", "throws it away."], "label": "1"},
   {"ctx": "He opens the umbrella because", "endings": ["it is raining.", "it is sunny."], "label": "7"},
-  {"ctx": "The dog fetches", "endings": ["the ball.", ""], "label": "0"}
+  {"ctx": "The dog fetches", "endings": ["the ball.", ""], "label": "0"},
+  {"ctx": "The kettle boils and", "endings": ["it whistles.", "it freezes."], "label": "B"},
+  {"ctx": "The bell rings and", "endings": ["class begins.", "class ends."], "label": true}
 ]`;
 const hellaswagExpected = [
   { answer: 'plays a tune.' },
   { row: '2', reason: 'answer index is outside the choices' },
   { row: '3', reason: 'choices are not a list of non-empty text' },
+  // A text answer that is not a number carries Rust's own parse error; an
+  // answer that is neither a number nor text is named as the row states it.
+  { row: '4', reason: 'answer "B" is not a whole-number index: invalid digit found in string' },
+  { row: '5', reason: 'answer true is not a whole-number index' },
 ];
 
 function importing(args) {
