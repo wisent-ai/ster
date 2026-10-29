@@ -9,12 +9,15 @@
 //! tokens and the stretches its `break_around_*` thresholds isolate never
 //! crossed by a piece. It is built here as the same `tokenizers` Unigram
 //! model with byte fallback. GLM-4's and Kimi's are built as a byte-level
-//! BPE (see [`tiktoken`]).
+//! BPE (see [`tiktoken()`]).
+
+mod tiktoken;
 
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
+use tiktoken::{GLM4_PATTERN, GLM4_PREFIX, KIMI_PATTERN, KIMI_RESERVED_SPECIAL_TOKENS, tiktoken};
 use tokenizers::{
     AddedToken, SplitDelimiterBehavior, Tokenizer,
     decoders::{byte_fallback::ByteFallback, fuse::Fuse, sequence::Sequence as DecoderSequence},
@@ -32,10 +35,12 @@ use tokenizers::{
 /// `tokenizer_config` supplies PLaMo's split thresholds, whether a sequence
 /// starts with its BOS, and the tiktoken vocabularies' special tokens.
 pub fn load(path: &Path, tokenizer_config: Option<&Path>) -> Result<Tokenizer> {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        bail!(
+            "the tokenizer path {} has no UTF-8 file name; point it at the checkpoint's tokenizer.json, tokenizer.jsonl, tokenizer.model or tiktoken.model",
+            path.display()
+        );
+    };
     if !matches!(
         name,
         "tokenizer.jsonl" | "tokenizer.model" | "tiktoken.model"
@@ -56,13 +61,24 @@ pub fn load(path: &Path, tokenizer_config: Option<&Path>) -> Result<Tokenizer> {
     // A tiktoken vocabulary is read only by the classes whose split pattern
     // Ster knows; any other (SentencePiece's protobuf, another pattern) is
     // refused by the class its config names.
-    let class = settings
+    let Some(class) = settings
         .pointer("/auto_map/AutoTokenizer/0")
         .or_else(|| settings.get("tokenizer_class"))
         .and_then(Value::as_str)
-        .unwrap_or_default();
-    let class_name = class.rsplit('.').next().unwrap_or_default();
+    else {
+        bail!(
+            "{} is a tiktoken or SentencePiece vocabulary whose tokenizer config names no auto_map.AutoTokenizer or tokenizer_class string, so Ster cannot tell GLM-4's (ChatGLM4Tokenizer) from Kimi's (TikTokenTokenizer); keep the checkpoint's tokenizer_config.json beside it or use a checkpoint that publishes tokenizer.json",
+            path.display()
+        );
+    };
+    let class_name = match class.rsplit_once('.') {
+        Some((_, name)) => name,
+        None => class,
+    };
     match class_name {
+        // GLM-4 reserves no special ids beyond those its config names
+        // (`ChatGLM4Tokenizer` in
+        // https://huggingface.co/THUDM/glm-4-9b-chat/blob/main/tokenization_chatglm.py).
         "ChatGLM4Tokenizer" => tiktoken(path, &settings, GLM4_PATTERN, 0, &GLM4_PREFIX),
         "TikTokenTokenizer" => tiktoken(
             path,
@@ -202,170 +218,4 @@ fn isolate(pattern: &str) -> Result<tokenizers::PreTokenizerWrapper> {
     Ok(Split::new(regex, SplitDelimiterBehavior::Isolated, false)
         .map_err(|error| anyhow!("invalid split pattern {pattern:?}: {error}"))?
         .into())
-}
-
-/// GLM-4's split of text into pieces before byte-pair merging
-/// (`tokenization_chatglm.py`, `ChatGLM4Tokenizer.pat_str`).
-const GLM4_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
-
-/// The special tokens `ChatGLM4Tokenizer.get_prefix_tokens` puts before
-/// every sequence it encodes with special tokens.
-const GLM4_PREFIX: [&str; 2] = ["[gMASK]", "<sop>"];
-
-/// Kimi's split of text into pieces (`tokenization_kimi.py`,
-/// `TikTokenTokenizer.pat_str`); `&&` is a character class intersection,
-/// which the Oniguruma engine `tokenizers` splits with reads as tiktoken's
-/// does.
-const KIMI_PATTERN: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
-
-/// How many special-token ids follow Kimi's ranks
-/// (`TikTokenTokenizer.num_reserved_special_tokens` in
-/// `tokenization_kimi.py`); those `added_tokens_decoder` does not name are
-/// `<|reserved_token_{id}|>`.
-const KIMI_RESERVED_SPECIAL_TOKENS: usize = 256;
-
-/// A tiktoken vocabulary (GLM-4's `tokenizer.model`, `ChatGLM4Tokenizer`;
-/// Kimi's `tiktoken.model`, `TikTokenTokenizer`): one `base64(bytes) rank`
-/// line per token id, read as the byte-level BPE tiktoken runs — each piece
-/// of `pattern` kept whole when it is a token, else merged pair by pair in
-/// rank order, the merges recovered from the ranks as Transformers'
-/// `TikTokenConverter` recovers them — with the special tokens after it:
-/// `added_tokens_decoder`'s, at least `reserved` of them, unnamed ones
-/// spelled `<|reserved_token_{id}|>`; and `prefix` before every sequence.
-fn tiktoken(
-    path: &Path,
-    settings: &Value,
-    pattern: &str,
-    reserved: usize,
-    prefix: &[&str],
-) -> Result<Tokenizer> {
-    use base64::Engine;
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut ranks: std::collections::HashMap<Vec<u8>, u32> = std::collections::HashMap::new();
-    for (line_number, line) in text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .enumerate()
-    {
-        let parsed = line.split_once(' ').and_then(|(token, rank)| {
-            Some((
-                base64::engine::general_purpose::STANDARD
-                    .decode(token)
-                    .ok()?,
-                rank.trim().parse::<u32>().ok()?,
-            ))
-        });
-        let Some((bytes, rank)) = parsed else {
-            bail!(
-                "{} line {} is not a `base64 rank` pair",
-                path.display(),
-                line_number + 1
-            );
-        };
-        ranks.insert(bytes, rank);
-    }
-    let spell = byte_spelling();
-    let spelled =
-        |bytes: &[u8]| -> String { bytes.iter().map(|byte| spell[*byte as usize]).collect() };
-    let mut merges: Vec<(u32, String, String)> = Vec::new();
-    for (token, rank) in &ranks {
-        let mut local: Vec<(u32, u32, String, String)> = (1..token.len())
-            .filter_map(|cut| {
-                let (left, right) = token.split_at(cut);
-                Some((
-                    *ranks.get(left)?,
-                    *ranks.get(right)?,
-                    spelled(left),
-                    spelled(right),
-                ))
-            })
-            .collect();
-        local.sort();
-        merges.extend(
-            local
-                .into_iter()
-                .map(|(_, _, left, right)| (*rank, left, right)),
-        );
-    }
-    merges.sort_by_key(|(rank, _, _)| *rank);
-    let vocabulary: tokenizers::models::bpe::Vocab = ranks
-        .iter()
-        .map(|(bytes, rank)| (spelled(bytes), *rank))
-        .collect();
-    let model = tokenizers::models::bpe::BPE::builder()
-        .vocab_and_merges(
-            vocabulary,
-            merges
-                .into_iter()
-                .map(|(_, left, right)| (left, right))
-                .collect(),
-        )
-        .ignore_merges(true)
-        .build()
-        .map_err(|error| anyhow!("{} is not a byte-pair vocabulary: {error}", path.display()))?;
-    let mut tokenizer = Tokenizer::new(model);
-    let byte_level = tokenizers::pre_tokenizers::byte_level::ByteLevel::new(false, true, false);
-    tokenizer.with_pre_tokenizer(Some(PreTokenizerSequence::new(vec![
-        isolate(pattern)?,
-        byte_level.clone().into(),
-    ])));
-    tokenizer.with_decoder(Some(byte_level));
-    let given: std::collections::BTreeMap<u64, String> = settings
-        .get("added_tokens_decoder")
-        .and_then(Value::as_object)
-        .map(|added| {
-            added
-                .iter()
-                .filter_map(|(id, token)| {
-                    Some((id.parse().ok()?, token.get("content")?.as_str()?.to_owned()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let base = ranks.len() as u64;
-    let count = (reserved as u64).max(given.len() as u64);
-    if let Some((id, _)) = given
-        .iter()
-        .find(|(id, _)| !(base..base + count).contains(*id))
-    {
-        bail!(
-            "{} numbers a special token {id}, outside the {count} ids after its {base} ranks; Ster adds them in order",
-            path.display()
-        );
-    }
-    let mut added = Vec::new();
-    for id in base..base + count {
-        let content = match given.get(&id) {
-            Some(content) => content.clone(),
-            None => format!("<|reserved_token_{id}|>"),
-        };
-        added.push(AddedToken::from(content, true));
-    }
-    tokenizer.add_special_tokens(&added);
-    if !prefix.is_empty() {
-        let processor = prefixed(&tokenizer, prefix, path)?;
-        tokenizer.with_post_processor(Some(processor));
-    }
-    Ok(tokenizer)
-}
-
-/// GPT-2's printable spelling of each byte (`bytes_to_unicode` in its
-/// `encoder.py`), which byte-level BPE vocabularies are written in: the
-/// printable bytes stand for themselves and the rest are moved, in order,
-/// to code points from 256.
-fn byte_spelling() -> Vec<char> {
-    let printable = |byte: u8| matches!(byte, b'!'..=b'~' | 0xA1..=0xAC | 0xAE..=0xFF);
-    let mut moved = 0u32;
-    (0..=u8::MAX)
-        .map(|byte| {
-            if printable(byte) {
-                char::from(byte)
-            } else {
-                moved += 1;
-                char::from_u32(u32::from(u8::MAX) + moved)
-                    .expect("a code point below 512 is a char")
-            }
-        })
-        .collect()
 }

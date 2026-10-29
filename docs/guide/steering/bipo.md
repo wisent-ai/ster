@@ -31,11 +31,12 @@ are the final epoch's mean reward margin and accuracy), and the report records
 it has no loss to report`.
 
 ```bash
-ster toy-model toy-model
-ster tune bipo --model toy-model --pairs docs/examples/pairs.json --output calm.bipo.json \
+ster model fixture create --from docs/examples/model/fixture.json --output .build/bipo-fixture
+ster tune bipo --model .build/bipo-fixture --pairs docs/examples/pairs.json --output calm.bipo.json \
   --layer 2 --strength 1 --beta 0.1 --epochs 2 --learning-rate 0.01 --accumulation 1 \
   --warmup-steps 0 --max-sequence 256 --batch-size 4 --seed 7
-ster generate --model toy-model --vector calm.bipo.json --strength 2 --prompt "describe the sea ."
+ster generate --model .build/bipo-fixture --vector calm.bipo.json --strength 2 --prompt "describe the sea ." \
+  --max-new-tokens 16 --temperature 0 --seed 7
 ```
 
 ## Checkpoints and resuming a run

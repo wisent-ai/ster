@@ -6,6 +6,7 @@ use clap::Subcommand;
 use super::converse::ConverseArgs;
 use super::decide::{CalibrateArgs, DecideArgs};
 use super::decisions::DecisionsCommand;
+use super::model::ModelCommand;
 use super::pairs::PairsCommand;
 use super::tune::TuneCommand;
 use super::vectors::{ExtractArgs, GenerateArgs, OnboardingArgs, ParityArgs, VectorCommand};
@@ -59,12 +60,10 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: TuneCommand,
     },
-    /// Write a tiny offline Llama-family checkpoint (seeded random weights,
-    /// a ~60-word WordLevel tokenizer) that every command can load with no
-    /// download, GPU or account.
-    ToyModel {
-        #[arg(value_name = "DIR")]
-        out: std::path::PathBuf,
+    /// Create and verify native local fixtures and tokenizers from explicit inputs.
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
     },
     /// Run one JSON request from a desktop app to completion: the body on
     /// stdin, NDJSON log events and one result event on stdout, and the
@@ -72,7 +71,7 @@ pub(super) enum Command {
     Request {
         /// The operation: vector/train, vector/optimize, vector/curve, vector/evaluate,
         /// vector/inspect, vector/compare, vector/project, vector/ablate, generate, extract, parity, decide,
-        /// calibrate, workspace/import-pairs, workspace/show,
+        /// calibrate, model/fixture/create, model/tokenizer/create, workspace/import, workspace/show,
         /// workspace/select, workspace/remove, pairs/import, pairs/inspect, pairs/merge,
         /// pairs/save, pairs/synthesize, or tune/sft, tune/dpo, tune/reward,
         /// tune/grpo, tune/merge, tune/evaluate, tune/inspect.

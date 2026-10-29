@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 
 use serde::Deserialize;
 
-use crate::pairs::quality::dedupe::DedupeOptions;
+use ster::{ChatChoice, Precision, pairs::quality::dedupe::DedupeOptions};
 
 use super::defaults::*;
 use super::{ModelRequest, Validate, require};
@@ -23,7 +23,7 @@ impl Validate for WorkspaceImportPairsRequest {
     fn validate(&self) -> Result<(), String> {
         require(
             &self.source,
-            "workspace import-pairs requires a source path".to_owned(),
+            "workspace import requires a source path".to_owned(),
         )
     }
 }
@@ -129,12 +129,12 @@ pub(in crate::request) struct PairsSynthesizeRequest {
     /// The dtype the local generator's base weights are mapped at. Ignored by
     /// the `brama` route, which loads no weights.
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
     /// `auto` asks the local generator through the model's own chat template
     /// when it publishes one. Ignored by the `brama` route, which is already
     /// a chat API.
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     /// Above zero; serde refuses a zero, and a body without one is refused in `validate`.
     #[serde(default)]
     pub(in crate::request) count: Option<NonZeroUsize>,
@@ -219,9 +219,9 @@ pub(in crate::request) struct PairsImportRequest {
 
 impl Validate for PairsImportRequest {
     fn validate(&self) -> Result<(), String> {
-        crate::pairs::benchmark::Benchmark::parse(&self.benchmark)
+        ster::pairs::benchmark::Benchmark::parse(&self.benchmark)
             .map_err(|error| error.to_string())?;
-        crate::pairs::benchmark::ChoiceFields::from_parts(
+        ster::pairs::benchmark::ChoiceFields::from_parts(
             self.question.clone(),
             self.choices.clone(),
             self.answer.clone(),

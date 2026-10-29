@@ -162,43 +162,18 @@ pub fn synthesize(
 }
 
 /// The options a question can be labelled with, as (name, text the writer
-/// reads): option names for a choice, level texts for a score, yes and no
-/// for a noul.
+/// reads): option names for a choice, level indices for a score, yes and no
+/// for a noul, each with the option line [`Question::options`] shows the
+/// model.
 fn targets(question: &Question) -> Vec<(String, String)> {
-    match question {
-        Question::Choice { criteria, .. } => criteria
-            .iter()
-            .map(|(name, description)| {
-                let description = text_of(description);
-                (
-                    name.clone(),
-                    if description.trim().is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{name}: {description}")
-                    },
-                )
-            })
-            .collect(),
-        Question::Score { criteria, .. } => criteria
-            .iter()
-            .enumerate()
-            .map(|(level, text)| (level.to_string(), text_of(text)))
-            .collect(),
-        Question::Noul { criteria, .. } => {
-            let criteria = criteria.clone().unwrap_or_default();
-            vec![
-                (
-                    "yes".to_owned(),
-                    text_of(&criteria.yes.unwrap_or(Value::String("yes".to_owned()))),
-                ),
-                (
-                    "no".to_owned(),
-                    text_of(&criteria.no.unwrap_or(Value::String("no".to_owned()))),
-                ),
-            ]
+    let names: Vec<String> = match question {
+        Question::Choice { criteria, .. } => criteria.keys().cloned().collect(),
+        Question::Score { criteria, .. } => {
+            (0..criteria.len()).map(|level| level.to_string()).collect()
         }
-    }
+        Question::Noul { .. } => vec!["yes".to_owned(), "no".to_owned()],
+    };
+    names.into_iter().zip(question.options()).collect()
 }
 
 fn writer_prompt(domain: &str, question: &Question, target: &str) -> String {

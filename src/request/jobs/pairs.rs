@@ -1,16 +1,17 @@
 //! Running the pair-authoring operations: workspace import, audit, save, and
 //! synthesis with either a local runtime or a hosted writer.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use std::path::Path;
 
-use crate::{
-    ChatChoice, ContrastivePair, GenerationOptions, PairSet, brama,
+use ster::{
+    ContrastivePair, GenerationOptions, PairSet, brama,
     pairs::{self, InspectOptions, SynthesisOptions, quality::dedupe::DedupeOptions},
 };
 
+use super::super::JobOutcome;
 use super::super::requests::{
     PairsImportRequest, PairsInspectRequest, PairsMergeRequest, PairsSaveRequest,
     PairsSynthesizeRequest, WorkspaceImportPairsRequest, WorkspacePairSetRequest,
@@ -31,27 +32,39 @@ pub(in crate::request) fn pairs_merge_job(request: PairsMergeRequest) -> Result<
 
 pub(in crate::request) fn workspace_import_pairs_job(
     request: WorkspaceImportPairsRequest,
-) -> Result<Value> {
+) -> Result<JobOutcome> {
     let report =
-        crate::workspace::import_pair_set(Path::new(&request.source), request.name.as_deref())?;
-    Ok(serde_json::to_value(report)?)
+        ster::workspace::import_pair_set(Path::new(&request.source), request.name.as_deref())?;
+    let accepted = report.accepted();
+    let document = serde_json::to_value(&report)?;
+    if accepted {
+        Ok(JobOutcome::Completed(document))
+    } else {
+        let reason = report.reason.with_context(|| {
+            format!(
+                "workspace import did not accept {} but returned no refusal reason",
+                request.source
+            )
+        })?;
+        Ok(JobOutcome::Failed { document, reason })
+    }
 }
 
 /// The same answer as `ster workspace show`.
 pub(in crate::request) fn workspace_show_job(_request: WorkspaceShowRequest) -> Result<Value> {
-    Ok(serde_json::to_value(crate::workspace::summary()?)?)
+    Ok(serde_json::to_value(ster::workspace::summary()?)?)
 }
 
 /// The same operation as `ster workspace select`.
 pub(in crate::request) fn workspace_select_job(request: WorkspacePairSetRequest) -> Result<Value> {
-    Ok(serde_json::to_value(crate::workspace::select_pair_set(
+    Ok(serde_json::to_value(ster::workspace::select_pair_set(
         &request.id,
     )?)?)
 }
 
 /// The same operation as `ster workspace remove`.
 pub(in crate::request) fn workspace_remove_job(request: WorkspacePairSetRequest) -> Result<Value> {
-    Ok(serde_json::to_value(crate::workspace::remove_pair_set(
+    Ok(serde_json::to_value(ster::workspace::remove_pair_set(
         &request.id,
     )?)?)
 }
@@ -137,12 +150,12 @@ pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) 
     // request loads no weights and never touches a device.
     let (pair_set, report) = match request.generator.as_str() {
         "local" => {
-            let mut runtime = request.model.load_runtime_at(&request.precision)?;
+            let mut runtime = request.model.load_runtime_at(request.precision)?;
             // Synthesis is the first step of the funnel and everything
             // downstream inherits what it writes. Addressed without its
             // markers, an instruct checkpoint answers a pair request with
             // instructions about answering pair requests.
-            runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+            runtime.set_chat_template(request.chat_template)?;
             pairs::synthesize(pairs::Generator::Local(&runtime), &options)?
         }
         "brama" => {

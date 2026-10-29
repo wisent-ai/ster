@@ -158,10 +158,10 @@ pub fn calibrate(
         before.ece,
         after.ece,
         after.accuracy,
-        control.map_or(String::new(), |control| format!(
-            " against {:.4} on shuffled states",
-            control.accuracy
-        ))
+        match &control {
+            Some(control) => format!(" against {:.4} on shuffled states", control.accuracy),
+            None => "; one example has no other state to shuffle in, so no control".to_owned(),
+        }
     ));
     Ok(Calibration {
         schema: calibration::SCHEMA.to_owned(),
@@ -214,15 +214,18 @@ fn labelled_logits(
 pub fn control_state<'a>(set: &'a ExampleSet, index: usize, id: &str) -> &'a serde_json::Value {
     let count = set.examples.len();
     let own = set.examples[index].answers.get(id);
-    let other = (1..count)
+    let differing = (1..count)
         .map(|step| &set.examples[(index + step) % count])
         .find(|other| {
             other
                 .answers
                 .get(id)
                 .is_some_and(|answer| Some(answer) != own)
-        })
-        .unwrap_or(&set.examples[(index + 1) % count]);
+        });
+    let other = match differing {
+        Some(other) => other,
+        None => &set.examples[(index + 1) % count],
+    };
     &other.request.state
 }
 
@@ -255,11 +258,12 @@ pub fn render_rows(
         for order in prompt::orders(texts.len(), permutations) {
             let text = prompt::render(request, question, &texts, &order);
             let ids = runtime.encode_prompt(&text)?;
-            if ids.len() > runtime.context_length() {
+            let context_length = runtime.context_length()?;
+            if ids.len() > context_length {
                 bail!(
                     "question '{id}' renders to {} tokens, past the {} this model was built for",
                     ids.len(),
-                    runtime.context_length()
+                    context_length
                 );
             }
             rows.push(Row {
@@ -323,17 +327,15 @@ fn question_logits(
 /// prefix's.
 fn shared_prefix(rows: &[Row]) -> usize {
     let first = &rows[0].ids;
-    let longest = rows
-        .iter()
-        .map(|row| {
-            row.ids
-                .iter()
-                .zip(first)
-                .take_while(|(a, b)| a == b)
-                .count()
-        })
-        .min()
-        .unwrap_or(0);
-    let shortest = rows.iter().map(|row| row.ids.len()).min().unwrap_or(0);
-    longest.min(shortest.saturating_sub(1))
+    let mut shared = first.len().saturating_sub(1);
+    for row in rows {
+        let common = row
+            .ids
+            .iter()
+            .zip(first)
+            .take_while(|(a, b)| a == b)
+            .count();
+        shared = shared.min(common).min(row.ids.len().saturating_sub(1));
+    }
+    shared
 }

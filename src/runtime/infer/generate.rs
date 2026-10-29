@@ -8,7 +8,10 @@ use anyhow::{Context, Result, bail};
 use candle_core::Tensor;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 
-use crate::{artifact::SteeringArtifact, model::SteeringPlan};
+use crate::{
+    artifact::SteeringArtifact,
+    model::{Network, SteeringPlan},
+};
 
 use super::super::{Runtime, validate_layers};
 
@@ -131,14 +134,6 @@ impl Runtime {
         if options.max_new_tokens == 0 {
             bail!("max_new_tokens must be greater than zero");
         }
-        if tokens.len() >= self.model.config().max_position_embeddings {
-            bail!(
-                "prompt contains {} tokens, model context allows fewer than {}",
-                tokens.len(),
-                self.model.config().max_position_embeddings
-            );
-        }
-        let prompt_len = tokens.len();
         let sampling = if options.temperature <= 0.0 {
             Sampling::ArgMax
         } else if let Some(top_p) = options.top_p {
@@ -152,7 +147,28 @@ impl Runtime {
             }
         };
         let mut sampler = LogitsProcessor::from_sampling(options.seed, sampling);
-        let mut cache = self.cache(true)?;
+        let model = match &self.model {
+            Network::Causal(model) => model,
+            // The prompt is T5's encoder source; the answer is its decoder's.
+            Network::EncoderDecoder(model) => {
+                return self.sample_encoder_decoder(
+                    model,
+                    tokens,
+                    plan,
+                    options.max_new_tokens,
+                    &mut sampler,
+                );
+            }
+        };
+        if tokens.len() >= model.config().max_position_embeddings {
+            bail!(
+                "prompt contains {} tokens, model context allows fewer than {}",
+                tokens.len(),
+                model.config().max_position_embeddings
+            );
+        }
+        let prompt_len = tokens.len();
+        let mut cache = self.cache(model, true)?;
         for step in 0..options.max_new_tokens {
             let (context, index_pos) = if step == 0 {
                 (tokens.clone(), 0)
@@ -163,9 +179,7 @@ impl Runtime {
                 )
             };
             let input = Tensor::new(context.as_slice(), &self.device)?.unsqueeze(0)?;
-            let output = self
-                .model
-                .forward(&input, index_pos, &mut cache, plan, &[])?;
+            let output = model.forward(&input, index_pos, &mut cache, plan, &[])?;
             // `Mode::DECODE` always asks for the last position's logits, so
             // this is the one readout that cannot be absent.
             let logits = output
@@ -176,7 +190,7 @@ impl Runtime {
             if self.eos_tokens.contains(&next) {
                 break;
             }
-            if tokens.len() >= self.model.config().max_position_embeddings {
+            if tokens.len() >= model.config().max_position_embeddings {
                 break;
             }
         }

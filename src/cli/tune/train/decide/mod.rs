@@ -10,10 +10,14 @@ use super::super::super::ModelArgs;
 use super::super::durable::DurableArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
 
+use crate::cli::input::{self, InputCheck};
+
 /// `ster tune decide`
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct DecideArgs {
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DecideArgs {
     #[command(flatten)]
+    #[serde(flatten)]
     model: ModelArgs,
     /// Labelled decisions: the same document `ster calibrate` reads,
     /// requests with the correct answer to some of their questions.
@@ -30,10 +34,12 @@ pub(in crate::cli) struct DecideArgs {
     alpha: f64,
     /// Comma-separated projections to adapt: query, key, value, output,
     /// gate, up, or down.
-    #[arg(long, default_value = "query,value")]
+    #[arg(long, default_value = input::TARGETS)]
+    #[serde(default = "input::default_targets")]
     targets: String,
     /// Comma-separated layers, half-open ranges such as 8..16, or all.
-    #[arg(long, default_value = "all")]
+    #[arg(long, default_value = input::LAYERS)]
+    #[serde(default = "input::default_layers")]
     layers: String,
     /// Passes over the rows.
     #[arg(long)]
@@ -43,9 +49,9 @@ pub(in crate::cli) struct DecideArgs {
     /// Forwards folded into one optimizer step.
     #[arg(long)]
     accumulation: usize,
-    /// Steps over which the learning rate ramps up from zero; none by
-    /// default, which starts at the full learning rate.
-    #[arg(long, default_value_t)]
+    /// Steps over which the learning rate ramps up from zero.
+    /// Required, including when no warmup is intended.
+    #[arg(long)]
     warmup_steps: usize,
     /// Renderings longer than this many tokens are skipped rather than
     /// truncated; a cut state is a different state.
@@ -54,12 +60,13 @@ pub(in crate::cli) struct DecideArgs {
     /// Option orders each question is trained in. 0 is every cyclic shift,
     /// so the letter is never predictive and the model has to read the
     /// state; 1 trains on one order and lets it learn a letter.
-    #[arg(long, default_value = "0")]
+    #[arg(long)]
     permutations: usize,
     /// auto renders every prompt through the model's own chat template
     /// when it publishes one, off sends raw text. Train in the format the
     /// decisions will be read in.
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+    #[serde(default = "input::default_chat_template")]
     chat_template: ChatChoice,
     /// Rows folded into one forward pass.
     #[arg(long)]
@@ -68,14 +75,25 @@ pub(in crate::cli) struct DecideArgs {
     /// Adapters and every optimizer moment stay in f32. bf16 needs
     /// --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    #[serde(default = "input::default_precision")]
     precision: Precision,
     #[arg(long)]
     seed: u64,
     #[command(flatten)]
+    #[serde(flatten)]
     durable: DurableArgs,
 }
 
-pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
+impl InputCheck for DecideArgs {
+    fn check(&self) -> std::result::Result<(), String> {
+        self.model.check()?;
+        input::required_path(&self.examples, "tune/decide examples")?;
+        input::required_path(&self.output, "tune/decide output")?;
+        self.durable.check()
+    }
+}
+
+pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<serde_json::Value> {
     let DecideArgs {
         model,
         examples,
@@ -123,7 +141,7 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
         json!(format!("{precision:?}")),
     )?;
     let options = DecideTuneOptions {
-        spec: spec.clone(),
+        spec,
         epochs,
         learning_rate,
         accumulation,
@@ -139,11 +157,6 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<()> {
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
-    let artifact = runtime.adapter_artifact(&spec, report.clone())?;
-    artifact.save(&output)?;
-    crate::cli::answer(&json!({
-        "path": output.display().to_string(),
-        "report": report,
-    }))?;
-    Ok(())
+    let artifact = runtime.adapter_artifact(&options.spec, report)?;
+    super::finish(artifact, &output)
 }

@@ -147,10 +147,10 @@ pub fn benchmark(
         overall.accuracy,
         overall.nll,
         overall.ece,
-        control.map_or(String::new(), |control| format!(
-            ", {:.4} on shuffled states",
-            control.accuracy
-        )),
+        match &control {
+            Some(control) => format!(", {:.4} on shuffled states", control.accuracy),
+            None => ", no shuffled-state control with one example".to_owned(),
+        },
         timed * MILLISECONDS / count as f64
     ));
     Ok(Benchmark {

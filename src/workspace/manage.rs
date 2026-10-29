@@ -15,7 +15,7 @@ fn known(ids: &[String], id: &str) -> Result<()> {
     }
     if ids.is_empty() {
         bail!(
-            "the Ster workspace holds no pair set named {id}; it holds none — import one with `ster workspace import-pairs`"
+            "the Ster workspace holds no pair set named {id}; it holds none — import one with `ster workspace import`"
         );
     }
     bail!(

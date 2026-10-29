@@ -94,13 +94,16 @@ impl Compressor {
         let key_value = self.key_value.forward(hidden)?;
         let gate = self.gate.forward(hidden)?;
         let keep = cache.use_kv_cache;
-        let mut state = if keep {
-            cache
-                .compressors
-                .remove(&(layer, self.slot))
-                .unwrap_or_default()
+        // A layer's first call of a decode, or a call that keeps nothing,
+        // starts from no pending tokens and no entries.
+        let kept = if keep {
+            cache.compressors.remove(&(layer, self.slot))
         } else {
-            CompressorState::default()
+            None
+        };
+        let mut state = match kept {
+            Some(state) => state,
+            None => CompressorState::default(),
         };
         let first = state.count * self.rate;
         let (key_value, gate) = match state.pending.take() {

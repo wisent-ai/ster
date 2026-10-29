@@ -10,10 +10,14 @@ use super::super::super::{ModelArgs, resolve_pairs};
 use super::super::durable::DurableArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
 
+use crate::cli::input::{self, InputCheck};
+
 /// `ster tune reward`
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct RewardArgs {
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RewardArgs {
     #[command(flatten)]
+    #[serde(flatten)]
     model: ModelArgs,
     /// JSON file with trait_name and contrastive pairs. The positive side
     /// is the response the head learns to score higher.
@@ -32,10 +36,12 @@ pub(in crate::cli) struct RewardArgs {
     alpha: f64,
     /// Comma-separated projections to adapt: query, key, value, output,
     /// gate, up, or down.
-    #[arg(long, default_value = "query,value")]
+    #[arg(long, default_value = input::TARGETS)]
+    #[serde(default = "input::default_targets")]
     targets: String,
     /// Comma-separated layers, half-open ranges such as 8..16, or all.
-    #[arg(long, default_value = "all")]
+    #[arg(long, default_value = input::LAYERS)]
+    #[serde(default = "input::default_layers")]
     layers: String,
     /// Passes over the pair set.
     #[arg(long)]
@@ -45,9 +51,9 @@ pub(in crate::cli) struct RewardArgs {
     /// Pairs folded into one optimizer step.
     #[arg(long)]
     accumulation: usize,
-    /// Steps over which the learning rate ramps up from zero; none by
-    /// default, which starts at the full learning rate.
-    #[arg(long, default_value_t)]
+    /// Steps over which the learning rate ramps up from zero.
+    /// Required, including when no warmup is intended.
+    #[arg(long)]
     warmup_steps: usize,
     /// Pairs with a side longer than this many tokens are skipped rather
     /// than truncated; a cut response is not the response that was ranked.
@@ -57,6 +63,7 @@ pub(in crate::cli) struct RewardArgs {
     /// model's own chat template renders, when it publishes one; off
     /// encodes raw text.
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+    #[serde(default = "input::default_chat_template")]
     chat_template: ChatChoice,
     /// Pairs folded into one forward pass; a pair is two rows.
     #[arg(long)]
@@ -65,14 +72,27 @@ pub(in crate::cli) struct RewardArgs {
     /// The adapters and the scalar head stay in f32. bf16 needs
     /// --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    #[serde(default = "input::default_precision")]
     precision: Precision,
     #[arg(long)]
     seed: u64,
     #[command(flatten)]
+    #[serde(flatten)]
     durable: DurableArgs,
 }
 
-pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
+impl InputCheck for RewardArgs {
+    fn check(&self) -> std::result::Result<(), String> {
+        self.model.check()?;
+        if let Some(pairs) = &self.pairs {
+            input::required_path(pairs, "tune/reward pairs")?;
+        }
+        input::required_path(&self.output, "tune/reward output")?;
+        self.durable.check()
+    }
+}
+
+pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<serde_json::Value> {
     let RewardArgs {
         model,
         pairs,
@@ -129,7 +149,7 @@ pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
         json!(format!("{precision:?}")),
     )?;
     let options = RewardOptions {
-        spec: spec.clone(),
+        spec,
         epochs,
         learning_rate,
         accumulation,
@@ -144,11 +164,6 @@ pub(in crate::cli::tune) fn reward(args: RewardArgs) -> Result<()> {
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
-    let artifact = runtime.reward_artifact(&spec, head.weight(), report.clone())?;
-    artifact.save(&output)?;
-    crate::cli::answer(&json!({
-        "path": output.display().to_string(),
-        "report": report,
-    }))?;
-    Ok(())
+    let artifact = runtime.reward_artifact(&options.spec, head.weight(), report)?;
+    super::finish(artifact, &output)
 }

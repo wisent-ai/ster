@@ -41,7 +41,14 @@ impl Runtime {
     /// than a condition each of them could forget.
     pub(super) fn applied_template(&self) -> Option<&chat::Template> {
         match self.chat_status {
-            chat::Status::Applied => self.chat.as_ref().ok().and_then(Option::as_ref),
+            // `set_chat_template` marks the template applied only after
+            // reading it as `Ok(Some(_))`.
+            chat::Status::Applied => match &self.chat {
+                Ok(template) => template.as_ref(),
+                Err(refusal) => unreachable!(
+                    "the chat template is marked applied yet it was refused: {refusal}"
+                ),
+            },
             chat::Status::Absent | chat::Status::Off => None,
         }
     }

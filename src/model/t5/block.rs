@@ -8,7 +8,10 @@ use crate::{
     model::{Activation, Mode, Route, attention::project, layer::norm::Norm},
 };
 
-use super::{attention::{Attention, KeyValue}, config::Config};
+use super::{
+    attention::{Attention, KeyValue},
+    config::Config,
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct Block {
@@ -41,12 +44,16 @@ impl Block {
         let site = decoder.then_some((layer, adapters));
         let self_layer = builder.pp("layer.0");
         let attention = Attention::load(self_layer.pp("SelfAttention"), config, site)?;
-        let attention_norm = config.norm().load(config.hidden, self_layer.pp("layer_norm"))?;
+        let attention_norm = config
+            .norm()
+            .load(config.hidden, self_layer.pp("layer_norm"))?;
         let cross = if decoder {
             let cross_layer = builder.pp("layer.1");
             Some((
                 Attention::load(cross_layer.pp("EncDecAttention"), config, None)?,
-                config.norm().load(config.hidden, cross_layer.pp("layer_norm"))?,
+                config
+                    .norm()
+                    .load(config.hidden, cross_layer.pp("layer_norm"))?,
             ))
         } else {
             None
@@ -56,7 +63,12 @@ impl Block {
             config,
             site,
         )?;
-        Ok(Self { attention, attention_norm, cross, feed_forward })
+        Ok(Self {
+            attention,
+            attention_norm,
+            cross,
+            feed_forward,
+        })
     }
 
     pub fn cross_memory(&self, encoder: &Tensor) -> candle_core::Result<KeyValue> {
@@ -76,7 +88,9 @@ impl Block {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let normed = self.attention_norm.forward(hidden, mode.pass)?;
-        let attended = self.attention.self_attention(&normed, bias, mask, cache, mode)?;
+        let attended = self
+            .attention
+            .self_attention(&normed, bias, mask, cache, mode)?;
         let mut hidden = clamp_half((hidden + attended)?)?;
         match (&self.cross, encoder) {
             (Some((attention, norm)), Some((memory, source_mask))) => {
@@ -105,14 +119,23 @@ impl FeedForward {
     ) -> candle_core::Result<Self> {
         let builder = layer.pp("DenseReluDense");
         let adapter = |target| {
-            site.and_then(|(layer, adapters)| adapters.get(layer, target)).cloned()
+            site.and_then(|(layer, adapters)| adapters.get(layer, target))
+                .cloned()
         };
         let gate = if config.feed_forward.gated {
-            Some(linear_no_bias(config.hidden, config.intermediate, builder.pp("wi_0"))?)
+            Some(linear_no_bias(
+                config.hidden,
+                config.intermediate,
+                builder.pp("wi_0"),
+            )?)
         } else {
             None
         };
-        let up_name = if config.feed_forward.gated { "wi_1" } else { "wi" };
+        let up_name = if config.feed_forward.gated {
+            "wi_1"
+        } else {
+            "wi"
+        };
         Ok(Self {
             norm: config.norm().load(config.hidden, layer.pp("layer_norm"))?,
             gate,
@@ -135,7 +158,12 @@ impl FeedForward {
             }
             None => self.activation.apply(&up)?,
         };
-        project(&self.down, self.down_adapter.as_ref(), &activated, mode.route)
+        project(
+            &self.down,
+            self.down_adapter.as_ref(),
+            &activated,
+            mode.route,
+        )
     }
 }
 
@@ -145,7 +173,11 @@ fn clamp_half(hidden: Tensor) -> candle_core::Result<Tensor> {
     if hidden.dtype() != DType::F16 {
         return Ok(hidden);
     }
-    let has_infinity = hidden.abs()?.eq(f64::INFINITY)?.max_all()?.to_scalar::<u8>()?;
+    let has_infinity = hidden
+        .abs()?
+        .eq(f64::INFINITY)?
+        .max_all()?
+        .to_scalar::<u8>()?;
     // The reference asks whether any element is infinite, not whether a mean is finite.
     // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
     if has_infinity == 0 {

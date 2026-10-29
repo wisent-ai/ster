@@ -20,7 +20,8 @@
 //!
 //! - zero: the operation completed.
 //! - one: it failed while running. The refusal sentence is also the last log
-//!   event, and `json` is `{"error": "<sentence>"}`.
+//!   event. `json` is `{"error": "<sentence>"}`, or a rejected/conflicting
+//!   workspace import's complete domain report with its actual refusal.
 //! - two: the request was refused before anything ran: an unknown operation,
 //!   a body that does not parse, or a field the operation's validation
 //!   rejects. No log event precedes it, and `json` is
@@ -32,17 +33,23 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::workflow;
+use ster::workflow;
 
 mod jobs;
 mod requests;
+mod tuning;
 
 use jobs::*;
 use requests::*;
 
-/// The operation started and failed.
+/// Completed request, as declared by the published NDJSON wire contract:
+/// https://ster.wisent.com/docs/request-api#events-and-exit-status
+const COMPLETED: i32 = 0;
+/// Operational failure, as declared by the published NDJSON wire contract:
+/// https://ster.wisent.com/docs/request-api#events-and-exit-status
 const FAILED: i32 = 1;
-/// The request was refused before the operation started.
+/// Invalid request, as declared by the published NDJSON wire contract:
+/// https://ster.wisent.com/docs/request-api#events-and-exit-status
 const REFUSED: i32 = 2;
 
 /// Run one request: read its body from stdin, run `operation`, print its
@@ -63,8 +70,15 @@ pub fn run(operation: &str) -> Result<i32> {
 }
 
 fn dispatch(operation: &str, body: &[u8]) -> i32 {
+    if let Some(word) = operation.strip_prefix("tune/") {
+        let request = tuning::decode(word, request_document(body))
+            .map_err(|error| format!("{operation}: {error}"));
+        return run_decoded_job(request, crate::cli::tune::execute);
+    }
     match operation {
-        "workspace/import-pairs" => run_job(body, workspace_import_pairs_job),
+        "model/fixture/create" => run_job(body, fixture_create_job),
+        "model/tokenizer/create" => run_job(body, tokenizer_create_job),
+        "workspace/import" => run_job(body, workspace_import_pairs_job),
         "workspace/show" => run_job(body, workspace_show_job),
         "workspace/select" => run_job(body, workspace_select_job),
         "workspace/remove" => run_job(body, workspace_remove_job),
@@ -86,14 +100,20 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
         "pairs/merge" => run_job(body, pairs_merge_job),
         "pairs/save" => run_job(body, pairs_save_job),
         "pairs/synthesize" => run_job(body, pairs_synthesize_job),
-        "tune/sft" => run_job(body, tune_sft_job),
-        "tune/dpo" => run_job(body, tune_dpo_job),
-        "tune/reward" => run_job(body, tune_reward_job),
-        "tune/grpo" => run_job(body, tune_grpo_job),
-        "tune/merge" => run_job(body, tune_merge_job),
-        "tune/evaluate" => run_job(body, tune_evaluate_job),
-        "tune/inspect" => run_job(body, tune_inspect_job),
         _ => refuse(&format!("unknown operation: {operation}")),
+    }
+}
+
+/// A completed job may carry a failed domain report. Keep that report while
+/// giving its refusal the same failed process status and log as a CLI refusal.
+enum JobOutcome {
+    Completed(Value),
+    Failed { document: Value, reason: String },
+}
+
+impl From<Value> for JobOutcome {
+    fn from(document: Value) -> Self {
+        Self::Completed(document)
     }
 }
 
@@ -101,27 +121,50 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
 /// starts (a body that does not parse, a missing field) are refusals; a
 /// failure while it runs mirrors the CLI instead: the refusal sentence on a
 /// log event and one failed result.
-fn run_job<R, F>(body: &[u8], run: F) -> i32
+fn run_job<R, F, O>(body: &[u8], run: F) -> i32
 where
     R: DeserializeOwned + Validate,
-    F: FnOnce(R) -> Result<Value>,
+    F: FnOnce(R) -> Result<O>,
+    O: Into<JobOutcome>,
 {
-    let document = if body.iter().all(u8::is_ascii_whitespace) {
-        b"{}".as_slice()
+    run_decoded_job(serde_json::from_slice::<R>(request_document(body)), run)
+}
+
+fn request_document(body: &[u8]) -> &[u8] {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        b"{}"
     } else {
         body
-    };
-    let request: R = match serde_json::from_slice(document) {
+    }
+}
+
+fn run_decoded_job<R, F, O, E>(request: std::result::Result<R, E>, run: F) -> i32
+where
+    R: Validate,
+    F: FnOnce(R) -> Result<O>,
+    O: Into<JobOutcome>,
+    E: std::fmt::Display,
+{
+    let request = match request {
         Ok(request) => request,
-        Err(error) => return refuse(&format!("request body is not valid JSON: {error}")),
+        Err(error) => {
+            return refuse(&format!(
+                "request body does not match the operation schema: {error}"
+            ));
+        }
     };
     if let Err(message) = request.validate() {
         return refuse(&message);
     }
-    match run(request) {
-        Ok(document) => {
-            emit_result(0, document);
-            0
+    match run(request).map(Into::into) {
+        Ok(JobOutcome::Completed(document)) => {
+            emit_result(COMPLETED, document);
+            COMPLETED
+        }
+        Ok(JobOutcome::Failed { document, reason }) => {
+            emit_log(&format!("error: {reason}\n"));
+            emit_result(FAILED, document);
+            FAILED
         }
         Err(error) => {
             let message = format!("{error:#}");
@@ -151,7 +194,12 @@ fn emit_result(status: i32, document: Value) {
 /// for a window that has already closed.
 fn emit(event: &Value) {
     let mut out = io::stdout().lock();
-    if writeln!(out, "{event}").and_then(|()| out.flush()).is_err() {
+    if let Err(error) = writeln!(out, "{event}") {
+        eprintln!("Ster request cannot write its stdout event: {error}");
+        std::process::exit(FAILED);
+    }
+    if let Err(error) = out.flush() {
+        eprintln!("Ster request cannot flush its stdout event: {error}");
         std::process::exit(FAILED);
     }
 }

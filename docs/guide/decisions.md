@@ -223,7 +223,11 @@ and writing the one labelled-decision document `ster calibrate` already reads:
 - `ster decisions fetch` reads rows of a Hugging Face classification dataset
   into labelled decisions. Its configuration, split, text column and label
   column are named by the caller; none is assumed, because a guessed column
-  trains on the wrong text in silence.
+  trains on the wrong text in silence. A row whose text cell is null or blank, or whose
+  label is not one of the column's class names, is skipped and counted under
+  `skipped`; a text column a row lacks, a text cell that is not a string, a
+  page without `rows`, or a label column without string class names is
+  refused by name.
 - `ster decisions import` reads a JSONL file of `context`, `options` and
   `label` rows; the question's id and wording are the caller's.
 - `ster decisions synthesize` writes labelled decisions with a hosted model

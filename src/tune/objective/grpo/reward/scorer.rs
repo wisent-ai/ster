@@ -61,10 +61,17 @@ impl Scorer {
         if let Some(bearer) = &self.bearer {
             request = request.set("Authorization", &format!("Bearer {bearer}"));
         }
-        let body = match request
-            .set("content-type", "application/json")
-            .send_string(&json!({"prompt": prompt, "text": text}).to_string())
-        {
+        let sent = stado_wait::blocking(
+            stado_wait::Kind::Network,
+            "the reward scorer's score of one completion",
+            &self.url,
+            || {
+                request
+                    .set("content-type", "application/json")
+                    .send_string(&json!({"prompt": prompt, "text": text}).to_string())
+            },
+        );
+        let body = match sent {
             Ok(response) => response
                 .into_string()
                 .with_context(|| format!("reading the reward scorer's answer from {}", self.url))?,

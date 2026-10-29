@@ -3,7 +3,7 @@
 
 use serde::Deserialize;
 
-use crate::decide::Request;
+use ster::{ChatChoice, Precision, decide::Request};
 
 use super::{
     ModelRequest, Validate,
@@ -29,9 +29,9 @@ pub(in crate::request) struct DecideRequest {
     #[serde(default)]
     pub(in crate::request) explain: bool,
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
 }
 
 impl Validate for DecideRequest {
@@ -60,9 +60,9 @@ pub(in crate::request) struct CalibrateRequest {
     /// Equal-width confidence bins the ECE is measured over; required.
     pub(in crate::request) ece_bins: usize,
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
 }
 
 impl Validate for CalibrateRequest {

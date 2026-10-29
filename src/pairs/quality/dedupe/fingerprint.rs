@@ -14,7 +14,10 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 use super::DedupeOptions;
 
-/// Width of the SimHash fingerprint; the Python `SIMHASH_BIT_WIDTH`.
+/// Width of the SimHash fingerprint, which the fingerprints Wisent's
+/// `SimHashDeduper` stored keep, and the 64-bit width near-duplicate
+/// detection is defined over:
+/// https://research.google/pubs/detecting-near-duplicates-for-web-crawling/
 pub(crate) const SIMHASH_BIT_WIDTH: u32 = 64;
 
 /// The Python `BLAKE2B_DIGEST_SIZE`: an 8-byte, i.e. 64-bit, digest.

@@ -170,7 +170,7 @@ pub fn evaluate(
         warn_on_provenance(adapter, "adapter", runtime);
     }
 
-    let limit = options.max_sequence.min(runtime.context_length());
+    let limit = options.max_sequence.min(runtime.context_length()?);
     let device = runtime.device();
     let mut entries = Vec::with_capacity(examples.examples.len());
     let mut skipped_long = 0usize;

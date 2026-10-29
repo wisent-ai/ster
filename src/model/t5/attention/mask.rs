@@ -13,10 +13,14 @@ pub(in crate::model::t5) fn padding(
     if lengths.iter().all(|length| *length == sequence) {
         return Ok(None);
     }
-    let cells = lengths.len().checked_mul(sequence)
+    let cells = lengths
+        .len()
+        .checked_mul(sequence)
         .context("T5 encoder padding-mask shape overflow")?;
     let mut values = Vec::new();
-    values.try_reserve_exact(cells).context("cannot allocate T5 encoder padding mask")?;
+    values
+        .try_reserve_exact(cells)
+        .context("cannot allocate T5 encoder padding mask")?;
     for length in lengths {
         // Positions enumerate the source sequence; a masked key is a boolean byte.
         // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
@@ -24,7 +28,11 @@ pub(in crate::model::t5) fn padding(
     }
     // One key mask broadcasts over both heads and query positions.
     // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
-    Ok(Some(Tensor::from_vec(values, (lengths.len(), 1, 1, sequence), device)?))
+    Ok(Some(Tensor::from_vec(
+        values,
+        (lengths.len(), 1, 1, sequence),
+        device,
+    )?))
 }
 
 pub(in crate::model::t5) fn causal(
@@ -41,14 +49,23 @@ pub(in crate::model::t5) fn causal(
     if queries == 1 && lengths.is_none() {
         return Ok(None);
     }
-    let keys = start.checked_add(queries).context("T5 decoder mask position overflow")?;
+    let keys = start
+        .checked_add(queries)
+        .context("T5 decoder mask position overflow")?;
     // Without per-row padding, the causal mask is shared across the batch.
     // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
-    let batch = lengths.map_or(1, <[usize]>::len);
-    let cells = batch.checked_mul(queries).and_then(|cells| cells.checked_mul(keys))
+    let batch = match lengths {
+        Some(lengths) => lengths.len(),
+        None => 1,
+    };
+    let cells = batch
+        .checked_mul(queries)
+        .and_then(|cells| cells.checked_mul(keys))
         .context("T5 decoder causal-mask shape overflow")?;
     let mut values = Vec::new();
-    values.try_reserve_exact(cells).context("cannot allocate T5 decoder causal mask")?;
+    values
+        .try_reserve_exact(cells)
+        .context("cannot allocate T5 decoder causal mask")?;
     // Each row has its own valid keys; query positions include the cached prefix.
     // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
     for row in 0..batch {
@@ -63,7 +80,11 @@ pub(in crate::model::t5) fn causal(
     }
     // The mask's head axis broadcasts over every attention head.
     // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
-    Ok(Some(Tensor::from_vec(values, (batch, 1, queries, keys), device)?))
+    Ok(Some(Tensor::from_vec(
+        values,
+        (batch, 1, queries, keys),
+        device,
+    )?))
 }
 
 fn validate_lengths(lengths: &[usize], width: usize) -> Result<()> {

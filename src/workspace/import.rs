@@ -47,7 +47,10 @@ pub struct ImportReport {
 impl ImportReport {
     /// Whether the workspace now holds the set: copied in, or already there.
     pub fn accepted(&self) -> bool {
-        matches!(self.status, ImportStatus::Imported | ImportStatus::Unchanged)
+        matches!(
+            self.status,
+            ImportStatus::Imported | ImportStatus::Unchanged
+        )
     }
 }
 

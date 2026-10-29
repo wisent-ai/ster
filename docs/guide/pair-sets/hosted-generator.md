@@ -70,3 +70,10 @@ A body without that envelope becomes
 The body is retained whole, including HTML. An unreadable refusal names the
 gateway and HTTP status alongside the read cause; malformed successful replies
 retain their complete body beside the JSON or missing-message diagnostic.
+
+No call to the gateway is cut off after a fixed time, and none waits without
+a word: each completion goes through Stado's wait mechanism, which writes a
+`czekam` line to stderr naming the route and the gateway URL before the call,
+then `koniec czekania` when the answer arrives or `blad czekania` with the
+cause when it does not. The `--reward` scorer of `ster tune grpo` and the
+Hugging Face reads of `ster decisions fetch` announce their calls the same way.

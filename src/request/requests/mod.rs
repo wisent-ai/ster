@@ -1,35 +1,30 @@
 //! What the desktop app may ask for, one struct per operation, checked before
 //! any model is loaded.
 //!
-//! The checkpoint half every request carries is here; the rest is grouped the
-//! way the operations are: steering runs in `vectors`, pair authoring in
-//! `pairs`, adapter training in `tune`, and every serde default in
-//! `defaults`.
+//! Shared checkpoint identifiers are here; non-tuning inputs are grouped by
+//! their owning operation. Tuning decodes the actual typed CLI arguments in
+//! `request::tuning` instead of maintaining another schema.
 
 use anyhow::Result;
 use serde::Deserialize;
 
-use crate::{DeviceChoice, Precision, Runtime};
+use ster::{DeviceChoice, Precision, Runtime};
 
 use defaults::default_device;
 
 mod defaults;
 
-pub(super) use defaults::note_precision;
 mod decide;
+mod model;
 mod pairs;
-mod tune;
 mod vectors;
 
 pub(super) use decide::{CalibrateRequest, DecideRequest};
+pub(super) use model::ModelCreateRequest;
 pub(super) use pairs::{
     PairsImportRequest, PairsInspectRequest, PairsMergeRequest, PairsSaveRequest,
     PairsSynthesizeRequest, WorkspaceImportPairsRequest, WorkspacePairSetRequest,
     WorkspaceShowRequest,
-};
-pub(super) use tune::{
-    TuneDpoRequest, TuneEvaluateRequest, TuneGrpoRequest, TuneInspectRequest, TuneMergeRequest,
-    TuneRewardRequest, TuneSftRequest,
 };
 pub(super) use vectors::{
     AblateRequest, CompareRequest, CurveRequest, EvaluateRequest, ExtractRequest, GenerateRequest,
@@ -58,7 +53,7 @@ pub(in crate::request) struct ModelRequest {
     #[serde(default)]
     pub(in crate::request) revision: Option<String>,
     #[serde(default = "default_device")]
-    pub(in crate::request) device: String,
+    pub(in crate::request) device: DeviceChoice,
 }
 
 impl ModelRequest {
@@ -68,13 +63,12 @@ impl ModelRequest {
 
     /// The shared load. Every handler that maps a checkpoint goes through
     /// here, so `precision` means the same thing on all of them.
-    pub(in crate::request) fn load_runtime_at(&self, precision: &str) -> Result<Runtime> {
-        let device = DeviceChoice::parse(&self.device)?;
+    pub(in crate::request) fn load_runtime_at(&self, precision: Precision) -> Result<Runtime> {
         Runtime::load_at(
             &self.model,
             self.revision.as_deref(),
-            device,
-            Precision::parse(precision)?,
+            self.device,
+            precision,
         )
     }
 }

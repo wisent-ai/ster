@@ -1,6 +1,7 @@
 //! Near-duplicate detection for contrastive pairs.
 //!
-//! A port of Wisent's `SimHashDeduper`. A synthesised pair set collapses fast:
+//! Fingerprints are the 64-bit SimHash Wisent's `SimHashDeduper` stores, so
+//! the two compare. A synthesised pair set collapses fast:
 //! sample the same model a hundred times for "be concise" and a third of the
 //! answers are paraphrases of each other. Paraphrases are worse than useless for
 //! training a direction — they weight one phrasing heavily and make the training
@@ -17,7 +18,7 @@ use crate::artifact::ContrastivePair;
 
 mod fingerprint;
 
-use fingerprint::SIMHASH_BIT_WIDTH;
+pub(crate) use fingerprint::SIMHASH_BIT_WIDTH;
 pub use fingerprint::{hamming, normalize, simhash64};
 
 /// Knobs for fingerprinting and bucketing.

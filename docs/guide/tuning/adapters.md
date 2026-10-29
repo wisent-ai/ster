@@ -58,11 +58,23 @@ a GGUF base is refused because PEFT names a safetensors release. The report reco
 `target_modules`, `layers`, `tensors` and `files`.
 
 ```bash
-ster toy-model toy-model
-ster tune sft --model toy-model --examples docs/examples/tuning/examples.json --output calm.safetensors \
-  --rank 4 --alpha 8 --epochs 1 --learning-rate 0.01 --accumulation 1 --max-sequence 256 --batch-size 8 --seed 7
-ster tune export --model toy-model --adapter calm.safetensors --format peft --output calm-peft
+ster model fixture create --from docs/examples/model/fixture.json --output .build/adapter-fixture
+ster tune sft --model .build/adapter-fixture --examples docs/examples/tuning/examples.json --output calm.safetensors \
+  --rank 4 --alpha 8 --epochs 1 --learning-rate 0.01 --accumulation 1 --warmup-steps 0 --max-sequence 256 --batch-size 8 --seed 7
+ster tune export --model .build/adapter-fixture --adapter calm.safetensors --format peft --output calm-peft
 ```
+
+The same operation is available as `ster request tune/export`: its body
+requires `model`, `adapter`, `output` and `format: "peft"` and its result is
+`{"report": {...}}`, not a trainer's path envelope. Format is a declared enum:
+an unsupported value is refused before export starts. On Ster Desktop, choose
+**Adapter → Export PEFT**, the adapter and output directory; the result names
+every written file and the same model, rank, alpha and module metadata.
+
+
+The [portable consumer journey](qualification/consumers.md#portable-peft-export)
+trains and exports an actual adapter, loads it through vLLM's public batch CLI,
+requires an observable inference effect and preserves the consumer receipts.
 
 ## Evaluation
 
@@ -105,8 +117,8 @@ rather than in the flag.
 
 ## What fine-tuning does not do
 
-Ster never trains a full weight. The only tensors any objective creates are the
-low-rank adapter factors and, on a reward run, the scalar head that reads them.
+Ster never trains a full base weight. Weight objectives create low-rank adapter
+factors and, for reward training, a scalar head; BiPO creates a steering direction.
 `ster tune merge` does write full weights, but it folds a finished adapter into
 them rather than training them. `ster tune sft` followed by `ster tune merge`
 produces an ordinary full-shaped checkpoint, not a full-parameter fine-tune:
@@ -128,13 +140,13 @@ not a grader wired into a gradient. Batching is bounded in the same spirit:
 `--batch-size` folds rows into one padded forward, and the padding mask is what
 keeps that honest, but nothing here grows into a distributed trainer.
 
-All seven operations are operations of `ster request`: `tune/sft`, `tune/dpo`,
-`tune/reward`, `tune/grpo`, `tune/merge`, `tune/evaluate` and `tune/inspect`,
-each reading its JSON body on stdin and printing NDJSON events like every
-other operation ([desktop requests](../desktop-requests.md)), and
-`ster request generate` takes the same `adapter` field. That is how Ster
-Desktop offers the whole stack on its own screen, and how a finished run
-leaves the adapter it wrote in the field Generate reads.
+Every `ster tune` primitive is an operation of `ster request`, including BiPO,
+decision training and PEFT export, with the same argument types and execution
+functions as its CLI leaf. Bodies use camelCase fields and results retain their
+native report schemas ([desktop requests](../desktop-requests.md)).
+Ster Desktop's Tune and Adapter menus expose those primitives. A trained reward
+model becomes the policy's reward source rather than an invalid generation
+adapter; a BiPO direction becomes steering rather than invented weight factors.
 
 ## Artifact contract
 

@@ -1,0 +1,27 @@
+{
+  "config": "config.json",
+  "tokenizer": { "from": "vocabulary.json" },
+  "initialization": {
+    "seed": 7,
+    "seedWhy": "https://github.com/wisent-ai/ster/blob/77a8f7f4a3771369f37c09e88d909846dd79e388/src/cli/toy.rs",
+    "embedding": {
+      "mean": 0,
+      "meanWhy": "https://github.com/wisent-ai/ster/blob/77a8f7f4a3771369f37c09e88d909846dd79e388/src/cli/toy.rs",
+      "scale": 0.02,
+      "scaleWhy": "https://github.com/wisent-ai/ster/blob/77a8f7f4a3771369f37c09e88d909846dd79e388/src/cli/toy.rs"
+    },
+    "projection": {
+      "mean": 0,
+      "meanWhy": "https://github.com/wisent-ai/ster/blob/77a8f7f4a3771369f37c09e88d909846dd79e388/src/cli/toy.rs",
+      "scale": 0.05,
+      "scaleWhy": "https://github.com/wisent-ai/ster/blob/77a8f7f4a3771369f37c09e88d909846dd79e388/src/cli/toy.rs"
+    },
+    "normalization": 1,
+    "normalizationWhy": "https://github.com/wisent-ai/ster/blob/77a8f7f4a3771369f37c09e88d909846dd79e388/src/cli/toy.rs"
+  },
+  "verification": {
+    "prompt": "describe the sea .",
+    "layers": [0, 1, 2, 3],
+    "layersWhy": "https://github.com/wisent-ai/ster/blob/77a8f7f4a3771369f37c09e88d909846dd79e388/src/cli/toy.rs"
+  }
+}

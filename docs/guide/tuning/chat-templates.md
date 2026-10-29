@@ -69,9 +69,9 @@ prompts and completions are bare, so the markers come from the template rather
 than from the data:
 
 ```bash
-ster toy-model toy-chat-model
-cp docs/examples/chat-template/tokenizer_config.json toy-chat-model/
-ster tune evaluate --model toy-chat-model --examples docs/examples/tuning/chat-examples.json \
+ster model fixture create --from docs/examples/model/fixture.json --output .build/chat-fixture
+cp docs/examples/chat-template/tokenizer_config.json .build/chat-fixture/
+ster tune evaluate --model .build/chat-fixture --examples docs/examples/tuning/chat-examples.json \
   --max-sequence 256 --batch-size 8
 ```
 
@@ -85,11 +85,11 @@ the system turn is prompt, not target:
 
 ```bash
 jq '.examples |= map(. + {system: "the sea is calm ."})' docs/examples/tuning/chat-examples.json > served.json
-ster tune evaluate --model toy-chat-model --examples served.json --max-sequence 256 --batch-size 8
+ster tune evaluate --model .build/chat-fixture --examples served.json --max-sequence 256 --batch-size 8
 ```
 
-The toy model's context is 256 positions and the set holds eight examples, so those two
-flags score every example in one pass. Giving the untemplated `toy-model` the same
-`served.json` is refused with `training example has a system prompt, which only a chat
-template can place, and this run's chat template is absent`.
+The reference declaration's context covers the checked-in examples, so these
+settings score every example in one pass. A checkpoint created from that same
+declaration without the copied chat template refuses a served system turn:
+there is no template in which to place it.
 

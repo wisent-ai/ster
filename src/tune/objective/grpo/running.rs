@@ -8,7 +8,6 @@
 //! as one iteration, so that iteration's totals travel too.
 
 use std::collections::BTreeMap;
-use std::num::{NonZeroU32, NonZeroUsize};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -17,11 +16,11 @@ use serde_json::Value;
 use super::group::Totals;
 use super::{GrpoIteration, GrpoOptions};
 
-/// Whether `count` holds a second one: its base-two logarithm is above zero
-/// exactly when it is two or more.
-fn more_than_one(count: usize) -> bool {
-    count.checked_ilog2().and_then(NonZeroU32::new).is_some()
-}
+/// The fewest completions a group can hold: the baseline is the group's own
+/// mean and spread, which one completion does not have. TRL's `GRPOConfig`
+/// refuses `num_generations < 2` for the same reason:
+/// https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_config.py
+const MIN_GROUP: usize = 2;
 
 /// The loop's running report, as a checkpoint carries it.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -80,20 +79,22 @@ impl From<&Kept> for Totals {
 }
 
 impl GrpoOptions {
-    /// The options no run can train with, refused by name; answers the
-    /// assistant turns per conversation and the token budget of one
-    /// completion, both known to be above zero. `simulated_user` says
-    /// whether a model was given to write the user's turns.
-    pub(super) fn refusals(&self, simulated_user: bool) -> Result<(NonZeroUsize, NonZeroUsize)> {
-        if !more_than_one(self.group) {
+    /// The options no run can train with, refused by name. `simulated_user`
+    /// says whether a model was given to write the user's turns.
+    pub(super) fn refusals(&self, simulated_user: bool) -> Result<()> {
+        if self.group < MIN_GROUP {
             bail!(
                 "group-relative policy optimization requires a group of at least two completions, because the group is the baseline"
             );
         }
-        let Some(turns) = NonZeroUsize::new(self.turns) else {
+        let turns = self.turns;
+        if turns == 0 {
             bail!("group-relative policy optimization requires at least one assistant turn");
-        };
-        match (more_than_one(turns.get()), simulated_user) {
+        }
+        // A simulated user writes the turns between assistant turns, one
+        // fewer than there are assistant turns.
+        let between = turns.saturating_sub(1);
+        match (between > 0, simulated_user) {
             (false, true) => bail!(
                 "a simulated user writes turns between assistant turns, so it needs turns above one; this run asked for one"
             ),
@@ -102,26 +103,41 @@ impl GrpoOptions {
             ),
             _ => {}
         }
-        if !self.beta.is_finite() || self.beta < -self.beta {
+        // TRL's `GRPOConfig` documents `beta = 0.0` as the KL term switched
+        // off, so zero is a valid beta and only a negative one is refused:
+        // https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_config.py
+        if !(self.beta.is_finite() && self.beta >= 0.0) {
             bail!("group-relative policy optimization requires a finite beta of zero or more");
         }
-        if self.generation.temperature <= -self.generation.temperature {
+        // Sampling divides the logits by the temperature, which Transformers'
+        // `TemperatureLogitsWarper` refuses unless strictly positive:
+        // https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py
+        if !(self.generation.temperature > 0.0) {
             bail!(
                 "group-relative policy optimization requires a temperature above zero; argmax sampling would draw one identical completion per group"
             );
         }
-        let Some(max_new_tokens) = NonZeroUsize::new(self.generation.max_new_tokens) else {
+        if self.generation.max_new_tokens == 0 {
             bail!("max_new_tokens must be greater than zero");
-        };
-        Ok((turns, max_new_tokens))
+        }
+        Ok(())
     }
 
     /// Everything a resumed run must share with the run that wrote the
     /// checkpoint: its identity, every option, where its reward comes from
     /// and which model plays the user.
-    pub(super) fn fingerprint(&self, reward: &str, user_model: Option<&str>) -> BTreeMap<String, Value> {
+    pub(super) fn fingerprint(
+        &self,
+        reward: &str,
+        user_model: Option<&str>,
+    ) -> BTreeMap<String, Value> {
         let mut fingerprint = self.identity.clone();
-        let targets: Vec<&str> = self.spec.targets.iter().map(|target| target.name()).collect();
+        let targets: Vec<&str> = self
+            .spec
+            .targets
+            .iter()
+            .map(|target| target.name())
+            .collect();
         let options = [
             ("objective", Value::from("grpo")),
             ("reward", Value::from(reward)),
@@ -138,12 +154,19 @@ impl GrpoOptions {
             ("accumulation", Value::from(self.accumulation)),
             ("warmup_steps", Value::from(self.warmup_steps)),
             ("max_sequence", Value::from(self.max_sequence)),
-            ("max_new_tokens", Value::from(self.generation.max_new_tokens)),
+            (
+                "max_new_tokens",
+                Value::from(self.generation.max_new_tokens),
+            ),
             ("temperature", Value::from(self.generation.temperature)),
             ("top_p", Value::from(self.generation.top_p)),
             ("seed", Value::from(self.generation.seed)),
         ];
-        fingerprint.extend(options.into_iter().map(|(field, value)| (field.to_owned(), value)));
+        fingerprint.extend(
+            options
+                .into_iter()
+                .map(|(field, value)| (field.to_owned(), value)),
+        );
         fingerprint
     }
 }

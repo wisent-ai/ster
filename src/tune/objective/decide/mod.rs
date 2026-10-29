@@ -52,41 +52,64 @@ use rows::{Rows, decision_loss, training_rows};
 
 /// Trains the adapters `varmap` owns against the labelled questions in
 /// `examples`.
-pub fn decide(runtime: &Runtime, varmap: &VarMap, examples: &ExampleSet, options: &DecideOptions) -> Result<DecideReport> {
+pub fn decide(
+    runtime: &Runtime,
+    varmap: &VarMap,
+    examples: &ExampleSet,
+    options: &DecideOptions,
+) -> Result<DecideReport> {
     examples.validate()?;
-    let Trainable { spec, vars: _, tensors: trainable_tensors, parameters: trainable_parameters, limit } = Preflight {
+    let Trainable {
+        spec,
+        vars: _,
+        tensors: trainable_tensors,
+        parameters: trainable_parameters,
+        limit,
+    } = Preflight {
         subject: "calibrated decision training",
         unit: "row",
         pass: "epoch",
         noun: "adapter tensors",
         epochs: options.epochs,
         accumulation: options.accumulation,
-        batch: options.batch,
+        batch: Some(options.batch),
         learning_rate: options.learning_rate,
         max_sequence: options.max_sequence,
     }
     .open(runtime, varmap, &options.spec)?;
 
-    let Rows { rows, questions, rendered, skipped_long } =
-        training_rows(runtime, examples, options.permutations, limit)?;
+    let Rows {
+        rows,
+        questions,
+        rendered,
+        skipped_long,
+    } = training_rows(runtime, examples, options.permutations, limit)?;
     if rows.is_empty() {
         bail!("every rendering is longer than the sequence limit, so there is nothing to train on");
     }
 
     let fingerprint = options.fingerprint();
-    let mut optimizer = AdamW::over(varmap, ParamsAdamW { lr: options.learning_rate, ..Default::default() })
-        .context("failed to initialize the AdamW optimizer")?;
+    let mut optimizer = AdamW::over(
+        varmap,
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
+    )
+    .context("failed to initialize the AdamW optimizer")?;
     let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     let mut running: Running = match &resumed {
-        Some(position) => serde_json::from_value(position.running.clone())
-            .context("the checkpoint's running report is not one calibrated decision training wrote")?,
+        Some(position) => serde_json::from_value(position.running.clone()).context(
+            "the checkpoint's running report is not one calibrated decision training wrote",
+        )?,
         None => Running::default(),
     };
     let mut checkpoints = Vec::new();
 
     let lengths: Vec<usize> = rows.iter().map(|row| row.ids.len()).collect();
     let scale = batch::divisor(options.batch, options.accumulation);
-    let total_steps = batch::steps_per_epoch(rows.len(), options.batch, options.accumulation) * options.epochs;
+    let total_steps =
+        batch::steps_per_epoch(rows.len(), options.batch, options.accumulation) * options.epochs;
     let mut order: Vec<usize> = rows.iter().enumerate().map(|(slot, _)| slot).collect();
 
     for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
@@ -97,9 +120,15 @@ pub fn decide(runtime: &Runtime, varmap: &VarMap, examples: &ExampleSet, options
         let plans = batch::plan(&order, &lengths, options.batch, options.accumulation);
         let remaining = match &resumed {
             Some(position) if position.pass > epoch => continue,
-            Some(position) if position.pass == epoch => plans.get(position.within..).with_context(|| {
-                format!("the checkpoint stands {} steps into epoch {epoch}, which has {} steps", position.within, plans.len())
-            })?,
+            Some(position) if position.pass == epoch => {
+                plans.get(position.within..).with_context(|| {
+                    format!(
+                        "the checkpoint stands {} steps into epoch {epoch}, which has {} steps",
+                        position.within,
+                        plans.len()
+                    )
+                })?
+            }
             _ => {
                 running.epoch_losses.clear();
                 running.epoch_units.clear();
@@ -117,10 +146,15 @@ pub fn decide(runtime: &Runtime, varmap: &VarMap, examples: &ExampleSet, options
             let mut summed: Option<Tensor> = None;
             let mut losses: Vec<f64> = Vec::with_capacity(plan.units);
             for forward in &plan.forwards {
-                let ids: Vec<&[u32]> = forward.iter().map(|&slot| rows[slot].ids.as_slice()).collect();
+                let ids: Vec<&[u32]> = forward
+                    .iter()
+                    .map(|&slot| rows[slot].ids.as_slice())
+                    .collect();
                 // One sequence is one row.
                 let read =
-                    batch::read_rows(&ids, options.batch, ids.len() / forward.len(), |pass| runtime.forward_train_rows(pass))?;
+                    batch::read_rows(&ids, options.batch, ids.len() / forward.len(), |pass| {
+                        runtime.forward_train_rows(pass)
+                    })?;
                 for (logits, &slot) in read.iter().zip(forward) {
                     let value = decision_loss(logits, &rows[slot], runtime)?;
                     losses.push(value.to_scalar::<f32>()? as f64);
@@ -134,7 +168,9 @@ pub fn decide(runtime: &Runtime, varmap: &VarMap, examples: &ExampleSet, options
             let Some(summed) = summed else {
                 bail!("an accumulation group contained no rows");
             };
-            optimizer.backward_step(&summed).context("failed to backpropagate the accumulated loss")?;
+            optimizer
+                .backward_step(&summed)
+                .context("failed to backpropagate the accumulated loss")?;
 
             let group_loss: f64 = losses.iter().sum();
             let step_loss = (group_loss / plan.units as f64) as f32;
@@ -175,9 +211,11 @@ pub fn decide(runtime: &Runtime, varmap: &VarMap, examples: &ExampleSet, options
         ));
     }
 
-    let (Some(first_loss), Some(final_loss), Some(&mean_final_epoch_loss)) =
-        (running.first_loss, running.final_loss, running.epoch_means.last())
-    else {
+    let (Some(first_loss), Some(final_loss), Some(&mean_final_epoch_loss)) = (
+        running.first_loss,
+        running.final_loss,
+        running.epoch_means.last(),
+    ) else {
         bail!("the run took no step, so it has no loss to report");
     };
     Ok(DecideReport {
@@ -195,7 +233,11 @@ pub fn decide(runtime: &Runtime, varmap: &VarMap, examples: &ExampleSet, options
         mean_final_epoch_loss,
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: spec
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,

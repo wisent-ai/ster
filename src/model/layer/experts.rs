@@ -156,7 +156,10 @@ impl Experts {
                     builder.pp("block_sparse_moe")
                 };
                 // Kimi-K3's latent experts work on `routed_expert_hidden_size`.
-                let width = spec.latent.map_or(hidden, |latent| latent.width);
+                let width = match spec.latent {
+                    Some(latent) => latent.width,
+                    None => hidden,
+                };
                 let experts = (0..count)
                     .map(|expert| {
                         Expert::load(
@@ -197,7 +200,10 @@ impl Experts {
                 } else {
                     ["up_proj", "down_proj"]
                 };
-                let width = spec.latent.map_or(hidden, |latent| latent.width);
+                let width = match spec.latent {
+                    Some(latent) => latent.width,
+                    None => hidden,
+                };
                 let stacked = block.pp("experts");
                 // Transformers 5 saves every expert stacked: `gate_up_proj`
                 // `[experts, 2 · width, hidden]`, gate rows first, and

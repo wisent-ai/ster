@@ -241,10 +241,13 @@ impl FeedForward {
         adapters: &Adapters,
     ) -> candle_core::Result<Self> {
         // DeciLM states each layer's feed-forward width apart.
-        let intermediate = architecture
+        let intermediate = match architecture
             .layer_plan(layer)
             .and_then(|plan| plan.intermediate)
-            .unwrap_or(config.intermediate_size);
+        {
+            Some(own) => own,
+            None => config.intermediate_size,
+        };
         let hidden = config.hidden_size;
         let bias = architecture.feed_forward_bias;
         let names = architecture.names;
@@ -300,11 +303,9 @@ impl FeedForward {
             activation: architecture.activation,
             scales: architecture.feed_forward_scales,
             xielu: if architecture.activation == Activation::Xielu {
-                let parent = names.down.rsplit_once('.').map_or("", |(parent, _)| parent);
-                let block = if parent.is_empty() {
-                    builder.clone()
-                } else {
-                    builder.pp(parent)
+                let block = match names.down.rsplit_once('.') {
+                    Some((parent, _)) if !parent.is_empty() => builder.pp(parent),
+                    _ => builder.clone(),
                 };
                 Some(Xielu::load(block.pp("act_fn"))?)
             } else {
@@ -1133,16 +1134,25 @@ impl Block {
                     // (`post_norm_eps`); PLaMo 3's add their own shifts to
                     // the stored scale in place of the block's offset.
                     let output_spec = NormSpec {
-                        eps: architecture.output_norm_eps.unwrap_or(spec.eps),
+                        eps: match architecture.output_norm_eps {
+                            Some(eps) => eps,
+                            None => spec.eps,
+                        },
                         offset: spec.offset && architecture.output_norm_shifts.is_none(),
                         ..spec
                     };
-                    let (attention_shift, feed_forward_shift) =
-                        architecture.output_norm_shifts.unwrap_or_default();
-                    let output_norm = |name: &str, shift: f64| {
-                        output_spec
-                            .load(config.hidden_size, builder.pp(name))?
-                            .shifted(shift)
+                    // Without PLaMo 3's shifts the stored scale is read as it is.
+                    let shifts = architecture.output_norm_shifts;
+                    let (attention_shift, feed_forward_shift) = (
+                        shifts.map(|(attention, _)| attention),
+                        shifts.map(|(_, feed_forward)| feed_forward),
+                    );
+                    let output_norm = |name: &str, shift: Option<f64>| {
+                        let norm = output_spec.load(config.hidden_size, builder.pp(name))?;
+                        match shift {
+                            Some(shift) => norm.shifted(shift),
+                            None => Ok(norm),
+                        }
                     };
                     (
                         Some(norm(names.attention_norm)?),

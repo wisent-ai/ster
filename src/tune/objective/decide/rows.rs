@@ -81,23 +81,33 @@ pub(super) fn training_rows(
                 .order
                 .iter()
                 .position(|&option| option == truths[row.question])
-                .with_context(|| format!("a rendering of example {index} does not show its correct option"))?;
+                .with_context(|| {
+                    format!("a rendering of example {index} does not show its correct option")
+                })?;
             let spellings = row
                 .order
                 .iter()
                 .enumerate()
                 .map(|(position, _)| {
-                    labels
-                        .get(&position)
-                        .cloned()
-                        .with_context(|| format!("answer letter {position} has no spelling in this vocabulary"))
+                    labels.get(&position).cloned().with_context(|| {
+                        format!("answer letter {position} has no spelling in this vocabulary")
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            rows.push(TrainingRow { ids: row.ids, truth, labels: spellings });
+            rows.push(TrainingRow {
+                ids: row.ids,
+                truth,
+                labels: spellings,
+            });
         }
     }
     let skipped_long = rendered.len() - rows.len();
-    Ok(Rows { rows, questions: questions.len(), rendered: rendered.len(), skipped_long })
+    Ok(Rows {
+        rows,
+        questions: questions.len(),
+        rendered: rendered.len(),
+        skipped_long,
+    })
 }
 
 /// The negative log-probability of the correct letter, over the letters on
@@ -110,21 +120,38 @@ pub(super) fn training_rows(
 /// log-sum-exp and the normalization are tensor ops, so the gradient reaches
 /// the adapters through the same arithmetic the reader uses. Every reduction
 /// is over the last axis, the only one the vectors it works on have.
-pub(super) fn decision_loss(logits: &Tensor, row: &TrainingRow, runtime: &Runtime) -> Result<Tensor> {
+pub(super) fn decision_loss(
+    logits: &Tensor,
+    row: &TrainingRow,
+    runtime: &Runtime,
+) -> Result<Tensor> {
     let (_, positions, _) = logits.dims3()?;
     if positions != row.ids.len() {
-        bail!("the forward pass returned {positions} positions for {} tokens", row.ids.len());
+        bail!(
+            "the forward pass returned {positions} positions for {} tokens",
+            row.ids.len()
+        );
     }
     let Some((answer, _)) = row.ids.iter().enumerate().last() else {
         bail!("a training row holds no token, so no distribution answers it");
     };
     // `[1, n, vocab]` read as `[n, vocab]`, then the answering position.
-    let last = logits.flatten_to(D::Minus2)?.i(answer)?.to_dtype(DType::F32)?;
+    let last = logits
+        .flatten_to(D::Minus2)?
+        .i(answer)?
+        .to_dtype(DType::F32)?;
     let mut letters = Vec::with_capacity(row.labels.len());
     for spellings in &row.labels {
-        let picked = last.index_select(&Tensor::new(spellings.as_slice(), runtime.device())?, D::Minus1)?;
+        let picked = last.index_select(
+            &Tensor::new(spellings.as_slice(), runtime.device())?,
+            D::Minus1,
+        )?;
         let max = picked.max_keepdim(D::Minus1)?;
-        let summed = picked.broadcast_sub(&max)?.exp()?.sum_keepdim(D::Minus1)?.log()?;
+        let summed = picked
+            .broadcast_sub(&max)?
+            .exp()?
+            .sum_keepdim(D::Minus1)?
+            .log()?;
         letters.push((summed + max)?);
     }
     let letters = Tensor::cat(&letters, D::Minus1)?;

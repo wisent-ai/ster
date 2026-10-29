@@ -3,8 +3,6 @@
 //! moment a file is opened. Whether a side is a refusal needs a model's
 //! judgement, which synthesis asks for as it writes each pair.
 
-use std::num::NonZeroUsize;
-
 use anyhow::Result;
 use serde::Serialize;
 
@@ -56,6 +54,10 @@ pub struct SetReport {
 /// Audit a pair set without loading a model. Every judgement here is textual,
 /// which is why the desktop app can show it the moment a file is opened.
 pub fn inspect(pairs: &PairSet, options: &InspectOptions) -> Result<SetReport> {
+    // The set inspected is the set `PairSet::load` admits: at least one pair,
+    // and no side blank after trimming, so every side has a character and
+    // `length_ratio` never divides by zero.
+    pairs.validate(&format!("{:?}", pairs.trait_name))?;
     let duplicates = dedupe::classify(&pairs.pairs, options.dedupe)?;
     let entries: Vec<EntryReport> = pairs
         .pairs
@@ -106,12 +108,8 @@ pub fn inspect(pairs: &PairSet, options: &InspectOptions) -> Result<SetReport> {
     })
 }
 
-/// Longer side over shorter side, each counted as at least one character: two
-/// empty sides are as long as each other, and a single empty side reads as
-/// the whole length of the other, maximally unbalanced, instead of dividing
-/// by zero.
+/// Longer side over shorter side, in characters. `inspect` refused a blank
+/// side before calling it, so the shorter side has at least one character.
 fn length_ratio(positive_chars: usize, negative_chars: usize) -> f64 {
-    let at_least_one = |chars: usize| chars.max(NonZeroUsize::MIN.get()) as f64;
-    at_least_one(positive_chars.max(negative_chars))
-        / at_least_one(positive_chars.min(negative_chars))
+    positive_chars.max(negative_chars) as f64 / positive_chars.min(negative_chars) as f64
 }

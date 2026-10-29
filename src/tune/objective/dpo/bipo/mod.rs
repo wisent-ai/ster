@@ -57,16 +57,23 @@ const VECTOR: &str = "steering";
 /// Learns the steering vector at `options.layer` that makes the model prefer
 /// each pair's chosen side when added and its rejected side when subtracted,
 /// and returns it as a steering artifact with the run's report.
-pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result<(SteeringArtifact, BipoReport)> {
+pub fn bipo(
+    runtime: &Runtime,
+    pairs: &PairSet,
+    options: &BipoOptions,
+) -> Result<(SteeringArtifact, BipoReport)> {
     options.validate(runtime.layer_count())?;
     pairs.validate(&pair_set_label(pairs))?;
-    let mut encoded: Vec<Scored> =
-        encode_pairs(runtime, pairs, options.max_sequence)?.into_iter().map(Scored::new).collect();
+    let mut encoded: Vec<Scored> = encode_pairs(runtime, pairs, options.max_sequence)?
+        .into_iter()
+        .map(Scored::new)
+        .collect();
     let skipped_long = pairs.pairs.len() - encoded.len();
     reference_scores(runtime, &mut encoded, options.batch)?;
 
     let hidden = runtime.hidden_size();
-    let vector = Var::zeros(hidden, DType::F32, runtime.device()).context("failed to create the steering vector")?;
+    let vector = Var::zeros(hidden, DType::F32, runtime.device())
+        .context("failed to create the steering vector")?;
     let varmap = VarMap::new();
     varmap
         .data()
@@ -74,8 +81,14 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
         .map_err(|poisoned| anyhow!("the run's tensor map is unreadable: {poisoned}"))?
         .insert(VECTOR.to_owned(), vector.clone());
     let fingerprint = options.fingerprint();
-    let mut optimizer = AdamW::over(&varmap, ParamsAdamW { lr: options.learning_rate, ..Default::default() })
-        .context("failed to initialize the AdamW optimizer")?;
+    let mut optimizer = AdamW::over(
+        &varmap,
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
+    )
+    .context("failed to initialize the AdamW optimizer")?;
     let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     let mut running: Running = match &resumed {
         Some(position) => serde_json::from_value(position.running.clone())
@@ -84,10 +97,13 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
     };
     let mut checkpoints = Vec::new();
 
-    let lengths: Vec<usize> =
-        encoded.iter().map(|scored| scored.pair.chosen.len().max(scored.pair.rejected.len())).collect();
+    let lengths: Vec<usize> = encoded
+        .iter()
+        .map(|scored| scored.pair.chosen.len().max(scored.pair.rejected.len()))
+        .collect();
     let scale = batch::divisor(options.batch, options.accumulation);
-    let total_steps = batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
+    let total_steps =
+        batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
     let mut order: Vec<usize> = encoded.iter().enumerate().map(|(slot, _)| slot).collect();
 
     for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
@@ -99,9 +115,14 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
         let remaining = match &resumed {
             Some(position) if position.pass > epoch => continue,
             Some(position) if position.pass == epoch => {
-                let (taken, remaining) = plans.split_at_checked(position.within).with_context(|| {
-                    format!("the checkpoint stands {} steps into epoch {epoch}, which has {} steps", position.within, plans.len())
-                })?;
+                let (taken, remaining) =
+                    plans.split_at_checked(position.within).with_context(|| {
+                        format!(
+                            "the checkpoint stands {} steps into epoch {epoch}, which has {} steps",
+                            position.within,
+                            plans.len()
+                        )
+                    })?;
                 // One direction was drawn per forward of every step taken;
                 // drawing them again leaves the generator where it stood.
                 for _ in taken.iter().flat_map(|plan| &plan.forwards) {
@@ -128,8 +149,11 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
             let mut pair_losses: Vec<f64> = Vec::with_capacity(plan.units);
             for forward in &plan.forwards {
                 let subtract: bool = rng.random();
-                let (strength, beta) =
-                    if subtract { (-options.strength, -options.beta) } else { (options.strength, options.beta) };
+                let (strength, beta) = if subtract {
+                    (-options.strength, -options.beta)
+                } else {
+                    (options.strength, options.beta)
+                };
                 let steering = SteeringPlan::from_tensors(
                     [(options.layer, vector.as_tensor().clone())],
                     strength,
@@ -138,18 +162,38 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
                 )?;
                 let rows: Vec<&[u32]> = forward
                     .iter()
-                    .flat_map(|&slot| [encoded[slot].pair.chosen.as_slice(), encoded[slot].pair.rejected.as_slice()])
+                    .flat_map(|&slot| {
+                        [
+                            encoded[slot].pair.chosen.as_slice(),
+                            encoded[slot].pair.rejected.as_slice(),
+                        ]
+                    })
                     .collect();
                 let sides = rows.len() / forward.len();
-                let read =
-                    batch::read_rows(&rows, options.batch, sides, |pass| runtime.forward_steered_rows(pass, &steering))?;
+                let read = batch::read_rows(&rows, options.batch, sides, |pass| {
+                    runtime.forward_steered_rows(pass, &steering)
+                })?;
                 for (&slot, logits) in forward.iter().zip(read.chunks_exact(sides)) {
                     let [chosen, rejected] = logits else {
-                        bail!("a preference pair read back {} rows instead of a chosen and a rejected side", logits.len());
+                        bail!(
+                            "a preference pair read back {} rows instead of a chosen and a rejected side",
+                            logits.len()
+                        );
                     };
                     let scored = &encoded[slot];
-                    let value = step_loss(runtime, scored, chosen, rejected, Preference { loss: options.loss, beta })
-                        .with_context(|| format!("pair {} produced no usable loss", scored.pair.index))?;
+                    let value = step_loss(
+                        runtime,
+                        scored,
+                        chosen,
+                        rejected,
+                        Preference {
+                            loss: options.loss,
+                            beta,
+                        },
+                    )
+                    .with_context(|| {
+                        format!("pair {} produced no usable loss", scored.pair.index)
+                    })?;
                     pair_losses.push(value.loss);
                     summary.record(&value);
                     let scaled = (value.tensor / scale)?;
@@ -162,7 +206,9 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
             let Some(summed) = summed else {
                 bail!("an accumulation group contained no pairs");
             };
-            optimizer.backward_step(&summed).context("failed to backpropagate the accumulated loss")?;
+            optimizer
+                .backward_step(&summed)
+                .context("failed to backpropagate the accumulated loss")?;
             let mean = (pair_losses.iter().sum::<f64>() / plan.units as f64) as f32;
             running.first_loss.get_or_insert(mean);
             running.final_loss = Some(mean);
@@ -176,8 +222,12 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
                 summary.accuracy()
             ));
             if options.durable.due(step) {
-                let position =
-                    Position { pass: epoch, step, within: running.steps.len(), running: serde_json::to_value(&running)? };
+                let position = Position {
+                    pass: epoch,
+                    step,
+                    within: running.steps.len(),
+                    running: serde_json::to_value(&running)?,
+                };
                 options.durable.save(&optimizer, &fingerprint, &position)?;
                 checkpoints.push(step);
             }
@@ -185,9 +235,11 @@ pub fn bipo(runtime: &Runtime, pairs: &PairSet, options: &BipoOptions) -> Result
         running.finished.push(Totals::from(&summary));
     }
 
-    let (Some(first_loss), Some(final_loss), Some(last)) =
-        (running.first_loss, running.final_loss, running.finished.last())
-    else {
+    let (Some(first_loss), Some(final_loss), Some(last)) = (
+        running.first_loss,
+        running.final_loss,
+        running.finished.last(),
+    ) else {
         bail!("the run took no step, so it has no loss to report");
     };
     let epoch_summary = Summary::from(last);

@@ -83,10 +83,14 @@ mod decoder;
 mod deepseek4;
 mod depth;
 mod inkling;
+pub(crate) mod input;
 mod layer;
+mod network;
+pub(crate) mod t5;
 
 pub use cache::Cache;
 pub use decoder::SteeringLlama;
+pub(crate) use network::Network;
 
 use crate::lora::Target;
 pub(crate) use attention::ALIBI_SPAN;
@@ -1145,8 +1149,10 @@ impl Architecture {
     /// layers' own rotated width under a global attention spec,
     /// `rotary_dim` otherwise.
     pub fn global_rotary_dim(&self) -> usize {
-        self.global_attention
-            .map_or(self.rotary_dim, |global| global.rotary_dim)
+        match self.global_attention {
+            Some(global) => global.rotary_dim,
+            None => self.rotary_dim,
+        }
     }
 
     /// The layer whose keys and values a Gemma 4 key-value-sharing layer
@@ -1239,10 +1245,11 @@ impl Architecture {
     /// Width of one head's value: narrower than the query in latent
     /// attention and under MiMo-V2's `v_head_dim`, the head width otherwise.
     pub fn value_dim(&self) -> usize {
-        self.latent
-            .map(|latent| latent.value)
-            .or(self.value_head_dim)
-            .unwrap_or(self.head_dim)
+        match (self.latent, self.value_head_dim) {
+            (Some(latent), _) => latent.value,
+            (None, Some(value_head_dim)) => value_head_dim,
+            (None, None) => self.head_dim,
+        }
     }
 
     /// Where `target`'s weight lives at `layer`, or `None` when this family
@@ -1864,10 +1871,15 @@ impl Names {
     /// The same layout in a checkpoint saved without the `root` prefix.
     pub fn without_root(self) -> Self {
         let prefix = self.root;
+        // A path outside `root` (a top-level head) is kept as it is.
         let strip = |path: &'static str| -> &'static str {
-            path.strip_prefix(prefix)
+            match path
+                .strip_prefix(prefix)
                 .and_then(|rest| rest.strip_prefix('.'))
-                .unwrap_or(path)
+            {
+                Some(rest) => rest,
+                None => path,
+            }
         };
         Self {
             root: "",

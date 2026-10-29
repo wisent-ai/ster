@@ -13,9 +13,17 @@ use crate::runtime::Runtime;
 /// long as the completion, against the targets `ids[boundary..]`. A
 /// completion needs a prompt token before it, and `encode_example` always
 /// prepends the prompt's special tokens.
-pub(super) fn completion_loss(logits: &Tensor, ids: &[u32], boundary: usize, runtime: &Runtime) -> Result<Tensor> {
+pub(super) fn completion_loss(
+    logits: &Tensor,
+    ids: &[u32],
+    boundary: usize,
+    runtime: &Runtime,
+) -> Result<Tensor> {
     let (Some(prompt), Some(completion)) = (ids.get(..boundary), ids.get(boundary..)) else {
-        bail!("a training example's completion starts at token {boundary} of {}", ids.len());
+        bail!(
+            "a training example's completion starts at token {boundary} of {}",
+            ids.len()
+        );
     };
     let Some((start, _)) = prompt.iter().enumerate().last() else {
         bail!("a training example must begin with at least one prompt token");
@@ -25,7 +33,10 @@ pub(super) fn completion_loss(logits: &Tensor, ids: &[u32], boundary: usize, run
     }
     let (_, positions, vocab) = logits.dims3()?;
     if positions != ids.len() {
-        bail!("the forward pass returned {positions} positions for {} tokens", ids.len());
+        bail!(
+            "the forward pass returned {positions} positions for {} tokens",
+            ids.len()
+        );
     }
     // Scored in F32 whatever the base weights are. `cross_entropy` takes the
     // log-softmax of this window, and a half-precision log-softmax over a

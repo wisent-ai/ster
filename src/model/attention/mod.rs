@@ -182,24 +182,33 @@ impl Attention {
         // MiMo-V2's and Gemma 4's their own key-value head count, Step 3.5's
         // their own head counts; DeciLM states each layer's key-value heads.
         let global = architecture.global_at(layer);
-        let heads = global
-            .and_then(|global| global.heads)
-            .unwrap_or(config.num_attention_heads);
-        let key_value_heads = global
-            .and_then(|global| global.key_value_heads)
-            .or_else(|| {
-                architecture
-                    .layer_plan(layer)
-                    .and_then(|plan| plan.key_value_heads)
-            })
-            .unwrap_or(config.num_key_value_heads);
-        let head_dim = global.map_or(architecture.head_dim, |global| global.head_dim);
+        let heads = match global.and_then(|global| global.heads) {
+            Some(own) => own,
+            None => config.num_attention_heads,
+        };
+        let own_key_value_heads = match global.and_then(|global| global.key_value_heads) {
+            Some(own) => Some(own),
+            None => architecture
+                .layer_plan(layer)
+                .and_then(|plan| plan.key_value_heads),
+        };
+        let key_value_heads = match own_key_value_heads {
+            Some(own) => own,
+            None => config.num_key_value_heads,
+        };
+        let head_dim = match global {
+            Some(global) => global.head_dim,
+            None => architecture.head_dim,
+        };
         let query_width = match global {
             Some(_) => heads * head_dim,
             None => architecture.attention_width(heads),
         };
         let value_dim = match global {
-            Some(global) => architecture.value_head_dim.unwrap_or(global.head_dim),
+            Some(global) => match architecture.value_head_dim {
+                Some(value_head_dim) => value_head_dim,
+                None => global.head_dim,
+            },
             None => architecture.value_dim(),
         };
         // Dots3-Note's sliding-window layers run their own latent attention:
@@ -361,7 +370,10 @@ impl Attention {
                 }
                 QkvLayout::Separate => (
                     projection(
-                        architecture.query_bottleneck.unwrap_or(input),
+                        match architecture.query_bottleneck {
+                            Some(bottleneck) => bottleneck,
+                            None => input,
+                        },
                         query_width,
                         bias,
                         conv1d,
@@ -574,14 +586,9 @@ impl Attention {
                 Some((loops, window)) => {
                     // `gate_projections` sits beside `layers`, below the
                     // model root.
-                    let parent = names
-                        .layers
-                        .rsplit_once('.')
-                        .map_or("", |(parent, _)| parent);
-                    let root = if parent.is_empty() {
-                        layer_builder.root()
-                    } else {
-                        layer_builder.root().pp(parent)
+                    let root = match names.layers.rsplit_once('.') {
+                        Some((parent, _)) if !parent.is_empty() => layer_builder.root().pp(parent),
+                        _ => layer_builder.root(),
                     };
                     let gate = root.pp("gate_projections").pp(layer.to_string());
                     Some(LoopMix {

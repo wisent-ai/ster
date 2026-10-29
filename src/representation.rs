@@ -1,6 +1,10 @@
 use anyhow::{Result, bail};
+use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A request body names it as the same word `--method` takes; an unknown one
+/// is refused while the body is read, with the sentence `parse` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub enum TrainingMethod {
     Caa,
     Pca,
@@ -23,6 +27,13 @@ impl TrainingMethod {
             Self::Pca => "pca",
             Self::Logistic => "logistic",
         }
+    }
+}
+
+impl TryFrom<String> for TrainingMethod {
+    type Error = anyhow::Error;
+    fn try_from(value: String) -> Result<Self> {
+        Self::parse(&value)
     }
 }
 

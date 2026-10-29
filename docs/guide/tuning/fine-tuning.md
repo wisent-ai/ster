@@ -1,49 +1,65 @@
 # Fine-tuning
 
 What `ster tune` trains, what a run needs before it starts, and what it
-records about itself. The four objectives are in
+records about itself. The training objectives are in
 [objectives](objectives.md); reading and folding a trained adapter is in
 [adapters](adapters.md). The [README](../../../README.md) links here from its
 command list.
 
 
 
-`ster tune` owns adapters: four objectives that train one, and three utilities
-that read one. It has seven subcommands:
+`ster tune` declares the training primitives and the operations on their
+artifacts. Each leaf has its own required inputs:
 
 ```text
 ster tune sft --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
               --rank <R> --alpha <A> --epochs <N> --learning-rate <LR>
-              --accumulation <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
+              --accumulation <N> --warmup-steps <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
               [--revision <REVISION>] [--device cpu] [--targets query,value]
-              [--layers all] [--warmup-steps 0] [--chat-template auto|off]
+              [--layers all] [--chat-template auto|off]
               [--precision f32|f16|bf16]
               [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
 ster tune dpo --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
               --rank <R> --alpha <A> --beta <B> --epochs <N> --learning-rate <LR>
-              --accumulation <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
+              --accumulation <N> --warmup-steps <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
               [--revision <REVISION>] [--device cpu] [--targets query,value]
-              [--layers all] [--loss dpo|ipo] [--warmup-steps 0]
+              [--layers all] [--loss dpo|ipo]
               [--chat-template auto|off] [--precision f32|f16|bf16]
               [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
+ster tune bipo --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
+               --layer <LAYER> --strength <STRENGTH> --beta <B> --epochs <N>
+               --learning-rate <LR> --accumulation <N> --warmup-steps <N>
+               --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
+               [--revision <REVISION>] [--device cpu] [--loss dpo|ipo]
+               [--chat-template auto|off] [--precision f32|f16|bf16]
+               [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
 ster tune reward --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
                  --rank <R> --alpha <A> --epochs <N> --learning-rate <LR>
-                 --accumulation <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
+                 --accumulation <N> --warmup-steps <N> --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
                  [--revision <REVISION>] [--device cpu] [--targets query,value]
-                 [--layers all] [--warmup-steps 0] [--chat-template auto|off]
+                 [--layers all] [--chat-template auto|off]
                  [--precision f32|f16|bf16]
                  [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
 ster tune grpo --model <MODEL> --prompts <PROMPTS> --output <OUTPUT>
                --group <N> --iterations <N> --beta <B> --rank <R> --alpha <A>
-               --learning-rate <LR> --accumulation <N> --max-new-tokens <N>
-               --temperature <T> --top-p <P> --max-sequence <TOKENS> --seed <SEED>
+               --learning-rate <LR> --accumulation <N> --warmup-steps <N> --max-new-tokens <N>
+               --temperature <T> --top-p <P> --max-sequence <TOKENS> --seed <SEED> --turns <N>
                [--revision <REVISION>] [--device cpu] [--reward length]
-               [--turns 1] [--user-model <MODEL>] [--user-revision <REVISION>]
-               [--targets query,value] [--layers all] [--warmup-steps 0]
+               [--user-model <MODEL>] [--user-revision <REVISION>]
+               [--targets query,value] [--layers all]
                [--chat-template auto|off] [--precision f32|f16|bf16]
                [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
+ster tune decide --model <MODEL> --examples <EXAMPLES> --output <OUTPUT>
+                 --rank <R> --alpha <A> --epochs <N> --permutations <N>
+                 --learning-rate <LR> --accumulation <N> --warmup-steps <N>
+                 --max-sequence <TOKENS> --batch-size <N> --seed <SEED>
+                 [--revision <REVISION>] [--device cpu] [--targets query,value]
+                 [--layers all] [--chat-template auto|off] [--precision f32|f16|bf16]
+                 [--checkpoint <DIR> --checkpoint-every <STEPS>] [--resume <DIR>]
 ster tune merge --model <MODEL> --adapter <ADAPTER> --output <DIR>
                 [--revision <REVISION>] [--device cpu]
+ster tune export --model <MODEL> --adapter <ADAPTER> --format peft --output <DIR>
+                 [--revision <REVISION>] [--device cpu]
 ster tune evaluate --model <MODEL> --examples <EXAMPLES>
                    --max-sequence <TOKENS> --batch-size <N>
                    [--revision <REVISION>] [--device cpu] [--adapter <ADAPTER>]
@@ -51,18 +67,19 @@ ster tune evaluate --model <MODEL> --examples <EXAMPLES>
 ster tune inspect <ARTIFACT>
 ```
 
-Every training number is the caller's. Ster assumes no rank, alpha, epoch
-count, learning rate, accumulation, sequence limit, batch size, seed, beta,
-group size, iteration count, token budget, temperature or nucleus mass, so a
-command without one is a usage error naming the flag (exit 2), and the
-`tune/*` request bodies refuse a missing field by name
-(`missing field \`learningRate\``). Each run's report records the values it
-trained with.
+Every training number that applies to the selected objective is the caller's:
+rank, alpha, epochs, learning rate, accumulation, warmup steps, sequence limit,
+batch size, seed, beta, layer, strength, group size, iterations, token budget,
+temperature, nucleus mass, assistant turns and decision permutations. Omitting
+one is a usage error naming the flag, and the native body refuses the same
+missing field before execution. A zero warmup or a request for every cyclic
+answer order is still an explicit choice, not an omitted numeric field.
+Each report records the values the run used.
 
 ## Checkpoints and resuming a run
 
-`ster tune sft`, `ster tune dpo`, `ster tune reward` and `ster tune grpo` take
-`--checkpoint <DIR> --checkpoint-every <STEPS>`, and write the run's state into
+All trainers take `--checkpoint <DIR> --checkpoint-every <STEPS>`, and write
+their state into
 `DIR` after every `STEPS`-th optimizer step: the trained tensors (a reward run's
 head among them), both AdamW moments of each, the learning rate of every step
 taken, where the run stands (epoch or iteration, steps taken, steps taken in
@@ -106,34 +123,31 @@ The report of a resumed run carries `resumed_from` (the step it continued
 from) and every report carries `checkpoints` (the steps after which one was
 written).
 
-`ster tune decide` takes the same three flags and keeps the same state as
-`sft`, its fingerprint adding `--permutations` and digesting the labelled
-decisions file. `ster tune bipo` takes them too; what its checkpoint holds is
-in [BiPO](../steering/bipo.md#checkpoints-and-resuming-a-run). Every training
-objective Ster has therefore survives a stop.
+Decision training adds its permutation setting and labelled-decision digest
+to the fingerprint. [BiPO](../steering/bipo.md#checkpoints-and-resuming-a-run)
+records its direction and corresponding optimizer state.
 
-The request API takes the same three settings as `checkpoint`,
-`checkpointEvery` and `resume` on `tune/sft`, `tune/dpo`, `tune/reward` and
-`tune/grpo`, refusing a directory without a step count (`tune sft names a
-checkpoint directory without checkpointEvery`) and the reverse (`tune sft names
-checkpointEvery without a checkpoint directory`), and Ster Desktop's Tune
-screen shows them in its Checkpoints section for every objective it trains. A run
-started from one surface resumes from the other: both build the same
-fingerprint.
+The request API uses the same `checkpoint`, `checkpointEvery` and `resume`
+fields on every trainer. A directory without its step count, or a step count
+without its directory, is refused before execution. Ster Desktop's Checkpoints
+section sends those fields for every Tune objective. A run started from one
+surface resumes through the other because both deserialize the same inputs
+and execute the same training implementation.
 
-The repository's real CLI journey is
-`STER=target/debug/ster tests/tuning/checkpoint.sh`, using a binary built from
-the source under qualification. It trains every objective on a real local
-toy-model artifact, interrupts the checkpointed process with SIGTERM after a
-completed checkpoint is reported, then resumes the persisted state. It
-compares final tensors and final loss with uninterrupted training, exercises
-an unpublished older-format checkpoint directory, and checks mismatched-run,
-missing-setting, missing-checkpoint and escaping-pointer refusals. A process
-that finishes before interruption is not accepted as interruption evidence.
-The isolated `target/real-tests/tuning/checkpoint-<run>/` retains commands,
-exit statuses, progress, the saved state, the source revision and archive,
-the executable digest and the comparison result. A `passed` marker is written
-only after the journey has actually executed and every comparison succeeded.
+The real lifecycle journey is
+`node --env-file=.build/qualification.env tests/tuning/checkpoints.mjs`.
+It trains every objective from explicit declarations, observes atomic
+checkpoint-pointer publication, interrupts the actual writer with SIGTERM and
+resumes through the native request frontend. Final tensors and loss must match
+uninterrupted training. A completed process or a checkpoint at the final step
+does not qualify as interruption evidence.
+
+The journey also protects a valid unreferenced older-format attempt, checks
+mismatched-run, incomplete-setting and missing-state refusals, and exercises
+an escaping pointer that actually resolves to a valid owned checkpoint outside
+the checkpoint root. Receipts, persisted state and final comparisons remain
+under `.build/tuning/checkpoints/`; see the
+[required inputs and interpretation](qualification/consumers.md#checkpoint-lifecycles).
 
 ## Reproducibility
 
@@ -146,8 +160,9 @@ floating-point sums inside a batched forward associate in a different order.
 Neither is a defect and neither is a loss of reproducibility — every batch size
 reproduces itself.
 
-`--batch-size` counts rows per forward: examples for `sft` and `evaluate`, pairs
-for `dpo` and `reward`, where a pair is two rows. A batch of one is one row per
+`--batch-size` counts examples for `sft` and `evaluate`, pairs for `dpo`,
+`bipo` and `reward`, and expanded answer-order rows for `decide`. A pair is two
+sequences. A batch of one is one row per
 forward whatever the unit, so a preference pair's two sides go through the model
 as two separate one-row passes — which is what makes the byte
 identity above hold. `--accumulation` keeps counting forwards, so a step sees up
@@ -164,11 +179,11 @@ of them whenever the run had steps after its warmup.
 
 ## What trains, and what does not
 
-Only the adapters train, in every objective below. Base weights arrive through
-`VarBuilder::from_mmaped_safetensors` and are never registered in a `VarMap`, so
-the optimizer is handed `varmap.all_vars()` and there is structurally nothing
-else it could reach; a reward run adds its scalar head to that same map, and
-that head is the only non-adapter weight Ster ever creates. Each adapter is a
+Weight objectives train adapters, with a scoring head added for reward training.
+BiPO instead trains a direction at one residual-stream layer; its base remains
+frozen too. Base weights are mapped read-only and are not registered as optimizer
+variables. The optimizer receives the explicitly registered trainable tensors;
+a reward run adds its scalar head to that set. Each weight adapter is a
 pair of factors: `A` is drawn from a normal with mean zero and standard
 deviation `1/rank`, and `B` is zeros, so the low-rank update is exactly zero
 before the first step. A fresh adapter is the identity, and training starts from
@@ -215,7 +230,7 @@ seeded at all and an adapter nobody can reproduce is not an artifact. A sequence
 longer than `--max-sequence` is skipped rather than truncated, with one progress
 line naming it, in every objective: a cut sequence is a different sequence.
 
-Every objective writes the same pair of files, `<name>.safetensors` holding the
+Each weight-training objective writes `<name>.safetensors` holding the
 factors under the names `layers.{layer}.{target}.a` and
 `layers.{layer}.{target}.b`, and `<name>.json` beside it carrying
 `schema_version`, `product`, `kind`, `model`, `model_revision`, `rank`, `alpha`,
@@ -223,6 +238,11 @@ factors under the names `layers.{layer}.{target}.a` and
 adapter always carries the run that produced it. `ster tune inspect` prints that
 document with every tensor name and shape beside it, and loads no model to do
 it.
+
+BiPO writes its learned direction as a steering JSON artifact instead; it has
+neither LoRA rank nor projection factors. Use it as a steering direction, not
+as `--adapter`.
+
 
 An artifact says what it is, and applying it where it does not belong is a
 refusal rather than a wrong answer. `ster generate --adapter <FILE>` attaches a
@@ -236,3 +256,9 @@ four checks guard `tune merge` and `tune evaluate`, and `tune grpo --reward`
 runs them in the other direction, refusing a generation adapter with
 `adapter artifact is a generation adapter, not a reward model`.
 
+
+## Consumer qualification
+
+[Tuning consumer qualification](qualification/consumers.md) documents the
+revision-bound BiPO and portable PEFT export journeys, explicit experiment
+inputs, real vLLM dependency and retained evidence.

@@ -68,6 +68,7 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
     let mut examples = Vec::new();
     let mut rows = 0usize;
     let mut skipped = 0usize;
+    let mut label_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut offset = options.offset;
     while rows < options.count {
         let length = PAGE.min(options.count - rows);
@@ -81,18 +82,36 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
             names = Some(class_names(&page, &options.label_field)?);
         }
         let classes = names.as_ref().expect("names resolved on the first page");
-        let page_rows = page["rows"].as_array().cloned().unwrap_or_default();
+        let Some(page_rows) = page.get("rows").and_then(Value::as_array) else {
+            bail!(
+                "the datasets server's page of {} at offset {offset} carries no `rows` array; the rows route at {ROWS_URL} answers with one",
+                options.dataset
+            );
+        };
         if page_rows.is_empty() {
             break;
         }
-        for entry in &page_rows {
+        for (position, entry) in page_rows.iter().enumerate() {
             rows += 1;
+            let index = offset + position;
             let row = &entry["row"];
-            let text = row[&options.text_field]
-                .as_str()
-                .unwrap_or_default()
-                .trim()
-                .to_owned();
+            // A null cell is a row without text: skipped and counted.
+            let text = match row.get(&options.text_field) {
+                Some(Value::String(text)) => text.trim().to_owned(),
+                Some(Value::Null) => String::new(),
+                Some(other) => bail!(
+                    "row {} of {} holds {other} in text column '{}', not a string; pass a text column as --text-field",
+                    index,
+                    options.dataset,
+                    options.text_field
+                ),
+                None => bail!(
+                    "row {} of {} has no column '{}'; pass one of its columns as --text-field",
+                    index,
+                    options.dataset,
+                    options.text_field
+                ),
+            };
             let label = match &row[&options.label_field] {
                 Value::Number(number) => number
                     .as_u64()
@@ -105,6 +124,7 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
                 skipped += 1;
                 continue;
             };
+            *label_counts.entry(label.clone()).or_insert(0) += 1;
             examples.push(example(options, classes, text, label));
         }
         offset += page_rows.len();
@@ -112,6 +132,12 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
             break;
         }
     }
+    let Some(names) = names else {
+        bail!(
+            "the datasets server returned no page of {}",
+            options.dataset
+        );
+    };
     if examples.is_empty() {
         bail!(
             "no row of {} carried both a text and a known label",
@@ -124,22 +150,12 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
         dataset: options.dataset.clone(),
         config: options.config.clone(),
         split: options.split.clone(),
-        options: names.unwrap_or_default(),
+        options: names,
         requested: options.count,
         rows,
         examples: set.examples.len(),
         skipped,
-        label_counts: set
-            .examples
-            .iter()
-            .fold(BTreeMap::new(), |mut counts, example| {
-                for answer in example.answers.values() {
-                    *counts
-                        .entry(answer.as_str().unwrap_or_default().to_owned())
-                        .or_insert(0) += 1;
-                }
-                counts
-            }),
+        label_counts,
     };
     Ok((set, report))
 }
@@ -150,22 +166,37 @@ fn read_page(
     offset: usize,
     length: usize,
 ) -> Result<Value> {
-    let response = agent
+    let request = agent
         .get(ROWS_URL)
         .query("dataset", &options.dataset)
         .query("config", &options.config)
         .query("split", &options.split)
         .query("offset", &offset.to_string())
-        .query("length", &length.to_string())
-        .call();
+        .query("length", &length.to_string());
+    let response = stado_wait::blocking(
+        stado_wait::Kind::Network,
+        format!("rows {offset}..{} of {}", offset + length, options.dataset),
+        ROWS_URL,
+        || request.call(),
+    );
     let response = match response {
         Ok(response) => response,
         Err(ureq::Error::Status(status, response)) => {
-            let body = response.into_string().unwrap_or_default();
-            let sentence = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|value| value["error"].as_str().map(str::to_owned))
-                .unwrap_or(body);
+            let body = response.into_string().with_context(|| {
+                format!(
+                    "the datasets server answered {status} for {} with a body that could not be read",
+                    options.dataset
+                )
+            })?;
+            // The server words its refusal in an `error` field; any other
+            // body is shown as it was sent.
+            let sentence = match serde_json::from_str::<Value>(&body) {
+                Ok(Value::Object(fields)) => match fields.get("error") {
+                    Some(Value::String(error)) => error.clone(),
+                    _ => body,
+                },
+                _ => body,
+            };
             bail!(
                 "the datasets server answered {status} for {}: {sentence}",
                 options.dataset
@@ -190,16 +221,19 @@ fn class_names(page: &Value, label_field: &str) -> Result<Vec<String>> {
         .iter()
         .find(|feature| feature["name"].as_str() == Some(label_field))
         .with_context(|| format!("the dataset has no column named '{label_field}'"))?;
-    let names: Vec<String> = feature["type"]["names"]
-        .as_array()
-        .map(|names| {
-            names
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let Some(listed) = feature["type"]["names"].as_array() else {
+        bail!(
+            "column '{label_field}' is the feature {}, not a class label with named classes; pass a ClassLabel column as --label-field",
+            feature["type"]
+        );
+    };
+    let mut names = Vec::with_capacity(listed.len());
+    for name in listed {
+        let Some(name) = name.as_str() else {
+            bail!("column '{label_field}' names a class {name}, not a string");
+        };
+        names.push(name.to_owned());
+    }
     if names.len() < 2 {
         bail!("column '{label_field}' is not a class label with at least two named classes");
     }

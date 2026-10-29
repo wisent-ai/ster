@@ -1,6 +1,7 @@
 //! Lexical and structural diversity metrics for a set of texts.
 //!
-//! A port of Wisent's `FastDiversity`. A pair set that passes deduplication can
+//! The same five measures Wisent's `FastDiversity` reports, each measured
+//! over every text. A pair set that passes deduplication can
 //! still be monotonous — a hundred distinct sentences that all open "Certainly!
 //! Here is" teach a direction more about that opening than about the trait.
 //! These five numbers are the cheap summary an operator needs to decide whether
@@ -11,12 +12,12 @@ use std::collections::HashSet;
 
 use serde::Serialize;
 
-/// Width of the SimHash fingerprint; the Python `SIMHASH_BIT_WIDTH`.
-const SIMHASH_BIT_WIDTH: u32 = 64;
+use super::dedupe::SIMHASH_BIT_WIDTH;
 
-/// FNV-1a 64-bit offset basis.
+/// FNV-1a 64-bit offset basis and prime, as the FNV specification states
+/// them: https://datatracker.ietf.org/doc/html/draft-eastlake-fnv
 const FNV_OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
-/// FNV-1a 64-bit prime.
+/// https://datatracker.ietf.org/doc/html/draft-eastlake-fnv
 const FNV_PRIME: u64 = 0x100_0000_01B3;
 
 /// The five diversity numbers.

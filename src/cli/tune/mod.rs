@@ -1,6 +1,5 @@
-//! `ster tune`: training adapters and working with the ones already trained.
-//! The arms go through the same `tune` and `lora` functions `ster request`
-//! calls and print one pretty JSON document each.
+//! One typed tuning operation and execution path for CLI and native requests.
+//! Each frontend renders the same actual result in its own transport.
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
@@ -11,9 +10,13 @@ mod command;
 mod durable;
 mod train;
 
-pub(super) use command::TuneCommand;
+pub(crate) use command::TuneCommand;
 
 pub(super) fn run(command: TuneCommand) -> Result<()> {
+    crate::cli::answer_document(&execute(command)?)
+}
+
+pub(crate) fn execute(command: TuneCommand) -> Result<serde_json::Value> {
     match command {
         TuneCommand::Sft(args) => train::sft(args),
         TuneCommand::Dpo(args) => train::dpo(args),

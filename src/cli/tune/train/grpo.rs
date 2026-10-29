@@ -14,10 +14,14 @@ use super::super::super::ModelArgs;
 use super::super::durable::DurableArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
 
+use crate::cli::input::{self, InputCheck};
+
 /// `ster tune grpo`
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct GrpoArgs {
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GrpoArgs {
     #[command(flatten)]
+    #[serde(flatten)]
     model: ModelArgs,
     /// JSON file shaped as {"prompts": ["..."]}, the shape ster extract takes.
     #[arg(long)]
@@ -30,7 +34,8 @@ pub(in crate::cli) struct GrpoArgs {
     /// artifact written by ster tune reward; or an outside scorer,
     /// http(s)://host/path#/json/pointer, sent {"prompt": prompt, "text": completion} (with
     /// STER_REWARD_BEARER as the bearer when set) and read at the pointer.
-    #[arg(long, default_value = "length")]
+    #[arg(long, default_value = input::REWARD)]
+    #[serde(default = "input::default_reward")]
     reward: String,
     /// Completions sampled per prompt. Their mean is the baseline, which is
     /// why two is the smallest group that means anything. Ster assumes none.
@@ -39,7 +44,7 @@ pub(in crate::cli) struct GrpoArgs {
     /// Assistant turns per sampled conversation. Above one, --user-model
     /// writes each user turn in between, and a conversation's reward is
     /// the sum of its assistant turns' rewards.
-    #[arg(long, default_value = "1")]
+    #[arg(long)]
     turns: usize,
     /// The model that plays the user when --turns is above one: it
     /// answers the conversation with the roles swapped, at this run's
@@ -64,10 +69,12 @@ pub(in crate::cli) struct GrpoArgs {
     alpha: f64,
     /// Comma-separated projections to adapt: query, key, value, output,
     /// gate, up, or down.
-    #[arg(long, default_value = "query,value")]
+    #[arg(long, default_value = input::TARGETS)]
+    #[serde(default = "input::default_targets")]
     targets: String,
     /// Comma-separated layers, half-open ranges such as 8..16, or all.
-    #[arg(long, default_value = "all")]
+    #[arg(long, default_value = input::LAYERS)]
+    #[serde(default = "input::default_layers")]
     layers: String,
     #[arg(long)]
     learning_rate: f64,
@@ -75,9 +82,9 @@ pub(in crate::cli) struct GrpoArgs {
     /// --group sequences.
     #[arg(long)]
     accumulation: usize,
-    /// Steps over which the learning rate ramps up from zero; none by
-    /// default, which starts at the full learning rate.
-    #[arg(long, default_value_t)]
+    /// Steps over which the learning rate ramps up from zero.
+    /// Required, including when no warmup is intended.
+    #[arg(long)]
     warmup_steps: usize,
     /// Token budget of one sampled completion.
     #[arg(long)]
@@ -96,19 +103,40 @@ pub(in crate::cli) struct GrpoArgs {
     /// chat template renders it, when it publishes one; off samples from
     /// raw text.
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+    #[serde(default = "input::default_chat_template")]
     chat_template: ChatChoice,
     /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
     /// Adapters and every optimizer moment stay in f32. bf16 needs
     /// --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    #[serde(default = "input::default_precision")]
     precision: Precision,
     #[arg(long)]
     seed: u64,
     #[command(flatten)]
+    #[serde(flatten)]
     durable: DurableArgs,
 }
 
-pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
+impl InputCheck for GrpoArgs {
+    fn check(&self) -> std::result::Result<(), String> {
+        self.model.check()?;
+        input::required_path(&self.prompts, "tune/grpo prompts")?;
+        input::required_path(&self.output, "tune/grpo output")?;
+        if let Some(model) = &self.user_model {
+            input::required_text(model, "tune/grpo userModel")?;
+        }
+        if let Some(revision) = &self.user_revision {
+            input::required_text(revision, "tune/grpo userRevision")?;
+            if self.user_model.is_none() {
+                return Err("tune/grpo userRevision requires userModel".to_owned());
+            }
+        }
+        self.durable.check()
+    }
+}
+
+pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<serde_json::Value> {
     let GrpoArgs {
         model,
         prompts,
@@ -169,7 +197,7 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
         json!(format!("{precision:?}")),
     )?;
     let options = GrpoOptions {
-        spec: spec.clone(),
+        spec,
         group,
         turns,
         iterations,
@@ -200,11 +228,6 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<()> {
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
-    let artifact = runtime.adapter_artifact(&spec, report.clone())?;
-    artifact.save(&output)?;
-    crate::cli::answer(&json!({
-        "path": output.display().to_string(),
-        "report": report,
-    }))?;
-    Ok(())
+    let artifact = runtime.adapter_artifact(&options.spec, report)?;
+    super::finish(artifact, &output)
 }

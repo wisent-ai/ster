@@ -43,9 +43,20 @@ impl AdamW {
                 .with_context(|| format!("the first moment of {name} could not be allocated"))?;
             let second = Var::zeros(var.shape(), var.dtype(), var.device())
                 .with_context(|| format!("the second moment of {name} could not be allocated"))?;
-            tracked.insert(name.clone(), Tracked { var: var.clone(), first, second });
+            tracked.insert(
+                name.clone(),
+                Tracked {
+                    var: var.clone(),
+                    first,
+                    second,
+                },
+            );
         }
-        Ok(Self { tracked, rates: Vec::new(), params })
+        Ok(Self {
+            tracked,
+            rates: Vec::new(),
+            params,
+        })
     }
 
     pub(crate) fn set_learning_rate(&mut self, learning_rate: f64) {
@@ -61,7 +72,13 @@ impl AdamW {
     /// One AdamW step. `1 - b^t` is written `-expm1(t ln b)`, which is the
     /// same quantity computed without cancellation, and `1 - b` likewise.
     fn step(&mut self, grads: &GradStore) -> Result<()> {
-        let ParamsAdamW { lr, beta1, beta2, eps, weight_decay } = self.params;
+        let ParamsAdamW {
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        } = self.params;
         self.rates.push(lr);
         let elapsed = self.rates.len() as f64;
         let complement = |beta: f64| -beta.ln().exp_m1();

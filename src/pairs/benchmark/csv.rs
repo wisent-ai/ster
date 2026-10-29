@@ -23,7 +23,11 @@ impl Record {
             None => bail!(
                 "record {} has no column {column:?}; the header names {}",
                 self.number,
-                self.fields.keys().map(|name| format!("{name:?}")).collect::<Vec<_>>().join(", ")
+                self.fields
+                    .keys()
+                    .map(|name| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }

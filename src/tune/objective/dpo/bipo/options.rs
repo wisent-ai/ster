@@ -2,7 +2,6 @@
 //! no run can train with, and the fingerprint a checkpoint of it carries.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -66,12 +65,21 @@ impl BipoOptions {
     /// setting.
     pub(super) fn validate(&self, layers: usize) -> Result<()> {
         if self.layer >= layers {
-            bail!("layer {} is outside the model's {layers} layers", self.layer);
+            bail!(
+                "layer {} is outside the model's {layers} layers",
+                self.layer
+            );
         }
-        for (name, value) in [("beta", self.beta), ("strength", self.strength), ("learning rate", self.learning_rate)] {
+        for (name, value) in [
+            ("beta", self.beta),
+            ("strength", self.strength),
+            ("learning rate", self.learning_rate),
+        ] {
             // A normal, positive float: finite, not zero, not subnormal.
             if !(value.is_normal() && value.is_sign_positive()) {
-                bail!("bi-directional preference optimization requires a finite {name} above zero, not {value}");
+                bail!(
+                    "bi-directional preference optimization requires a finite {name} above zero, not {value}"
+                );
             }
         }
         for (name, value) in [
@@ -80,7 +88,7 @@ impl BipoOptions {
             ("batch size", self.batch),
             ("sequence limit", self.max_sequence),
         ] {
-            if NonZeroUsize::new(value).is_none() {
+            if value == 0 {
                 bail!("bi-directional preference optimization requires {name} of at least one");
             }
         }
@@ -105,7 +113,11 @@ impl BipoOptions {
             ("max_sequence", Value::from(self.max_sequence)),
             ("seed", Value::from(self.seed)),
         ];
-        fingerprint.extend(options.into_iter().map(|(field, value)| (field.to_owned(), value)));
+        fingerprint.extend(
+            options
+                .into_iter()
+                .map(|(field, value)| (field.to_owned(), value)),
+        );
         fingerprint
     }
 }

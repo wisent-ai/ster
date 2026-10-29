@@ -8,10 +8,13 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::prompt::LABELS;
+
 /// The most options one question may carry. Every option is answered by one
-/// letter of the Latin alphabet, read from one token position, and a second
-/// letter would be a second position.
-pub const MAX_OPTIONS: usize = 26;
+/// letter of [`LABELS`], read from one token position, and a second letter
+/// would be a second position; the cap is read from the letters themselves
+/// so the two cannot diverge.
+pub const MAX_OPTIONS: usize = LABELS.len();
 
 /// A decision request: TypeSafe's System One request shape, so a document
 /// written for that API runs here unchanged. `model` is accepted and ignored,
@@ -139,15 +142,17 @@ impl Question {
         match self {
             Self::Choice { criteria, .. } => criteria
                 .iter()
-                .map(|(name, description)| describe(name, description))
+                .map(|(name, description)| describe(name, Some(description)))
                 .collect(),
             Self::Score { criteria, .. } => criteria.iter().map(text_of).collect(),
             Self::Noul { criteria, .. } => {
-                let criteria = criteria.clone().unwrap_or_default();
-                vec![
-                    describe("yes", &criteria.yes.unwrap_or(Value::Null)),
-                    describe("no", &criteria.no.unwrap_or(Value::Null)),
-                ]
+                // A noul without `criteria`, or without one side of it, shows
+                // that side by its name alone.
+                let (yes, no) = match criteria {
+                    Some(NoulCriteria { yes, no }) => (yes.as_ref(), no.as_ref()),
+                    None => (None, None),
+                };
+                vec![describe("yes", yes), describe("no", no)]
             }
         }
     }
@@ -163,8 +168,11 @@ impl Question {
 
 /// A name and its description as one option line: `name: description`, or
 /// the name alone when there is no description.
-fn describe(name: &str, description: &Value) -> String {
-    let description = text_of(description);
+fn describe(name: &str, description: Option<&Value>) -> String {
+    let description = match description {
+        Some(description) => text_of(description),
+        None => String::new(),
+    };
     if description.trim().is_empty() {
         name.to_owned()
     } else {
@@ -178,7 +186,7 @@ pub fn text_of(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         Value::Null => String::new(),
-        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+        other => format!("{other:#}"),
     }
 }
 

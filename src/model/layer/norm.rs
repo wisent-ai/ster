@@ -188,7 +188,12 @@ impl Norm {
         let shape = hidden.shape().clone();
         let hidden = if self.groups > 1 {
             let mut grouped = shape.dims().to_vec();
-            let width = grouped.pop().unwrap_or(0);
+            let Some(width) = grouped.pop() else {
+                candle_core::bail!(
+                    "a norm over {} groups needs a hidden state with a last dimension, and this one has shape {shape:?}",
+                    self.groups
+                );
+            };
             grouped.extend([self.groups, width / self.groups]);
             hidden.reshape(grouped)?
         } else {

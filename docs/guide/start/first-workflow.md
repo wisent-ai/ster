@@ -8,7 +8,7 @@ If you already have a canonical Ster pair set, import it instead of creating
 starter rows:
 
 ```bash
-ster workspace import-pairs ./my-pairs.json
+ster workspace import ./my-pairs.json
 ster workspace show
 ```
 

@@ -100,8 +100,8 @@ for one prompt. `--prompt` and `--prompts` exclude each other, `--output` goes w
 before any weight is mapped. A steered sweep is one run per strength:
 
 ```bash
-ster toy-model toy-model
-ster generate --model toy-model --prompts docs/examples/prompts.json --output answers.json \
+ster model fixture create --from docs/examples/model/fixture.json --output .build/prompt-fixture
+ster generate --model .build/prompt-fixture --prompts docs/examples/prompts.json --output answers.json \
   --max-new-tokens 16 --temperature 0 --seed 7
 ```
 
@@ -204,9 +204,9 @@ together and orders fewer pairs — the over-steering a representation score
 cannot see.
 
 ```bash
-ster toy-model toy-model
-ster vector train --model toy-model --pairs docs/examples/pairs.json --output calm.ster.json --layers 2
-ster vector evaluate --model toy-model --pairs docs/examples/pairs.json --vector calm.ster.json \
+ster model fixture create --from docs/examples/model/fixture.json --output .build/strength-fixture
+ster vector train --model .build/strength-fixture --pairs docs/examples/pairs.json --output calm.ster.json --layers 2
+ster vector evaluate --model .build/strength-fixture --pairs docs/examples/pairs.json --vector calm.ster.json \
   --strengths -1,0.5,1,2,4 --batch-size 4 --max-sequence 256
 ```
 
@@ -249,132 +249,15 @@ Ster writes is unit-normalized, so a norm that is not 1.0 to within rounding is
 the fastest available sign that a file was written by something other than
 Ster.
 
-## Comparison
+## Geometry and provenance
 
-`ster vector compare A B [C ...] --clusters <N>` compares steering artifacts
-fitted for different traits on one model. It loads no model: the directions
-are read from the artifacts. At every layer all of them carry (or every layer
-`--layers` names, a comma list each artifact must carry) it reports each
-pair's cosine similarity, then their mean over those layers as `similarity`
-and the most similar and most different pair. `uniqueness` is, per artifact,
-the length of the part of its directions that the other artifacts'
-directions at the same layers do not span, over their whole length: one for
-a direction nothing else explains, none for one the others already contain.
-`distance` is the mean distance between unit directions, taking whichever of
-a pair's two signs lies nearer, because a direction and its negation pick
-out one axis; average linkage on it cuts the artifacts into `--clusters`
-groups (`clusters`, one group number per artifact in argument order), and
-`silhouette` is that cut's mean silhouette over the artifacts that share a
-group, or `null` when none does. Ster chooses no group count. Refusals:
-fewer than two artifacts, artifacts of different models or widths, more
-groups than artifacts, a named layer an artifact does not carry, no layer
-every artifact carries, and a direction with no usable length.
+- [Comparison, projection and writing directions into weights](steering/geometry.md)
+  covers artifact geometry, result fields and useful refusals.
+- [Provenance and chat-format transfer](steering/provenance.md) covers native
+  compatibility warnings and the published format-transfer measurement.
 
-## Projection
+## Real qualification
 
-`ster vector project` shows where an artifact moves the model's states, the
-picture wisent's `steering-viz` drew, as numbers a caller can plot or check.
-Every side of every pair is read at `--layer` twice, unsteered and with the
-artifact added at `--strength`, and both reads are projected onto the first
-`--components` principal components of the unsteered reads; Ster chooses
-neither number. A read at a layer is taken before that layer's own vector is
-added, so the movement it shows comes from the vectors at the layers before
-it. The answer lists every point (`pair`, `side`, `steered`, `coordinates`),
-the share of the unsteered variance each component carries (`explained`,
-fewer entries when the reads span fewer directions), the mean movement along
-the artifact's own unit direction at that layer (`shift_along_direction`,
-`null` when the artifact carries no vector there), the mean distance of the
-negative sides from the mean positive side before and after steering, and
-the share of negatives steering brought nearer. Refusals: a layer the model
-lacks, no components, an artifact of another model or width, and reads that
-do not vary at all.
-
-## Writing a direction into the weights
-
-`ster vector ablate` makes a direction permanent, as wisent's
-`modify-weights` did by directional projection. At every layer the
-artifact carries, the two projections that write the residual stream — the
-attention output and the feed-forward down projection — become
-`W - strength * v (v^T W)` for the layer's unit direction `v`: at strength
-one the layer can no longer write along the direction, a smaller strength
-removes that share of it, and a negative one amplifies it. Ster states no
-strength. The output is an ordinary checkpoint directory written by the
-same code `tune merge` writes with — the rewritten weights beside the
-source's own config, tokenizer and chat template — so every loader reads
-it, and no decoder is built to write it. The answer names every rewritten
-tensor, the copied ones and the files written. Refusals: a zero or
-non-finite strength, an artifact fitted on another model or width, a layer
-the model lacks, a GGUF checkpoint, and a write stored fused with another
-projection.
-
-## Provenance
-
-A steering artifact records the precision and the chat-template decision of the
-run that fitted it, and `ster vector evaluate` and `ster generate` check them against
-the run that is consuming it. Both call the same helper the tune half has used
-for adapters, so a direction read in a space it was not fitted in says so on
-the progress stream:
-
-```text
-warning: this direction was trained with chat template off and this run encodes applied, so the number below describes a format it was not trained in
-warning: this direction was trained at precision f32 and this run maps the base weights at f16, so it is being read in a different space than it was fitted in
-```
-
-A warning and not a refusal, deliberately. Both mismatches are things an
-operator may want on purpose — measuring how far a direction transfers out of
-the format it was fitted in is a real question, and the measurement below is
-exactly that experiment — and a refusal would make it impossible rather than
-merely deliberate. Only an unnoticed mismatch is a defect. An artifact written
-before these fields existed carries `null` in both and warns about neither: an
-absent record is not a disagreement.
-
-## What fitting out of format costs
-
-[Chat templates](#chat-templates) covers the flag itself and its three
-outcomes. The steering half has one further consequence, and it is the sharper
-one: the hidden-state read behind `train`, `optimize`, `evaluate` and `extract`
-encodes every prompt through the template, so a direction is fitted in the
-space it will be applied in. That was not true before this release — pair text
-went to the model raw while `generate` rendered its prompt through the template
-— and the difference is not a rounding question. A direction is a displacement
-between two points in the residual stream, and where those points sit depends
-on the markers around the text that produced them: under a template the model
-is answering a user turn, without one it is continuing a document.
-
-Measured on `TinyLlama/TinyLlama-1.1B-Chat-v1.0`, at `--precision f32`, over
-all 22 layers, with the four-pair set at `~/.stado/work/loop/pairs.json` for
-the trait `calm and measured, never alarmed`. One direction was fitted with
-`--chat-template off` and another with `auto`, and each was evaluated under
-both. The two columns are the mean over the 22 layers of the per-layer accuracy
-and margin `ster vector evaluate` reports:
-
-| fitted | evaluated | mean accuracy | mean margin |
-| --- | --- | --- | --- |
-| `off` | `off` | 1.0000 | +4.9451 |
-| `auto` | `auto` | 1.0000 | +1.0917 |
-| `off` | `auto` | 0.7841 | +0.0168 |
-| `auto` | `off` | 0.7614 | +0.1160 |
-
-The two matched runs separate all four pairs at every one of the 22 layers. The
-two crossed runs do not: accuracy falls below 1.0 at 12 of the 22 layers for
-off evaluated as auto, the mean lands near 0.78 whichever way the crossing
-runs, and the margin collapses by roughly two orders of magnitude. Layer 21 is
-the clearest single reading: +20.6697 fitted and evaluated `off`, and -0.0486
-for that same direction evaluated `auto`.
-
-The sign is the part worth stopping on. In the three deepest layers — 19, 20
-and 21, in both crossings — the crossed margin is negative, which is not a weak
-direction but a wrong one: the projection orders the two sides of a pair
-backwards, so adding that direction during generation pushes toward the side
-the operator labelled negative. A direction fitted out of format does not
-merely lose resolution in the layers where steering is usually applied. It
-points the other way.
-
-That is why the read encodes through the template by default rather than
-offering it as something to remember. The two matched rows also show what the
-flag is not: `off` and `auto` each separate the set perfectly in their own
-space, and the larger raw margin of the `off` run is a property of raw-text
-geometry rather than a better direction. A margin is only comparable with
-another margin taken in the same format, which is exactly what the artifact now
-records so that `evaluate` can say when it is not.
-
+[Steering qualification](steering/qualification.md) documents the permanent
+prompt-batch, mixture and pair/activation-count journeys, explicit artifact
+and experiment inputs, meaningful refusals, retained evidence and GUI boundary.

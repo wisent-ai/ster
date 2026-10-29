@@ -8,8 +8,9 @@
 //!   did the generating model refuse instead of answering, and is one side
 //!   systematically longer than the other (a length confound trains a
 //!   "verbosity" direction rather than the trait).
-//! * `synthesis` — a faithful port of Wisent's
-//!   `SyntheticContrastivePairsGenerator.generate`, driven by whichever
+//! * `synthesis` — writes a pair set from a trait: the opposite trait, then a
+//!   question, a positive and a negative per attempt, refusals repaired and
+//!   near-duplicates dropped as each pair lands, driven by whichever
 //!   `Generator` the caller picked: Ster's own local `Runtime`, or a hosted
 //!   route reached through Brama. Steering itself still needs hidden states
 //!   and therefore a local model, but writing pair text needs no activations

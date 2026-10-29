@@ -871,16 +871,22 @@ impl NgramEmbeddings {
         let contexts: Vec<Vec<u32>> = rows
             .iter()
             .enumerate()
-            .map(|(row, tokens)| {
-                let mut context = earlier
-                    .as_ref()
-                    .and_then(|earlier| earlier.get(row))
-                    .cloned()
-                    .unwrap_or_default();
+            .map(|(row, tokens)| -> candle_core::Result<Vec<u32>> {
+                // The first call of a decode has no earlier tokens.
+                let mut context = match &earlier {
+                    Some(earlier) => match earlier.get(row) {
+                        Some(kept) => kept.clone(),
+                        None => candle_core::bail!(
+                            "the n-gram embedding kept the context of {} rows and was given row {row}",
+                            earlier.len()
+                        ),
+                    },
+                    None => Vec::new(),
+                };
                 context.extend_from_slice(tokens);
-                context
+                Ok(context)
             })
-            .collect();
+            .collect::<candle_core::Result<_>>()?;
         if cache.use_kv_cache {
             cache.ngram_context = Some(
                 contexts

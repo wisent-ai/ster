@@ -3,8 +3,8 @@
 
 use serde::Deserialize;
 
-use super::defaults::*;
-use super::{ModelRequest, Validate, require};
+use super::{ModelRequest, Validate, defaults::*, require};
+use ster::{ChatChoice, Precision, TrainingMethod};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,18 +18,18 @@ pub(in crate::request) struct TrainRequest {
     #[serde(default = "default_layers")]
     pub(in crate::request) layers: String,
     #[serde(default = "default_method")]
-    pub(in crate::request) method: String,
+    pub(in crate::request) method: TrainingMethod,
     /// `auto` reads every pair through the model's own chat template when it
     /// publishes one, `off` reads it as raw text. A direction is fitted in
     /// whatever space the pairs were read in and added in whatever space
     /// generation runs in.
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     /// The dtype the base weights are mapped at: `f32`, `f16`, or `bf16`. A
     /// direction is fitted in whatever space the prompts were read in, so two
     /// artifacts trained at different precisions are not interchangeable.
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
 }
 
 impl Validate for TrainRequest {
@@ -53,9 +53,9 @@ pub(in crate::request) struct OptimizeRequest {
     #[serde(default)]
     pub(in crate::request) output: String,
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
     #[serde(default = "default_layers")]
     pub(in crate::request) layers: String,
     /// Fraction of the pairs held out to rank candidates on; required.
@@ -88,9 +88,9 @@ pub(in crate::request) struct EvaluateRequest {
     /// It should match the run that trained the artifact for the same reason
     /// `precision` should.
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
     /// Strengths to measure the artifact at, as `--strengths` takes them;
     /// empty measures none.
     #[serde(default)]
@@ -163,9 +163,9 @@ pub(in crate::request) struct GenerateRequest {
     /// it publishes one, `off` sends raw text. An instruct checkpoint handed
     /// a bare prompt continues it instead of answering it.
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
 }
 
 /// One steering artifact and the scale it is added at. The strength has no
@@ -202,9 +202,9 @@ pub(in crate::request) struct ExtractRequest {
     #[serde(default = "default_layers")]
     pub(in crate::request) layers: String,
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
 }
 
 impl Validate for ExtractRequest {
@@ -227,7 +227,7 @@ pub(in crate::request) struct ParityRequest {
     #[serde(default)]
     pub(in crate::request) input: String,
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
 }
 
 impl Validate for ParityRequest {
@@ -302,9 +302,9 @@ pub(in crate::request) struct ProjectRequest {
     /// Principal components to project onto; required.
     pub(in crate::request) components: std::num::NonZeroUsize,
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
 }
 
 impl Validate for ProjectRequest {
@@ -331,15 +331,15 @@ pub(in crate::request) struct CurveRequest {
     #[serde(default = "default_layers")]
     pub(in crate::request) layers: String,
     /// caa, pca or logistic; required.
-    pub(in crate::request) method: String,
+    pub(in crate::request) method: TrainingMethod,
     /// Fraction of the pairs held out to score on; required.
     pub(in crate::request) holdout: f64,
     /// Numbers of pairs to fit on; required.
     pub(in crate::request) sizes: Vec<std::num::NonZeroUsize>,
     #[serde(default = "default_chat_template")]
-    pub(in crate::request) chat_template: String,
+    pub(in crate::request) chat_template: ChatChoice,
     #[serde(default = "default_precision")]
-    pub(in crate::request) precision: String,
+    pub(in crate::request) precision: Precision,
 }
 
 impl Validate for CurveRequest {

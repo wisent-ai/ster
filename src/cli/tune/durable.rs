@@ -6,8 +6,11 @@ use std::path::PathBuf;
 
 use ster::tune;
 
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct DurableArgs {
+use crate::cli::input::{self, InputCheck};
+
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DurableArgs {
     /// Directory the run writes its checkpoint to every --checkpoint-every
     /// steps: the adapter, the optimizer's moments and steps, and where the
     /// run stands. Only the newest checkpoint is kept.
@@ -21,6 +24,22 @@ pub(in crate::cli) struct DurableArgs {
     /// refused naming every field that differs.
     #[arg(long)]
     resume: Option<PathBuf>,
+}
+
+impl InputCheck for DurableArgs {
+    fn check(&self) -> Result<(), String> {
+        if let Some(path) = &self.checkpoint {
+            input::required_path(path, "checkpoint")?;
+        }
+        if let Some(path) = &self.resume {
+            input::required_path(path, "resume")?;
+        }
+        match (&self.checkpoint, &self.checkpoint_every) {
+            (Some(_), None) => Err("checkpoint requires checkpointEvery".to_owned()),
+            (None, Some(_)) => Err("checkpointEvery requires checkpoint".to_owned()),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl DurableArgs {

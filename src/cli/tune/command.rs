@@ -4,9 +4,11 @@ use clap::Subcommand;
 
 use super::artifact::{EvaluateArgs, ExportArgs, InspectArgs, MergeArgs};
 use super::train::{BipoArgs, DecideArgs, DpoArgs, GrpoArgs, RewardArgs, SftArgs};
+use crate::cli::input::InputCheck;
 
-#[derive(Debug, Subcommand)]
-pub(in crate::cli) enum TuneCommand {
+#[derive(Debug, Subcommand, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TuneCommand {
     /// Train LoRA adapters on prompt and completion examples.
     Sft(SftArgs),
     /// Train LoRA adapters to prefer one side of each contrastive pair.
@@ -30,4 +32,21 @@ pub(in crate::cli) enum TuneCommand {
     Evaluate(EvaluateArgs),
     /// Print and validate a Ster LoRA adapter artifact.
     Inspect(InspectArgs),
+}
+
+impl InputCheck for TuneCommand {
+    fn check(&self) -> Result<(), String> {
+        match self {
+            Self::Sft(args) => args.check(),
+            Self::Dpo(args) => args.check(),
+            Self::Bipo(args) => args.check(),
+            Self::Reward(args) => args.check(),
+            Self::Grpo(args) => args.check(),
+            Self::Decide(args) => args.check(),
+            Self::Merge(args) => args.check(),
+            Self::Export(args) => args.check(),
+            Self::Evaluate(args) => args.check(),
+            Self::Inspect(args) => args.check(),
+        }
+    }
 }

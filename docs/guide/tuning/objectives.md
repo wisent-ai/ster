@@ -1,8 +1,8 @@
 # Training objectives
 
-Supervised fine-tuning, preference optimization, reward modelling and policy
-optimization: what each one reads, what it writes, and how a run is read back.
-[Fine-tuning](fine-tuning.md) covers what they share.
+Supervision, preference optimization, steering-direction preference training,
+reward modelling, policy optimization and labelled decision training.
+[Fine-tuning](fine-tuning.md) covers their shared input contract.
 
 ## Supervised fine-tuning
 
@@ -16,12 +16,15 @@ a `system` on a run whose chat template is `absent` or `off` is refused with
 `training example has a system prompt, which only a chat template can place, and this
 run's chat template is <absent|off>`, because raw text has no place for a system turn.
 `ster tune evaluate` reads the same field and echoes it in each scored entry.
-Eight examples written in the toy checkpoint's own vocabulary
-are checked in as [`docs/examples/tuning/examples.json`](../../examples/tuning/examples.json),
-so a first run needs no download: `ster toy-model <DIR>` writes that checkpoint
-(a four-layer grouped-query Llama shape with seeded random weights and a
-WordLevel tokenizer over the same vocabulary). An example longer than `--max-sequence`
-tokens is skipped because a cut completion would teach the model to stop early.
+Examples written in the reference fixture's vocabulary are checked in as
+[`docs/examples/tuning/examples.json`](../../examples/tuning/examples.json).
+An offline checkpoint is created with
+`ster model fixture create --from docs/examples/model/fixture.json --output <DIR>`.
+That declaration selects the grouped-query Llama architecture, native
+vocabulary and seeded initialization explicitly; the command supplies no
+numerical preset. See [Native model fixtures](../models/fixtures.md).
+An example longer than `--max-sequence` tokens is skipped because a cut
+completion would teach the model to stop early.
 
 The objective is next-token cross-entropy over the completion tokens only. For a
 joined sequence of `n` tokens whose completion begins at `boundary`, the scored
@@ -49,7 +52,7 @@ target. It takes `--pairs`, the contrastive pair set `ster vector train` already
 reads: the positive side is the chosen response and the negative side the
 rejected one, so a set written for steering trains a preference without being
 rewritten and [`docs/examples/pairs.json`](../../examples/pairs.json) runs
-offline on the toy checkpoint.
+offline on the declared reference fixture.
 
 The objective needs the frozen reference model's log-probabilities of the same
 two sequences. Ster gets them from the model it already has, by skipping the
@@ -100,6 +103,22 @@ bi-directional preference optimization of Cao et al. (arXiv 2406.00045), with
 the pairs, loss and reference of `ster tune dpo`. Its settings, refusals,
 report and checkpoints are in [BiPO](../steering/bipo.md).
 
+## Labelled decision training
+
+`ster tune decide` learns the probability of a labelled answer, not a generated
+completion. Its `--examples` uses the labelled decision examples read by
+[calibration](../decisions/calibration.md). Each labelled question expands into
+the cyclic answer orders the explicit `--permutations` requests. The batch
+counts those expanded rows, not whole example documents.
+
+The output is a generation adapter. Its report distinguishes `examples`,
+`questions`, `rows`, `trained_rows` and `skipped_long`, and records the
+permutation setting, losses, epochs, steps and LoRA parameters. The native
+`tune/decide` operation takes the same inputs, including required
+`permutations` and `warmupSteps`; Ster Desktop's Decision adapter objective
+shows those fields and reports actual question and row counts.
+
+
 ## Reward modeling
 
 `ster tune reward` trains a model that judges text rather than one that writes
@@ -140,26 +159,19 @@ The report records `pairs`, `trained_pairs`, `skipped_long`, `epochs`, `steps`,
 `precision`, with `accuracy`, `tied_pairs` and the scores measured over the
 final epoch.
 
-One reading of that report is worth stating, because it looks alarming and is
-not. A one-epoch run reports `accuracy` 0.0 and `mean_score_margin` 0.0000.
-That is not a head that ranked every pair backwards; it is a head that has not
-moved. It starts at zeros, so every pair scores an exact tie, and a tie is not a
-strict win. `tied_pairs` is what tells the two apart from the document alone:
-a head that never moved ties every pair it trained on, so `tied_pairs` equals
-`trained_pairs`, while a head that learned the order backwards ties none of
-them and reports a negative `mean_score_margin` beside the same accuracy. It
-counts exact equality rather than closeness, because the tie it exists to name
-is two sides of one pair run through identical weights, not two scores a
-trained head happens to find similar. Read the tie count first and the accuracy
-second, and give the run more than one epoch before either number means
-anything.
+Read `accuracy`, `tied_pairs` and `mean_score_margin` together. Exact ties do
+not count as strict wins; a report that ties every trained pair is not evidence
+that the head ranked them backwards. Ties alone also do not prove the weights
+never moved. Accuracy is a measured share, not a universal pass threshold or
+a reason to manufacture an absent tie count as zero. Ster Desktop keeps an
+unreported tie count explicit and reports all-tied data without a success grade.
 
 ## Policy optimization
 
 `ster tune grpo` is the only trainer that learns from text the model writes
 rather than text someone wrote for it. `--prompts` reads
 `{"prompts": ["…"]}`, the shape `ster extract` already takes; six prompts in
-the toy checkpoint's vocabulary are checked in as
+the reference fixture's vocabulary are checked in as
 [`docs/examples/tuning/grpo-prompts.json`](../../examples/tuning/grpo-prompts.json). For each
 prompt it samples `--group` completions, scores them, subtracts the group's own
 mean, and steps the policy toward the ones that beat it.
@@ -226,7 +238,7 @@ is zero, and the advantages are mean-centred, so the policy term is zero too.
 
 ### Conversations with a simulated user
 
-`--turns N` above one samples whole conversations instead of single
+`--turns N` is required. Above one it samples whole conversations instead of single
 completions. The prompt is the user's first turn; the policy answers it, and
 `--user-model` writes the user's next turn by answering the same conversation
 with every role swapped, at the run's own `--max-new-tokens`, `--temperature`
@@ -247,7 +259,7 @@ turn in it carries that advantage; the loss averages each turn over its own
 tokens and then over the conversation's turns. A refusal is whatever the reward
 model scores low, never a list of phrases.
 
-`--turns 1` (the default) with `--user-model` is refused with `a simulated user
+An explicit `--turns 1` with `--user-model` is refused with `a simulated user
 writes turns between assistant turns, so it needs turns above one; this run
 asked for one`, and `--turns` above one without it with `a conversation of <N>
 assistant turns needs a simulated user model to write the turns in between`. A

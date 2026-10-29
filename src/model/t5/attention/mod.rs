@@ -5,7 +5,10 @@ use candle_nn::{Linear, VarBuilder, kv_cache::KvCache, linear_no_bias};
 
 use crate::{
     lora::{Adapter, Adapters, Target},
-    model::{Mode, Pass, Route, attention::{masked_fill, project}},
+    model::{
+        Mode, Pass, Route,
+        attention::{masked_fill, project},
+    },
 };
 
 use super::config::Config;
@@ -43,7 +46,8 @@ impl Attention {
         site: Option<(usize, &Adapters)>,
     ) -> candle_core::Result<Self> {
         let adapter = |target| {
-            site.and_then(|(layer, adapters)| adapters.get(layer, target)).cloned()
+            site.and_then(|(layer, adapters)| adapters.get(layer, target))
+                .cloned()
         };
         Ok(Self {
             query: linear_no_bias(config.hidden, config.attention_width, builder.pp("q"))?,
@@ -63,8 +67,18 @@ impl Attention {
     /// Cross-attention calls this once for its encoder memory, then keeps the result.
     pub fn key_value(&self, hidden: &Tensor, route: Route) -> candle_core::Result<KeyValue> {
         Ok(KeyValue {
-            key: self.heads(project(&self.key, self.key_adapter.as_ref(), hidden, route)?)?,
-            value: self.heads(project(&self.value, self.value_adapter.as_ref(), hidden, route)?)?,
+            key: self.heads(project(
+                &self.key,
+                self.key_adapter.as_ref(),
+                hidden,
+                route,
+            )?)?,
+            value: self.heads(project(
+                &self.value,
+                self.value_adapter.as_ref(),
+                hidden,
+                route,
+            )?)?,
         })
     }
 
@@ -120,12 +134,14 @@ impl Attention {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         let (batch, queries, _) = hidden.dims3()?;
-        let query = self.heads(project(
-            &self.query,
-            self.query_adapter.as_ref(),
-            hidden,
-            mode.route,
-        )?)?.to_dtype(DType::F32)?;
+        let query = self
+            .heads(project(
+                &self.query,
+                self.query_adapter.as_ref(),
+                hidden,
+                mode.route,
+            )?)?
+            .to_dtype(DType::F32)?;
         // T5 uses q @ k.T without the head-width scaling other families apply.
         // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
         let key = memory.key.to_dtype(DType::F32)?.transpose(2, 3)?;
@@ -152,6 +168,11 @@ impl Attention {
             .contiguous()?
             .reshape((batch, queries, self.attention_width))?
             .to_dtype(hidden.dtype())?;
-        project(&self.output, self.output_adapter.as_ref(), &context, mode.route)
+        project(
+            &self.output,
+            self.output_adapter.as_ref(),
+            &context,
+            mode.route,
+        )
     }
 }

@@ -1,5 +1,5 @@
-//! What `ster tune` does with an adapter that already exists: fold it into
-//! the base weights, score a checkpoint with it, or read it.
+//! Existing adapter operations return their actual document; CLI and native
+//! request frontends own rendering, not a second implementation.
 
 use std::path::PathBuf;
 
@@ -11,10 +11,14 @@ use ster::{ChatChoice, EvaluateOptions, ExampleSet, Precision, Runtime, lora, tu
 use super::super::ModelArgs;
 use super::note_precision;
 
+use crate::cli::input::{self, InputCheck};
+
 /// `ster tune merge`
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct MergeArgs {
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergeArgs {
     #[command(flatten)]
+    #[serde(flatten)]
     model: ModelArgs,
     /// The adapter to fold in. It must have been trained for this exact
     /// model, and must be a generation adapter rather than a reward model.
@@ -31,10 +35,19 @@ pub(in crate::cli) struct MergeArgs {
     output: PathBuf,
 }
 
+// The declared export format is a native protocol identity, not a classifier.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ExportFormat {
+    Peft,
+}
+
 /// `ster tune export`
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct ExportArgs {
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExportArgs {
     #[command(flatten)]
+    #[serde(flatten)]
     model: ModelArgs,
     /// The adapter to write. It must have been trained for this exact
     /// model, and must be a generation adapter rather than a reward model.
@@ -43,17 +56,19 @@ pub(in crate::cli) struct ExportArgs {
     /// The layout to write. peft is the one there is: adapter_config.json
     /// and adapter_model.safetensors named after the base checkpoint's own
     /// projections, beside the base's tokenizer.json.
-    #[arg(long, value_parser = ["peft"])]
-    format: String,
+    #[arg(long, value_enum)]
+    format: ExportFormat,
     /// Directory to write.
     #[arg(long)]
     output: PathBuf,
 }
 
 /// `ster tune evaluate`
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct EvaluateArgs {
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EvaluateArgs {
     #[command(flatten)]
+    #[serde(flatten)]
     model: ModelArgs,
     /// JSON file shaped as {"examples": [{"prompt": "...", "completion": "..."}]};
     /// an example may add "system": "..." for the system turn it is served under.
@@ -73,6 +88,7 @@ pub(in crate::cli) struct EvaluateArgs {
     /// must match the run that trained the adapter, or the score measures
     /// a format the adapter never saw.
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+    #[serde(default = "input::default_chat_template")]
     chat_template: ChatChoice,
     /// Examples folded into one forward pass; Ster assumes none.
     #[arg(long)]
@@ -81,17 +97,52 @@ pub(in crate::cli) struct EvaluateArgs {
     /// A score is only comparable with another score taken at the same
     /// precision. bf16 needs --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    #[serde(default = "input::default_precision")]
     precision: Precision,
 }
 
 /// `ster tune inspect`
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct InspectArgs {
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InspectArgs {
     #[arg(value_name = "ARTIFACT")]
     artifact: PathBuf,
 }
 
-pub(super) fn merge(args: MergeArgs) -> Result<()> {
+impl InputCheck for MergeArgs {
+    fn check(&self) -> std::result::Result<(), String> {
+        self.model.check()?;
+        input::required_path(&self.adapter, "tune/merge adapter")?;
+        input::required_path(&self.output, "tune/merge output")
+    }
+}
+
+impl InputCheck for ExportArgs {
+    fn check(&self) -> std::result::Result<(), String> {
+        self.model.check()?;
+        input::required_path(&self.adapter, "tune/export adapter")?;
+        input::required_path(&self.output, "tune/export output")
+    }
+}
+
+impl InputCheck for EvaluateArgs {
+    fn check(&self) -> std::result::Result<(), String> {
+        self.model.check()?;
+        input::required_path(&self.examples, "tune/evaluate examples")?;
+        if let Some(adapter) = &self.adapter {
+            input::required_path(adapter, "tune/evaluate adapter")?;
+        }
+        Ok(())
+    }
+}
+
+impl InputCheck for InspectArgs {
+    fn check(&self) -> std::result::Result<(), String> {
+        input::required_path(&self.artifact, "tune/inspect artifact")
+    }
+}
+
+pub(super) fn merge(args: MergeArgs) -> Result<serde_json::Value> {
     let MergeArgs {
         model,
         adapter,
@@ -101,24 +152,26 @@ pub(super) fn merge(args: MergeArgs) -> Result<()> {
     // the model, so it resolves the checkpoint's files without mapping
     // them.
     let report = tune::merge(&model.model, model.revision.as_deref(), &adapter, &output)?;
-    crate::cli::answer(&json!({ "report": report }))?;
-    Ok(())
+    Ok(json!({ "report": report }))
 }
 
-pub(super) fn export(args: ExportArgs) -> Result<()> {
+pub(super) fn export(args: ExportArgs) -> Result<serde_json::Value> {
     let ExportArgs {
         model,
         adapter,
-        format: _,
+        format,
         output,
     } = args;
     // Like merge, export renames tensors and never runs the model.
-    let report = tune::export_peft(&model.model, model.revision.as_deref(), &adapter, &output)?;
-    crate::cli::answer(&json!({ "report": report }))?;
-    Ok(())
+    let report = match format {
+        ExportFormat::Peft => {
+            tune::export_peft(&model.model, model.revision.as_deref(), &adapter, &output)?
+        }
+    };
+    Ok(json!({ "report": report }))
 }
 
-pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
+pub(super) fn evaluate(args: EvaluateArgs) -> Result<serde_json::Value> {
     let EvaluateArgs {
         model,
         examples,
@@ -160,16 +213,14 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
-    crate::cli::answer(&report)?;
-    Ok(())
+    Ok(report)
 }
 
-pub(super) fn inspect(args: InspectArgs) -> Result<()> {
+pub(super) fn inspect(args: InspectArgs) -> Result<serde_json::Value> {
     let InspectArgs { artifact } = args;
     // Inspection reads the adapter document alone: no model is
     // loaded, so the tensors land on the CPU whatever trained them.
     let loaded = lora::Artifact::load(&artifact, &Device::Cpu)
         .with_context(|| format!("failed to inspect {}", artifact.display()))?;
-    crate::cli::answer(&tune::inspect(&loaded))?;
-    Ok(())
+    Ok(tune::inspect(&loaded))
 }

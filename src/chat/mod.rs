@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 
 mod jinja;
 mod template;
@@ -38,7 +39,12 @@ pub use template::Template;
 /// only ever get a refusal. `auto` applies the template when the checkpoint
 /// publishes one and says so when it does not; `off` is the raw-text encoding
 /// every Ster release before this one used, which is what a base model wants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// A request body names it as the same word `--chat-template` takes; an
+/// unknown one is refused while the body is read, with the sentence `parse`
+/// writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub enum Choice {
     Auto,
     Off,
@@ -51,6 +57,13 @@ impl Choice {
             "off" => Ok(Self::Off),
             _ => bail!("unknown chat template mode {value:?}; expected auto or off"),
         }
+    }
+}
+
+impl TryFrom<String> for Choice {
+    type Error = anyhow::Error;
+    fn try_from(value: String) -> Result<Self> {
+        Self::parse(&value)
     }
 }
 

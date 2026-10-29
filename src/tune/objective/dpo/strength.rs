@@ -15,8 +15,6 @@
 //! candidate's numbers are reported, because they are the whole decision.
 //! Ster names no candidate strength, no batch and no sequence limit.
 
-use std::num::NonZeroUsize;
-
 use anyhow::{Result, bail};
 use serde::Serialize;
 
@@ -79,7 +77,7 @@ fn validate(options: &StrengthOptions) -> Result<()> {
         ("batch size", options.batch),
         ("sequence limit", options.max_sequence),
     ] {
-        if NonZeroUsize::new(value).is_none() {
+        if value == 0 {
             bail!("strength selection requires {name} of at least one");
         }
     }

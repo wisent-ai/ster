@@ -37,11 +37,12 @@ pub(crate) struct Preflight<'a> {
     pub noun: &'a str,
     pub epochs: usize,
     pub accumulation: usize,
-    /// Sequences folded into one forward pass. One is the unbatched pass every
-    /// objective took before batching existed, which is why it is the default
-    /// rather than a tuned number: a batch changes only how many sequences
-    /// share a kernel launch, never what the loss is.
-    pub batch: usize,
+    /// Sequences folded into one forward pass, as the caller stated it; a
+    /// batch changes only how many sequences share a kernel launch, never
+    /// what the loss is. `None` for an objective that folds no sequences
+    /// together: policy optimization samples and scores one completion at a
+    /// time, so it has no batch to refuse.
+    pub batch: Option<usize>,
     pub learning_rate: f64,
     pub max_sequence: usize,
 }
@@ -75,7 +76,7 @@ impl Preflight<'_> {
                 self.unit
             );
         }
-        if self.batch == 0 {
+        if self.batch == Some(0) {
             bail!(
                 "{} requires a batch of at least one {}",
                 self.subject,
@@ -113,7 +114,7 @@ impl Preflight<'_> {
             spec.rank,
             spec.layers.len()
         ));
-        let limit = self.max_sequence.min(runtime.context_length());
+        let limit = self.max_sequence.min(runtime.context_length()?);
         Ok(Trainable {
             spec,
             vars,

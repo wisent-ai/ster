@@ -20,6 +20,9 @@ const DEFAULT_MAX_DISTANCE: usize = 128;
 /// `T5Config.layer_norm_epsilon` when a config leaves it out:
 /// https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/configuration_t5.py
 const DEFAULT_NORM_EPS: f64 = 1e-6;
+/// `PretrainedConfig.tie_word_embeddings` when a config leaves it out:
+/// https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/configuration_utils.py
+const DEFAULT_TIED_HEAD: bool = true;
 
 /// The feed-forward a `feed_forward_proj` names: `gated-<act>` (T5 v1.1,
 /// FLAN-T5) multiplies `wi_0`'s activation by `wi_1`, a bare `<act>` (the
@@ -67,33 +70,79 @@ impl Config {
     /// `feed_forward_proj` names, which the loader resolves through the
     /// activation names every family shares.
     pub(crate) fn read(raw: &Value, feed_forward: FeedForward, path: &Path) -> Result<Self> {
-        let stated = |key: &str| raw.get(key).and_then(Value::as_u64).map(|value| value as usize);
+        // A key left out or written `null` is absent; one of another type is
+        // refused, never read as absent.
+        let stated = |key: &str| -> Result<Option<u64>> {
+            match raw.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(value) => match value.as_u64() {
+                    Some(number) => Ok(Some(number)),
+                    None => bail!(
+                        "{} sets {key} to {value}, not a whole number; correct it in the checkpoint's config.json",
+                        path.display()
+                    ),
+                },
+            }
+        };
+        let count = |key: &str| -> Result<Option<usize>> {
+            match stated(key)? {
+                Some(number) => Ok(Some(usize::try_from(number).with_context(|| {
+                    format!(
+                        "{} sets {key} to {number}, past this platform's sizes",
+                        path.display()
+                    )
+                })?)),
+                None => Ok(None),
+            }
+        };
         let size = |key: &str| -> Result<usize> {
-            stated(key)
-                .and_then(std::num::NonZeroUsize::new)
-                .map(std::num::NonZeroUsize::get)
-                .with_context(|| format!("{} declares a T5 model without {key}", path.display()))
+            match count(key)? {
+                Some(size) if size > 0 => Ok(size),
+                Some(size) => bail!(
+                    "{} sets {key} to {size}; a T5 model needs it above zero",
+                    path.display()
+                ),
+                None => bail!("{} declares a T5 model without {key}", path.display()),
+            }
+        };
+        let id = |key: &str, number: u64| -> Result<u32> {
+            u32::try_from(number).with_context(|| {
+                format!(
+                    "{} sets {key} to {number}, past the u32 token ids",
+                    path.display()
+                )
+            })
         };
         let token = |key: &str| -> Result<u32> {
-            raw.get(key)
-                .and_then(Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok())
-                .with_context(|| format!("{} declares a T5 model without {key}", path.display()))
+            match stated(key)? {
+                Some(number) => id(key, number),
+                None => bail!("{} declares a T5 model without {key}", path.display()),
+            }
         };
         let (hidden, heads, head_width) = (size("d_model")?, size("num_heads")?, size("d_kv")?);
         let encoder_layers = size("num_layers")?;
-        let tied_head = raw
-            .get("tie_word_embeddings")
-            .and_then(Value::as_bool)
-            .is_none_or(|tied| tied);
+        let tied_head = match raw.get("tie_word_embeddings") {
+            None | Some(Value::Null) => DEFAULT_TIED_HEAD,
+            Some(Value::Bool(tied)) => *tied,
+            Some(other) => bail!(
+                "{} sets tie_word_embeddings to {other}, not true or false; correct it in the checkpoint's config.json",
+                path.display()
+            ),
+        };
         let eos = match raw.get("eos_token_id") {
-            Some(Value::Array(ids)) => ids
-                .iter()
-                .map(|id| id.as_u64().and_then(|id| u32::try_from(id).ok()))
-                .collect::<Option<Vec<u32>>>()
-                .with_context(|| {
-                    format!("{} lists an eos_token_id that is not a token id", path.display())
-                })?,
+            Some(Value::Array(ids)) => {
+                let mut eos = Vec::with_capacity(ids.len());
+                for listed in ids {
+                    let Some(number) = listed.as_u64() else {
+                        bail!(
+                            "{} lists an eos_token_id {listed}, not a token id; correct it in the checkpoint's config.json",
+                            path.display()
+                        );
+                    };
+                    eos.push(id("eos_token_id", number)?);
+                }
+                eos
+            }
             _ => vec![token("eos_token_id")?],
         };
         if eos.is_empty() {
@@ -107,26 +156,35 @@ impl Config {
             attention_width: heads * head_width,
             intermediate: size("d_ff")?,
             encoder_layers,
-            decoder_layers: match stated("num_decoder_layers") {
+            // `T5Config` sets `num_decoder_layers` to `num_layers` when it is
+            // left out:
+            // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/configuration_t5.py
+            decoder_layers: match count("num_decoder_layers")? {
                 Some(layers) => layers,
                 None => encoder_layers,
             },
-            buckets: match stated("relative_attention_num_buckets") {
+            buckets: match count("relative_attention_num_buckets")? {
                 Some(buckets) => buckets,
                 None => DEFAULT_BUCKETS,
             },
-            max_distance: match stated("relative_attention_max_distance") {
+            max_distance: match count("relative_attention_max_distance")? {
                 Some(distance) => distance,
                 None => DEFAULT_MAX_DISTANCE,
             },
-            norm_eps: match raw.get("layer_norm_epsilon").and_then(Value::as_f64) {
-                Some(eps) => eps,
-                None => DEFAULT_NORM_EPS,
+            norm_eps: match raw.get("layer_norm_epsilon") {
+                None | Some(Value::Null) => DEFAULT_NORM_EPS,
+                Some(value) => match value.as_f64() {
+                    Some(eps) => eps,
+                    None => bail!(
+                        "{} sets layer_norm_epsilon to {value}, not a number; correct it in the checkpoint's config.json",
+                        path.display()
+                    ),
+                },
             },
             feed_forward,
             tied_head,
             scale_decoder_outputs: tied_head,
-            context_length: stated("n_positions"),
+            context_length: count("n_positions")?,
             decoder_start: token("decoder_start_token_id")?,
             pad: token("pad_token_id")?,
             eos,
@@ -134,12 +192,15 @@ impl Config {
     }
 
     /// T5's layer norm: a root mean square with a scale, no mean, no bias.
-    pub(crate) fn norm(&self) -> NormSpec {
+    pub(in crate::model) fn norm(&self) -> NormSpec {
         NormSpec {
             kind: NormKind::Rms,
             eps: self.norm_eps,
             offset: false,
-            groups: std::num::NonZeroUsize::MIN.get(),
+            // `T5LayerNorm` normalizes each position's whole hidden state as
+            // one group:
+            // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
+            groups: 1,
         }
     }
 }

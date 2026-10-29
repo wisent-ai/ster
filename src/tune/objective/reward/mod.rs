@@ -69,7 +69,13 @@ pub fn reward(
     options: &RewardOptions,
 ) -> Result<RewardReport> {
     pairs.validate(&pair_set_label(pairs))?;
-    let Trainable { spec, vars: _, tensors, parameters, limit } = Preflight {
+    let Trainable {
+        spec,
+        vars: _,
+        tensors,
+        parameters,
+        limit,
+    } = Preflight {
         subject: "reward modeling",
         unit: "pair",
         pass: "epoch",
@@ -77,7 +83,7 @@ pub fn reward(
         noun: "tensors",
         epochs: options.epochs,
         accumulation: options.accumulation,
-        batch: options.batch,
+        batch: Some(options.batch),
         learning_rate: options.learning_rate,
         max_sequence: options.max_sequence,
     }
@@ -86,8 +92,14 @@ pub fn reward(
     let encoded = encode_pairs(runtime, pairs, limit)?;
 
     let fingerprint = options.fingerprint();
-    let mut optimizer = AdamW::over(varmap, ParamsAdamW { lr: options.learning_rate, ..Default::default() })
-        .context("failed to initialize the AdamW optimizer")?;
+    let mut optimizer = AdamW::over(
+        varmap,
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
+    )
+    .context("failed to initialize the AdamW optimizer")?;
     let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     let mut running: Running = match &resumed {
         Some(position) => serde_json::from_value(position.running.clone())
@@ -98,9 +110,13 @@ pub fn reward(
 
     // Both sides of a pair go through the same forward, so the width its rows
     // are padded to is the longer of the two.
-    let lengths: Vec<usize> = encoded.iter().map(|pair| pair.chosen.len().max(pair.rejected.len())).collect();
+    let lengths: Vec<usize> = encoded
+        .iter()
+        .map(|pair| pair.chosen.len().max(pair.rejected.len()))
+        .collect();
     let scale = batch::divisor(options.batch, options.accumulation);
-    let total_steps = batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
+    let total_steps =
+        batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
     let mut order: Vec<usize> = encoded.iter().enumerate().map(|(slot, _)| slot).collect();
 
     for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
@@ -111,9 +127,15 @@ pub fn reward(
         let plans = batch::plan(&order, &lengths, options.batch, options.accumulation);
         let remaining = match &resumed {
             Some(position) if position.pass > epoch => continue,
-            Some(position) if position.pass == epoch => plans.get(position.within..).with_context(|| {
-                format!("the checkpoint stands {} steps into epoch {epoch}, which has {} steps", position.within, plans.len())
-            })?,
+            Some(position) if position.pass == epoch => {
+                plans.get(position.within..).with_context(|| {
+                    format!(
+                        "the checkpoint stands {} steps into epoch {epoch}, which has {} steps",
+                        position.within,
+                        plans.len()
+                    )
+                })?
+            }
             _ => {
                 running.steps.clear();
                 running.epoch = Totals::default();
@@ -142,14 +164,25 @@ pub fn reward(
             for forward in &plan.forwards {
                 let rows: Vec<&[u32]> = forward
                     .iter()
-                    .flat_map(|&slot| [encoded[slot].chosen.as_slice(), encoded[slot].rejected.as_slice()])
+                    .flat_map(|&slot| {
+                        [
+                            encoded[slot].chosen.as_slice(),
+                            encoded[slot].rejected.as_slice(),
+                        ]
+                    })
                     .collect();
                 let sides = rows.len() / forward.len();
-                let read = batch::read_rows(&rows, options.batch, sides, |pass| runtime.forward_hidden_rows(pass))?;
+                let read = batch::read_rows(&rows, options.batch, sides, |pass| {
+                    runtime.forward_hidden_rows(pass)
+                })?;
                 for (pair_rows, &slot) in read.chunks_exact(sides).zip(forward) {
                     let pair = &encoded[slot];
                     let [chosen, rejected] = pair_rows else {
-                        bail!("pair {} was read as {} rows, not its two sides", pair.index, pair_rows.len());
+                        bail!(
+                            "pair {} was read as {} rows, not its two sides",
+                            pair.index,
+                            pair_rows.len()
+                        );
                     };
                     let value = step_loss(head, chosen, rejected)
                         .with_context(|| format!("pair {} produced no usable loss", pair.index))?;
@@ -167,7 +200,9 @@ pub fn reward(
                 // forward with no rows; refusing beats stepping on nothing.
                 bail!("an accumulation group contained no pairs");
             };
-            optimizer.backward_step(&summed).context("failed to backpropagate the accumulated loss")?;
+            optimizer
+                .backward_step(&summed)
+                .context("failed to backpropagate the accumulated loss")?;
 
             let group_mean = (losses.iter().sum::<f64>() / plan.units as f64) as f32;
             running.first_loss.get_or_insert(group_mean);
@@ -184,8 +219,12 @@ pub fn reward(
                 summary.accuracy()
             ));
             if options.durable.due(step) {
-                let position =
-                    Position { pass: epoch, step, within: running.steps.len(), running: serde_json::to_value(&running)? };
+                let position = Position {
+                    pass: epoch,
+                    step,
+                    within: running.steps.len(),
+                    running: serde_json::to_value(&running)?,
+                };
                 options.durable.save(&optimizer, &fingerprint, &position)?;
                 checkpoints.push(step);
             }
@@ -204,9 +243,11 @@ pub fn reward(
         ));
     }
 
-    let (Some(first_loss), Some(final_loss), Some(last)) =
-        (running.first_loss, running.final_loss, running.finished.last())
-    else {
+    let (Some(first_loss), Some(final_loss), Some(last)) = (
+        running.first_loss,
+        running.final_loss,
+        running.finished.last(),
+    ) else {
         bail!("the run took no step, so it has no loss to report");
     };
     let epoch_summary = Summary::from(last);
@@ -228,7 +269,11 @@ pub fn reward(
         mean_score_margin: epoch_summary.mean_margin(),
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: spec
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,

@@ -3,8 +3,12 @@
 
 use anyhow::{Result, bail};
 use candle_core::{DType, Device};
+use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy)]
+/// A request body names it as the same word `--device` takes; an unknown one
+/// is refused while the body is read, with the sentence `parse` writes.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(try_from = "String")]
 pub enum DeviceChoice {
     Cpu,
     Metal,
@@ -54,6 +58,13 @@ impl DeviceChoice {
     }
 }
 
+impl TryFrom<String> for DeviceChoice {
+    type Error = anyhow::Error;
+    fn try_from(value: String) -> Result<Self> {
+        Self::parse(&value)
+    }
+}
+
 /// The dtype the frozen base weights are mapped at.
 ///
 /// Not the dtype of anything a run trains: adapters, a reward head, and every
@@ -61,7 +72,8 @@ impl DeviceChoice {
 /// two bytes per base weight instead of four — a checkpoint that ships in
 /// bf16 currently costs twice its own file size to load — and on Metal it
 /// reaches the half-precision matmul path the hardware has and F32 does not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub enum Precision {
     F32,
     F16,
@@ -108,5 +120,12 @@ impl Precision {
             ),
             (Self::Bf16, _) => Ok(DType::BF16),
         }
+    }
+}
+
+impl TryFrom<String> for Precision {
+    type Error = anyhow::Error;
+    fn try_from(value: String) -> Result<Self> {
+        Self::parse(&value)
     }
 }

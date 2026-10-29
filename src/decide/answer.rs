@@ -144,8 +144,11 @@ impl QuestionLogits {
     /// log-probabilities rather than probabilities because one order with a
     /// favoured letter would otherwise outvote the rest by arithmetic alone.
     pub fn log_scores(&self) -> Vec<f64> {
-        let count = self.rows.first().map_or(0, Vec::len);
-        let mut mean = vec![0f64; count];
+        let Some(first) = self.rows.first() else {
+            // A question read in no order holds no score for any option.
+            return Vec::new();
+        };
+        let mut mean = vec![0f64; first.len()];
         for row in &self.rows {
             for (slot, value) in mean.iter_mut().zip(log_softmax(row)) {
                 *slot += value / self.rows.len() as f64;

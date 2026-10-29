@@ -12,7 +12,7 @@ use anyhow::{Result, bail};
 use candle_core::{DType, Device};
 use tokenizers::Tokenizer;
 
-use crate::{chat, model::SteeringLlama};
+use crate::{chat, model::Network};
 
 mod artifact;
 mod device;
@@ -29,7 +29,7 @@ pub struct Runtime {
     pub model_id: String,
     pub revision: Option<String>,
     tokenizer: Tokenizer,
-    model: SteeringLlama,
+    model: Network,
     device: Device,
     dtype: DType,
     /// The flag value that chose `dtype`, kept alongside it because a written
@@ -62,9 +62,14 @@ impl Runtime {
     /// forward. Grouped-query attention makes the key and value width smaller
     /// than the attention width, and a stated `head_dim` can make the
     /// attention width differ from the residual one, which is why none of
-    /// them can be derived from `hidden_size`.
-    pub fn config_dims(&self) -> crate::lora::Widths {
-        crate::lora::Widths::for_decoder(self.model.config(), self.model.architecture())
+    /// them can be derived from `hidden_size`. A T5 checkpoint has none:
+    /// Ster attaches no adapter to it.
+    pub fn config_dims(&self) -> Result<crate::lora::Widths> {
+        let model = self.model.causal("sizing a LoRA adapter")?;
+        Ok(crate::lora::Widths::for_decoder(
+            model.config(),
+            model.architecture(),
+        ))
     }
 
     pub fn device(&self) -> &Device {
@@ -93,23 +98,25 @@ impl Runtime {
     }
 
     pub fn hidden_size(&self) -> usize {
-        self.model.config().hidden_size
+        self.model.hidden_size()
     }
 
+    /// The layers steering and capture address: a T5 model's decoder blocks.
     pub fn layer_count(&self) -> usize {
-        self.model.config().num_hidden_layers
+        self.model.layer_count()
     }
 
     /// The rows of the model's embedding table: every token id it reads.
     pub fn vocab_size(&self) -> usize {
-        self.model.config().vocab_size
+        self.model.vocab_size()
     }
 
     /// The longest sequence the model was configured for
-    /// (`max_position_embeddings`). Training clamps against it for the same
-    /// reason `generate` does: past it the model's positions are untrained.
-    pub fn context_length(&self) -> usize {
-        self.model.config().max_position_embeddings
+    /// (`max_position_embeddings`, T5's `n_positions`). Training clamps
+    /// against it for the same reason `generate` does: past it the model's
+    /// positions are untrained.
+    pub fn context_length(&self) -> Result<usize> {
+        self.model.context_length()
     }
 }
 

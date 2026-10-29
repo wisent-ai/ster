@@ -5,7 +5,10 @@
 
 use super::request::{Question, Request, text_of};
 
-/// The answer letters, in the order options are listed.
+/// The answer letters, in the order options are listed: the Latin capital
+/// letters A to Z, U+0041..U+005A of Unicode's Basic Latin block
+/// (https://www.unicode.org/charts/PDF/U0000.pdf). [`super::MAX_OPTIONS`]
+/// is their count.
 pub const LABELS: [&str; 26] = [
     "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S",
     "T", "U", "V", "W", "X", "Y", "Z",

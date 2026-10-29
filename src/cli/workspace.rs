@@ -11,7 +11,7 @@ use super::onboarding;
 #[derive(Debug, Subcommand)]
 pub(super) enum WorkspaceCommand {
     /// Validate, persist, and activate an existing contrastive pair set.
-    ImportPairs {
+    Import {
         #[arg(value_name = "SOURCE")]
         source: PathBuf,
         /// Stable workspace name; defaults to the source file name.
@@ -35,7 +35,7 @@ pub(super) enum WorkspaceCommand {
 
 pub(super) fn run(command: WorkspaceCommand) -> Result<()> {
     match command {
-        WorkspaceCommand::ImportPairs { source, name } => {
+        WorkspaceCommand::Import { source, name } => {
             let report = ster::workspace::import_pair_set(&source, name.as_deref())?;
             if report.accepted() {
                 let path = report
@@ -45,15 +45,15 @@ pub(super) fn run(command: WorkspaceCommand) -> Result<()> {
                 onboarding::record_pair_set_imported(std::path::Path::new(path))?;
             }
             let accepted = report.accepted();
-            let refusal = report.reason.clone();
             super::answer(&report)?;
             if !accepted {
-                bail!(
-                    "{}",
-                    refusal
-                        .as_deref()
-                        .unwrap_or("Ster did not accept the pair set")
-                );
+                let reason = report.reason.as_deref().with_context(|| {
+                    format!(
+                        "Ster workspace import refused {} but returned no refusal reason",
+                        source.display()
+                    )
+                })?;
+                bail!("{reason}");
             }
         }
         WorkspaceCommand::Show => {

@@ -18,7 +18,7 @@
 # was accepted, and its answer go to the run's report.txt; a failed check
 # stops the run (set -e) after naming itself there.
 #
-# Usage: STER=target/release/ster MINIMAX_M3_CHECKPOINT=/path/to/checkpoint tests/models/minimax_m3.sh
+# Usage: STER=target/release/ster MINIMAX_M3_CHECKPOINT=/path/to/checkpoint STER_TEST_MAX_NEW_TOKENS=<n> STER_TEST_SEED=<n> tests/models/minimax_m3.sh
 set -eu
 cd "$(dirname "$0")/../.."
 BIN=${STER:?set STER to the ster binary under test, e.g. STER=target/release/ster}
@@ -63,10 +63,12 @@ refused() {
 [ -f "$CHECKPOINT/config.json" ] || fail "$CHECKPOINT holds no config.json"
 PROMPTS=docs/examples/prompts.json
 FIRST=$(jq -r '.prompts | first' "$PROMPTS")
-# Greedy decoding, so two paths can be compared; the token budget and seed are
-# read from the checked-in prompt set, so none is a chosen number.
-COUNT=$(jq '.prompts | length' "$PROMPTS")
-SETTINGS=(--max-new-tokens "$COUNT" --temperature "$(jq '.prompts | length - length' "$PROMPTS")" --seed "$COUNT" --chat-template off)
+# The token budget and seed are the experiment's, stated by the caller.
+TOKENS=${STER_TEST_MAX_NEW_TOKENS:?set STER_TEST_MAX_NEW_TOKENS to the experiment token budget}
+SEED=${STER_TEST_SEED:?set STER_TEST_SEED to the experiment seed}
+# Greedy decoding, so two paths can be compared: zero temperature is the
+# native argmax boundary, https://ster.wisent.com/docs/cli/generate
+SETTINGS=(--max-new-tokens "$TOKENS" --temperature 0 --seed "$SEED" --chat-template off)
 
 run accepted generate --model "$CHECKPOINT" --prompt "$FIRST" "${SETTINGS[@]}"
 SINGLE=$out

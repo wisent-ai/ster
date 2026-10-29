@@ -34,7 +34,10 @@ impl Cache {
                 .map(|_| KvCache::new(2, capacity.get()))
                 .collect()
         });
-        Self { encoder: None, decoder }
+        Self {
+            encoder: None,
+            decoder,
+        }
     }
 
     pub fn position(&self) -> Result<usize> {
@@ -43,7 +46,9 @@ impl Cache {
             // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
             return Ok(0);
         };
-        let first = layers.first().context("T5 decoder cache contains no layers")?;
+        let first = layers
+            .first()
+            .context("T5 decoder cache contains no layers")?;
         let position = first.current_seq_len();
         for (index, layer) in layers.iter().enumerate() {
             if layer.current_seq_len() != position {
@@ -54,18 +59,5 @@ impl Cache {
             }
         }
         Ok(position)
-    }
-
-    /// A branch used only by the runtime's serial suffix-scoring loop.
-    ///
-    /// Candle clones cache counters but shares their backing tensor. Appending a
-    /// branch preserves the prefix and may overwrite an earlier branch's suffix.
-    /// The caller must finish reading one branch before starting the next. This
-    /// is deliberately not Clone: independent generation creates a fresh cache.
-    pub fn fork_for_scoring(&self) -> Self {
-        Self {
-            encoder: self.encoder.clone(),
-            decoder: self.decoder.clone(),
-        }
     }
 }

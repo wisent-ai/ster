@@ -72,11 +72,17 @@ impl RelativeBias {
 
     /// `[1, heads, queries, keys]`; `start` is the absolute decoder query position.
     pub fn forward(&self, queries: usize, keys: usize, start: usize) -> Result<Tensor> {
-        let end = start.checked_add(queries).context("T5 query position overflow")?;
-        let cells = queries.checked_mul(keys).context("T5 position-bias shape overflow")?;
+        let end = start
+            .checked_add(queries)
+            .context("T5 query position overflow")?;
+        let cells = queries
+            .checked_mul(keys)
+            .context("T5 position-bias shape overflow")?;
         let mut indices = Vec::new();
         indices.try_reserve_exact(cells).with_context(|| {
-            format!("cannot allocate T5 position-bias indices for {queries} queries and {keys} keys")
+            format!(
+                "cannot allocate T5 position-bias indices for {queries} queries and {keys} keys"
+            )
         })?;
         for query in start..end {
             // Memory positions count from the beginning of the cached key sequence.

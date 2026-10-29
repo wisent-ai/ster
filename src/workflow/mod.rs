@@ -7,7 +7,6 @@
 //! share — the progress channel, the artifact summary every command prints,
 //! and the layer-selection parser.
 
-use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
@@ -93,7 +92,7 @@ fn norm(values: &[f32]) -> f64 {
 }
 
 pub fn parse_layers(value: &str, count: usize) -> Result<Vec<usize>> {
-    if NonZeroUsize::new(count).is_none() {
+    if count == 0 {
         bail!("model has no layers");
     }
     if value == "all" {

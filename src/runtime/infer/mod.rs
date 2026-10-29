@@ -4,13 +4,18 @@
 use anyhow::{Context, Result, bail};
 use candle_core::Tensor;
 
-use crate::model::{Cache, ForwardOutput, Mode, Route, SteeringPlan};
+use crate::model::{Cache, ForwardOutput, Mode, Network, Route, SteeringLlama, SteeringPlan};
 
 use super::{Runtime, requested_activations, validate_layers};
 
+mod encoder_decoder;
 mod generate;
 
 pub use generate::{Completion, GenerationOptions};
+
+/// What reaches the whole-sequence passes below, named in the refusal a T5
+/// checkpoint gets from them.
+const WHOLE_SEQUENCE: &str = "a whole-sequence pass (ster tune sft, dpo, grpo, reward, decide, bipo and evaluate, ster vector evaluate --strengths, and ster parity)";
 
 impl Runtime {
     /// One differentiable forward over `ids`, returning logits `[1, n, vocab]`.
@@ -170,18 +175,23 @@ impl Runtime {
         if suffixes.is_empty() || suffixes.iter().any(|suffix| suffix.is_empty()) {
             bail!("a decision forward pass needs at least one token");
         }
-        let mut shared = self.cache(true)?;
+        let model = match &self.model {
+            Network::Causal(model) => model,
+            Network::EncoderDecoder(model) => {
+                return self.next_token_logits_encoder_decoder(model, prefix, suffixes);
+            }
+        };
+        let mut shared = self.cache(model, true)?;
         if !prefix.is_empty() {
             let input = Tensor::new(prefix, &self.device)?.unsqueeze(0)?;
-            self.model.forward(&input, 0, &mut shared, None, &[])?;
+            model.forward(&input, 0, &mut shared, None, &[])?;
         }
         suffixes
             .iter()
             .map(|suffix| {
                 let mut cache = shared.clone();
                 let input = Tensor::new(*suffix, &self.device)?.unsqueeze(0)?;
-                let logits = self
-                    .model
+                let logits = model
                     .forward(&input, prefix.len(), &mut cache, None, &[])?
                     .logits
                     .context("this forward pass was asked for no vocabulary projection")?;
@@ -190,14 +200,18 @@ impl Runtime {
             .collect()
     }
 
-    /// A fresh decode state: this model's rotary frequencies, one key-value
-    /// slot and one recurrent-state slot per layer.
-    pub(super) fn cache(&self, use_kv_cache: bool) -> candle_core::Result<Cache> {
+    /// A fresh decode state for the causal `model`: its rotary frequencies,
+    /// one key-value slot and one recurrent-state slot per layer.
+    pub(super) fn cache(
+        &self,
+        model: &SteeringLlama,
+        use_kv_cache: bool,
+    ) -> candle_core::Result<Cache> {
         Cache::new(
             use_kv_cache,
             self.dtype,
-            self.model.config(),
-            self.model.architecture(),
+            model.config(),
+            model.architecture(),
             &self.device,
         )
     }
@@ -227,11 +241,10 @@ impl Runtime {
         if ids.is_empty() {
             bail!("{empty}");
         }
+        let model = self.model.causal(WHOLE_SEQUENCE)?;
         let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
-        let mut cache = self.cache(false)?;
-        Ok(self
-            .model
-            .forward_pass(&input, 0, &mut cache, None, &[], mode)?)
+        let mut cache = self.cache(model, false)?;
+        Ok(model.forward_pass(&input, 0, &mut cache, None, &[], mode)?)
     }
 
     /// The body every batched forward shares: many right-padded sequences, no
@@ -249,21 +262,24 @@ impl Runtime {
         mode: Mode,
         empty: &str,
     ) -> Result<ForwardOutput> {
-        if rows.is_empty() || rows.iter().any(|row| row.is_empty()) {
-            bail!("{empty}");
-        }
+        let model = self.model.causal(WHOLE_SEQUENCE)?;
         let lengths: Vec<usize> = rows.iter().map(|row| row.len()).collect();
-        let width = lengths.iter().copied().max().unwrap_or_default();
+        let Some(width) = lengths
+            .iter()
+            .copied()
+            .max()
+            .filter(|_| !lengths.contains(&0))
+        else {
+            bail!("{empty}");
+        };
         let mut flat = Vec::with_capacity(rows.len() * width);
         for row in rows {
             flat.extend_from_slice(row);
             flat.resize(flat.len() + width - row.len(), 0);
         }
         let input = Tensor::from_vec(flat, (rows.len(), width), &self.device)?;
-        let mut cache = self.cache(false)?;
-        Ok(self
-            .model
-            .forward_batch(&input, &lengths, &mut cache, steering, mode)?)
+        let mut cache = self.cache(model, false)?;
+        Ok(model.forward_batch(&input, &lengths, &mut cache, steering, mode)?)
     }
 
     /// The hidden states one prompt produces at the requested layers.
@@ -291,11 +307,15 @@ impl Runtime {
     ) -> Result<Vec<(usize, Vec<f32>)>> {
         validate_layers(layers, self.layer_count())?;
         let ids = self.encode_prompt(prompt)?;
+        let model = match &self.model {
+            Network::Causal(model) => model,
+            Network::EncoderDecoder(model) => {
+                return self.activations_encoder_decoder(model, &ids, layers, steering);
+            }
+        };
         let input = Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?;
-        let mut cache = self.cache(false)?;
-        let output = self
-            .model
-            .forward(&input, 0, &mut cache, steering, layers)?;
+        let mut cache = self.cache(model, false)?;
+        let output = model.forward(&input, 0, &mut cache, steering, layers)?;
         requested_activations(output.activations, layers)
     }
 

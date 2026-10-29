@@ -43,7 +43,6 @@
 //! sample, the optimizer's moments and steps, and the totals of the iteration
 //! in progress are the ones the stopped run had.
 
-use std::num::NonZeroUsize;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -88,7 +87,8 @@ pub fn grpo(
     user: Option<(&UserSimulator, &str)>,
     options: &GrpoOptions,
 ) -> Result<GrpoReport> {
-    let (turns, max_new_tokens) = options.refusals(user.is_some())?;
+    options.refusals(user.is_some())?;
+    let max_new_tokens = options.generation.max_new_tokens;
     let simulator = user.map(|(simulator, _)| simulator);
     // The judge is a different model from the policy, but it reads the same
     // kind of residual stream, and it was fitted in whatever encoding and
@@ -98,18 +98,23 @@ pub fn grpo(
     if let Some(path) = matches!(reward, Reward::Model(_)).then_some(requested_reward) {
         crate::tune::warn_on_provenance(Path::new(path), "reward model", runtime);
     }
-    let Trainable { spec, vars: _, tensors, parameters, limit } = Preflight {
+    let Trainable {
+        spec,
+        vars: _,
+        tensors,
+        parameters,
+        limit,
+    } = Preflight {
         subject: "group-relative policy optimization",
         unit: "prompt",
         pass: "iteration",
         noun: "adapter tensors",
         epochs: options.iterations,
         accumulation: options.accumulation,
-        // One sequence per forward, and no flag to say otherwise. This
-        // objective's cost is autoregressive sampling, not the scoring pass,
-        // and `--group` is already the word for how many completions share a
-        // prompt; a second batch word here would only compete with it.
-        batch: NonZeroUsize::MIN.get(),
+        // No batch: this objective's cost is autoregressive sampling, and it
+        // samples and scores one completion at a time; `--group` is already
+        // the word for how many completions share a prompt.
+        batch: None,
         learning_rate: options.learning_rate,
         max_sequence: options.max_sequence,
     }
@@ -120,8 +125,10 @@ pub fn grpo(
     // per draw and that encode is the one the scored sequence comes from.
     let mut usable: Vec<usize> = Vec::with_capacity(prompts.prompts.len());
     for (index, prompt) in prompts.prompts.iter().enumerate() {
-        let ids = runtime.encode(prompt).with_context(|| format!("prompt {index} could not be encoded"))?;
-        if ids.len() + max_new_tokens.get() > limit {
+        let ids = runtime
+            .encode(prompt)
+            .with_context(|| format!("prompt {index} could not be encoded"))?;
+        if ids.len() + max_new_tokens > limit {
             workflow::progress(format!(
                 "skipping prompt {index}: {} prompt tokens plus {max_new_tokens} sampled tokens exceed the {limit} token limit",
                 ids.len()
@@ -135,15 +142,22 @@ pub fn grpo(
     }
 
     let fingerprint = options.fingerprint(requested_reward, user.map(|(_, model)| model));
-    let mut optimizer = AdamW::over(varmap, ParamsAdamW { lr: options.learning_rate, ..Default::default() })
-        .context("failed to initialize the AdamW optimizer")?;
+    let mut optimizer = AdamW::over(
+        varmap,
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
+    )
+    .context("failed to initialize the AdamW optimizer")?;
     let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     // Every draw gets its own seed, advanced from the operator's and counted in
     // `running.draw`: a fixed seed would draw one completion `--group` times
     // over, and a group with no variety has no baseline.
     let mut running: Running = match &resumed {
-        Some(position) => serde_json::from_value(position.running.clone())
-            .context("the checkpoint's running report is not one group-relative policy optimization wrote")?,
+        Some(position) => serde_json::from_value(position.running.clone()).context(
+            "the checkpoint's running report is not one group-relative policy optimization wrote",
+        )?,
         None => Running::default(),
     };
     let mut checkpoints = Vec::new();
@@ -184,8 +198,16 @@ pub fn grpo(
                     options.group
                 ));
                 let prompt = &prompts.prompts[index];
-                let group = sample_group(runtime, simulator, prompt, reward, options, limit, &mut running.draw)
-                    .with_context(|| format!("prompt {index} produced no usable group"))?;
+                let group = sample_group(
+                    runtime,
+                    simulator,
+                    prompt,
+                    reward,
+                    options,
+                    limit,
+                    &mut running.draw,
+                )
+                .with_context(|| format!("prompt {index} produced no usable group"))?;
                 let loss = group_loss(runtime, &group, options)
                     .with_context(|| format!("prompt {index} produced no usable loss"))?;
                 totals.record(&group, &loss);
@@ -201,7 +223,9 @@ pub fn grpo(
                 // stepping on nothing.
                 bail!("an accumulation group contained no prompts");
             };
-            optimizer.backward_step(&summed).context("failed to backpropagate the accumulated loss")?;
+            optimizer
+                .backward_step(&summed)
+                .context("failed to backpropagate the accumulated loss")?;
 
             let group_mean = (losses.iter().sum::<f64>() / losses.len() as f64) as f32;
             running.first_loss.get_or_insert(group_mean);
@@ -217,7 +241,12 @@ pub fn grpo(
             if options.durable.due(step) {
                 running.totals = (&totals).into();
                 let within = steps.len() - rest.len();
-                let position = Position { pass: iteration, step, within, running: serde_json::to_value(&running)? };
+                let position = Position {
+                    pass: iteration,
+                    step,
+                    within,
+                    running: serde_json::to_value(&running)?,
+                };
                 options.durable.save(&optimizer, &fingerprint, &position)?;
                 checkpoints.push(step);
             }
@@ -232,15 +261,21 @@ pub fn grpo(
         summary.iteration = done;
         workflow::progress(format!(
             "iterations done {done}/{} mean reward {:.4} spread {:.4} mean kl {:.5} policy loss {:.4}",
-            options.iterations, summary.mean_reward, summary.reward_spread, summary.mean_kl, summary.policy_loss
+            options.iterations,
+            summary.mean_reward,
+            summary.reward_spread,
+            summary.mean_kl,
+            summary.policy_loss
         ));
     }
 
     // The last iteration describes the adapter that was written; the whole
     // history is beside it for the trend.
-    let (Some(first_loss), Some(final_loss), Some(last)) =
-        (running.first_loss, running.final_loss, running.history.last().cloned())
-    else {
+    let (Some(first_loss), Some(final_loss), Some(last)) = (
+        running.first_loss,
+        running.final_loss,
+        running.history.last().cloned(),
+    ) else {
         bail!("the run finished no iteration, so it has no loss or reward to report");
     };
     Ok(GrpoReport {
@@ -249,7 +284,7 @@ pub fn grpo(
         trained_prompts: usable.len(),
         skipped_long: prompts.prompts.len() - usable.len(),
         group: options.group,
-        turns: turns.get(),
+        turns: options.turns,
         user_model: user.map(|(_, model)| model.to_owned()),
         iterations: options.iterations,
         steps: optimizer.rates.len(),
@@ -262,13 +297,17 @@ pub fn grpo(
         mean_kl: last.mean_kl,
         policy_loss: last.policy_loss,
         history: running.history,
-        max_new_tokens: max_new_tokens.get(),
+        max_new_tokens,
         temperature: options.generation.temperature,
         top_p: options.generation.top_p,
         seed: options.generation.seed,
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: spec
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,

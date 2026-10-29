@@ -10,10 +10,14 @@ use super::super::super::ModelArgs;
 use super::super::durable::DurableArgs;
 use super::super::{note_precision, parse_adapter_layers, parse_targets};
 
+use crate::cli::input::{self, InputCheck};
+
 /// `ster tune sft`
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct SftArgs {
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SftArgs {
     #[command(flatten)]
+    #[serde(flatten)]
     model: ModelArgs,
     /// JSON file shaped as {"examples": [{"prompt": "...", "completion": "..."}]};
     /// an example may add "system": "..." for the system turn it is served under.
@@ -31,10 +35,12 @@ pub(in crate::cli) struct SftArgs {
     /// Comma-separated projections to adapt: query, key, value, output,
     /// gate, up, or down. The default query,value is the pair the LoRA
     /// papers adapt first, and it is the cheapest useful choice.
-    #[arg(long, default_value = "query,value")]
+    #[arg(long, default_value = input::TARGETS)]
+    #[serde(default = "input::default_targets")]
     targets: String,
     /// Comma-separated layers, half-open ranges such as 8..16, or all.
-    #[arg(long, default_value = "all")]
+    #[arg(long, default_value = input::LAYERS)]
+    #[serde(default = "input::default_layers")]
     layers: String,
     /// Passes over the example set.
     #[arg(long)]
@@ -44,9 +50,9 @@ pub(in crate::cli) struct SftArgs {
     /// Examples folded into one optimizer step.
     #[arg(long)]
     accumulation: usize,
-    /// Steps over which the learning rate ramps up from zero; none by
-    /// default, which starts at the full learning rate.
-    #[arg(long, default_value_t)]
+    /// Steps over which the learning rate ramps up from zero.
+    /// Required, including when no warmup is intended.
+    #[arg(long)]
     warmup_steps: usize,
     /// Examples longer than this many tokens are skipped rather than
     /// truncated; a cut completion would teach the model to stop early.
@@ -57,6 +63,7 @@ pub(in crate::cli) struct SftArgs {
     /// instruct checkpoint trained on raw text learns a format it will
     /// never be prompted in.
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+    #[serde(default = "input::default_chat_template")]
     chat_template: ChatChoice,
     /// Examples folded into one forward pass; --accumulation still counts
     /// forwards, so a step sees up to batch-size times accumulation examples.
@@ -67,14 +74,25 @@ pub(in crate::cli) struct SftArgs {
     /// whatever this says, because a low-rank update below the weight's
     /// own ulp rounds to nothing in half. bf16 needs --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    #[serde(default = "input::default_precision")]
     precision: Precision,
     #[arg(long)]
     seed: u64,
     #[command(flatten)]
+    #[serde(flatten)]
     durable: DurableArgs,
 }
 
-pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
+impl InputCheck for SftArgs {
+    fn check(&self) -> std::result::Result<(), String> {
+        self.model.check()?;
+        input::required_path(&self.examples, "tune/sft examples")?;
+        input::required_path(&self.output, "tune/sft output")?;
+        self.durable.check()
+    }
+}
+
+pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<serde_json::Value> {
     let SftArgs {
         model,
         examples,
@@ -122,7 +140,7 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
         json!(format!("{precision:?}")),
     )?;
     let options = SftOptions {
-        spec: spec.clone(),
+        spec,
         epochs,
         learning_rate,
         accumulation,
@@ -140,11 +158,6 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<()> {
     let mut report = serde_json::to_value(&report)?;
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
-    let artifact = runtime.adapter_artifact(&spec, report.clone())?;
-    artifact.save(&output)?;
-    crate::cli::answer(&json!({
-        "path": output.display().to_string(),
-        "report": report,
-    }))?;
-    Ok(())
+    let artifact = runtime.adapter_artifact(&options.spec, report)?;
+    super::finish(artifact, &output)
 }

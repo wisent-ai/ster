@@ -67,32 +67,54 @@ use scoring::{Preference, Scored, Summary, reference_scores, step_loss};
 /// `varmap`; the two are a pair, and passing a plain `Runtime` here would
 /// produce a run whose optimizer has no variables to step and whose reference
 /// pass is indistinguishable from its policy pass.
-pub fn dpo(runtime: &Runtime, varmap: &VarMap, pairs: &PairSet, options: &DpoOptions) -> Result<DpoReport> {
-    // Above zero: positive in sign and not its own negation, which only zero is.
-    let above_zero = options.beta.is_sign_positive() && options.beta != -options.beta;
-    if !(options.beta.is_finite() && above_zero) {
+pub fn dpo(
+    runtime: &Runtime,
+    varmap: &VarMap,
+    pairs: &PairSet,
+    options: &DpoOptions,
+) -> Result<DpoReport> {
+    // DPO's loss is `-log σ(β · margin)`; at β = 0 every pair's loss is the
+    // constant `log 2` and no gradient reaches the policy, so β must be a
+    // finite number above zero (Rafailov et al., eq. 7):
+    // https://arxiv.org/abs/2305.18290
+    if !(options.beta.is_finite() && options.beta > 0.0) {
         bail!("direct preference optimization requires a finite beta above zero");
     }
     pairs.validate(&pair_set_label(pairs))?;
-    let Trainable { spec, vars: _, tensors, parameters, limit } = Preflight {
+    let Trainable {
+        spec,
+        vars: _,
+        tensors,
+        parameters,
+        limit,
+    } = Preflight {
         subject: "direct preference optimization",
         unit: "pair",
         pass: "epoch",
         noun: "adapter tensors",
         epochs: options.epochs,
         accumulation: options.accumulation,
-        batch: options.batch,
+        batch: Some(options.batch),
         learning_rate: options.learning_rate,
         max_sequence: options.max_sequence,
     }
     .open(runtime, varmap, &options.spec)?;
 
-    let mut encoded: Vec<Scored> = encode_pairs(runtime, pairs, limit)?.into_iter().map(Scored::new).collect();
+    let mut encoded: Vec<Scored> = encode_pairs(runtime, pairs, limit)?
+        .into_iter()
+        .map(Scored::new)
+        .collect();
     reference_scores(runtime, &mut encoded, options.batch)?;
 
     let fingerprint = options.fingerprint();
-    let mut optimizer = AdamW::over(varmap, ParamsAdamW { lr: options.learning_rate, ..Default::default() })
-        .context("failed to initialize the AdamW optimizer")?;
+    let mut optimizer = AdamW::over(
+        varmap,
+        ParamsAdamW {
+            lr: options.learning_rate,
+            ..Default::default()
+        },
+    )
+    .context("failed to initialize the AdamW optimizer")?;
     let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     let mut running: Running = match &resumed {
         Some(position) => serde_json::from_value(position.running.clone())
@@ -104,12 +126,18 @@ pub fn dpo(runtime: &Runtime, varmap: &VarMap, pairs: &PairSet, options: &DpoOpt
     // A pair's two sides go through the same forward, so the width its rows
     // are padded to is the longer of the two; grouping on that is grouping on
     // what the padding actually costs.
-    let lengths: Vec<usize> =
-        encoded.iter().map(|scored| scored.pair.chosen.len().max(scored.pair.rejected.len())).collect();
+    let lengths: Vec<usize> = encoded
+        .iter()
+        .map(|scored| scored.pair.chosen.len().max(scored.pair.rejected.len()))
+        .collect();
     let scale = batch::divisor(options.batch, options.accumulation);
-    let total_steps = batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
+    let total_steps =
+        batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
     let mut order: Vec<usize> = encoded.iter().enumerate().map(|(slot, _)| slot).collect();
-    let preference = Preference { loss: options.loss, beta: options.beta };
+    let preference = Preference {
+        loss: options.loss,
+        beta: options.beta,
+    };
 
     for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
         // Reseeded per epoch, exactly as supervised fine-tuning is; a resumed
@@ -119,9 +147,15 @@ pub fn dpo(runtime: &Runtime, varmap: &VarMap, pairs: &PairSet, options: &DpoOpt
         let plans = batch::plan(&order, &lengths, options.batch, options.accumulation);
         let remaining = match &resumed {
             Some(position) if position.pass > epoch => continue,
-            Some(position) if position.pass == epoch => plans.get(position.within..).with_context(|| {
-                format!("the checkpoint stands {} steps into epoch {epoch}, which has {} steps", position.within, plans.len())
-            })?,
+            Some(position) if position.pass == epoch => {
+                plans.get(position.within..).with_context(|| {
+                    format!(
+                        "the checkpoint stands {} steps into epoch {epoch}, which has {} steps",
+                        position.within,
+                        plans.len()
+                    )
+                })?
+            }
             _ => {
                 running.steps.clear();
                 running.epoch = Totals::default();
@@ -148,17 +182,30 @@ pub fn dpo(runtime: &Runtime, varmap: &VarMap, pairs: &PairSet, options: &DpoOpt
             for forward in &plan.forwards {
                 let rows: Vec<&[u32]> = forward
                     .iter()
-                    .flat_map(|&slot| [encoded[slot].pair.chosen.as_slice(), encoded[slot].pair.rejected.as_slice()])
+                    .flat_map(|&slot| {
+                        [
+                            encoded[slot].pair.chosen.as_slice(),
+                            encoded[slot].pair.rejected.as_slice(),
+                        ]
+                    })
                     .collect();
                 let sides = rows.len() / forward.len();
-                let read = batch::read_rows(&rows, options.batch, sides, |pass| runtime.forward_train_rows(pass))?;
+                let read = batch::read_rows(&rows, options.batch, sides, |pass| {
+                    runtime.forward_train_rows(pass)
+                })?;
                 for (pair_rows, &slot) in read.chunks_exact(sides).zip(forward) {
                     let scored = &encoded[slot];
                     let [chosen, rejected] = pair_rows else {
-                        bail!("pair {} was read as {} rows, not its two sides", scored.pair.index, pair_rows.len());
+                        bail!(
+                            "pair {} was read as {} rows, not its two sides",
+                            scored.pair.index,
+                            pair_rows.len()
+                        );
                     };
                     let value = step_loss(runtime, scored, chosen, rejected, preference)
-                        .with_context(|| format!("pair {} produced no usable loss", scored.pair.index))?;
+                        .with_context(|| {
+                            format!("pair {} produced no usable loss", scored.pair.index)
+                        })?;
                     losses.push(value.loss);
                     summary.record(&value);
                     let scaled = (value.tensor / scale)?;
@@ -173,7 +220,9 @@ pub fn dpo(runtime: &Runtime, varmap: &VarMap, pairs: &PairSet, options: &DpoOpt
                 // forward with no rows; refusing beats stepping on nothing.
                 bail!("an accumulation group contained no pairs");
             };
-            optimizer.backward_step(&summed).context("failed to backpropagate the accumulated loss")?;
+            optimizer
+                .backward_step(&summed)
+                .context("failed to backpropagate the accumulated loss")?;
 
             let group_mean = (losses.iter().sum::<f64>() / plan.units as f64) as f32;
             running.first_loss.get_or_insert(group_mean);
@@ -190,8 +239,12 @@ pub fn dpo(runtime: &Runtime, varmap: &VarMap, pairs: &PairSet, options: &DpoOpt
                 summary.accuracy()
             ));
             if options.durable.due(step) {
-                let position =
-                    Position { pass: epoch, step, within: running.steps.len(), running: serde_json::to_value(&running)? };
+                let position = Position {
+                    pass: epoch,
+                    step,
+                    within: running.steps.len(),
+                    running: serde_json::to_value(&running)?,
+                };
                 options.durable.save(&optimizer, &fingerprint, &position)?;
                 checkpoints.push(step);
             }
@@ -208,9 +261,11 @@ pub fn dpo(runtime: &Runtime, varmap: &VarMap, pairs: &PairSet, options: &DpoOpt
         ));
     }
 
-    let (Some(first_loss), Some(final_loss), Some(last)) =
-        (running.first_loss, running.final_loss, running.finished.last())
-    else {
+    let (Some(first_loss), Some(final_loss), Some(last)) = (
+        running.first_loss,
+        running.final_loss,
+        running.finished.last(),
+    ) else {
         bail!("the run took no step, so it has no loss to report");
     };
     let epoch_summary = Summary::from(last);
@@ -233,7 +288,11 @@ pub fn dpo(runtime: &Runtime, varmap: &VarMap, pairs: &PairSet, options: &DpoOpt
         mean_rejected_reward: epoch_summary.mean_rejected(),
         rank: spec.rank,
         alpha: spec.alpha,
-        targets: spec.targets.iter().map(|target| target.name().to_owned()).collect(),
+        targets: spec
+            .targets
+            .iter()
+            .map(|target| target.name().to_owned())
+            .collect(),
         layers: spec.layers.clone(),
         learning_rate: options.learning_rate,
         accumulation: options.accumulation,

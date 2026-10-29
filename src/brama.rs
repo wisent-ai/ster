@@ -95,12 +95,19 @@ impl Gateway {
             "temperature": temperature,
         })
         .to_string();
-        let response = self
-            .agent
-            .post(&format!("{}/v1/chat/completions", self.base))
-            .set("authorization", &format!("Bearer {}", self.bearer))
-            .set("content-type", "application/json")
-            .send_string(&body);
+        let url = format!("{}/v1/chat/completions", self.base);
+        let response = stado_wait::blocking(
+            stado_wait::Kind::Network,
+            format!("Brama completion from {}", self.model),
+            &url,
+            || {
+                self.agent
+                    .post(&url)
+                    .set("authorization", &format!("Bearer {}", self.bearer))
+                    .set("content-type", "application/json")
+                    .send_string(&body)
+            },
+        );
         let response = match response {
             Ok(response) => response,
             // `ureq` hands back every non-2xx as this arm, response body intact.

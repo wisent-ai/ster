@@ -254,12 +254,14 @@ pub(super) fn python_method(
                 state.apply_filter(method, &[value.clone()])
             }
             "get" => {
+                // Python's `dict.get(key, default=None)`: https://docs.python.org/3/library/stdtypes.html#dict.get
                 let (key, default): (Value, Option<Value>) = from_args(args)?;
-                Ok(value
-                    .get_item(&key)
-                    .ok()
-                    .filter(|found| !found.is_undefined())
-                    .unwrap_or_else(|| default.unwrap_or(Value::from(()))))
+                let found = value.get_item(&key)?;
+                Ok(match (found.is_undefined(), default) {
+                    (false, _) => found,
+                    (true, Some(default)) => default,
+                    (true, None) => Value::from(()),
+                })
             }
             _ => Err(unknown()),
         };

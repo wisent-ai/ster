@@ -54,8 +54,6 @@ pub use objective::{
     strengths,
 };
 
-use std::num::NonZeroUsize;
-
 use crate::lora;
 
 /// Linear warmup for `warmup` steps, then cosine decay from `base` to zero
@@ -73,13 +71,14 @@ fn schedule(base: f64, step: usize, total: usize, warmup: usize) -> f64 {
     if step < warmup {
         return base * step as f64 / warmup as f64 + base / warmup as f64;
     }
-    let Some(decaying) = NonZeroUsize::new(total.saturating_sub(warmup)) else {
+    let decaying = total.saturating_sub(warmup);
+    if decaying == 0 {
         return base;
-    };
+    }
     // Progress over the decay counts the steps taken, as Hugging Face's does,
     // so the last step still learns and only the step after it would be zero.
-    let elapsed = (step - warmup).min(decaying.get());
-    let progress = elapsed as f64 / decaying.get() as f64;
+    let elapsed = (step - warmup).min(decaying);
+    let progress = elapsed as f64 / decaying as f64;
     let half = (std::f64::consts::FRAC_PI_2 * progress).cos();
     base * half * half
 }
@@ -94,7 +93,7 @@ pub fn inspect(artifact: &lora::Artifact) -> serde_json::Value {
     // `Spec::scale` is the same ratio, but an artifact is not a spec: a file
     // this inspector did not produce may name a rank of zero, and then it has
     // no scale at all, which is said as null rather than as a number.
-    let scale = NonZeroUsize::new(artifact.rank).map(|rank| artifact.alpha / rank.get() as f64);
+    let scale = (artifact.rank != 0).then(|| artifact.alpha / artifact.rank as f64);
     serde_json::json!({
         "adapter": {
             "schema_version": artifact.schema_version,

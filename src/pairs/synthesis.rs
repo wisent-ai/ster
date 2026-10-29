@@ -1,9 +1,10 @@
-//! Writing a contrastive pair set with a model: a faithful port of Wisent's
-//! `SyntheticContrastivePairsGenerator.generate`, driven by whichever
-//! generator the caller picked. Steering needs hidden states and stays local;
-//! writing pair text does not, so the writer may be a hosted route.
+//! Writing a contrastive pair set with a model, driven by whichever generator
+//! the caller picked: one opposite-trait description, then a question and its
+//! two answers per attempt, each answer judged for refusal as it lands.
+//! Steering needs hidden states and stays local; writing pair text does not,
+//! so the writer may be a hosted route.
 
-use std::num::{FpCategory, NonZeroUsize};
+use std::num::NonZeroUsize;
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -80,12 +81,15 @@ struct Attempt {
 
 /// Generate a contrastive pair set with `generator`.
 ///
-/// Port of `SyntheticContrastivePairsGenerator.generate`: one opposite-trait
-/// description up front, then a question / positive / negative triple per
-/// attempt, with refusal repair and deduplication applied as each pair lands
-/// rather than in a batch pass at the end. Cleaning inline is what lets the
-/// loop stop the moment `count` *surviving* pairs exist instead of
-/// re-cleaning the whole set every ten pairs the way the Python does.
+/// Asks once for the opposite trait unless the caller stated it, then per
+/// attempt asks for a question and for a positive and a negative answer to
+/// it. A refusing positive drops the attempt; a refusing negative is asked
+/// once more with `ROLEPLAY_NEG_FIX` and dropped if it still refuses; a pair
+/// that repeats a kept one is dropped. Each pair is cleaned as it lands, so
+/// the loop stops the moment `count` surviving pairs exist, or when
+/// `count × retry_multiplier` attempts are spent. Wisent's Python generator
+/// instead re-cleans the whole set every ten pairs; the prompt texts above
+/// are its, verbatim, because they are the contract the pairs must match.
 pub fn synthesize(
     generator: Generator<'_>,
     options: &SynthesisOptions,
@@ -96,13 +100,11 @@ pub fn synthesize(
     // decoder — Ster's own argmax path at or below zero temperature, and any
     // hosted sampler asked for the same — would return the same question and
     // the same answers forever and the whole run would dedupe to one pair.
-    // The reason is the loop's, so the refusal holds for every route. A
-    // temperature that is not a number is not above zero either.
-    let temperature = options.generation.temperature;
-    if temperature.is_nan()
-        || temperature.is_sign_negative()
-        || temperature.classify() == FpCategory::Zero
-    {
+    // The reason is the loop's, so the refusal holds for every route; a
+    // temperature that is not a number is not above zero either. Sampling
+    // temperature is strictly positive, as Transformers' `TemperatureLogitsWarper` states:
+    // https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py
+    if !(options.generation.temperature > 0.0) {
         bail!(
             "synthesis requires a temperature above zero; argmax generation repeats a single prompt"
         );
@@ -160,7 +162,10 @@ pub fn synthesize(
     let mut index = dedupe::Index::new(options.dedupe)?;
     let mut kept: Vec<ContrastivePair> = Vec::with_capacity(options.count.get());
     let mut questions: Vec<String> = Vec::with_capacity(options.count.get());
-    let max_attempts = options.count.get().saturating_mul(options.retry_multiplier.get());
+    let max_attempts = options
+        .count
+        .get()
+        .saturating_mul(options.retry_multiplier.get());
     let mut attempts: Vec<Attempt> = Vec::new();
 
     while kept.len() < options.count.get() && attempts.len() < max_attempts {
@@ -170,13 +175,19 @@ pub fn synthesize(
             options.count,
             attempts.len()
         ));
-        let mut attempt = Attempt { outcome: Outcome::Kept, repaired_negative: false };
+        let mut attempt = Attempt {
+            outcome: Outcome::Kept,
+            repaired_negative: false,
+        };
         attempt.outcome = 'attempt: {
             let question = ask(QUESTION_INSTRUCTION, &mut asked)?;
             if question.is_empty() {
                 break 'attempt Outcome::Empty;
             }
-            let positive = ask(&persona_prompt(&question, &options.trait_description), &mut asked)?;
+            let positive = ask(
+                &persona_prompt(&question, &options.trait_description),
+                &mut asked,
+            )?;
             if positive.is_empty() {
                 break 'attempt Outcome::Empty;
             }
@@ -187,10 +198,14 @@ pub fn synthesize(
 
             // Whether an answer declined its role is the generator's judgement,
             // asked once per answer and read in one exact form.
-            let refuses = |personality: &str, answer: &str, asked: &mut Vec<String>| -> Result<bool> {
-                let text = ask(&refusal::judgement_prompt(&question, personality, answer), asked)?;
-                refusal::verdict(&generator.label(), &text)
-            };
+            let refuses =
+                |personality: &str, answer: &str, asked: &mut Vec<String>| -> Result<bool> {
+                    let text = ask(
+                        &refusal::judgement_prompt(&question, personality, answer),
+                        asked,
+                    )?;
+                    refusal::verdict(&generator.label(), &text)
+                };
 
             // A refusing positive has no repair path: the trait itself is what the
             // model declined to roleplay, so re-asking would refuse again.
@@ -235,7 +250,12 @@ pub fn synthesize(
     // Diversity is measured over the questions, matching the Python report:
     // the answers inherit their variety from the prompt that produced them.
     let diversity = diversity::compute(&questions);
-    let counted = |outcome: Outcome| attempts.iter().filter(|attempt| attempt.outcome == outcome).count();
+    let counted = |outcome: Outcome| {
+        attempts
+            .iter()
+            .filter(|attempt| attempt.outcome == outcome)
+            .count()
+    };
 
     let report = SynthesisReport {
         generator: generator.label(),
@@ -248,7 +268,10 @@ pub fn synthesize(
         rejected_empty: counted(Outcome::Empty),
         rejected_refusals: counted(Outcome::Refused),
         rejected_duplicates: counted(Outcome::Duplicate),
-        refusal_retries: attempts.iter().filter(|attempt| attempt.repaired_negative).count(),
+        refusal_retries: attempts
+            .iter()
+            .filter(|attempt| attempt.repaired_negative)
+            .count(),
         diversity,
     };
     Ok((

@@ -36,7 +36,12 @@ impl RewardOptions {
     /// checkpoint.
     pub(super) fn fingerprint(&self) -> BTreeMap<String, Value> {
         let mut fingerprint = self.identity.clone();
-        let targets: Vec<&str> = self.spec.targets.iter().map(|target| target.name()).collect();
+        let targets: Vec<&str> = self
+            .spec
+            .targets
+            .iter()
+            .map(|target| target.name())
+            .collect();
         let options = [
             ("objective", Value::from("reward")),
             ("rank", Value::from(self.spec.rank)),
@@ -51,7 +56,11 @@ impl RewardOptions {
             ("max_sequence", Value::from(self.max_sequence)),
             ("seed", Value::from(self.seed)),
         ];
-        fingerprint.extend(options.into_iter().map(|(field, value)| (field.to_owned(), value)));
+        fingerprint.extend(
+            options
+                .into_iter()
+                .map(|(field, value)| (field.to_owned(), value)),
+        );
         fingerprint
     }
 }

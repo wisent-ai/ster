@@ -229,12 +229,11 @@ impl Template {
 /// The byte length of the longest common prefix of two renders, always on a
 /// character boundary so the result can slice either of them.
 fn common_prefix(left: &str, right: &str) -> usize {
-    left.char_indices()
+    left.chars()
         .zip(right.chars())
-        .take_while(|((_, a), b)| a == b)
-        .map(|((index, a), _)| index + a.len_utf8())
-        .last()
-        .unwrap_or(0)
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum()
 }
 
 /// The `chat_template` field, in either shape `transformers` ever wrote it.

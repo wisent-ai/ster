@@ -12,10 +12,14 @@ use super::super::super::{ModelArgs, resolve_pairs};
 use super::super::durable::DurableArgs;
 use super::super::note_precision;
 
+use crate::cli::input::{self, InputCheck};
+
 /// `ster tune bipo`
-#[derive(Debug, clap::Args)]
-pub(in crate::cli) struct BipoArgs {
+#[derive(Debug, clap::Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BipoArgs {
     #[command(flatten)]
+    #[serde(flatten)]
     model: ModelArgs,
     /// JSON file with trait_name and contrastive pairs: the positive side is
     /// what +v makes the model prefer, the negative side what -v makes it
@@ -36,7 +40,8 @@ pub(in crate::cli) struct BipoArgs {
     beta: f64,
     /// Preference objective: dpo for the sigmoid loss, ipo for the squared
     /// error against 1/(2*beta) over length-normalized log-probabilities.
-    #[arg(long, default_value = "dpo")]
+    #[arg(long, default_value = input::LOSS)]
+    #[serde(default = "input::default_loss")]
     loss: String,
     /// Passes over the pair set.
     #[arg(long)]
@@ -57,6 +62,7 @@ pub(in crate::cli) struct BipoArgs {
     /// model's own chat template renders, when it publishes one; off
     /// encodes raw text. Generate in the format the vector was learned in.
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
+    #[serde(default = "input::default_chat_template")]
     chat_template: ChatChoice,
     /// Pairs folded into one forward pass; a pair is two rows, and every
     /// pair of one forward shares that forward's direction.
@@ -65,14 +71,27 @@ pub(in crate::cli) struct BipoArgs {
     /// Dtype the frozen base weights are mapped at: f32, f16, or bf16. The
     /// vector and every optimizer moment stay in f32. bf16 needs --device metal.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
+    #[serde(default = "input::default_precision")]
     precision: Precision,
     #[arg(long)]
     seed: u64,
     #[command(flatten)]
+    #[serde(flatten)]
     durable: DurableArgs,
 }
 
-pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<()> {
+impl InputCheck for BipoArgs {
+    fn check(&self) -> std::result::Result<(), String> {
+        self.model.check()?;
+        if let Some(pairs) = &self.pairs {
+            input::required_path(pairs, "tune/bipo pairs")?;
+        }
+        input::required_path(&self.output, "tune/bipo output")?;
+        self.durable.check()
+    }
+}
+
+pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<serde_json::Value> {
     let BipoArgs {
         model,
         pairs,
@@ -130,9 +149,8 @@ pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<()> {
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
     artifact.save(&output)?;
-    crate::cli::answer(&json!({
+    Ok(json!({
         "path": output.display().to_string(),
         "report": report,
-    }))?;
-    Ok(())
+    }))
 }

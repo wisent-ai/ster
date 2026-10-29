@@ -15,10 +15,11 @@ mod command;
 mod converse;
 mod decide;
 mod decisions;
+pub(crate) mod input;
+mod model;
 mod onboarding;
 mod pairs;
-mod toy;
-mod tune;
+pub(crate) mod tune;
 mod vectors;
 mod workspace;
 
@@ -46,13 +47,20 @@ static TEXT: OnceLock<bool> = OnceLock::new();
 /// Print one answer: the pretty JSON document, or with `--text` one
 /// `path: value` line per leaf field, nested keys joined with dots.
 pub(crate) fn answer<T: Serialize>(value: &T) -> Result<()> {
-    let value = serde_json::to_value(value)?;
-    if !TEXT.get().copied().unwrap_or(false) {
-        println!("{}", serde_json::to_string_pretty(&value)?);
+    answer_document(&serde_json::to_value(value)?)
+}
+
+/// Print an already constructed document without copying its JSON tree.
+pub(crate) fn answer_document(value: &Value) -> Result<()> {
+    let text = TEXT
+        .get()
+        .context("Ster command output mode was not initialized before printing its answer")?;
+    if !*text {
+        println!("{}", serde_json::to_string_pretty(value)?);
         return Ok(());
     }
     let mut lines = String::new();
-    render(&value, "", &mut lines);
+    render(value, "", &mut lines);
     print!("{lines}");
     Ok(())
 }
@@ -83,7 +91,8 @@ fn render(value: &Value, path: &str, lines: &mut String) {
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Args, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ModelArgs {
     /// Hugging Face model id or local model directory.
     #[arg(long)]
@@ -94,6 +103,7 @@ pub(crate) struct ModelArgs {
     /// Runtime device: cpu, metal, or cuda. Parsed by clap, so an unknown
     /// device is a usage error (exit 2) before anything loads.
     #[arg(long, default_value = "cpu", value_parser = DeviceChoice::parse)]
+    #[serde(default = "input::default_device")]
     device: DeviceChoice,
 }
 
@@ -113,7 +123,12 @@ impl ModelArgs {
 
 pub(crate) fn run() -> Result<()> {
     let cli = Cli::parse();
-    let _ = TEXT.set(cli.text);
+    TEXT.set(cli.text).map_err(|attempted| {
+        anyhow::anyhow!(
+            "Ster command output mode is already {:?}; cannot replace it with --text={attempted}",
+            TEXT.get()
+        )
+    })?;
     match cli.command {
         Command::Vector { command } => vectors::run(command),
         Command::Generate(args) => vectors::generate(args),
@@ -126,14 +141,11 @@ pub(crate) fn run() -> Result<()> {
         Command::Workspace { command } => workspace::run(command),
         Command::Pairs { command } => pairs::run(command),
         Command::Tune { command } => tune::run(command),
-        Command::ToyModel { out } => toy::run(&out),
+        Command::Model { command } => model::run(command),
         Command::Converse(args) => converse::run(args),
         Command::Request { operation } => {
-            let status = ster::request::run(&operation)?;
-            if status != 0 {
-                std::process::exit(status);
-            }
-            Ok(())
+            let status = crate::request::run(&operation)?;
+            std::process::exit(status);
         }
     }
 }
@@ -142,7 +154,6 @@ fn resolve_pairs(selected: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = selected {
         return Ok(path);
     }
-    ster::workspace::active_pair_set()?.context(
-        "no active Ster pair set; pass --pairs or import one with `ster workspace import-pairs`",
-    )
+    ster::workspace::active_pair_set()?
+        .context("no active Ster pair set; pass --pairs or import one with `ster workspace import`")
 }

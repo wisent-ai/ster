@@ -93,8 +93,14 @@ fn load_stack(
     // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
     (0..count)
         .map(|index| {
-            Block::load(blocks.pp(index.to_string()), config, index, decoder, adapters)
-                .with_context(|| format!("failed to load T5 {name} block {index}"))
+            Block::load(
+                blocks.pp(index.to_string()),
+                config,
+                index,
+                decoder,
+                adapters,
+            )
+            .with_context(|| format!("failed to load T5 {name} block {index}"))
         })
         .collect()
 }

@@ -1,15 +1,13 @@
-//! What each operation actually runs. Every job mirrors its CLI arm in the
-//! `cli` module: same loads, same workflow call, and the returned document is
-//! the same payload the CLI prints.
+//! Non-tuning native operations. Tuning runs the actual typed CLI operation
+//! through `request::tuning`; it has no mirrored job implementation here.
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use std::path::Path;
 
-use crate::{
-    ChatChoice, DeviceChoice, GenerationOptions, PairSet, Precision, Runtime, SteeringArtifact,
-    TrainingMethod, tune as tune_lib,
+use ster::{
+    GenerationOptions, PairSet, Runtime, SteeringArtifact, tune as tune_lib,
     workflow::{self, parse_layers},
 };
 
@@ -19,30 +17,25 @@ use super::requests::{
 };
 
 mod decide;
+mod model;
 mod pairs;
-mod tune;
-mod tune_flags;
 
 pub(super) use decide::{calibrate_job, decide_job};
+pub(super) use model::{fixture_create_job, tokenizer_create_job};
 
 pub(super) use pairs::{
     pairs_import_job, pairs_inspect_job, pairs_merge_job, pairs_save_job, pairs_synthesize_job,
     workspace_import_pairs_job, workspace_remove_job, workspace_select_job, workspace_show_job,
 };
-pub(super) use tune::{
-    tune_dpo_job, tune_evaluate_job, tune_grpo_job, tune_inspect_job, tune_merge_job,
-    tune_reward_job, tune_sft_job,
-};
 
 /// Every job mirrors its CLI arm in main.rs: same loads, same workflow call,
 /// and the returned document is the same payload the CLI prints.
 pub(in crate::request) fn train_job(request: TrainRequest) -> Result<Value> {
-    let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    let mut runtime = request.model.load_runtime_at(request.precision)?;
+    let chat = runtime.set_chat_template(request.chat_template)?;
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
-    let method = TrainingMethod::parse(&request.method)?;
-    let artifact = workflow::train(&runtime, &pair_set, &layers, method)?;
+    let artifact = workflow::train(&runtime, &pair_set, &layers, request.method)?;
     artifact.save(Path::new(&request.output))?;
     let mut summary = workflow::artifact_summary(&artifact);
     chat.annotate(&mut summary)?;
@@ -50,8 +43,8 @@ pub(in crate::request) fn train_job(request: TrainRequest) -> Result<Value> {
 }
 
 pub(in crate::request) fn optimize_job(request: OptimizeRequest) -> Result<Value> {
-    let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    let mut runtime = request.model.load_runtime_at(request.precision)?;
+    let chat = runtime.set_chat_template(request.chat_template)?;
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let selection = workflow::optimize(&runtime, &pair_set, &layers, request.holdout)?;
@@ -62,8 +55,8 @@ pub(in crate::request) fn optimize_job(request: OptimizeRequest) -> Result<Value
 }
 
 pub(in crate::request) fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
-    let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    let mut runtime = request.model.load_runtime_at(request.precision)?;
+    let chat = runtime.set_chat_template(request.chat_template)?;
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
     tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
@@ -90,7 +83,6 @@ pub(in crate::request) fn evaluate_job(request: EvaluateRequest) -> Result<Value
 }
 
 pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value> {
-    let precision = Precision::parse(&request.precision)?;
     // Both documents are read before a single weight is mapped, so the two
     // halves of the wrong-document refusal cost the same. An adapter was
     // already refused this early because it is attached during the load; a
@@ -116,13 +108,13 @@ pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value
         Some(adapter) => Runtime::load_with_adapter_at(
             &request.model.model,
             request.model.revision.as_deref(),
-            DeviceChoice::parse(&request.model.device)?,
+            request.model.device,
             Path::new(adapter),
-            precision,
+            request.precision,
         )?,
-        None => request.model.load_runtime_at(&request.precision)?,
+        None => request.model.load_runtime_at(request.precision)?,
     };
-    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    runtime.set_chat_template(request.chat_template)?;
     for part in &request.steering {
         tune_lib::warn_on_provenance(Path::new(&part.vector), "direction", &runtime);
     }
@@ -141,8 +133,8 @@ pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value
 }
 
 pub(in crate::request) fn extract_job(request: ExtractRequest) -> Result<Value> {
-    let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    let mut runtime = request.model.load_runtime_at(request.precision)?;
+    runtime.set_chat_template(request.chat_template)?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let input = Path::new(&request.input);
     let output = Path::new(&request.output);
@@ -151,7 +143,7 @@ pub(in crate::request) fn extract_job(request: ExtractRequest) -> Result<Value> 
 }
 
 pub(in crate::request) fn parity_job(request: ParityRequest) -> Result<Value> {
-    let runtime = request.model.load_runtime_at(&request.precision)?;
+    let runtime = request.model.load_runtime_at(request.precision)?;
     Ok(serde_json::to_value(workflow::parity(
         &runtime,
         Path::new(&request.input),
@@ -189,8 +181,8 @@ pub(in crate::request) fn compare_job(request: CompareRequest) -> Result<Value> 
 pub(in crate::request) fn project_job(request: ProjectRequest) -> Result<Value> {
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
-    let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    let mut runtime = request.model.load_runtime_at(request.precision)?;
+    let chat = runtime.set_chat_template(request.chat_template)?;
     tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
     let options = workflow::ProjectOptions {
         layer: request.layer,
@@ -207,15 +199,14 @@ pub(in crate::request) fn project_job(request: ProjectRequest) -> Result<Value> 
 /// document the CLI prints.
 pub(in crate::request) fn curve_job(request: CurveRequest) -> Result<Value> {
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
-    let method = TrainingMethod::parse(&request.method)?;
-    let mut runtime = request.model.load_runtime_at(&request.precision)?;
-    let chat = runtime.set_chat_template(ChatChoice::parse(&request.chat_template)?)?;
+    let mut runtime = request.model.load_runtime_at(request.precision)?;
+    let chat = runtime.set_chat_template(request.chat_template)?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let report = workflow::curve(
         &runtime,
         &pair_set,
         &layers,
-        method,
+        request.method,
         request.holdout,
         &request.sizes,
     )?;
