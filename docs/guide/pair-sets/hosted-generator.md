@@ -3,22 +3,30 @@
 How `ster pairs synthesize --generator brama` reaches a hosted model. The
 [pair sets guide](../pair-sets.md) links here from its synthesis section.
 
-The hosted route reads Brama's own documented client variables: `BRAMA_URL`,
-the gateway base, and `BRAMA_BEARER`, the caller's bearer. Both are required;
-there is no built-in gateway. Ster reads both from its own environment
-and never reads a vault itself. Nothing puts them there for you: there is no
-launcher script in this repository, no wrapper on the fleet, and no service
-unit that exports them, and Ster Desktop runs `ster request` with the
-environment it inherited without setting a variable of its own. You export
-both before the run. An unset base is refused with
-`BRAMA_URL is unset or empty; export the Brama gateway base Ster should call`,
-an empty bearer with
+The hosted route never dials Brama itself. An exported `BRAMA_URL`, the
+gateway base, is the operator's choice and is used as given, with
+`BRAMA_BEARER`, the caller's bearer. Without `BRAMA_URL`, Ster asks Stado which
+model service answers it, `stado capabilities resolve inference --consumer
+ster`: Brama's route for this machine, called with `BRAMA_BEARER` and
+`--generator-model`; or, when Brama does not answer, the OpenAI-compatible
+endpoint the operator declared in its place (`capabilities.inference.endpoint.url`),
+called with its own declared model (`capabilities.inference.endpoint.model`) and
+the key of the role `capabilities.inference.endpoint.key_role` names, read through
+`stado credentials get`. The report names the generator as `brama:<route>` or
+`model-endpoint:<model>`. When no alternative answers, the run is refused before
+any call with `BRAMA_URL is unset and no inference alternative answers ster:
+<product> at <route>: <cause>; …`, naming every alternative and how to export
+`BRAMA_URL` or declare an endpoint instead. Nothing exports `BRAMA_BEARER` for
+you: there is no launcher script in this repository, no wrapper on the fleet,
+and no service unit that sets it, and Ster Desktop runs `ster request` with the
+environment it inherited. An empty bearer while Brama serves is refused with
 `BRAMA_BEARER is unset or empty; export Ster's own Brama bearer before running this command`,
 a bearer that is not Unicode, without printing it, with
 `BRAMA_BEARER is not Unicode; export Ster's own Brama bearer as text before running this command`,
 and a base that is neither https nor explicit loopback with
-`BRAMA_URL must be an https:// base or an explicit http:// loopback address, because Brama answers plain http elsewhere with 426 secure_transport_required`.
-Loopback is `localhost` or any loopback IP address, IPv6 in brackets.
+`the model service base <base> must be https:// or an explicit http:// loopback address, because Brama answers plain http elsewhere with 426 secure_transport_required`.
+Loopback is `localhost` or any loopback IP address, IPv6 in brackets. The real
+journey is `tests/synthesis/resolved.sh`.
 
 The bearer to export is Ster's own client identity, never another product's.
 Ster is a declared consumer of `brama` in Stado's service directory —
@@ -62,11 +70,11 @@ by name. Neither `--seed` nor `--top-p` therefore travels, and a hosted run is
 not seed-reproducible: the provider owns its sampler, and the running
 deduplicator is what suppresses repeated draws. The bounds on `max_tokens` and
 `temperature` are Brama's alone: a value outside them is refused by the
-gateway on the first pair, in its own words. A gateway refusal is
-surfaced in Brama's own words, as `brama refused the completion: 401 unauthorized`
-— the status followed by the `message` from Brama's `{"error":{...}}` envelope.
-A body without that envelope becomes
-`brama refused the completion with {status} and a body that is not its error envelope: {body}`.
+gateway on the first pair, in its own words. A refusal is surfaced in the
+answering service's own words, as `brama refused the completion: 401 unauthorized`
+(or `model-endpoint refused …`) — the status followed by the `message` from its
+`{"error":{...}}` envelope. A body without that envelope becomes
+`<provider> refused the completion with {status} and a body that is not its error envelope: {body}`.
 The body is retained whole, including HTML. An unreadable refusal names the
 gateway and HTTP status alongside the read cause; malformed successful replies
 retain their complete body beside the JSON or missing-message diagnostic.

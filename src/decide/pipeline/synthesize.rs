@@ -147,7 +147,7 @@ pub fn synthesize(
     let set = ExampleSet { examples };
     set.validate()?;
     let report = SynthesizeReport {
-        generator: format!("brama:{}", gateway.model()),
+        generator: format!("{}:{}", gateway.provider(), gateway.model()),
         domain: schema.domain.clone(),
         questions: schema.questions.len(),
         requested,

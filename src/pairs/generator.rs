@@ -20,7 +20,7 @@ impl Generator<'_> {
     pub fn label(&self) -> String {
         match self {
             Self::Local(runtime) => format!("local:{}", runtime.model_id),
-            Self::Gateway(gateway) => format!("brama:{}", gateway.model()),
+            Self::Gateway(gateway) => format!("{}:{}", gateway.provider(), gateway.model()),
         }
     }
 
