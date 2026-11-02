@@ -37,32 +37,41 @@ use serde_json::{Value, json};
 /// which never asks it. Mint it where the gateway looks.
 pub const URL_VAR: &str = "BRAMA_URL";
 pub const BEARER_VAR: &str = "BRAMA_BEARER";
-/// The consumer Ster asks Stado's capability resolution as.
+/// The consumer Ster asks Stado's capabilities as.
 const CONSUMER: &str = "ster";
 
+/// Where Ster's completions go.
+enum Route {
+    /// The `BRAMA_URL` the operator exported, with `BRAMA_BEARER`. Built once
+    /// per gateway: a `ureq` agent owns the connection pool and the TLS
+    /// setup, so rebuilding it per call would pay a fresh handshake for every
+    /// pair in a synthesis run.
+    Named {
+        base: String,
+        bearer: String,
+        agent: ureq::Agent,
+    },
+    /// Stado's inference alternatives: each request is handed to `stado
+    /// capabilities call inference --consumer ster`.
+    Stado,
+}
+
 pub struct Gateway {
-    base: String,
-    /// None for an endpoint answering in Brama's place that names no key.
-    bearer: Option<String>,
+    route: Route,
     model: String,
-    /// Who answers: `brama`, or the provider Stado hands out in its place.
-    provider: String,
-    /// Built once per gateway: a `ureq` agent owns the connection pool and the
-    /// TLS setup, so rebuilding it per call would pay a fresh handshake for
-    /// every pair in a synthesis run.
-    agent: ureq::Agent,
+    /// Who answered the last completion: `brama` for a named router, else the
+    /// alternative Stado says answered.
+    provider: std::sync::Mutex<String>,
 }
 
 impl Gateway {
     /// The model service Ster writes with. An exported `BRAMA_URL` is the
     /// operator's choice and is used as given, with `BRAMA_BEARER`. Otherwise
-    /// Ster never dials Brama itself: it asks `stado capabilities resolve
-    /// inference --consumer ster`, which hands out Brama's route (called with
-    /// `BRAMA_BEARER` and `model`) or the OpenAI-compatible endpoint declared
-    /// in its place (called with its own declared model and the key of the
-    /// role it names). When no alternative answers, the refusal names each
-    /// one with its route and cause, beside the `BRAMA_URL` the operator may
-    /// export instead.
+    /// Ster names no model service: each request is handed to `stado
+    /// capabilities call inference --consumer ster`, which sends it to the
+    /// first alternative in Stado's selected order that answers it, so an
+    /// alternative Stado adds, or another order, changes what writes Ster's
+    /// pairs without Ster changing. No bearer of Ster's is read then.
     pub fn from_env(model: &str) -> Result<Self> {
         let model = model.trim();
         if model.is_empty() {
@@ -70,58 +79,40 @@ impl Gateway {
                 "the generator model must be a Brama alias, a canonical provider/model route, or a selector"
             );
         }
-        let agent = ureq::AgentBuilder::new().build();
-        if let Some(base) = base_url()? {
-            require_secure_transport(&base)?;
-            return Ok(Self {
-                base,
-                bearer: Some(bearer()?),
-                model: model.to_owned(),
-                provider: "brama".to_owned(),
-                agent,
-            });
-        }
-        let resolved = resolve()?;
-        let base = resolved.route.trim_end_matches('/').to_owned();
-        require_secure_transport(&base)?;
-        if resolved.provider == "brama" {
-            return Ok(Self {
-                base,
-                bearer: Some(bearer()?),
-                model: model.to_owned(),
-                provider: resolved.provider,
-                agent,
-            });
-        }
-        let Some(declared) = resolved.model else {
-            bail!(
-                "{} at {base} answers in Brama's place but declares no model: set capabilities.inference.endpoint.model",
-                resolved.provider
-            );
+        let route = match base_url()? {
+            Some(base) => {
+                require_secure_transport(&base)?;
+                Route::Named {
+                    base,
+                    bearer: bearer()?,
+                    agent: ureq::AgentBuilder::new().build(),
+                }
+            }
+            None => Route::Stado,
         };
-        let bearer = match &resolved.key_role {
-            Some(role) => Some(role_key(role, &resolved.provider, &base)?),
-            None => None,
+        let provider = match route {
+            Route::Named { .. } => "brama",
+            Route::Stado => "stado",
         };
         Ok(Self {
-            base,
-            bearer,
-            model: declared,
-            provider: resolved.provider,
-            agent,
+            route,
+            model: model.to_owned(),
+            provider: std::sync::Mutex::new(provider.to_owned()),
         })
     }
 
-    /// The route this gateway generates with, for reports; an endpoint in
-    /// Brama's place is named with its provider.
+    /// The route this gateway generates with, for reports.
     pub fn model(&self) -> &str {
         &self.model
     }
 
-    /// Who answers this gateway: `brama`, or the provider Stado handed out
-    /// in its place.
-    pub fn provider(&self) -> &str {
-        &self.provider
+    /// Who answered: `brama` for a named router; through Stado, the
+    /// alternative that answered the last completion (`stado` before any).
+    pub fn provider(&self) -> String {
+        self.provider
+            .lock()
+            .map(|provider| provider.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
     /// One buffered completion. Returns the assistant text, trimmed.
@@ -147,54 +138,22 @@ impl Gateway {
             "temperature": temperature,
         })
         .to_string();
-        let url = format!("{}/v1/chat/completions", self.base);
-        let response = stado_wait::blocking(
-            stado_wait::Kind::Network,
-            format!("{} completion from {}", self.provider, self.model),
-            &url,
-            || {
-                let request = self
-                    .agent
-                    .post(&url)
-                    .set("content-type", "application/json");
-                let request = match &self.bearer {
-                    Some(bearer) => request.set("authorization", &format!("Bearer {bearer}")),
-                    None => request,
-                };
-                request.send_string(&body)
-            },
-        );
-        let response = match response {
-            Ok(response) => response,
-            // `ureq` hands back every non-2xx as this arm, response body intact.
-            Err(ureq::Error::Status(status, response)) => {
-                let body = response.into_string().with_context(|| {
-                    format!(
-                        "failed to read the refusal of {} at {} with status {status}",
-                        self.provider, self.base
-                    )
-                })?;
-                return Err(refusal(&self.provider, status, &body));
-            }
-            // The transport error quotes the URL it failed on; the bearer lives
-            // in a header and never appears in it.
-            Err(ureq::Error::Transport(transport)) => {
-                let detail = match transport.message() {
-                    Some(message) => format!("{} ({message})", transport.kind()),
-                    None => transport.kind().to_string(),
-                };
-                bail!(
-                    "failed to reach {} at {}: {detail}",
-                    self.provider,
-                    self.base
-                );
+        let text = match &self.route {
+            Route::Named {
+                base,
+                bearer,
+                agent,
+            } => named(base, bearer, agent, &self.model, &body)?,
+            Route::Stado => {
+                let (provider, text) = call_stado(&body)?;
+                if let Ok(mut answered) = self.provider.lock() {
+                    *answered = provider;
+                }
+                text
             }
         };
-        let text = response
-            .into_string()
-            .context("failed to read Brama's completion body")?;
         let value: Value = serde_json::from_str(&text).with_context(|| {
-            format!("Brama returned a completion body that is not JSON: {text}")
+            format!("the completion body is not JSON: {text}")
         })?;
         let content = value
             .get("choices")
@@ -205,14 +164,99 @@ impl Gateway {
             .and_then(Value::as_str);
         match content {
             Some(content) => Ok(content.trim().to_owned()),
-            None => bail!("Brama's answer carried no assistant message: {text}"),
+            None => bail!("the answer carried no assistant message: {text}"),
         }
     }
 }
 
+/// One completion from the router `BRAMA_URL` names, with `BRAMA_BEARER`.
+fn named(base: &str, bearer: &str, agent: &ureq::Agent, model: &str, body: &str) -> Result<String> {
+    let url = format!("{base}/v1/chat/completions");
+    let response = stado_wait::blocking(
+        stado_wait::Kind::Network,
+        format!("brama completion from {model}"),
+        &url,
+        || {
+            agent
+                .post(&url)
+                .set("content-type", "application/json")
+                .set("authorization", &format!("Bearer {bearer}"))
+                .send_string(body)
+        },
+    );
+    let response = match response {
+        Ok(response) => response,
+        // `ureq` hands back every non-2xx as this arm, response body intact.
+        Err(ureq::Error::Status(status, response)) => {
+            let body = response.into_string().with_context(|| {
+                format!("failed to read the refusal of brama at {base} with status {status}")
+            })?;
+            return Err(refusal("brama", status, &body));
+        }
+        // The transport error quotes the URL it failed on; the bearer lives
+        // in a header and never appears in it.
+        Err(ureq::Error::Transport(transport)) => {
+            let detail = match transport.message() {
+                Some(message) => format!("{} ({message})", transport.kind()),
+                None => transport.kind().to_string(),
+            };
+            bail!("failed to reach brama at {base}: {detail}");
+        }
+    };
+    response
+        .into_string()
+        .context("failed to read Brama's completion body")
+}
+
+/// Hand one request to `stado capabilities call inference --consumer ster`
+/// and read the alternative that answered and its answer. A refusal carries
+/// Stado's sentence, which names each alternative with its cause, beside the
+/// `BRAMA_URL` the operator may export instead.
+fn call_stado(body: &str) -> Result<(String, String)> {
+    use std::io::Write;
+    let operation = format!("stado capabilities call inference --consumer {CONSUMER} --json");
+    let mut child = std::process::Command::new("stado")
+        .args(["capabilities", "call", "inference", "--consumer", CONSUMER, "--json"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!("{URL_VAR} is unset and `{operation}` could not run; export {URL_VAR} or install Stado")
+        })?;
+    child
+        .stdin
+        .take()
+        .context("stado's standard input could not be opened")?
+        .write_all(body.as_bytes())
+        .with_context(|| format!("the request could not be handed to `{operation}`"))?;
+    let output = stado_wait::child_output(child, &operation)
+        .with_context(|| format!("`{operation}` did not end"))?;
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stderr);
+        let cause = said
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("Error: "))
+            .or_else(|| said.lines().rev().find(|line| !line.trim().is_empty()))
+            .unwrap_or("it said nothing")
+            .trim();
+        bail!(
+            "{URL_VAR} is unset and no inference alternative answered `{operation}` ({}): {cause}; answer it as Stado's sentence says, or export {URL_VAR}",
+            output.status
+        );
+    }
+    let printed: Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("`{operation}` printed an answer that is not JSON"))?;
+    let provider = printed["resolution"]["provider"]
+        .as_str()
+        .unwrap_or("stado")
+        .to_owned();
+    Ok((provider, printed["answer"].to_string()))
+}
+
 /// `BRAMA_URL` with trailing slashes trimmed when the operator exported one;
-/// `None` when it is unset or empty, and Stado's capability resolution then
-/// names the model service.
+/// `None` when it is unset or empty, and Stado's alternatives then answer.
 ///
 /// A non-unicode value is refused by name and never echoed: the same launcher
 /// exports the bearer, and a message that quotes environment values is one
@@ -225,109 +269,6 @@ fn base_url() -> Result<Option<String>> {
     };
     let base = raw.trim().trim_end_matches('/');
     Ok((!base.is_empty()).then(|| base.to_owned()))
-}
-
-/// What `stado capabilities resolve inference --consumer ster` handed out.
-struct Resolved {
-    provider: String,
-    route: String,
-    model: Option<String>,
-    key_role: Option<String>,
-}
-
-/// Ask Stado which inference alternative answers Ster. A refusal names every
-/// alternative with its route and cause, and the `BRAMA_URL` the operator
-/// may export instead.
-fn resolve() -> Result<Resolved> {
-    let operation = format!("stado capabilities resolve inference --consumer {CONSUMER} --json");
-    let output = stado_wait::output(std::process::Command::new("stado").args([
-        "capabilities",
-        "resolve",
-        "inference",
-        "--consumer",
-        CONSUMER,
-        "--json",
-    ]))
-    .with_context(|| {
-        format!(
-            "{URL_VAR} is unset and `{operation}` could not run; export {URL_VAR} or install Stado"
-        )
-    })?;
-    if !output.status.success() {
-        let named = [&output.stdout, &output.stderr]
-            .into_iter()
-            .filter_map(|bytes| serde_json::from_slice::<Value>(bytes).ok())
-            .find_map(|envelope| envelope["details"]["unreachable"].as_array().cloned())
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| {
-                        format!(
-                            "{} at {}: {}",
-                            item["product"].as_str().unwrap_or("an alternative"),
-                            item["route"].as_str().unwrap_or("its route"),
-                            item["cause"].as_str().unwrap_or("no cause given")
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            })
-            .filter(|named| !named.is_empty());
-        match named {
-            Some(named) => bail!(
-                "{URL_VAR} is unset and no inference alternative answers {CONSUMER}: {named}; export {URL_VAR}, or declare an endpoint in Brama's place (stado config set capabilities.inference.endpoint.url <url> and capabilities.inference.endpoint.model <model>)"
-            ),
-            None => bail!(
-                "{URL_VAR} is unset and `{operation}` exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        }
-    }
-    let answer: Value = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("`{operation}` printed an answer that is not JSON"))?;
-    let text = |field: &str| {
-        answer
-            .get(field)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_owned)
-    };
-    let (Some(provider), Some(route)) = (text("provider"), text("route")) else {
-        bail!("`{operation}` answered no provider and route");
-    };
-    Ok(Resolved {
-        provider,
-        route,
-        model: text("model"),
-        key_role: text("key_role"),
-    })
-}
-
-/// The key of the endpoint Stado handed out, read as the role it names
-/// (`stado credentials get --role ROLE --field token`).
-fn role_key(role: &str, provider: &str, base: &str) -> Result<String> {
-    let output = stado_wait::output(std::process::Command::new("stado").args([
-        "credentials",
-        "get",
-        "--role",
-        role,
-        "--field",
-        "token",
-    ]))
-    .with_context(|| format!("stado credentials get --role {role} could not run"))?;
-    if !output.status.success() {
-        bail!(
-            "{provider} at {base} answers in Brama's place, but the key of role {role} cannot be read: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let key = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if key.is_empty() {
-        bail!("stado credentials get --role {role} answered an empty key");
-    }
-    Ok(key)
 }
 
 /// Refuses a base Brama itself would answer `426 secure_transport_required`.

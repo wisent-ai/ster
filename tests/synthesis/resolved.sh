@@ -1,42 +1,36 @@
 #!/bin/sh
-# Real test that `ster pairs synthesize --generator brama` takes its model
-# service from Stado's capability resolution, never from a gateway it dials
-# itself, through the built binary and the real Stado STER_TEST_STADO names
-# (first on PATH as `stado`), in a home under this run's directory whose
-# registry places Brama nowhere.
+# Real test that `ster pairs synthesize --generator brama` names no model
+# service when BRAMA_URL is unset: each request is handed to `stado
+# capabilities call inference --consumer ster`, through the built binary and
+# the real Stado STER_TEST_STADO names (first on PATH as `stado`), in a home
+# under this run's directory whose registry places Brama nowhere.
 #
-#   1. BRAMA_URL unset and nothing declared in Brama's place: the run is
-#      refused before any call, naming brama and model-endpoint with causes.
-#   2. A real OpenAI-compatible endpoint declared in Brama's place
-#      (capabilities.inference.endpoint.url, its model, and the role whose
-#      item in an owner-only file store holds its key): the run writes pairs
-#      with that endpoint's own model, the report names model-endpoint as the
-#      generator, and Stado records that model-endpoint served ster.
+#   1. Nothing answers: the run is refused, naming brama with its cause and
+#      the `stado capabilities attestation record` command that answers the
+#      request Stado kept, and no pair set is written.
+#   2. A statement is recorded for each request Stado kept, and the run is
+#      repeated until every request it makes is answered: the run writes a
+#      pair set, its report names attestation as the generator, and Stado
+#      records that attestation served ster. Ster names no alternative.
 #
 # Every command, its exit status and output go to the run's report.txt.
 #
-# Usage: STER=target/debug/ster STER_TEST_STADO=<stado> \
-#   STER_TEST_ENDPOINT=<base url> STER_TEST_ENDPOINT_MODEL=<model id> \
-#   STER_TEST_ENDPOINT_KEY=<key> tests/synthesis/resolved.sh
+# Usage: STER=target/debug/ster STER_TEST_STADO=<stado> tests/synthesis/resolved.sh
 set -eu
 cd "$(dirname "$0")/../.."
 BIN=$(cd "$(dirname "${STER:?set STER to the ster binary under test}")" && pwd)/$(basename "$STER")
 STADO=${STER_TEST_STADO:?set STER_TEST_STADO to the real stado executable}
-ENDPOINT=${STER_TEST_ENDPOINT:?set STER_TEST_ENDPOINT to a real OpenAI-compatible base url}
-MODEL=${STER_TEST_ENDPOINT_MODEL:?set STER_TEST_ENDPOINT_MODEL to the model that endpoint serves}
-KEY=${STER_TEST_ENDPOINT_KEY:?set STER_TEST_ENDPOINT_KEY to that endpoint key}
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/synthesis/resolved-$RUN"
 REPORT="$ROOT/report.txt"
 mkdir -p "$ROOT/home" "$ROOT/bin" "$ROOT/tmp" "$ROOT/storage"
 ln -s "$STADO" "$ROOT/bin/stado"
-echo "revision: $(git rev-parse HEAD)$(git diff --quiet || echo ' (dirty)')" >"$REPORT"
+echo "revision: $(git rev-parse HEAD 2>/dev/null || echo unknown)" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
-echo "stado: $("$STADO" --version)" >>"$REPORT"
 
 export HOME="$ROOT/home" PATH="$ROOT/bin:$PATH" TMPDIR="$ROOT/tmp"
 export WC_STORAGE_BACKEND=local WC_LOCAL_STORAGE_PATH="$ROOT/storage"
-unset BRAMA_URL BRAMA_BEARER STADO_INFERENCE_ENDPOINT_URL STADO_INFERENCE_ENDPOINT_MODEL STADO_INFERENCE_ENDPOINT_KEY_ROLE
+unset BRAMA_URL BRAMA_BEARER STADO_INFERENCE_ORDER STADO_ATTESTATIONS STADO_CAPABILITIES_RECORD STADO_CONFIG
 
 fail() {
   echo "FAIL: $1" | tee -a "$REPORT" >&2
@@ -63,27 +57,47 @@ contains() {
 "$STADO" config init >>"$REPORT" 2>&1
 SYNTH="pairs synthesize --generator brama --generator-model wisent-backend/chat/primary --trait formal --count 1 --retry-multiplier 10 --dedupe-bits 3 --dedupe-bands 8 --max-new-tokens 200 --temperature 0.7 --top-p 0.9 --seed 1 --opposite casual"
 
-# 1. Nothing answers: every alternative is named, before any call.
+# 1. Nothing answers: every alternative is named, and the request is kept.
 # shellcheck disable=SC2086
 run 1 $SYNTH --output "$ROOT/refused.json"
-contains "refusal names the resolution" "$err" "no inference alternative answers ster"
+contains "refusal names the call" "$err" "no inference alternative answered \`stado capabilities call inference --consumer ster"
 contains "refusal names brama" "$err" "brama at "
-contains "refusal names the endpoint alternative" "$err" "model-endpoint at capabilities.inference.endpoint.url"
+contains "refusal names how to answer the kept request" "$err" "stado capabilities attestation record inference --consumer ster"
 [ ! -e "$ROOT/refused.json" ] || fail "a refused run wrote a pair set"
 
-# 2. A real endpoint answers in Brama's place.
-"$STADO" config set credentials.store "file://$ROOT/credentials.json" >>"$REPORT" 2>&1
-printf '{"token":"%s"}' "$KEY" | "$STADO" credentials put --role ster-journey-endpoint >>"$REPORT" 2>&1
-"$STADO" config set capabilities.inference.endpoint.url "$ENDPOINT" >>"$REPORT" 2>&1
-"$STADO" config set capabilities.inference.endpoint.model "$MODEL" >>"$REPORT" 2>&1
-"$STADO" config set capabilities.inference.endpoint.key_role ster-journey-endpoint >>"$REPORT" 2>&1
-# shellcheck disable=SC2086
-run 0 $SYNTH --output "$ROOT/served.json"
-contains "the report names the endpoint and its model" "$out" "model-endpoint:$MODEL"
+# 2. Answer every request Stado keeps until the run asks nothing new, each
+#    as its prompt asks: the question it asks for, the answer in the named
+#    register, and the refusal judgement as the JSON object it requires.
+answered=0
+round=0
+while :; do
+  round=$((round + 1))
+  [ "$round" -le 40 ] || fail "the run kept asking new requests after $answered statements: $(grep -v '^czekam\|^koniec' "$ROOT/stderr" | tail -2)"
+  waiting=$("$STADO" capabilities attestation list inference --consumer ster --json | jq -r '.[] | select(.attested == false) | .request')
+  for digest in $waiting; do
+    prompt=$("$STADO" capabilities attestation show inference --consumer ster "$digest" | jq -r '.asked.messages[-1].content')
+    case "$prompt" in
+      "A model was asked"*) text='{"refuses": false}' ;;
+      "Write one short question"*) text="Has the meeting been moved?" ;;
+      *"personality: casual"*) text="yeah, it got bumped to friday, no biggie" ;;
+      *) text="Indeed, the meeting has been rescheduled to Friday." ;;
+    esac
+    printf '%s' "$text" | "$STADO" capabilities attestation record inference --consumer ster "$digest" \
+      --checked "wrote the answer in the register the request names" >>"$REPORT" 2>&1
+    answered=$((answered + 1))
+  done
+  set +e
+  out=$("$BIN" $SYNTH --output "$ROOT/served.json" 2>"$ROOT/stderr" </dev/null)
+  status=$?
+  set -e
+  [ "$status" -eq 0 ] && break
+done
+printf '$ ster %s (round %s, %s statements)\nexit: %s\nstdout: %s\n\n' "$SYNTH" "$round" "$answered" "$status" "$out" >>"$REPORT"
+contains "the report names attestation as the generator" "$out" "attestation:wisent-backend/chat/primary"
 [ -s "$ROOT/served.json" ] || fail "the served run wrote no pair set"
 served=$("$STADO" capabilities inference --json | jq -r '.alternatives[0].served.ster.provider')
-[ "$served" = model-endpoint ] || fail "Stado records $served as serving ster, not model-endpoint"
-echo "ok: Stado records model-endpoint serving ster" >>"$REPORT"
+[ "$served" = attestation ] || fail "Stado records $served as serving ster, not attestation"
+echo "ok: Stado records attestation serving ster" >>"$REPORT"
 
 echo "PASS" >>"$REPORT"
 echo "resolved evidence: $REPORT"

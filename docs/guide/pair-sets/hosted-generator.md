@@ -5,21 +5,24 @@ How `ster pairs synthesize --generator brama` reaches a hosted model. The
 
 The hosted route never dials Brama itself. An exported `BRAMA_URL`, the
 gateway base, is the operator's choice and is used as given, with
-`BRAMA_BEARER`, the caller's bearer. Without `BRAMA_URL`, Ster asks Stado which
-model service answers it, `stado capabilities resolve inference --consumer
-ster`: Brama's route for this machine, called with `BRAMA_BEARER` and
-`--generator-model`; or, when Brama does not answer, the OpenAI-compatible
-endpoint the operator declared in its place (`capabilities.inference.endpoint.url`),
-called with its own declared model (`capabilities.inference.endpoint.model`) and
-the key of the role `capabilities.inference.endpoint.key_role` names, read through
-`stado credentials get`. The report names the generator as `brama:<route>` or
-`model-endpoint:<model>`. When no alternative answers, the run is refused before
-any call with `BRAMA_URL is unset and no inference alternative answers ster:
-<product> at <route>: <cause>; …`, naming every alternative and how to export
-`BRAMA_URL` or declare an endpoint instead. Nothing exports `BRAMA_BEARER` for
-you: there is no launcher script in this repository, no wrapper on the fleet,
-and no service unit that sets it, and Ster Desktop runs `ster request` with the
-environment it inherited. An empty bearer while Brama serves is refused with
+`BRAMA_BEARER`, the caller's bearer. Without `BRAMA_URL`, Ster names no model
+service: each request is handed to `stado capabilities call inference
+--consumer ster`, which sends it to the first alternative in Stado's selected
+order that answers it — Brama, or a statement recorded for that exact request
+(`stado capabilities attestation record`) — and prints its answer. An
+alternative Stado adds, or an order it selects, changes what writes Ster's
+pairs without Ster changing, and no bearer of Ster's is read then. The report
+names the generator as `<alternative>:<route>`: `brama:<route>` for an exported
+`BRAMA_URL`, else the alternative Stado says answered, such as
+`attestation:<route>`. When no alternative answers, the run is refused with
+`BRAMA_URL is unset and no inference alternative answered \`stado capabilities
+call inference --consumer ster --json\` (<status>): <Stado's sentence>; answer
+it as Stado's sentence says, or export BRAMA_URL`; Stado's sentence names every
+alternative with its cause and the command that answers the kept request.
+With `BRAMA_URL` exported, nothing exports `BRAMA_BEARER` for you: there is no
+launcher script in this repository, no wrapper on the fleet, and no service
+unit that sets it, and Ster Desktop runs `ster request` with the environment it
+inherited. An empty bearer is refused with
 `BRAMA_BEARER is unset or empty; export Ster's own Brama bearer before running this command`,
 a bearer that is not Unicode, without printing it, with
 `BRAMA_BEARER is not Unicode; export Ster's own Brama bearer as text before running this command`,
@@ -72,7 +75,7 @@ deduplicator is what suppresses repeated draws. The bounds on `max_tokens` and
 `temperature` are Brama's alone: a value outside them is refused by the
 gateway on the first pair, in its own words. A refusal is surfaced in the
 answering service's own words, as `brama refused the completion: 401 unauthorized`
-(or `model-endpoint refused …`) — the status followed by the `message` from its
+— the status followed by the `message` from its
 `{"error":{...}}` envelope. A body without that envelope becomes
 `<provider> refused the completion with {status} and a body that is not its error envelope: {body}`.
 The body is retained whole, including HTML. An unreadable refusal names the
