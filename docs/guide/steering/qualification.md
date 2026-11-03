@@ -204,3 +204,19 @@ and the actual native evaluation consumer must read the selected artifact.
 Excluded fraction endpoints and an omitted holdout refuse without publishing
 an artifact. Source models and operator inputs remain unchanged. Reports are
 retained under `.build/vectors/optimize/`.
+
+## Token scores
+
+```sh
+tests/steering/score.sh
+```
+
+The journey creates the reference checkpoint (`docs/examples/model/fixture.json`),
+fits a direction on `docs/examples/pairs.json` at layers 1 and 2, and scores a
+text at layer 2 through `vector score` and through `ster request vector/score`.
+Every token must carry its index in order, and `min`, `max` and `mean` must be
+those of the scores; a text file must score as the text does, and both
+surfaces must answer the same scores. A layer the artifact carries no vector
+at, a layer the model lacks, an empty text, no text, a text and a text file
+both given, and a request with no model refuse. `STER` selects the binary.
+Reports are retained under `target/real-tests/steering/`.
