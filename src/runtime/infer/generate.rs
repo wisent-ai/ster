@@ -292,7 +292,7 @@ impl Runtime {
     /// The checks every steering artifact passes before it touches this
     /// model: a valid document, fitted for this model, at this width, at
     /// layers this model has.
-    fn check_steering(&self, artifact: &SteeringArtifact) -> Result<()> {
+    pub fn check_steering(&self, artifact: &SteeringArtifact) -> Result<()> {
         artifact.validate()?;
         if artifact.model != self.model_id {
             bail!(

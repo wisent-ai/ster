@@ -6,6 +6,10 @@ use serde::Deserialize;
 use super::{ModelRequest, Validate, defaults::*, require};
 use ster::{ChatChoice, Precision, TrainingMethod};
 
+mod score;
+
+pub(in crate::request) use score::ScoreRequest;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::request) struct TrainRequest {

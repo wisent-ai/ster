@@ -28,7 +28,7 @@ pub(super) use pairs::{
 };
 pub(super) use vectors::{
     AblateRequest, CompareRequest, CurveRequest, EvaluateRequest, ExtractRequest, GenerateRequest,
-    InspectRequest, OptimizeRequest, ParityRequest, ProjectRequest, TrainRequest,
+    InspectRequest, OptimizeRequest, ParityRequest, ProjectRequest, ScoreRequest, TrainRequest,
 };
 
 /// Field-level validation before a job starts streaming. The message is the

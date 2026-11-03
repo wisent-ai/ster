@@ -555,6 +555,7 @@ impl SteeringLlama {
             None => None,
         };
         let mut activations = BTreeMap::new();
+        let mut positions = BTreeMap::new();
         // Solar's block skip connections keep up to two earlier hidden states.
         let mut kept: [Option<Tensor>; 2] = [None, None];
         // Gemma 3n's AltUp streams beside the first, which is `hidden`.
@@ -664,6 +665,9 @@ impl SteeringLlama {
                     .to_dtype(DType::F32)?
                     .to_vec1::<f32>()?;
                 activations.insert(index, activation);
+                // Every position's state, `[sequence, hidden]`: a view of the
+                // tensor the layer wrote, so no copy is made until it is read.
+                positions.insert(index, hidden.i(0)?);
             }
             if let Some(plan) = steering {
                 if let Some(vector) = plan.vector(index) {
@@ -732,6 +736,7 @@ impl SteeringLlama {
             logits,
             hidden: hidden.to_dtype(DType::F32)?,
             activations,
+            positions,
         })
     }
 }

@@ -10,6 +10,7 @@ use super::{Runtime, requested_activations, validate_layers};
 
 mod encoder_decoder;
 mod generate;
+mod positions;
 
 pub use generate::{Completion, GenerationOptions};
 

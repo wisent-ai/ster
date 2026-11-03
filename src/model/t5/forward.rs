@@ -144,6 +144,9 @@ impl Model {
             logits,
             hidden: hidden.to_dtype(DType::F32)?,
             activations,
+            // A decoder that reads a target, not a text of its own: no
+            // per-token read is offered here (`ster vector score` refuses it).
+            positions: BTreeMap::new(),
         })
     }
 

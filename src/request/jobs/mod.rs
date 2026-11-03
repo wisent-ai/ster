@@ -13,7 +13,7 @@ use ster::{
 
 use super::requests::{
     AblateRequest, CompareRequest, CurveRequest, EvaluateRequest, ExtractRequest, GenerateRequest,
-    InspectRequest, OptimizeRequest, ParityRequest, ProjectRequest, TrainRequest,
+    InspectRequest, OptimizeRequest, ParityRequest, ProjectRequest, ScoreRequest, TrainRequest,
 };
 
 mod decide;
@@ -191,6 +191,18 @@ pub(in crate::request) fn project_job(request: ProjectRequest) -> Result<Value> 
     };
     let mut report =
         serde_json::to_value(workflow::project(&runtime, &pair_set, &artifact, &options)?)?;
+    chat.annotate(&mut report)?;
+    Ok(report)
+}
+
+/// Mirrors `ster vector score`: the same read, the same projection, and the
+/// document the CLI prints.
+pub(in crate::request) fn score_job(request: ScoreRequest) -> Result<Value> {
+    let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
+    let mut runtime = request.model.load_runtime_at(request.precision)?;
+    let chat = runtime.set_chat_template(request.chat_template)?;
+    tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
+    let mut report = serde_json::to_value(workflow::score(&runtime, &artifact, &request.text, request.layer)?)?;
     chat.annotate(&mut report)?;
     Ok(report)
 }

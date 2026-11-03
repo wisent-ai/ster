@@ -137,6 +137,7 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
         "vector/inspect" => job.run(inspect_job),
         "vector/compare" => job.run(compare_job),
         "vector/project" => job.run(project_job),
+        "vector/score" => job.run(score_job),
         "generate" => job.run(generate_job),
         "extract" => job.run(extract_job),
         "parity" => job.run(parity_job),

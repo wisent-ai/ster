@@ -50,6 +50,9 @@ pub(super) enum VectorCommand {
     /// pair side read with and without it, projected onto the principal
     /// components of the unsteered reads.
     Project(project::ProjectArgs),
+    /// Score a text token by token along an artifact's direction: every
+    /// token's state at one layer projected onto the unit direction there.
+    Score(project::ScoreArgs),
     /// Write an artifact's direction out of a checkpoint's weights: the
     /// residual-stream writes at its layers lose that share of it, and the
     /// model carries the change with no artifact beside it.
@@ -65,6 +68,7 @@ pub(super) fn run(command: VectorCommand) -> Result<()> {
         VectorCommand::Inspect(args) => inspect(args),
         VectorCommand::Compare(args) => compare::compare(args),
         VectorCommand::Project(args) => project::project(args),
+        VectorCommand::Score(args) => project::score(args),
         VectorCommand::Ablate(args) => ablate::ablate(args),
     }
 }

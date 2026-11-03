@@ -77,7 +77,7 @@ pub(super) enum Command {
     /// result's status as the exit status.
     Request {
         /// The operation: vector/train, vector/optimize, vector/curve, vector/evaluate,
-        /// vector/inspect, vector/compare, vector/project, vector/ablate, generate, extract, parity, decide,
+        /// vector/inspect, vector/compare, vector/project, vector/score, vector/ablate, generate, extract, parity, decide,
         /// calibrate, model/fixture/create, model/tokenizer/create, workspace/import, workspace/show,
         /// workspace/select, workspace/remove, pairs/import, pairs/inspect, pairs/merge,
         /// pairs/save, pairs/synthesize, or tune/sft, tune/dpo, tune/reward,

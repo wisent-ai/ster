@@ -17,8 +17,10 @@ use crate::{
 use super::progress;
 
 mod pca;
+mod score;
 
 use pca::dot;
+pub use score::{ScoreReport, TokenScore, score};
 
 /// What the caller decides about one projection.
 pub struct ProjectOptions {

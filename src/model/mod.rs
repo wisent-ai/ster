@@ -2717,5 +2717,11 @@ pub struct ForwardOutput {
     /// Always returned, because a `Tensor` is a handle and returning it costs
     /// a refcount rather than a copy.
     pub hidden: Tensor,
+    /// Each captured layer's last-position state, as `train`, `extract` and
+    /// every pair read take it.
     pub activations: BTreeMap<usize, Vec<f32>>,
+    /// Each captured layer's state at every position, `[sequence, hidden]`,
+    /// for a read that scores a text token by token (`ster vector score`).
+    /// Empty from a pass that keeps none.
+    pub positions: BTreeMap<usize, Tensor>,
 }

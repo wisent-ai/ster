@@ -39,6 +39,24 @@ before and after steering, and the share of negatives steering brought nearer.
 Refusals: a layer the model lacks, no components, an artifact of another model
 or width, and reads that do not vary at all.
 
+## Scoring a text token by token
+
+`ster vector score --vector <VECTOR> --input <TEXT> --layer <L>` shows where
+a text sits along a direction, one token at a time: the text is read through
+the model once, at `--layer`, as `extract` reads a prompt (the chat template
+applied unless `--chat-template off`), and every token's state there is
+projected onto the artifact's unit direction at that layer. The answer lists
+each token (`index`, `id`, `text` as the tokenizer spells it, `score`) and
+the scores' `min`, `max` and `mean`, beside `layer`, `trait` and the model.
+A score is a length along the direction in the units of that layer's
+states; Ster gives no threshold for it, and a reader compares tokens of one
+text, or texts read alike. `--input-file FILE` reads the text from a file
+instead. Refusals: a layer the model lacks, a layer the artifact carries no
+vector at (naming the layers it does carry), an artifact of another model or
+width, a direction with no usable length, an empty text, a text and a
+text file both given, and an encoder-decoder checkpoint, whose decoder reads
+no text of its own.
+
 ## Writing a direction into the weights
 
 `ster vector ablate` makes a direction permanent by directional projection.

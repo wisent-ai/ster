@@ -32,6 +32,9 @@ ster vector compare <ARTIFACT> <ARTIFACT>... --clusters <N> [--layers <L,L,...>]
 ster vector project --model <MODEL> --pairs <PAIRS> --vector <VECTOR> --layer <L>
                     --strength <S> --components <N> [--revision <REVISION>]
                     [--device cpu] [--chat-template auto|off] [--precision f32|f16|bf16]
+ster vector score --model <MODEL> --vector <VECTOR> --layer <L>
+                  (--input <TEXT> | --input-file <FILE>) [--revision <REVISION>]
+                  [--device cpu] [--chat-template auto|off] [--precision f32|f16|bf16]
 ster vector ablate --model <MODEL> --vector <VECTOR> --strength <S> --output <DIR>
                    [--revision <REVISION>]
 ster generate --model <MODEL> (--prompt <PROMPT> | --prompts <SET> --output <FILE>)
@@ -52,7 +55,7 @@ direction, or a logistic probe. `--chat-template` and `--precision` are on
 every one of these commands except `vector inspect` and `vector compare`,
 which load no model. Each command prints a pretty JSON document on stdout,
 and each is also an operation of `ster request`: `ster request vector/train`,
-`vector/optimize`, `vector/curve`, `vector/evaluate`, `vector/inspect`, `vector/compare`, `vector/project`, `vector/ablate`,
+`vector/optimize`, `vector/curve`, `vector/evaluate`, `vector/inspect`, `vector/compare`, `vector/project`, `vector/score`, `vector/ablate`,
 `generate` and `extract` read the request body as one JSON document on stdin,
 where every flag above is a camelCase field, `chatTemplate` and `precision`
 included, each defaulting to what the CLI defaults to, and print NDJSON log
@@ -251,8 +254,9 @@ Ster.
 
 ## Geometry and provenance
 
-- [Comparison, projection and writing directions into weights](steering/geometry.md)
-  covers artifact geometry, result fields and useful refusals.
+- [Comparison, projection, token scores and writing directions into weights](steering/geometry.md)
+  covers artifact geometry, a text scored token by token along a direction,
+  result fields and useful refusals.
 - [Provenance and chat-format transfer](steering/provenance.md) covers native
   compatibility warnings and the published format-transfer measurement.
 
