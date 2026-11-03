@@ -35,14 +35,15 @@ pub(crate) fn observed() -> Result<Option<StarRequest>, JourneyError> {
     request()?.observe()
 }
 
-/// Count one CLI run that completed. The request, on the run that makes it,
-/// goes to standard error, so standard output keeps only the answer; a
-/// request that cannot be kept is said there too, and the run's own answer
-/// stands.
+/// Count one CLI run that completed, when a person reads this terminal. The
+/// request, on the run that makes it, goes to standard error, so standard
+/// output keeps only the answer; a request that cannot be kept is said there
+/// too, and the run's own answer stands.
 pub(super) fn observe() {
-    match observed() {
-        Ok(Some(made)) => eprintln!("{}", made.text("ster")),
-        Ok(None) => {}
+    match request() {
+        Ok(request) => {
+            request.observe_reporting();
+        }
         Err(error) => {
             eprintln!("ster: this run is not counted toward the GitHub star request: {error}")
         }
