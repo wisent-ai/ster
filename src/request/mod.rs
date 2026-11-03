@@ -13,7 +13,15 @@
 //! stdout carries only NDJSON events:
 //!
 //!   {"type":"log","stream":"stderr","chunk":"..."}      (zero or more)
+//!   {"type":"star_request","title":"...","body":"...","repository":"...","actions":5}
+//!                                                        (at most one, before the result)
 //!   {"type":"result","status":<exit>,"json":{...}}      (exactly one, last)
+//!
+//! `star_request` is the GitHub star request the shared onboarding runtime
+//! makes once, when a completed `vector/train`, `vector/optimize`,
+//! `generate`, `decide` or `tune/<objective>` is the fifth counted run: the
+//! desktop shows it beside the result. `star/status`, `star/dismiss` and
+//! `star/reset` answer the same status `ster star` prints.
 //!
 //! `json` is the same document the CLI command prints, and `status` is the
 //! status the process exits with:
@@ -69,37 +77,90 @@ pub fn run(operation: &str) -> Result<i32> {
     Ok(status)
 }
 
+/// The operations whose completion counts toward the GitHub star request:
+/// each runs a model and answers what a person asked for.
+fn counted(operation: &str) -> bool {
+    matches!(
+        operation,
+        "vector/train"
+            | "vector/optimize"
+            | "generate"
+            | "decide"
+            | "tune/sft"
+            | "tune/dpo"
+            | "tune/bipo"
+            | "tune/reward"
+            | "tune/grpo"
+            | "tune/decide"
+    )
+}
+
+/// The star request, as its event, when this completed run makes it; said on
+/// a log event when the request cannot be kept, and the run's own result
+/// stands.
+fn star_request_event() {
+    match crate::cli::star::observed() {
+        Ok(Some(request)) => emit(&json!({
+            "type": "star_request",
+            "title": request.title,
+            "body": request.body,
+            "repository": request.repository,
+            "actions": request.actions,
+        })),
+        Ok(None) => {}
+        Err(cause) => emit_log(&format!(
+            "ster: this run is not counted toward the GitHub star request: {cause}\n"
+        )),
+    }
+}
+
 fn dispatch(operation: &str, body: &[u8]) -> i32 {
+    let counts = counted(operation);
+    let job = Job { body, counts };
     if let Some(word) = operation.strip_prefix("tune/") {
         let request = tuning::decode(word, request_document(body))
             .map_err(|error| format!("{operation}: {error}"));
-        return run_decoded_job(request, crate::cli::tune::execute);
+        return run_decoded_job(request, counts, crate::cli::tune::execute);
     }
     match operation {
-        "model/fixture/create" => run_job(body, fixture_create_job),
-        "model/tokenizer/create" => run_job(body, tokenizer_create_job),
-        "workspace/import" => run_job(body, workspace_import_pairs_job),
-        "workspace/show" => run_job(body, workspace_show_job),
-        "workspace/select" => run_job(body, workspace_select_job),
-        "workspace/remove" => run_job(body, workspace_remove_job),
-        "vector/train" => run_job(body, train_job),
-        "vector/optimize" => run_job(body, optimize_job),
-        "vector/curve" => run_job(body, curve_job),
-        "vector/ablate" => run_job(body, ablate_job),
-        "vector/evaluate" => run_job(body, evaluate_job),
-        "vector/inspect" => run_job(body, inspect_job),
-        "vector/compare" => run_job(body, compare_job),
-        "vector/project" => run_job(body, project_job),
-        "generate" => run_job(body, generate_job),
-        "extract" => run_job(body, extract_job),
-        "parity" => run_job(body, parity_job),
-        "decide" => run_job(body, decide_job),
-        "calibrate" => run_job(body, calibrate_job),
-        "pairs/import" => run_job(body, pairs_import_job),
-        "pairs/inspect" => run_job(body, pairs_inspect_job),
-        "pairs/merge" => run_job(body, pairs_merge_job),
-        "pairs/save" => run_job(body, pairs_save_job),
-        "pairs/synthesize" => run_job(body, pairs_synthesize_job),
+        "model/fixture/create" => job.run(fixture_create_job),
+        "model/tokenizer/create" => job.run(tokenizer_create_job),
+        "workspace/import" => job.run(workspace_import_pairs_job),
+        "workspace/show" => job.run(workspace_show_job),
+        "workspace/select" => job.run(workspace_select_job),
+        "workspace/remove" => job.run(workspace_remove_job),
+        "vector/train" => job.run(train_job),
+        "vector/optimize" => job.run(optimize_job),
+        "vector/curve" => job.run(curve_job),
+        "vector/ablate" => job.run(ablate_job),
+        "vector/evaluate" => job.run(evaluate_job),
+        "vector/inspect" => job.run(inspect_job),
+        "vector/compare" => job.run(compare_job),
+        "vector/project" => job.run(project_job),
+        "generate" => job.run(generate_job),
+        "extract" => job.run(extract_job),
+        "parity" => job.run(parity_job),
+        "decide" => job.run(decide_job),
+        "calibrate" => job.run(calibrate_job),
+        "pairs/import" => job.run(pairs_import_job),
+        "pairs/inspect" => job.run(pairs_inspect_job),
+        "pairs/merge" => job.run(pairs_merge_job),
+        "pairs/save" => job.run(pairs_save_job),
+        "pairs/synthesize" => job.run(pairs_synthesize_job),
+        "star/status" | "star/dismiss" | "star/reset" => {
+            let verb = operation.trim_start_matches("star/");
+            match crate::cli::star::status_document(verb) {
+                Ok(document) => {
+                    emit_result(COMPLETED, document);
+                    COMPLETED
+                }
+                Err(error) => {
+                    emit_log(&format!("error: {error}\n"));
+                    emit_result(FAILED, json!({"error": error}));
+                    FAILED
+                }
+            }
+        }
         _ => refuse(&format!("unknown operation: {operation}")),
     }
 }
@@ -117,17 +178,30 @@ impl From<Value> for JobOutcome {
     }
 }
 
-/// Parse and validate the body, then run the operation. Failures before it
-/// starts (a body that does not parse, a missing field) are refusals; a
-/// failure while it runs mirrors the CLI instead: the refusal sentence on a
-/// log event and one failed result.
-fn run_job<R, F, O>(body: &[u8], run: F) -> i32
-where
-    R: DeserializeOwned + Validate,
-    F: FnOnce(R) -> Result<O>,
-    O: Into<JobOutcome>,
-{
-    run_decoded_job(serde_json::from_slice::<R>(request_document(body)), run)
+/// One request's body, and whether its completion counts toward the GitHub
+/// star request.
+struct Job<'a> {
+    body: &'a [u8],
+    counts: bool,
+}
+
+impl Job<'_> {
+    /// Parse and validate the body, then run the operation. Failures before
+    /// it starts (a body that does not parse, a missing field) are refusals;
+    /// a failure while it runs mirrors the CLI instead: the refusal sentence
+    /// on a log event and one failed result.
+    fn run<R, F, O>(&self, run: F) -> i32
+    where
+        R: DeserializeOwned + Validate,
+        F: FnOnce(R) -> Result<O>,
+        O: Into<JobOutcome>,
+    {
+        run_decoded_job(
+            serde_json::from_slice::<R>(request_document(self.body)),
+            self.counts,
+            run,
+        )
+    }
 }
 
 fn request_document(body: &[u8]) -> &[u8] {
@@ -138,7 +212,7 @@ fn request_document(body: &[u8]) -> &[u8] {
     }
 }
 
-fn run_decoded_job<R, F, O, E>(request: std::result::Result<R, E>, run: F) -> i32
+fn run_decoded_job<R, F, O, E>(request: std::result::Result<R, E>, counts: bool, run: F) -> i32
 where
     R: Validate,
     F: FnOnce(R) -> Result<O>,
@@ -158,6 +232,9 @@ where
     }
     match run(request).map(Into::into) {
         Ok(JobOutcome::Completed(document)) => {
+            if counts {
+                star_request_event();
+            }
             emit_result(COMPLETED, document);
             COMPLETED
         }

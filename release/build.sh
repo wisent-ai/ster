@@ -32,7 +32,10 @@ fi
 build_root="$output_dir/.build"
 release_dir="$output_dir/release"
 mkdir -p "$build_root" "$release_dir"
-CARGO_TARGET_DIR="$build_root" cargo build --locked --release --bin ster --manifest-path "$source_dir/Cargo.toml"
+# Through Stado's Cargo executor, which replaces the locked private Git
+# package (the onboarding runtime the GitHub star request runs on) with the
+# manifest's private-cargo-sources input: a worker holds no Git credential.
+CARGO_TARGET_DIR="$build_root" stado product cargo --manifest-path "$source_dir/Cargo.toml" build --locked --release --bin ster
 
 # The bare binary is what a stado-release install copies out of the stage
 # map; the archive beside it is what a person downloads.

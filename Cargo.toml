@@ -46,8 +46,12 @@ regex = "1.11"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 # The one wait mechanism: every network call says on stderr what it waits
-# for, where, since when, and how it ended. Blocking waits only.
-stado-wait = { git = "https://github.com/wisent-ai/stado", rev = "476cffc463a48bc349a5fae26f84aa8966428107", default-features = false }
+# for, where, since when, and how it ended. Blocking waits only. Declared by
+# repository without a revision, as the onboarding runtime declares it, so
+# Cargo.lock holds one stado-wait.
+stado-wait = { git = "https://github.com/wisent-ai/stado", package = "stado-wait", default-features = false }
+# The GitHub star request every Wisent product makes (`ster star`).
+wisent-onboarding-client = { git = "https://github.com/wisent-ai/echo-web", rev = "6d20fe6c1bc2403c4cbce0a8217b65747e4ab0b3", package = "wisent-onboarding-client" }
 tokenizers = "0.22.1"
 unicode-normalization = "0.1"
 ureq = "2.12"

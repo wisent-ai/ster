@@ -8,6 +8,7 @@ use super::decide::{CalibrateArgs, DecideArgs};
 use super::decisions::DecisionsCommand;
 use super::model::ModelCommand;
 use super::pairs::PairsCommand;
+use super::star::StarCommand;
 use super::tune::TuneCommand;
 use super::vectors::{ExtractArgs, GenerateArgs, OnboardingArgs, ParityArgs, VectorCommand};
 use super::workspace::WorkspaceCommand;
@@ -64,6 +65,12 @@ pub(super) enum Command {
     Model {
         #[command(subcommand)]
         command: ModelCommand,
+    },
+    /// Read, dismiss or reset the GitHub star request made once after the
+    /// fifth completed run of a model.
+    Star {
+        #[command(subcommand)]
+        command: StarCommand,
     },
     /// Run one JSON request from a desktop app to completion: the body on
     /// stdin, NDJSON log events and one result event on stdout, and the

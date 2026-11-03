@@ -19,6 +19,7 @@ pub(crate) mod input;
 mod model;
 mod onboarding;
 mod pairs;
+pub(crate) mod star;
 pub(crate) mod tune;
 mod vectors;
 mod workspace;
@@ -129,6 +130,28 @@ pub(crate) fn run() -> Result<()> {
             TEXT.get()
         )
     })?;
+    // A run of a model that answered what was asked counts toward the
+    // GitHub star request once it completed; a command that failed returns
+    // its error before anything is counted.
+    let counts = match &cli.command {
+        Command::Vector { command } => {
+            matches!(
+                command,
+                vectors::VectorCommand::Train(_) | vectors::VectorCommand::Optimize(_)
+            )
+        }
+        Command::Generate(_) | Command::Decide(_) => true,
+        Command::Tune { command } => matches!(
+            command,
+            tune::TuneCommand::Sft(_)
+                | tune::TuneCommand::Dpo(_)
+                | tune::TuneCommand::Bipo(_)
+                | tune::TuneCommand::Reward(_)
+                | tune::TuneCommand::Grpo(_)
+                | tune::TuneCommand::Decide(_)
+        ),
+        _ => false,
+    };
     match cli.command {
         Command::Vector { command } => vectors::run(command),
         Command::Generate(args) => vectors::generate(args),
@@ -142,12 +165,17 @@ pub(crate) fn run() -> Result<()> {
         Command::Pairs { command } => pairs::run(command),
         Command::Tune { command } => tune::run(command),
         Command::Model { command } => model::run(command),
+        Command::Star { command } => star::run(command),
         Command::Converse(args) => converse::run(args),
         Command::Request { operation } => {
             let status = crate::request::run(&operation)?;
             std::process::exit(status);
         }
+    }?;
+    if counts {
+        star::observe();
     }
+    Ok(())
 }
 
 fn resolve_pairs(selected: Option<PathBuf>) -> Result<PathBuf> {
