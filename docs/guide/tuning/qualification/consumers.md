@@ -1,9 +1,13 @@
 # Tuning consumer qualification
 
-These journeys execute the actual Ster CLI and native request frontend against
-an explicitly declared local checkpoint. Export qualification also executes
-vLLM's public batch interface on the actual exported adapter. No simulated
-provider or owned Python driver stands in for that consumer.
+These journeys are specified to execute the actual Ster CLI and native request
+frontend against an explicitly declared local checkpoint, with export
+qualification also executing vLLM's public batch interface on the actual
+exported adapter; no simulated provider or owned Python driver stands in for
+that consumer. None of them is in the repository yet: `tests/tuning/bipo.mjs`,
+`tests/tuning/export/creation.mjs`, `tests/tuning/system.mjs` and
+`tests/tuning/checkpoints.mjs` do not exist, so nothing runs them and no result
+of them qualifies Ster. The commands below are how each runs once written.
 
 ## Candidate and isolation
 

@@ -134,8 +134,9 @@ section sends those fields for every Tune objective. A run started from one
 surface resumes through the other because both deserialize the same inputs
 and execute the same training implementation.
 
-The real lifecycle journey is
-`node --env-file=.build/qualification.env tests/tuning/checkpoints.mjs`.
+The real lifecycle journey is specified as
+`node --env-file=.build/qualification.env tests/tuning/checkpoints.mjs`; that
+file does not exist in the repository yet, so nothing runs it.
 It trains every objective from explicit declarations, observes atomic
 checkpoint-pointer publication, interrupts the actual writer with SIGTERM and
 resumes through the native request frontend. Final tensors and loss must match

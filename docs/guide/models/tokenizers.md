@@ -110,11 +110,10 @@ STER_TEST_BINARY_SHA256=<artifact SHA-256 from the qualification build>
 STER_TEST_TOKENIZER_SPEC=<absolute tokenizer declaration path>
 ```
 
-Then run with Node's environment-file support:
-
-```sh
-node --env-file=.build/qualification.env tests/tokenizer/creation.mjs
-```
+Not written yet: `tests/tokenizer/creation.mjs` does not exist in the
+repository, so nothing runs it and no result of it qualifies Ster. When it
+exists it runs with Node's environment-file support, as
+`node --env-file=.build/qualification.env tests/tokenizer/creation.mjs`.
 
 This journey executes the actual CLI and native API, reads the persisted native
 vocabulary, verifies stable model identities and repeated output, exercises
