@@ -30,6 +30,24 @@ This is the `digest` each entry of the workspace state records.
 | `conflicting` | The id is taken by different content, or the destination file exists outside the workspace index; nothing is overwritten |
 | `rejected` | The document is invalid, the `--name` is not a valid id, or the file name gives no id |
 
+A `rejected` or `conflicting` report carries its refusal in `reason` and its
+declared cause in `cause` (`id`, `code`, `exit`, `usage`, `retryable`,
+`remedy`), and the command ends in that refusal: exit `2` for an invalid
+`--name` or a file name that gives no id, exit `1` otherwise.
+
+## Selecting and removing a set
+
+`ster workspace select <id>` makes an imported set the one every command run
+without `--pairs` reads; selecting the set that is already active is refused.
+`ster workspace remove <id>` deletes the workspace's copy first and only then
+takes the set out of the workspace document: a copy that cannot be deleted
+leaves the workspace exactly as it was, and the same command removes it once
+the directory allows it. The source file is never touched.
+
+Every refusal of the workspace, with its exit status and the test that
+provokes it, is on [How the workspace fails](../errors/workspace.md);
+`tests/workspace/failures.sh` drives each one through the CLI.
+
 ## Lifecycle qualification
 
 `tests/workspace/lifecycle.mjs` runs the real CLI and native request interface.

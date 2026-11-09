@@ -18,14 +18,16 @@ ster onboarding import or replay first use
 ster decide     answer typed questions about a state from one forward pass
 ster calibrate  fit the temperature that makes decision probabilities honest
 ster workspace  import, activate, and inspect persistent pair sets
+ster errors     list, show and check every declared way a command fails
 ster request    run one desktop request to completion: JSON body on stdin, NDJSON events on stdout
 ```
 
 Run `ster <command> --help` for exact arguments. Every answer is one JSON
 document on stdout for machines; the global `--text` flag prints the same
-answer as `path: value` lines for a person. Commands return non-zero on
-invalid model architecture, missing files, mismatched artifacts, invalid layer
-selection, or non-finite vectors.
+answer as `path: value` lines for a person. A refusal names what failed, why,
+the state it observed and what fixes it, and exits `2` for a usage refusal,
+`69` when retrying unchanged can help and `1` otherwise; [How Ster
+fails](../errors.md) lists every declared cause.
 
 Ster replaced the Python `wisent` CLI, whose twenty-nine hyphenated verbs
 each spelled an object into a command name. Each is now a verb of the object
@@ -81,3 +83,5 @@ Each command family has its own page in this repository:
 - [Desktop requests](../desktop-requests.md) — `ster request`: how
   Ster Desktop runs each workflow as one process per operation, the JSON body,
   the NDJSON events, and what each exit status means.
+- [How Ster fails](../errors.md) — `ster errors`: every declared cause of
+  every functionality, its exit status and its test, one page per area.

@@ -2,6 +2,7 @@ pub mod artifact;
 pub mod brama;
 pub mod chat;
 pub mod decide;
+pub mod failures;
 pub mod fixture;
 pub mod lora;
 pub mod model;

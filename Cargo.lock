@@ -2937,6 +2937,7 @@ dependencies = [
  "tokenizers",
  "unicode-normalization",
  "ureq",
+ "wisent-errors",
  "wisent-onboarding-client",
 ]
 
@@ -3920,6 +3921,11 @@ name = "winsafe"
 version = "0.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
+
+[[package]]
+name = "wisent-errors"
+version = "1.0.0"
+source = "git+https://github.com/wisent-ai/wisent-errors?rev=054d31d11a03b64f217e0090b000d49f64ac954e#054d31d11a03b64f217e0090b000d49f64ac954e"
 
 [[package]]
 name = "wisent-onboarding-client"

@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::failures::{pairs, refuse};
 use crate::{chat, runtime::Precision};
 
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
@@ -24,11 +25,15 @@ pub struct PairSet {
 
 impl PairSet {
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = fs::read(path)
-            .with_context(|| format!("failed to read pair set {}", path.display()))?;
-        let value: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid pair set JSON in {}", path.display()))?;
-        value.validate(&path.display().to_string())?;
+        let shown = path.display().to_string();
+        let bytes = fs::read(path).map_err(|error| pairs::read_refusal(&shown, &error))?;
+        let value: Self = serde_json::from_slice(&bytes).map_err(|error| {
+            refuse(
+                &pairs::MALFORMED,
+                &[("path", &shown), ("error", &error.to_string())],
+            )
+        })?;
+        value.validate(&shown)?;
         Ok(value)
     }
 
@@ -37,18 +42,28 @@ impl PairSet {
     /// `label` is the identity quoted in the refusal sentence. Callers that read
     /// from disk pass the path; callers that validate an in-memory set built from
     /// an API request pass whatever names it in the operator's mental model. The
-    /// two sentences below are published in the runbook, so they must stay
-    /// byte-identical regardless of which caller triggers them.
+    /// two causes below carry the sentences the runbook publishes, so they stay
+    /// byte-identical inside the refusal regardless of which caller triggers them.
     pub fn validate(&self, label: &str) -> Result<()> {
         if self.pairs.is_empty() {
-            bail!("pair set {label} contains no pairs");
+            return Err(refuse(&pairs::EMPTY, &[("label", label)]));
         }
-        if self
-            .pairs
-            .iter()
-            .any(|pair| pair.positive.trim().is_empty() || pair.negative.trim().is_empty())
-        {
-            bail!("pair set {label} contains an empty positive or negative prompt");
+        for (index, pair) in self.pairs.iter().enumerate() {
+            let side = if pair.positive.trim().is_empty() {
+                "positive"
+            } else if pair.negative.trim().is_empty() {
+                "negative"
+            } else {
+                continue;
+            };
+            return Err(refuse(
+                &pairs::BLANK,
+                &[
+                    ("label", label),
+                    ("index", &index.to_string()),
+                    ("side", side),
+                ],
+            ));
         }
         Ok(())
     }
@@ -59,20 +74,33 @@ impl PairSet {
     /// hand-edited and diffed in review, so the extra bytes buy a readable file and
     /// a one-line-per-change diff. The trailing newline keeps POSIX tooling happy.
     pub fn save(&self, path: &Path) -> Result<()> {
-        self.validate(&path.display().to_string())?;
+        let shown = path.display().to_string();
+        self.validate(&shown)?;
         // `Path::parent` yields an empty path for a bare file name; creating that
         // directory fails, so only create a parent that actually names one.
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+            fs::create_dir_all(parent).map_err(|error| {
+                refuse(
+                    &pairs::DIRECTORY,
+                    &[
+                        ("path", &shown),
+                        ("directory", &parent.display().to_string()),
+                        ("error", &error.to_string()),
+                    ],
+                )
+            })?;
         }
         let mut bytes = serde_json::to_vec_pretty(self)?;
         bytes.push(b'\n');
-        fs::write(path, bytes)
-            .with_context(|| format!("failed to write pair set {}", path.display()))
+        fs::write(path, bytes).map_err(|error| {
+            refuse(
+                &pairs::UNWRITABLE,
+                &[("path", &shown), ("error", &error.to_string())],
+            )
+        })
     }
 }
 

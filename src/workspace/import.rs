@@ -4,13 +4,16 @@
 
 use std::{fs, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use blake2::{Blake2b512, Digest};
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::PairSet;
+use crate::failures::{self, refuse, workspace::import};
 
-use super::state::{PairSetEntry, load_state, save_state, workspace_root};
+use super::name::{derived_name, validate_name};
+use super::state::{PairSetEntry, create_directory, load_state, save_state, workspace_root};
 
 /// How much of a pair set's BLAKE2b-512 digest the workspace keeps as its
 /// content identity, as every recorded `digest` holds it.
@@ -30,7 +33,7 @@ pub enum ImportStatus {
     Conflicting,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ImportReport {
     pub status: ImportStatus,
     pub source: String,
@@ -40,8 +43,15 @@ pub struct ImportReport {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pair_count: Option<usize>,
+    /// The refusal of a rejected or conflicting import, as a person reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The same refusal's declared cause, as a machine reads it: its id,
+    /// code, exit status and fix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Value>,
+    #[serde(skip)]
+    refusal: Option<anyhow::Error>,
 }
 
 impl ImportReport {
@@ -52,6 +62,44 @@ impl ImportReport {
             ImportStatus::Imported | ImportStatus::Unchanged
         )
     }
+
+    /// The refusal a rejected or conflicting import ends in, taken out of
+    /// the report: every surface prints the report, then ends in it.
+    pub fn take_refusal(&mut self) -> Option<anyhow::Error> {
+        self.refusal.take()
+    }
+
+    fn accepted_as(status: ImportStatus, source: &Path, entry: &PairSetEntry) -> Self {
+        Self {
+            status,
+            source: source.display().to_string(),
+            id: Some(entry.id.clone()),
+            path: Some(entry.path.display().to_string()),
+            pair_count: Some(entry.pair_count),
+            reason: None,
+            cause: None,
+            refusal: None,
+        }
+    }
+
+    fn refused(
+        status: ImportStatus,
+        source: String,
+        found: Option<(&str, &Path)>,
+        pair_count: Option<usize>,
+        refusal: anyhow::Error,
+    ) -> Self {
+        Self {
+            status,
+            source,
+            id: found.map(|(id, _)| id.to_owned()),
+            path: found.map(|(_, path)| path.display().to_string()),
+            pair_count,
+            reason: Some(format!("{refusal:#}")),
+            cause: failures::declared(&refusal).map(failures::Declared::summary),
+            refusal: Some(refusal),
+        }
+    }
 }
 
 /// Validate and adopt an existing canonical pair-set document.
@@ -61,40 +109,39 @@ impl ImportReport {
 /// copy is exactly the document Ster's training operations read. A content
 /// digest makes a repeated import idempotent, while a reused logical name with
 /// different content is reported as a conflict and never overwrites the first
-/// set.
+/// set. A rejected or conflicting import is a report carrying its refusal;
+/// a failure while writing is an error that says what was undone.
 pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<ImportReport> {
-    let source_display = source.display().to_string();
     let pair_set = match PairSet::load(source) {
         Ok(pair_set) => pair_set,
+        Err(refusal) => return Ok(rejected(source, None, refusal)),
+    };
+    let count = pair_set.pairs.len();
+    // The load just read it, so only a file taken away since then lands here.
+    let source = match fs::canonicalize(source) {
+        Ok(source) => source,
         Err(error) => {
-            return Ok(ImportReport {
-                status: ImportStatus::Rejected,
-                source: source_display,
-                id: None,
-                path: None,
-                pair_count: None,
-                reason: Some(format!("{error:#}")),
-            });
+            let refusal = failures::pairs::read_refusal(&source.display().to_string(), &error);
+            return Ok(rejected(source, None, refusal));
         }
     };
-    let source = fs::canonicalize(source)
-        .with_context(|| format!("failed to resolve pair set {}", source.display()))?;
     let named = match requested_name {
         Some(name) => validate_name(name).map(|()| name.to_owned()),
         None => derived_name(&source),
     };
     let id = match named {
         Ok(id) => id,
-        Err(reason) => {
-            return Ok(ImportReport {
-                status: ImportStatus::Rejected,
-                source: source.display().to_string(),
-                id: None,
-                path: None,
-                pair_count: Some(pair_set.pairs.len()),
-                reason: Some(reason),
-            });
-        }
+        Err(refusal) => return Ok(rejected(&source, Some(count), refusal)),
+    };
+    let shown = source.display().to_string();
+    let conflicting = |path: &Path, refusal: anyhow::Error| -> Result<ImportReport> {
+        Ok(ImportReport::refused(
+            ImportStatus::Conflicting,
+            shown.clone(),
+            Some((id.as_str(), path)),
+            Some(count),
+            refusal,
+        ))
     };
     let digest = pair_set_digest(&pair_set)?;
     let mut state = load_state()?;
@@ -107,108 +154,105 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
     {
         state.active_pair_set = Some(existing.id.clone());
         save_state(&state)?;
-        return Ok(ImportReport {
-            status: ImportStatus::Unchanged,
-            source: source.display().to_string(),
-            id: Some(existing.id),
-            path: Some(existing.path.display().to_string()),
-            pair_count: Some(existing.pair_count),
-            reason: None,
-        });
+        return Ok(ImportReport::accepted_as(
+            ImportStatus::Unchanged,
+            &source,
+            &existing,
+        ));
     }
 
     if let Some(existing) = state.pair_sets.iter().find(|entry| entry.id == id) {
-        return Ok(ImportReport {
-            status: ImportStatus::Conflicting,
-            source: source.display().to_string(),
-            id: Some(id),
-            path: Some(existing.path.display().to_string()),
-            pair_count: Some(pair_set.pairs.len()),
-            reason: Some(format!(
-                "pair-set name conflicts with existing content; choose another --name to preserve {}",
-                existing.path.display()
-            )),
-        });
+        let path = existing.path.display().to_string();
+        let refusal = refuse(
+            &import::NAME_CONFLICT,
+            &[("source", &shown), ("id", &id), ("path", &path)],
+        );
+        return conflicting(existing.path.as_path(), refusal);
     }
 
     let root = workspace_root()?;
     let pairs_dir = root.join("pairs");
-    fs::create_dir_all(&pairs_dir).with_context(|| {
-        format!(
-            "failed to create Ster pair-set directory {}",
-            pairs_dir.display()
-        )
-    })?;
+    create_directory(&root, &pairs_dir)?;
     let destination = pairs_dir.join(format!("{id}.json"));
+    let destination_shown = destination.display().to_string();
     if destination.exists() {
-        return Ok(ImportReport {
-            status: ImportStatus::Conflicting,
-            source: source.display().to_string(),
-            id: Some(id),
-            path: Some(destination.display().to_string()),
-            pair_count: Some(pair_set.pairs.len()),
-            reason: Some("the destination already exists outside the Ster workspace index; it was not replaced".to_owned()),
-        });
+        let refusal = refuse(
+            &import::DESTINATION_EXISTS,
+            &[
+                ("source", &shown),
+                ("id", &id),
+                ("path", &destination_shown),
+            ],
+        );
+        return conflicting(destination.as_path(), refusal);
     }
 
     let temporary = pairs_dir.join(format!(".{id}.{}.incoming", std::process::id()));
+    let staging = temporary.display().to_string();
     if temporary.exists() {
-        bail!(
-            "Ster import staging path already exists: {}",
-            temporary.display()
-        );
-    }
-    pair_set.save(&temporary)?;
-    if let Err(error) = fs::hard_link(&temporary, &destination) {
-        let staging = left_behind(&temporary);
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            let committed = "the destination appeared while the import was being committed; it was not replaced";
-            return Ok(ImportReport {
-                status: ImportStatus::Conflicting,
-                source: source.display().to_string(),
-                id: Some(id),
-                path: Some(destination.display().to_string()),
-                pair_count: Some(pair_set.pairs.len()),
-                reason: Some(match staging {
-                    Some(note) => format!("{committed}; {note}"),
-                    None => committed.to_owned(),
-                }),
-            });
-        }
-        let failure = anyhow::Error::new(error).context(format!(
-            "failed to commit imported pair set {}",
-            destination.display()
+        return Err(refuse(
+            &import::STAGING_LEFT,
+            &[("source", &shown), ("id", &id), ("path", &staging)],
         ));
-        return Err(with_note(failure, staging));
+    }
+    pair_set
+        .save(&temporary)
+        .map_err(|error| error.context(format!("staging the import of {shown} as {id}")))?;
+    if let Err(error) = fs::hard_link(&temporary, &destination) {
+        let left = left_behind(&temporary);
+        let error_text = error.to_string();
+        let values: [(&str, &str); 6] = [
+            ("source", &shown),
+            ("id", &id),
+            ("path", &destination_shown),
+            ("staging", &staging),
+            ("error", &error_text),
+            ("left", &left),
+        ];
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            let refusal = refuse(&import::DESTINATION_APPEARED, &values);
+            return conflicting(destination.as_path(), refusal);
+        }
+        return Err(refuse(&import::COMMIT_FAILED, &values));
     }
     if let Err(error) = fs::remove_file(&temporary) {
-        let failure = anyhow::Error::new(error).context(format!(
-            "failed to remove import staging file {}",
-            temporary.display()
+        return Err(refuse(
+            &import::STAGING_UNREMOVABLE,
+            &[
+                ("source", &shown),
+                ("id", &id),
+                ("staging", &staging),
+                ("error", &error.to_string()),
+                ("left", &left_behind(&destination)),
+            ],
         ));
-        return Err(with_note(failure, left_behind(&destination)));
     }
 
-    state.pair_sets.push(PairSetEntry {
+    let entry = PairSetEntry {
         id: id.clone(),
         digest,
         path: destination.clone(),
         source: source.clone(),
-        pair_count: pair_set.pairs.len(),
-    });
+        pair_count: count,
+    };
+    state.pair_sets.push(entry.clone());
     state.active_pair_set = Some(id.clone());
     if let Err(error) = save_state(&state) {
-        return Err(with_note(error, left_behind(&destination)));
+        let left = left_behind(&destination);
+        return Err(error.context(format!("importing {shown} as {id} was undone: {left}")));
     }
+    Ok(ImportReport::accepted_as(
+        ImportStatus::Imported,
+        &source,
+        &entry,
+    ))
+}
 
-    Ok(ImportReport {
-        status: ImportStatus::Imported,
-        source: source.display().to_string(),
-        id: Some(id),
-        path: Some(destination.display().to_string()),
-        pair_count: Some(pair_set.pairs.len()),
-        reason: None,
-    })
+/// The report of an import refused before anything was written: the source
+/// is not a pair set Ster reads, or it gives no valid id.
+fn rejected(source: &Path, pair_count: Option<usize>, refusal: anyhow::Error) -> ImportReport {
+    let shown = source.display().to_string();
+    ImportReport::refused(ImportStatus::Rejected, shown, None, pair_count, refusal)
 }
 
 fn pair_set_digest(pair_set: &PairSet) -> Result<String> {
@@ -220,76 +264,15 @@ fn pair_set_digest(pair_set: &PairSet) -> Result<String> {
         .collect())
 }
 
-/// Remove `path` while undoing an import: `None` when it is gone, or the
-/// sentence naming it when it could not be removed and stays behind.
-/// Dropped, a committed pair set left unrecorded in pairs/ came back on the
-/// next import as a conflict nobody could explain.
-fn left_behind(path: &Path) -> Option<String> {
+/// Remove `path` while undoing an import, and say how that went: removed,
+/// or left behind and why. Unsaid, a committed pair set left unrecorded in
+/// pairs/ came back on the next import as a conflict nobody could explain.
+fn left_behind(path: &Path) -> String {
     match fs::remove_file(path) {
-        Ok(()) => None,
-        Err(error) => Some(format!(
+        Ok(()) => format!("{} was removed", path.display()),
+        Err(error) => format!(
             "{} could not be removed and is left behind: {error}",
             path.display()
-        )),
+        ),
     }
-}
-
-fn with_note(failure: anyhow::Error, note: Option<String>) -> anyhow::Error {
-    match note {
-        Some(note) => failure.context(format!("rolling back the import: {note}")),
-        None => failure,
-    }
-}
-
-/// A workspace name is a file name: it starts with an ASCII letter or digit and
-/// holds only letters, digits, dots, underscores and hyphens. How long it may be
-/// is the filesystem's to say, and it says so when the set is written.
-fn validate_name(name: &str) -> std::result::Result<(), String> {
-    let valid = name
-        .as_bytes()
-        .first()
-        .is_some_and(u8::is_ascii_alphanumeric)
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
-    if valid {
-        Ok(())
-    } else {
-        Err("pair-set name must start with an ASCII letter or digit and contain only letters, digits, dots, underscores, or hyphens".to_owned())
-    }
-}
-
-/// The id a set imported without --name takes: its file name's letters and
-/// digits, lowercased, each run of anything else one hyphen. A name that
-/// holds none, or is not UTF-8, gives no id, and the reason names the file
-/// and the flag that supplies one.
-fn derived_name(source: &Path) -> std::result::Result<String, String> {
-    let refused = |why: &str| {
-        format!(
-            "{} {why}, so no pair-set id can be derived from it; name the set with --name",
-            source.display()
-        )
-    };
-    let stem = source
-        .file_stem()
-        .ok_or_else(|| refused("has no file name"))?
-        .to_str()
-        .ok_or_else(|| refused("has a file name that is not UTF-8"))?;
-    let mut name = String::new();
-    let mut separator = false;
-    for character in stem.chars() {
-        if character.is_ascii_alphanumeric() {
-            if separator && !name.is_empty() {
-                name.push('-');
-            }
-            separator = false;
-            name.push(character.to_ascii_lowercase());
-        } else {
-            separator = true;
-        }
-    }
-    if name.is_empty() {
-        return Err(refused("has no ASCII letter or digit in its file name"));
-    }
-    Ok(name)
 }

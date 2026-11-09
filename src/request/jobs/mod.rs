@@ -17,10 +17,12 @@ use super::requests::{
 };
 
 mod decide;
+mod errors;
 mod model;
 mod pairs;
 
 pub(super) use decide::{calibrate_job, decide_job};
+pub(super) use errors::{errors_list_job, errors_show_job};
 pub(super) use model::{fixture_create_job, tokenizer_create_job};
 
 pub(super) use pairs::{

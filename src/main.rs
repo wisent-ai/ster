@@ -5,8 +5,19 @@
 mod cli;
 mod request;
 
-use anyhow::Result;
+use std::process::ExitCode;
 
-fn main() -> Result<()> {
-    cli::run()
+/// Runs the command and exits with the status its failure declares: 2 for a
+/// usage refusal, 69 when retrying unchanged can help, 1 for every other
+/// failure (`ster::failures`). The refusal is printed as `Error: ` and the
+/// chain, as before any cause was declared.
+fn main() -> ExitCode {
+    match cli::run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            let status = ster::failures::exit_code(&error);
+            u8::try_from(status).map_or(ExitCode::FAILURE, ExitCode::from)
+        }
+    }
 }

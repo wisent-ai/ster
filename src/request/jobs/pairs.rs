@@ -1,7 +1,7 @@
 //! Running the pair-authoring operations: workspace import, audit, save, and
 //! synthesis with either a local runtime or a hosted writer.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use std::path::Path;
@@ -33,21 +33,14 @@ pub(in crate::request) fn pairs_merge_job(request: PairsMergeRequest) -> Result<
 pub(in crate::request) fn workspace_import_pairs_job(
     request: WorkspaceImportPairsRequest,
 ) -> Result<JobOutcome> {
-    let report =
+    let mut report =
         ster::workspace::import_pair_set(Path::new(&request.source), request.name.as_deref())?;
-    let accepted = report.accepted();
+    let refusal = report.take_refusal();
     let document = serde_json::to_value(&report)?;
-    if accepted {
-        Ok(JobOutcome::Completed(document))
-    } else {
-        let reason = report.reason.with_context(|| {
-            format!(
-                "workspace import did not accept {} but returned no refusal reason",
-                request.source
-            )
-        })?;
-        Ok(JobOutcome::Failed { document, reason })
-    }
+    Ok(match refusal {
+        None => JobOutcome::Completed(document),
+        Some(refusal) => JobOutcome::Failed { document, refusal },
+    })
 }
 
 /// The same answer as `ster workspace show`.

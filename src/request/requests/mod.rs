@@ -15,11 +15,13 @@ use defaults::default_device;
 mod defaults;
 
 mod decide;
+mod errors;
 mod model;
 mod pairs;
 mod vectors;
 
 pub(super) use decide::{CalibrateRequest, DecideRequest};
+pub(super) use errors::{ErrorsListRequest, ErrorsShowRequest};
 pub(super) use model::ModelCreateRequest;
 pub(super) use pairs::{
     PairsImportRequest, PairsInspectRequest, PairsMergeRequest, PairsSaveRequest,

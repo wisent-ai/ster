@@ -30,6 +30,9 @@
 //! - one: it failed while running. The refusal sentence is also the last log
 //!   event. `json` is `{"error": "<sentence>"}`, or a rejected/conflicting
 //!   workspace import's complete domain report with its actual refusal.
+//!   When a declared cause refused it (`ster errors list`), `json.cause`
+//!   carries its `id`, `code`, `exit` (the status the same CLI command exits
+//!   with), `usage`, `retryable` and `remedy`.
 //! - two: the request was refused before anything ran: an unknown operation,
 //!   a body that does not parse, or a field the operation's validation
 //!   rejects. No log event precedes it, and `json` is
@@ -162,6 +165,8 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
                 }
             }
         }
+        "errors/list" => job.run(errors_list_job),
+        "errors/show" => job.run(errors_show_job),
         _ => refuse(&format!("unknown operation: {operation}")),
     }
 }
@@ -170,7 +175,10 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
 /// giving its refusal the same failed process status and log as a CLI refusal.
 enum JobOutcome {
     Completed(Value),
-    Failed { document: Value, reason: String },
+    Failed {
+        document: Value,
+        refusal: anyhow::Error,
+    },
 }
 
 impl From<Value> for JobOutcome {
@@ -239,18 +247,22 @@ where
             emit_result(COMPLETED, document);
             COMPLETED
         }
-        Ok(JobOutcome::Failed { document, reason }) => {
-            emit_log(&format!("error: {reason}\n"));
-            emit_result(FAILED, document);
-            FAILED
-        }
-        Err(error) => {
-            let message = format!("{error:#}");
-            emit_log(&format!("error: {message}\n"));
-            emit_result(FAILED, json!({"error": message}));
-            FAILED
-        }
+        Ok(JobOutcome::Failed { document, refusal }) => failed(document, &refusal),
+        Err(error) => failed(json!({"error": format!("{error:#}")}), &error),
     }
+}
+
+/// A job that failed while it ran: its refusal on a log event, and `document`
+/// as the failed result, carrying the declared cause when one refused it.
+fn failed(mut document: Value, error: &anyhow::Error) -> i32 {
+    emit_log(&format!("error: {error:#}\n"));
+    if let (Some(declared), Some(fields)) =
+        (ster::failures::declared(error), document.as_object_mut())
+    {
+        fields.insert("cause".to_owned(), declared.summary());
+    }
+    emit_result(FAILED, document);
+    FAILED
 }
 
 fn refuse(message: &str) -> i32 {

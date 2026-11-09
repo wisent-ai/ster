@@ -55,6 +55,9 @@ wisent-onboarding-client = { git = "https://github.com/wisent-ai/echo-web", rev 
 tokenizers = "0.22.1"
 unicode-normalization = "0.1"
 ureq = "2.12"
+# The fleet's failure catalogue: every functionality declares how it fails
+# (src/failures), and `ster errors list|show|check` prints it.
+wisent-errors = { git = "https://github.com/wisent-ai/wisent-errors", rev = "054d31d11a03b64f217e0090b000d49f64ac954e" }
 
 # A bool is tested with if/else, never matched against true and false.
 [lints.clippy]

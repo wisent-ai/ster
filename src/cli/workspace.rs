@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Subcommand;
 
 use super::onboarding;
@@ -36,24 +36,18 @@ pub(super) enum WorkspaceCommand {
 pub(super) fn run(command: WorkspaceCommand) -> Result<()> {
     match command {
         WorkspaceCommand::Import { source, name } => {
-            let report = ster::workspace::import_pair_set(&source, name.as_deref())?;
-            if report.accepted() {
+            let mut report = ster::workspace::import_pair_set(&source, name.as_deref())?;
+            let refusal = report.take_refusal();
+            if refusal.is_none() {
                 let path = report
                     .path
                     .as_deref()
                     .context("accepted pair-set import did not return a destination")?;
                 onboarding::record_pair_set_imported(std::path::Path::new(path))?;
             }
-            let accepted = report.accepted();
             super::answer(&report)?;
-            if !accepted {
-                let reason = report.reason.as_deref().with_context(|| {
-                    format!(
-                        "Ster workspace import refused {} but returned no refusal reason",
-                        source.display()
-                    )
-                })?;
-                bail!("{reason}");
+            if let Some(refusal) = refusal {
+                return Err(refusal);
             }
         }
         WorkspaceCommand::Show => {

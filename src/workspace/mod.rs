@@ -7,35 +7,55 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::Serialize;
+
+use crate::failures::{refuse, workspace::manage as causes};
 
 mod import;
 mod manage;
+mod name;
 mod state;
 
 pub use import::{ImportReport, import_pair_set};
 pub use manage::{remove_pair_set, select_pair_set};
 
-use state::{WORKSPACE_SCHEMA, load_state};
+use state::{WORKSPACE_SCHEMA, WorkspaceState, load_state};
 
-pub fn active_pair_set() -> Result<Option<PathBuf>> {
-    let state = load_state()?;
-    let Some(active) = state.active_pair_set else {
-        return Ok(None);
-    };
-    let entry = state
+/// The ids the workspace holds, as a refusal lists them, or `none`.
+fn held(state: &WorkspaceState) -> String {
+    if state.pair_sets.is_empty() {
+        return "none".to_owned();
+    }
+    state
         .pair_sets
         .iter()
-        .find(|entry| entry.id == active)
-        .with_context(|| format!("Ster workspace names missing active pair set {active}"))?;
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The copy of the active imported set, which a command given no --pairs
+/// reads; refused when no set is active, when the workspace names an active
+/// set it does not hold, or when that set's copy is gone.
+pub fn active_pair_set() -> Result<PathBuf> {
+    let state = load_state()?;
+    let Some(active) = state.active_pair_set.as_deref() else {
+        return Err(refuse(&causes::NO_ACTIVE, &[("held", &held(&state))]));
+    };
+    let Some(entry) = state.pair_sets.iter().find(|entry| entry.id == active) else {
+        return Err(refuse(
+            &causes::ACTIVE_UNKNOWN,
+            &[("id", active), ("held", &held(&state))],
+        ));
+    };
     if !entry.path.is_file() {
-        bail!(
-            "active Ster pair set is missing: {}; import it again or select another set",
-            entry.path.display()
-        );
+        return Err(refuse(
+            &causes::ACTIVE_COPY_MISSING,
+            &[("id", active), ("path", &entry.path.display().to_string())],
+        ));
     }
-    Ok(Some(entry.path.clone()))
+    Ok(entry.path.clone())
 }
 
 pub fn summary() -> Result<WorkspaceSummary> {

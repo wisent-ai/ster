@@ -15,6 +15,7 @@ mod command;
 mod converse;
 mod decide;
 mod decisions;
+mod errors;
 pub(crate) mod input;
 mod model;
 mod onboarding;
@@ -166,6 +167,7 @@ pub(crate) fn run() -> Result<()> {
         Command::Tune { command } => tune::run(command),
         Command::Model { command } => model::run(command),
         Command::Star { command } => star::run(command),
+        Command::Errors { command } => errors::run(command),
         Command::Converse(args) => converse::run(args),
         Command::Request { operation } => {
             let status = crate::request::run(&operation)?;
@@ -178,10 +180,8 @@ pub(crate) fn run() -> Result<()> {
     Ok(())
 }
 
+/// The pair-set file a command reads: the one `--pairs` names, else the
+/// workspace's active set, refused by its declared cause when there is none.
 fn resolve_pairs(selected: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = selected {
-        return Ok(path);
-    }
-    ster::workspace::active_pair_set()?
-        .context("no active Ster pair set; pass --pairs or import one with `ster workspace import`")
+    selected.map_or_else(ster::workspace::active_pair_set, Ok)
 }

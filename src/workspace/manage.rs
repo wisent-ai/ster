@@ -4,37 +4,39 @@
 
 use std::fs;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 
-use super::state::{load_state, save_state};
-use super::{WorkspaceSummary, summary};
+use crate::failures::{
+    refuse,
+    workspace::{manage as causes, store},
+};
 
-fn known(ids: &[String], id: &str) -> Result<()> {
-    if ids.iter().any(|known| known == id) {
-        return Ok(());
+use super::state::{WorkspaceState, load_state, save_state, state_path, workspace_root};
+use super::{WorkspaceSummary, held, summary};
+
+/// Where in the workspace's list `id` is, or the refusal naming the ids it
+/// holds.
+fn position(state: &WorkspaceState, id: &str) -> Result<usize> {
+    if let Some(position) = state.pair_sets.iter().position(|entry| entry.id == id) {
+        return Ok(position);
     }
-    if ids.is_empty() {
-        bail!(
-            "the Ster workspace holds no pair set named {id}; it holds none — import one with `ster workspace import`"
-        );
-    }
-    bail!(
-        "the Ster workspace holds no pair set named {id}; it holds {}",
-        ids.join(", ")
-    )
+    let held = match held(state).as_str() {
+        "none" => "none — import one with `ster workspace import`".to_owned(),
+        ids => ids.to_owned(),
+    };
+    let path = state_path()?.display().to_string();
+    Err(refuse(
+        &store::SET_UNKNOWN,
+        &[("id", id), ("held", &held), ("path", &path)],
+    ))
 }
 
 /// Make `id` the active input every operation reads by default.
 pub fn select_pair_set(id: &str) -> Result<WorkspaceSummary> {
     let mut state = load_state()?;
-    let ids: Vec<String> = state
-        .pair_sets
-        .iter()
-        .map(|entry| entry.id.clone())
-        .collect();
-    known(&ids, id)?;
+    position(&state, id)?;
     if state.active_pair_set.as_deref() == Some(id) {
-        bail!("pair set {id} is already the active one");
+        return Err(refuse(&causes::ALREADY_ACTIVE, &[("id", id)]));
     }
     state.active_pair_set = Some(id.to_owned());
     save_state(&state)?;
@@ -45,35 +47,37 @@ pub fn select_pair_set(id: &str) -> Result<WorkspaceSummary> {
 /// source file it was imported from is not touched. Removing the active set
 /// leaves no active set, said in the answer, rather than activating another
 /// one nobody chose.
+///
+/// The copy goes first: a copy that cannot be deleted leaves the workspace
+/// as it was, so the same command removes it once the directory allows it.
+/// Taking the entry out first would leave a file no entry records, which the
+/// next import of that id meets as a conflict nothing can remove.
 pub fn remove_pair_set(id: &str) -> Result<WorkspaceSummary> {
     let mut state = load_state()?;
-    let ids: Vec<String> = state
-        .pair_sets
-        .iter()
-        .map(|entry| entry.id.clone())
-        .collect();
-    known(&ids, id)?;
-    let position = state
-        .pair_sets
-        .iter()
-        .position(|entry| entry.id == id)
-        .context("pair set vanished between reads")?;
-    let entry = state.pair_sets.remove(position);
-    if state.active_pair_set.as_deref() == Some(id) {
-        state.active_pair_set = None;
-    }
-    save_state(&state)?;
+    let index = position(&state, id)?;
+    let entry = state.pair_sets.remove(index);
     match fs::remove_file(&entry.path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "pair set {id} left the workspace but its copy {} was not deleted",
-                    entry.path.display()
-                )
-            });
+            let directory = entry
+                .path
+                .parent()
+                .map_or_else(workspace_root, |parent| Ok(parent.to_path_buf()))?;
+            return Err(refuse(
+                &causes::COPY_UNDELETABLE,
+                &[
+                    ("id", id),
+                    ("path", &entry.path.display().to_string()),
+                    ("directory", &directory.display().to_string()),
+                    ("error", &error.to_string()),
+                ],
+            ));
         }
     }
+    if state.active_pair_set.as_deref() == Some(id) {
+        state.active_pair_set = None;
+    }
+    save_state(&state)?;
     summary()
 }

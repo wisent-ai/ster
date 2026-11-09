@@ -26,6 +26,7 @@ a body that leaves one out is refused before anything runs, naming it:
 | `model/fixture/create`, `model/tokenizer/create` | `ster model fixture create`, `ster model tokenizer create`; each takes `from` and `output`, refuses unknown request fields, and returns its actual native artifact and consumer-verification report. See [fixtures](models/fixtures.md) and [tokenizers](models/tokenizers.md). |
 | `pairs/import`, `pairs/inspect`, `pairs/merge`, `pairs/save`, `pairs/synthesize` | the [pair-set](pair-sets.md) commands (`pairs/import` takes `benchmark`, `source`, `output`, `seed` and optional `examples`, `count`, `traitName`, and for `benchmark: "choices"` the row fields `question`, `choices`, `answer`, `answerForm` and `labels`; it answers `ster pairs import`'s document with the skipped-row report; `pairs/merge` takes `sources`, two or more paths, `traitName` and `output`) |
 | `tune/sft`, `tune/dpo`, `tune/bipo`, `tune/reward`, `tune/grpo`, `tune/decide`, `tune/merge`, `tune/export`, `tune/evaluate`, `tune/inspect` | the [training](tuning/objectives.md) and [adapter](tuning/adapters.md) commands; tuning bodies deserialize into the actual CLI argument types, not a second request schema |
+| `errors/list`, `errors/show` | `ster errors list`, `ster errors show` (`errors/show` takes the functionality's `id`); see [How Ster fails](errors.md) |
 
 `decide` takes its request document inline under `request`, and `pairs/save`
 takes the pairs inline under `entries`, because the desktop composes both;
@@ -86,7 +87,7 @@ last. Its `status` is also the process's exit status:
 | Status | Meaning | `json` |
 |---|---|---|
 | `0` | The operation completed. | The document the CLI command prints. |
-| `1` | The operation started and failed. The last `log` event is `error: <sentence>`. | `{"error": "<sentence>"}`, or the complete `ImportReport` for a rejected or conflicting workspace import. |
+| `1` | The operation started and failed. The last `log` event is `error: <sentence>`. | `{"error": "<sentence>"}`, or the complete `ImportReport` for a rejected or conflicting workspace import; when a declared cause refused it, also `cause`. |
 | `2` | The request was refused before anything ran. No `log` event precedes it. | `{"error": "<sentence>"}` |
 
 Status `2` covers an unknown operation (`unknown operation: <name>`), a body
@@ -102,6 +103,13 @@ whose reason is the CLI's own sentence, for example
 set: `rejected` and `conflicting` are failed results, not successful imports.
 The last log carries the report's reason. `imported` and `unchanged` complete
 successfully and name the durable copy.
+
+A failure a declared cause refused carries it in `json.cause`:
+`{"id", "code", "exit", "usage", "retryable", "remedy"}`, where `exit` is the
+status the same CLI command exits with (`2` for a usage refusal, `69` when
+retrying unchanged can help, `1` otherwise) and `remedy` the fix with the
+actual values filled in. The request's own status stays `1`: the operation
+had started. [How Ster fails](errors.md) lists every declared cause.
 
 A reader that closes stdout ends the request at its next event: nobody is left
 to receive the result, so a long training run does not continue for a window

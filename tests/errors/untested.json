@@ -1,0 +1,5 @@
+[
+  "tests/workspace/failures.sh::a_commit_the_filesystem_refuses_is_rolled_back",
+  "tests/workspace/failures.sh::a_destination_appearing_mid_import_is_not_replaced",
+  "tests/workspace/failures.sh::a_staging_file_that_cannot_be_removed_is_rolled_back"
+]

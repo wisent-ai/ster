@@ -6,6 +6,7 @@ use clap::Subcommand;
 use super::converse::ConverseArgs;
 use super::decide::{CalibrateArgs, DecideArgs};
 use super::decisions::DecisionsCommand;
+use super::errors::ErrorsCommand;
 use super::model::ModelCommand;
 use super::pairs::PairsCommand;
 use super::star::StarCommand;
@@ -72,6 +73,13 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: StarCommand,
     },
+    /// List, show and check every declared way a Ster functionality fails:
+    /// what failed, why, what is shown, what fixes it, its code, exit status
+    /// and test.
+    Errors {
+        #[command(subcommand)]
+        command: ErrorsCommand,
+    },
     /// Run one JSON request from a desktop app to completion: the body on
     /// stdin, NDJSON log events and one result event on stdout, and the
     /// result's status as the exit status.
@@ -80,7 +88,7 @@ pub(super) enum Command {
         /// vector/inspect, vector/compare, vector/project, vector/score, vector/ablate, generate, extract, parity, decide,
         /// calibrate, model/fixture/create, model/tokenizer/create, workspace/import, workspace/show,
         /// workspace/select, workspace/remove, pairs/import, pairs/inspect, pairs/merge,
-        /// pairs/save, pairs/synthesize, or tune/sft, tune/dpo, tune/reward,
+        /// pairs/save, pairs/synthesize, errors/list, errors/show, or tune/sft, tune/dpo, tune/reward,
         /// tune/grpo, tune/merge, tune/evaluate, tune/inspect.
         operation: String,
     },

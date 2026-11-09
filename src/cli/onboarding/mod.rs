@@ -28,26 +28,20 @@ pub fn run(reset: bool, import_pairs: Option<&Path>, name: Option<&str>) -> Resu
     };
 
     if let Some(source) = import_pairs {
-        let report = ster::workspace::import_pair_set(source, name)?;
+        let mut report = ster::workspace::import_pair_set(source, name)?;
+        let refusal = report.take_refusal();
         super::answer(&report)?;
-        if report.accepted() {
-            let destination = report
-                .path
-                .as_deref()
-                .context("accepted pair-set import did not return a destination")?;
-            record_pair_set_imported(Path::new(destination))?;
-            println!(
-                "Ster first-use journey complete: the imported pair set is active for training and evaluation."
-            );
-        } else {
-            match report.reason.as_deref() {
-                Some(reason) => bail!("{reason}"),
-                None => bail!(
-                    "Ster did not accept the pair set {} and its import report states no reason",
-                    source.display()
-                ),
-            }
+        if let Some(refusal) = refusal {
+            return Err(refusal);
         }
+        let destination = report
+            .path
+            .as_deref()
+            .context("accepted pair-set import did not return a destination")?;
+        record_pair_set_imported(Path::new(destination))?;
+        println!(
+            "Ster first-use journey complete: the imported pair set is active for training and evaluation."
+        );
         return Ok(());
     }
 
