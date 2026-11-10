@@ -96,8 +96,9 @@ pub(super) enum Command {
         /// vector/inspect, vector/compare, vector/project, vector/score, vector/ablate, generate, extract, parity, decide,
         /// calibrate, model/fixture/create, model/tokenizer/create, workspace/import, workspace/show,
         /// workspace/select, workspace/remove, pairs/import, pairs/inspect, pairs/merge,
-        /// pairs/save, pairs/synthesize, errors/list, errors/show, or tune/sft, tune/dpo, tune/reward,
-        /// tune/grpo, tune/merge, tune/evaluate, tune/inspect.
+        /// pairs/save, pairs/synthesize, errors/list, errors/show, star/status, star/dismiss,
+        /// star/reset, telemetry/status, telemetry/set, telemetry/show, telemetry/flush, or
+        /// tune/sft, tune/dpo, tune/reward, tune/grpo, tune/merge, tune/evaluate, tune/inspect.
         operation: String,
     },
 }

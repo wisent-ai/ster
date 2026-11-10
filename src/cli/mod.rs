@@ -22,7 +22,7 @@ mod model;
 mod onboarding;
 mod pairs;
 pub(crate) mod star;
-mod telemetry;
+pub(crate) mod telemetry;
 pub(crate) mod tune;
 mod vectors;
 mod workspace;

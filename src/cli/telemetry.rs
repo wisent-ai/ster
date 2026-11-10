@@ -89,6 +89,36 @@ pub(super) fn run(command: TelemetryCommand) -> Result<()> {
     super::answer_document(&telemetry.status())
 }
 
+/// What `ster request telemetry/<verb>` answers, the same document the CLI
+/// prints: `status`; `set` with `{"level": "off"|"errors"|"usage"}`, then the
+/// status; `show`, the waiting events; `flush`, what it sent. A refusal, or a
+/// flush that stopped, is the sentence the CLI prints.
+pub(crate) fn request_document(verb: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let telemetry = telemetry();
+    let said = |failure: Failure| refusal(failure).to_string();
+    match verb {
+        "status" => Ok(telemetry.status()),
+        "set" => {
+            let level = body
+                .get("level")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("telemetry/set needs {\"level\": \"off\"|\"errors\"|\"usage\"}")?;
+            let level = Level::parse(level, PRODUCT.id).map_err(said)?;
+            telemetry.set_level(level).map_err(said)?;
+            Ok(telemetry.status())
+        }
+        "show" => telemetry.queued().map(|queued| json!(queued)).map_err(said),
+        "flush" => {
+            let delivered = telemetry.flush().map_err(said)?;
+            match delivered.stopped {
+                Some(stopped) => Err(said(stopped)),
+                None => Ok(delivered.to_json()),
+            }
+        }
+        other => Err(format!("unknown operation: telemetry/{other}")),
+    }
+}
+
 /// The words of the command a person ran (`pairs import`), never its
 /// arguments, and when it started.
 pub(crate) struct Started {
