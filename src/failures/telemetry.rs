@@ -1,8 +1,9 @@
-//! How `ster telemetry` fails: through the functionalities of wisent-errors'
-//! telemetry it runs, which declare and test their own causes.
+//! How `ster telemetry` and `ster support` fail: through the functionalities
+//! of wisent-errors' telemetry and support they run, which declare and test
+//! their own causes.
 
 use wisent_errors::Operation;
-use wisent_errors::telemetry::{CONSENT, DELIVER, RECORD};
+use wisent_errors::telemetry::{CONSENT, DELIVER, RECORD, REPORT, STATUS};
 
 /// docs/guide/errors/telemetry.md, where this functionality is listed.
 const DOCS: &str = page!("telemetry");
@@ -29,6 +30,27 @@ pub(super) static TELEMETRY: Operation = Operation {
     causes: &[],
 };
 
-/// Ster's own functionality first, then the ones it uses, which a catalogue
-/// lists so `ster errors show ster.telemetry` reaches their causes.
-pub(super) static OPERATIONS: &[&Operation] = &[&TELEMETRY, &RECORD, &CONSENT, &DELIVER];
+/// support.md in the error guide, where `ster support` is listed.
+const SUPPORT_DOCS: &str = page!("support");
+
+/// Asking Ster's support for help and reading the replies.
+pub(super) static SUPPORT: Operation = Operation {
+    id: "ster.support",
+    entries: &[
+        "ster support report",
+        "ster support status",
+        "ster request support/report",
+        "ster request support/status",
+    ],
+    uses: &[&REPORT, &STATUS],
+    summary: "file a report with Ster's support from this installation and read the replies",
+    docs: SUPPORT_DOCS,
+    warnings: &[],
+    causes: &[],
+};
+
+/// Ster's own functionalities first, then the ones they use, which a
+/// catalogue lists so `ster errors show ster.telemetry` and `ster errors show
+/// ster.support` reach their causes.
+pub(super) static OPERATIONS: &[&Operation] =
+    &[&TELEMETRY, &SUPPORT, &RECORD, &CONSENT, &DELIVER, &REPORT, &STATUS];

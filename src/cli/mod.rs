@@ -22,6 +22,7 @@ mod model;
 mod onboarding;
 mod pairs;
 pub(crate) mod star;
+pub(crate) mod support;
 pub(crate) mod telemetry;
 pub(crate) mod tune;
 mod vectors;
@@ -198,6 +199,7 @@ pub(crate) fn run() -> Result<()> {
         Command::Star { command } => star::run(command),
         Command::Errors { command } => errors::run(command),
         Command::Telemetry { command } => telemetry::run(command),
+        Command::Support { command } => support::run(command),
         Command::Converse(args) => converse::run(args),
         Command::Request { operation } => {
             let status = crate::request::run(&operation)?;

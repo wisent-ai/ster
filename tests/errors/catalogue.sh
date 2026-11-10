@@ -94,7 +94,7 @@ show_refuses_an_undeclared_functionality() {
 
 markdown_refuses_a_page_no_functionality_is_listed_on() {
   run 2 errors list --markdown --page docs/guide/errors/nothing.md
-  said "printing the catalogue sections of docs/guide/errors/nothing.md: no functionality is listed on docs/guide/errors/nothing.md; observed: pages: docs/guide/errors/catalogue.md, docs/guide/errors/pairs.md, docs/guide/errors/workspace.md, docs/guide/errors/telemetry.md; fix: name one of those pages, or leave --page out for every section"
+  said "printing the catalogue sections of docs/guide/errors/nothing.md: no functionality is listed on docs/guide/errors/nothing.md; observed: pages: docs/guide/errors/catalogue.md, docs/guide/errors/pairs.md, docs/guide/errors/workspace.md, docs/guide/errors/telemetry.md, docs/guide/errors/support.md; fix: name one of those pages, or leave --page out for every section"
   passed markdown_refuses_a_page_no_functionality_is_listed_on
 }
 

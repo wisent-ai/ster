@@ -263,6 +263,14 @@ status|on|off|show|export|flush` reads and changes it and shows exactly what
 waits to be sent ([reference](https://ster.wisent.com/docs/cli/telemetry));
 `DO_NOT_TRACK=1` sends nothing.
 
+`ster support report --description "what you did and what happened"
+[--subject …] [--email …] [--without-failure]` asks Ster's support for help,
+with Ster's version, the system's, this installation's id and the last failure
+telemetry holds; `ster support status` prints every report this installation
+filed with its status and replies
+([reference](https://ster.wisent.com/docs/cli/support)). Ster Desktop's Help →
+Report a Problem files and reads the same reports.
+
 ## Architecture
 
 The runtime uses Candle directly. Ster owns its Llama decoder loop so every

@@ -183,6 +183,24 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
                 }
             }
         }
+        "support/report" | "support/status" => {
+            let verb = operation.trim_start_matches("support/");
+            let body = match serde_json::from_slice::<Value>(request_document(body)) {
+                Ok(body) => body,
+                Err(error) => return refuse(&format!("{operation} body is not JSON: {error}")),
+            };
+            match crate::cli::support::request_document(verb, &body) {
+                Ok(document) => {
+                    emit_result(COMPLETED, document);
+                    COMPLETED
+                }
+                Err(error) => {
+                    emit_log(&format!("error: {error}\n"));
+                    emit_result(FAILED, json!({"error": error}));
+                    FAILED
+                }
+            }
+        }
         "errors/list" => job.run(errors_list_job),
         "errors/show" => job.run(errors_show_job),
         _ => refuse(&format!("unknown operation: {operation}")),

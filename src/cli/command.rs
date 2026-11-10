@@ -10,6 +10,7 @@ use super::errors::ErrorsCommand;
 use super::model::ModelCommand;
 use super::pairs::PairsCommand;
 use super::star::StarCommand;
+use super::support::SupportCommand;
 use super::telemetry::TelemetryCommand;
 use super::tune::TuneCommand;
 use super::vectors::{ExtractArgs, GenerateArgs, OnboardingArgs, ParityArgs, VectorCommand};
@@ -88,6 +89,12 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: TelemetryCommand,
     },
+    /// Ask Ster's support for help, with Ster's version, this system's, this
+    /// installation's id and the last failure attached, and read the replies.
+    Support {
+        #[command(subcommand)]
+        command: SupportCommand,
+    },
     /// Run one JSON request from a desktop app to completion: the body on
     /// stdin, NDJSON log events and one result event on stdout, and the
     /// result's status as the exit status.
@@ -97,7 +104,8 @@ pub(super) enum Command {
         /// calibrate, model/fixture/create, model/tokenizer/create, workspace/import, workspace/show,
         /// workspace/select, workspace/remove, pairs/import, pairs/inspect, pairs/merge,
         /// pairs/save, pairs/synthesize, errors/list, errors/show, star/status, star/dismiss,
-        /// star/reset, telemetry/status, telemetry/set, telemetry/show, telemetry/flush, or
+        /// star/reset, telemetry/status, telemetry/set, telemetry/show, telemetry/flush,
+        /// support/report, support/status, or
         /// tune/sft, tune/dpo, tune/reward, tune/grpo, tune/merge, tune/evaluate, tune/inspect.
         operation: String,
     },

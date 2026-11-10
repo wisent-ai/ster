@@ -14,4 +14,4 @@ Everything below the marker is
 
 read and change what this installation of Ster reports to its maintainers, and send it
 
-Started through: `ster telemetry status`, `ster telemetry on`, `ster telemetry off`, `ster telemetry show`, `ster telemetry export`, `ster telemetry flush`. Uses: `wisent-errors.telemetry.record`, `wisent-errors.telemetry.consent`, `wisent-errors.telemetry.deliver`. Failure catalogue `ster.telemetry`: 0 declared cause(s) of its own.
+Started through: `ster telemetry status`, `ster telemetry on`, `ster telemetry off`, `ster telemetry show`, `ster telemetry export`, `ster telemetry flush`, `ster request telemetry/status`, `ster request telemetry/set`, `ster request telemetry/show`, `ster request telemetry/flush`. Uses: `wisent-errors.telemetry.record`, `wisent-errors.telemetry.consent`, `wisent-errors.telemetry.deliver`. Failure catalogue `ster.telemetry`: 0 declared cause(s) of its own.
