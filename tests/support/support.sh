@@ -90,7 +90,7 @@ agent -X POST -H 'content-type: application/json' --data '{"body_text":"Fixed in
   "$ORIGIN/v1/support/tickets/$TICKET_ID/reply" >/dev/null
 run 0 support status
 printf '%s' "$out" | jq -e --arg id "$ID" '
-  any(.[]; .id == $id and .status == "waiting_on_customer" and .replies[0].text == "Fixed in the next release.")' >/dev/null \
+  any(.reports[]; .id == $id and .status == "waiting_on_customer" and .replies[0].text == "Fixed in the next release.")' >/dev/null \
   || fail "status does not show the reply: $out"
 set +e
 request=$(printf '{}' | "$BIN" request support/status 2>"$ROOT/stderr")
@@ -98,7 +98,7 @@ request_status=$?
 set -e
 printf '$ ster request support/status\nexit: %s\nstdout: %s\n\n' "$request_status" "$request" >>"$REPORT"
 [ "$request_status" -eq 0 ] || fail "ster request support/status exited $request_status: $(cat "$ROOT/stderr")"
-printf '%s' "$request" | tail -n 1 | jq -e --arg id "$ID" 'any(.result[]?; .id == $id) or any(.document[]?; .id == $id) or (tostring | contains($id))' >/dev/null \
+printf '%s' "$request" | tail -n 1 | jq -e --arg id "$ID" '.status == 0 and any(.json.reports[]; .id == $id)' >/dev/null \
   || fail "ster request support/status does not answer the report: $request"
 passed "the agent's reply is what support status and request support/status show"
 

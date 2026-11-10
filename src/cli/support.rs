@@ -32,7 +32,8 @@ pub(super) enum SupportCommand {
         #[arg(long)]
         without_failure: bool,
     },
-    /// Every report this installation filed, with its state and the replies.
+    /// Every report this installation filed, with its state and the replies,
+    /// as `{"reports": [...]}`.
     Status,
 }
 
@@ -67,15 +68,15 @@ pub(super) fn run(command: SupportCommand) -> Result<()> {
         }
         SupportCommand::Status => {
             let reports = telemetry.reports().map_err(refusal)?;
-            super::answer_document(&json!(reports))
+            super::answer_document(&json!({ "reports": reports }))
         }
     }
 }
 
 /// What `ster request support/<verb>` answers, the document the CLI prints:
 /// `report` with `{"description", "subject"?, "email"?, "with_failure"?}`
-/// (with_failure defaults to true, as on the command line), and `status`. A
-/// refusal is the sentence the CLI prints.
+/// (with_failure defaults to true, as on the command line), and `status`,
+/// `{"reports": [...]}`. A refusal is the sentence the CLI prints.
 pub(crate) fn request_document(verb: &str, body: &Value) -> Result<Value, String> {
     let telemetry = telemetry();
     let said = |failure: Failure| refusal(failure).to_string();
@@ -93,7 +94,10 @@ pub(crate) fn request_document(verb: &str, body: &Value) -> Result<Value, String
                 })
                 .map_err(said)
         }
-        "status" => telemetry.reports().map(|reports| json!(reports)).map_err(said),
+        "status" => telemetry
+            .reports()
+            .map(|reports| json!({ "reports": reports }))
+            .map_err(said),
         other => Err(format!("unknown operation: support/{other}")),
     }
 }
