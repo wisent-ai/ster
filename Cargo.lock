@@ -3925,7 +3925,7 @@ checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 [[package]]
 name = "wisent-errors"
 version = "1.0.0"
-source = "git+https://github.com/wisent-ai/wisent-errors?rev=f904b7e6f40db3139d0fdf72e66cd53e38ea15af#f904b7e6f40db3139d0fdf72e66cd53e38ea15af"
+source = "git+https://github.com/wisent-ai/wisent-errors?rev=f77fcb0020f498ae54fd3eceda879d2625bae761#f77fcb0020f498ae54fd3eceda879d2625bae761"
 dependencies = [
  "getrandom 0.2.17",
  "serde_json",

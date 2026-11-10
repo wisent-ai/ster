@@ -14,14 +14,13 @@ use serde_json::json;
 use wisent_errors::telemetry::{Level, Product, Telemetry};
 use wisent_errors::{Code, Failure};
 
-/// Ster's command line, as Echo's app collector declares it. The release
-/// build passes `WISENT_TELEMETRY_COLLECTOR_URL`, so only our release knows
-/// our collector.
+/// Ster's command line, as Echo's app collector declares it. Events go to
+/// Wisent's public collector unless `WISENT_TELEMETRY_COLLECTOR_URL` names
+/// another.
 const PRODUCT: Product = Product {
     id: "ster",
     app_id: "ster-cli",
     version: env!("CARGO_PKG_VERSION"),
-    built_collector: option_env!("WISENT_TELEMETRY_COLLECTOR_URL"),
 };
 
 #[derive(Debug, Subcommand)]
