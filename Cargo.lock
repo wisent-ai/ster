@@ -3925,7 +3925,12 @@ checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 [[package]]
 name = "wisent-errors"
 version = "1.0.0"
-source = "git+https://github.com/wisent-ai/wisent-errors?rev=054d31d11a03b64f217e0090b000d49f64ac954e#054d31d11a03b64f217e0090b000d49f64ac954e"
+source = "git+https://github.com/wisent-ai/wisent-errors?rev=c41f97435d6f2677457ea40d64de8ed9ab82b82a#c41f97435d6f2677457ea40d64de8ed9ab82b82a"
+dependencies = [
+ "getrandom 0.2.17",
+ "serde_json",
+ "ureq",
+]
 
 [[package]]
 name = "wisent-onboarding-client"

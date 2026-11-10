@@ -4,9 +4,10 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser};
+use clap::{Args, CommandFactory, FromArgMatches, Parser};
 use serde::Serialize;
 use serde_json::Value;
 use ster::{DeviceChoice, Precision, Runtime};
@@ -21,6 +22,7 @@ mod model;
 mod onboarding;
 mod pairs;
 pub(crate) mod star;
+mod telemetry;
 pub(crate) mod tune;
 mod vectors;
 mod workspace;
@@ -45,6 +47,18 @@ struct Cli {
 
 /// Whether this invocation asked for text; set once before any command runs.
 static TEXT: OnceLock<bool> = OnceLock::new();
+
+/// The command this run is and when it started, set once it parsed, for the
+/// telemetry `main` finishes with.
+static STARTED: OnceLock<telemetry::Started> = OnceLock::new();
+
+/// Queue what this run did, as the user agreed, once its exit status is
+/// known; a run that never parsed a command reports nothing.
+pub(crate) fn finish(error: Option<&anyhow::Error>, status: i32) {
+    if let Some(started) = STARTED.get() {
+        telemetry::finish(started, error, status);
+    }
+}
 
 /// Print one answer: the pretty JSON document, or with `--text` one
 /// `path: value` line per leaf field, nested keys joined with dots.
@@ -124,7 +138,22 @@ impl ModelArgs {
 }
 
 pub(crate) fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let mut words = Vec::new();
+    let mut current = &matches;
+    while let Some((name, below)) = current.subcommand() {
+        words.push(name.to_owned());
+        current = below;
+    }
+    let command = words.join(" ");
+    if telemetry::reports(&command) {
+        telemetry::ask();
+    }
+    let _ = STARTED.set(telemetry::Started {
+        command,
+        at: Instant::now(),
+    });
     TEXT.set(cli.text).map_err(|attempted| {
         anyhow::anyhow!(
             "Ster command output mode is already {:?}; cannot replace it with --text={attempted}",
@@ -168,6 +197,7 @@ pub(crate) fn run() -> Result<()> {
         Command::Model { command } => model::run(command),
         Command::Star { command } => star::run(command),
         Command::Errors { command } => errors::run(command),
+        Command::Telemetry { command } => telemetry::run(command),
         Command::Converse(args) => converse::run(args),
         Command::Request { operation } => {
             let status = crate::request::run(&operation)?;

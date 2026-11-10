@@ -52,15 +52,18 @@ passed() { echo "ok: $1" >>"$REPORT"; }
 
 run 0 errors list
 LIST=$out
+# Every cause, Ster's own and those of the functionalities it uses from
+# another package (wisent-errors' telemetry), names its code, exit status and
+# test; Ster's own are documented on Ster's pages.
 printf '%s' "$LIST" | jq -e '
   (.functionalities | length > 0)
-  and all(.functionalities[]; (.operation | startswith("ster."))
-    and all(.causes[]; .code != null and (.exit | type == "number") and (.test | contains("::"))
-      and (.doc | startswith("https://github.com/wisent-ai/ster/blob/main/docs/guide/errors/"))))' >/dev/null \
+  and all(.functionalities[]; all(.causes[]; .code != null and (.exit | type == "number") and (.test | contains("::"))))
+  and all(.functionalities[] | select(.operation | startswith("ster."));
+    all(.causes[]; .doc | startswith("https://github.com/wisent-ai/ster/blob/main/docs/guide/errors/")))' >/dev/null \
   || fail "errors list does not answer every cause with its code, exit, test and doc: $LIST"
 passed "errors list answers every functionality with its causes"
 
-PAGES=$(printf '%s' "$LIST" | jq -r '.functionalities[].docs' | sort -u \
+PAGES=$(printf '%s' "$LIST" | jq -r '.functionalities[] | select(.operation | startswith("ster.")) | .docs' | sort -u \
   | sed 's|^https://github.com/wisent-ai/ster/blob/main/||')
 for page in $PAGES; do
   [ -f "$page" ] || fail "a functionality is listed on $page, which this checkout does not hold"
@@ -91,7 +94,7 @@ show_refuses_an_undeclared_functionality() {
 
 markdown_refuses_a_page_no_functionality_is_listed_on() {
   run 2 errors list --markdown --page docs/guide/errors/nothing.md
-  said "printing the catalogue sections of docs/guide/errors/nothing.md: no functionality is listed on docs/guide/errors/nothing.md; observed: pages: docs/guide/errors/catalogue.md, docs/guide/errors/pairs.md, docs/guide/errors/workspace.md; fix: name one of those pages, or leave --page out for every section"
+  said "printing the catalogue sections of docs/guide/errors/nothing.md: no functionality is listed on docs/guide/errors/nothing.md; observed: pages: docs/guide/errors/catalogue.md, docs/guide/errors/pairs.md, docs/guide/errors/workspace.md, docs/guide/errors/telemetry.md; fix: name one of those pages, or leave --page out for every section"
   passed markdown_refuses_a_page_no_functionality_is_listed_on
 }
 

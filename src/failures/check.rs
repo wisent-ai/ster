@@ -29,9 +29,15 @@ fn uncatalogued<'a>(operations: &[&Operation], commands: &'a [String]) -> Vec<&'
 
 /// Every declared test `repository` does not hold, by its declared path:
 /// the file the cause names is absent, unreadable, or never names the test.
+/// A functionality another package declares (`wisent-errors.telemetry.*`)
+/// names tests in that package's repository, which runs them; only Ster's own
+/// are held to this checkout.
 fn missing_tests(operations: &[&Operation], repository: &Path) -> Vec<(String, String)> {
     let mut missing = Vec::new();
-    for operation in operations {
+    for operation in operations
+        .iter()
+        .filter(|operation| operation.id.starts_with("ster."))
+    {
         for cause in operation.causes {
             let Some((file, name)) = cause.test.split_once("::") else {
                 // Operation::problems already refuses a test without `::`.

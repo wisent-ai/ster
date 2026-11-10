@@ -254,6 +254,15 @@ command family are listed in the [CLI overview](docs/guide/start/cli.md). Run
 `ster <command> --help` for exact arguments; every answer is one JSON document
 on stdout, and the global `--text` flag prints it as `path: value` lines.
 
+Ster reports nothing until you answer. The first command you run on a terminal
+asks once whether it may send its maintainers its failures (`errors`), its
+failures and the commands that ran (`usage`), or nothing; a script or a coding
+agent is never asked. No file, prompt, pair or command argument is sent, and
+your home directory and host name are taken out first. `ster telemetry
+status|on|off|show|export|flush` reads and changes it and shows exactly what
+waits to be sent ([reference](https://ster.wisent.com/docs/cli/telemetry));
+`DO_NOT_TRACK=1` sends nothing.
+
 ## Architecture
 
 The runtime uses Candle directly. Ster owns its Llama decoder loop so every

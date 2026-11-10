@@ -31,6 +31,7 @@ macro_rules! page {
 mod catalogue;
 pub mod check;
 pub mod pairs;
+mod telemetry;
 pub mod workspace;
 
 pub use check::check;
@@ -49,6 +50,7 @@ pub fn operations() -> Vec<&'static Operation> {
         catalogue::OPERATIONS,
         pairs::OPERATIONS,
         workspace::OPERATIONS,
+        telemetry::OPERATIONS,
     ]
     .concat()
 }
@@ -95,6 +97,24 @@ impl Declared {
             "retryable": self.cause.code.retryable(),
             "remedy": self.fix,
         })
+    }
+
+    /// The envelope this refusal reports: the failure point of the
+    /// functionality that declares the cause, its code, and the sentence and
+    /// fix with the actual names filled in.
+    pub fn failure(&self) -> wisent_errors::Failure {
+        let point = operations()
+            .into_iter()
+            .find(|operation| {
+                operation
+                    .causes
+                    .iter()
+                    .any(|cause| std::ptr::eq(*cause, self.cause))
+            })
+            .map_or("ster", |operation| operation.id);
+        wisent_errors::Failure::or_fallback(point, self.cause.code, "ster")
+            .detail(self.sentence.as_str())
+            .remedy(self.fix.as_str())
     }
 }
 

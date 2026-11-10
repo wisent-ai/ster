@@ -10,6 +10,7 @@ use super::errors::ErrorsCommand;
 use super::model::ModelCommand;
 use super::pairs::PairsCommand;
 use super::star::StarCommand;
+use super::telemetry::TelemetryCommand;
 use super::tune::TuneCommand;
 use super::vectors::{ExtractArgs, GenerateArgs, OnboardingArgs, ParityArgs, VectorCommand};
 use super::workspace::WorkspaceCommand;
@@ -79,6 +80,13 @@ pub(super) enum Command {
     Errors {
         #[command(subcommand)]
         command: ErrorsCommand,
+    },
+    /// Read and change what this installation reports to Ster's maintainers
+    /// when something fails, and send it: nothing until you answer, never
+    /// your files, prompts or command arguments.
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommand,
     },
     /// Run one JSON request from a desktop app to completion: the body on
     /// stdin, NDJSON log events and one result event on stdout, and the

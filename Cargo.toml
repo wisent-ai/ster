@@ -56,8 +56,9 @@ tokenizers = "0.22.1"
 unicode-normalization = "0.1"
 ureq = "2.12"
 # The fleet's failure catalogue: every functionality declares how it fails
-# (src/failures), and `ster errors list|show|check` prints it.
-wisent-errors = { git = "https://github.com/wisent-ai/wisent-errors", rev = "054d31d11a03b64f217e0090b000d49f64ac954e" }
+# (src/failures), and `ster errors list|show|check` prints it. Its telemetry
+# reports what failed on a user's machine, with their consent (`ster telemetry`).
+wisent-errors = { git = "https://github.com/wisent-ai/wisent-errors", rev = "c41f97435d6f2677457ea40d64de8ed9ab82b82a", features = ["telemetry"] }
 
 # A bool is tested with if/else, never matched against true and false.
 [lints.clippy]
