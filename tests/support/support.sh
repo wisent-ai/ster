@@ -14,6 +14,9 @@
 #   STER                        the binary, default target/debug/ster
 #   STER_TEST_SUPPORT           http(s)://<support>/v1/public/reports of a running wisent-customer-support
 #   STER_TEST_SUPPORT_TOKEN     that service's support token, for the agent's side
+#   STER_TEST_SUPPORT_AGENT     the service's own origin, where its agent API answers; default
+#                               the origin of STER_TEST_SUPPORT. A deployment publishes only
+#                               /v1/public/reports, so a public address needs the private one here
 set -eu
 cd "$(dirname "$0")/../.."
 BIN=${STER:-target/debug/ster}
@@ -27,12 +30,13 @@ mkdir -p "$ROOT"
 echo "revision: $(git rev-parse HEAD)$(git diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 echo "support: $STER_TEST_SUPPORT" >>"$REPORT"
+echo "support agent: ${STER_TEST_SUPPORT_AGENT:-${STER_TEST_SUPPORT%%/v1/*}}" >>"$REPORT"
 export WISENT_TELEMETRY_HOME="$ROOT/state"
 # Port 9, the IANA discard port: the failure this test queues is sent nowhere.
 export WISENT_TELEMETRY_COLLECTOR_URL="http://127.0.0.1:9/api/analytics/mobile/collect"
 export WISENT_SUPPORT_URL="$STER_TEST_SUPPORT"
 unset DO_NOT_TRACK
-ORIGIN=${STER_TEST_SUPPORT%%/v1/*}
+ORIGIN=${STER_TEST_SUPPORT_AGENT:-${STER_TEST_SUPPORT%%/v1/*}}
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
