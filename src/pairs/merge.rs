@@ -37,7 +37,9 @@ pub fn merge(sources: &[PathBuf], trait_name: &str) -> Result<(PairSet, MergeRep
         );
     };
     if trait_name.trim().is_empty() {
-        bail!("pairs merge needs the trait name the merged set is fitted for");
+        bail!(
+            "pairs merge needs the trait name the merged set is fitted for; the given name holds only whitespace"
+        );
     }
     let mut pairs: Vec<ContrastivePair> = Vec::new();
     let mut merged = Vec::with_capacity(sources.len());

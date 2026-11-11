@@ -221,7 +221,9 @@ pub fn grpo(
             let Some(summed) = summed else {
                 // `chunks` never yields an empty slice; refusing beats
                 // stepping on nothing.
-                bail!("an accumulation group contained no prompts");
+                bail!(
+                    "an accumulation group contained no prompts; the training plan never yields one, so this is a defect in it"
+                );
             };
             optimizer
                 .backward_step(&summed)

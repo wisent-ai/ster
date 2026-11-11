@@ -168,7 +168,10 @@ impl Artifact {
             );
         }
         if self.rank == 0 {
-            bail!("adapter artifact declares rank 0, which stores nothing");
+            bail!(
+                "adapter artifact for {} layer(s) declares rank 0, so it stores nothing",
+                self.layers.len()
+            );
         }
         if !self.alpha.is_finite() || self.alpha <= 0.0 {
             bail!(
@@ -177,13 +180,13 @@ impl Artifact {
             );
         }
         if self.hidden_size == 0 {
-            bail!("adapter artifact declares hidden size 0");
+            bail!("adapter artifact of rank {} declares hidden size 0", self.rank);
         }
         if self.targets.is_empty() {
-            bail!("adapter artifact names no targets");
+            bail!("adapter artifact of rank {} names no targets", self.rank);
         }
         if self.layers.is_empty() {
-            bail!("adapter artifact names no layers");
+            bail!("adapter artifact of rank {} names no layers", self.rank);
         }
         for (index, target) in self.targets.iter().enumerate() {
             if self.targets[..index].contains(target) {

@@ -204,7 +204,9 @@ pub fn bipo(
                 }
             }
             let Some(summed) = summed else {
-                bail!("an accumulation group contained no pairs");
+                bail!(
+                    "an accumulation group contained no pairs; the training plan never yields one, so this is a defect in it"
+                );
             };
             optimizer
                 .backward_step(&summed)

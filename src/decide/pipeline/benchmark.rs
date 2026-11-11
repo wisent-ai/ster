@@ -78,7 +78,10 @@ pub fn benchmark(
     options: &BenchmarkOptions,
 ) -> Result<Benchmark> {
     if options.ece_bins == 0 {
-        bail!("the expected calibration error needs at least one bin");
+        bail!(
+            "the expected calibration error needs at least one bin; got {}",
+            options.ece_bins
+        );
     }
     set.validate()?;
     let count = set.examples.len();

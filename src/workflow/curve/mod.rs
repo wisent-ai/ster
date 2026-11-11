@@ -64,7 +64,7 @@ pub fn curve(
 ) -> Result<CurveReport> {
     let holdout = split_holdout(pairs.pairs.len(), holdout)?;
     if sizes.is_empty() {
-        bail!("vector curve needs at least one size to fit on");
+        bail!("vector curve needs at least one size to fit on; the sizes list is empty");
     }
     if let Some(size) = sizes.iter().find(|size| size.get() > holdout.fit_pairs) {
         bail!(

@@ -166,7 +166,9 @@ pub fn decide(
                 }
             }
             let Some(summed) = summed else {
-                bail!("an accumulation group contained no rows");
+                bail!(
+                    "an accumulation group contained no rows; the training plan never yields one, so this is a defect in it"
+                );
             };
             optimizer
                 .backward_step(&summed)

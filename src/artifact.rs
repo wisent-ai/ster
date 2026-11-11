@@ -264,7 +264,11 @@ impl SteeringArtifact {
             bail!("artifact belongs to product {:?}, not Ster", self.product);
         }
         if self.hidden_size == 0 || self.vectors.is_empty() {
-            bail!("artifact has no steering vectors");
+            bail!(
+                "artifact has no steering vectors: hidden size {}, {} vector(s)",
+                self.hidden_size,
+                self.vectors.len()
+            );
         }
         for vector in &self.vectors {
             if vector.values.len() != self.hidden_size {

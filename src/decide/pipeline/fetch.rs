@@ -58,10 +58,14 @@ pub struct FetchReport {
 /// choice question over the dataset's classes.
 pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
     if options.count == 0 {
-        bail!("fetch needs a row count above zero");
+        bail!("fetch needs a row count above zero; got {}", options.count);
     }
     if options.question_id.trim().is_empty() || options.instructions.trim().is_empty() {
-        bail!("a fetched question needs an id and instructions");
+        bail!(
+            "a fetched question needs an id and instructions; got id {:?} and {} characters of instructions",
+            options.question_id,
+            options.instructions.len()
+        );
     }
     let agent = ureq::AgentBuilder::new().build();
     let mut names: Option<Vec<String>> = None;

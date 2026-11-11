@@ -131,7 +131,11 @@ fn canonical_definition() -> Result<Value> {
         || definition.get("journey_version").and_then(Value::as_str) != Some(JOURNEY_VERSION)
         || definition.get("first_success_fact").and_then(Value::as_str) != Some(FIRST_SUCCESS_FACT)
     {
-        bail!("canonical onboarding journey identity mismatch");
+        bail!(
+            "canonical onboarding journey identity mismatch: it names journey {} version {}, this build knows {JOURNEY_ID} version {JOURNEY_VERSION}",
+            definition.get("journey_id").and_then(Value::as_str).unwrap_or("none"),
+            definition.get("journey_version").and_then(Value::as_str).unwrap_or("none")
+        );
     }
 
     let entry_screen_id = definition
@@ -143,7 +147,7 @@ fn canonical_definition() -> Result<Value> {
         .and_then(Value::as_array)
         .context("canonical onboarding journey has no screens")?;
     if screens.is_empty() {
-        bail!("canonical onboarding journey has no screens");
+        bail!("canonical onboarding journey {JOURNEY_ID} has an empty screens list");
     }
 
     let mut screen_ids = Vec::with_capacity(screens.len());
@@ -170,7 +174,9 @@ fn canonical_definition() -> Result<Value> {
             .context("canonical onboarding screen has no body")?;
     }
     if !screen_ids.contains(&entry_screen_id) {
-        bail!("canonical onboarding entry screen does not exist");
+        bail!(
+            "canonical onboarding entry screen {entry_screen_id} does not exist among {screen_ids:?}"
+        );
     }
 
     for screen in screens {

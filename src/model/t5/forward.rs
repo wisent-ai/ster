@@ -36,17 +36,22 @@ impl Model {
             }
             if inputs.decoder_lengths.is_some() || mode.pass == Pass::Differentiable {
                 bail!(
-                    "T5 batched training and scoring require a pass without a decoder key-value cache"
+                    "T5 batched training and scoring require a pass without a decoder key-value cache; this call keeps one"
                 );
             }
         }
         if inputs.decoder_lengths.is_some() && mode.readout == Readout::LastPosition {
-            bail!("a padded T5 batch cannot read one common last position");
+            bail!(
+                "a padded T5 batch cannot read one common last position, because its rows end at different positions"
+            );
         }
         // A capture is one sequence's final-token state, never a padded batch slab.
         // https://ster.wisent.com/docs/concept-activation
         if !captures.is_empty() && (batch != 1 || inputs.decoder_lengths.is_some()) {
-            bail!("T5 activation capture requires one unpadded decoder sequence");
+            bail!(
+                "T5 activation capture requires one unpadded decoder sequence; this batch has {batch} rows{}",
+                if inputs.decoder_lengths.is_some() { " and padding" } else { "" }
+            );
         }
         if let Some(layer) = captures.iter().find(|layer| **layer >= self.decoder.len()) {
             bail!(
@@ -61,7 +66,9 @@ impl Model {
             );
         }
         if inputs.encoder.is_none() && inputs.encoder_lengths.is_some() {
-            bail!("T5 encoder lengths were supplied without encoder token rows");
+            bail!(
+                "T5 encoder lengths were supplied without encoder token rows; pass the encoder tokens with their lengths"
+            );
         }
         if let Some(tokens) = inputs.encoder {
             if cache.encoder.is_some() {
@@ -78,7 +85,10 @@ impl Model {
         // Encoder and decoder batch axes must describe the same examples.
         // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
         if encoder.hidden.dim(0)? != batch {
-            bail!("T5 encoder and decoder batch sizes differ");
+            bail!(
+                "T5 encoder and decoder batch sizes differ: {} and {batch}",
+                encoder.hidden.dim(0)?
+            );
         }
         let keys = start
             .checked_add(queries)

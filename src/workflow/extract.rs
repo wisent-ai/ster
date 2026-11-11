@@ -57,7 +57,7 @@ impl PromptSet {
         let value: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid prompt JSON in {}", path.display()))?;
         if value.prompts.is_empty() {
-            bail!("prompt set contains no prompts");
+            bail!("prompt set {} contains no prompts", path.display());
         }
         Ok(value)
     }

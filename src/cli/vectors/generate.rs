@@ -116,7 +116,7 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
                 .as_deref()
                 .is_some_and(|prompt| prompt.trim().is_empty())
             {
-                anyhow::bail!("prompt must not be empty");
+                anyhow::bail!("the prompt must not be empty: it holds only whitespace");
             }
             Some(text)
         }

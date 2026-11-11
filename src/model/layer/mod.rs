@@ -57,7 +57,7 @@ impl FeedForwardBlock {
             Self::Dense(dense) | Self::Shortcut(dense, _) => dense.forward(hidden, mode.route),
             Self::Routed(experts) => experts.forward(hidden),
             Self::Inkling(_) => candle_core::bail!(
-                "Inkling's feed-forward keeps a convolution history and runs only with its layer's cache"
+                "Inkling's feed-forward keeps a convolution history, so it runs only with its layer's cache"
             ),
             Self::Paired(paired) => {
                 let dense = paired
@@ -900,11 +900,13 @@ impl Block {
         {
             let Some(heads) = state_space.structured else {
                 candle_core::bail!(
-                    "a Zamba2 hybrid layer runs Mamba-2 heads, and this architecture states none"
+                    "a Zamba2 hybrid layer runs Mamba-2 heads; this architecture's state_space states no structured heads"
                 );
             };
             let Some(blocks) = architecture.shared_blocks else {
-                candle_core::bail!("a hybrid layer needs the architecture's shared blocks");
+                candle_core::bail!(
+                    "a hybrid layer needs the architecture's shared_blocks; this architecture states none"
+                );
             };
             let decoder = builder.pp("mamba_decoder");
             return Ok(Self {
@@ -990,7 +992,7 @@ impl Block {
         ) {
             let Some(heads) = state_space.structured else {
                 candle_core::bail!(
-                    "a parallel scan runs Mamba-2 heads, and this architecture states none"
+                    "a parallel scan runs Mamba-2 heads; this architecture's state_space states no structured heads"
                 );
             };
             return Ok(Self {

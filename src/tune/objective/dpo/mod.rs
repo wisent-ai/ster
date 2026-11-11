@@ -78,7 +78,10 @@ pub fn dpo(
     // finite number above zero (Rafailov et al., eq. 7):
     // https://arxiv.org/abs/2305.18290
     if !(options.beta.is_finite() && options.beta > 0.0) {
-        bail!("direct preference optimization requires a finite beta above zero");
+        bail!(
+            "direct preference optimization requires a finite beta above zero; got {}",
+            options.beta
+        );
     }
     pairs.validate(&pair_set_label(pairs))?;
     let Trainable {
@@ -218,7 +221,9 @@ pub fn dpo(
             let Some(summed) = summed else {
                 // `plan` never yields a step with no forwards and never a
                 // forward with no rows; refusing beats stepping on nothing.
-                bail!("an accumulation group contained no pairs");
+                bail!(
+                    "an accumulation group contained no pairs; the training plan never yields one, so this is a defect in it"
+                );
             };
             optimizer
                 .backward_step(&summed)

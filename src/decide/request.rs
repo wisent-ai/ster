@@ -75,14 +75,14 @@ impl Request {
     /// Every refusal a request can earn, checked before any model work.
     pub fn validate(&self) -> Result<()> {
         if text_of(&self.state).trim().is_empty() {
-            bail!("a decide request has an empty state");
+            bail!("a decide request has an empty state: it holds only whitespace");
         }
         if self.questions.is_empty() {
-            bail!("a decide request needs at least one question");
+            bail!("a decide request needs at least one question; its questions map is empty");
         }
         for (id, question) in &self.questions {
             if id.trim().is_empty() {
-                bail!("a decide request has a question with an empty id");
+                bail!("a decide request has a question with an empty id {id:?}");
             }
             if text_of(question.instructions()).trim().is_empty() {
                 bail!("question '{id}' has empty instructions");
@@ -217,7 +217,7 @@ impl ExampleSet {
 
     pub fn validate(&self) -> Result<()> {
         if self.examples.is_empty() {
-            bail!("calibration needs at least one labelled example");
+            bail!("calibration needs at least one labelled example; the examples list is empty");
         }
         let mut labelled = 0usize;
         for (index, example) in self.examples.iter().enumerate() {
@@ -238,7 +238,10 @@ impl ExampleSet {
             }
         }
         if labelled == 0 {
-            bail!("calibration needs at least one labelled question");
+            bail!(
+                "calibration needs at least one labelled question; none of the {} examples labels one",
+                self.examples.len()
+            );
         }
         Ok(())
     }

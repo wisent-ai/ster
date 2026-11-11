@@ -102,7 +102,7 @@ impl Validate for PairsSaveRequest {
     fn validate(&self) -> Result<(), String> {
         require(&self.path, "pairs save requires an output path".to_owned())?;
         if self.entries.is_empty() {
-            return Err("pairs save requires at least one pair".to_owned());
+            return Err("pairs save requires at least one pair; entries is empty".to_owned());
         }
         Ok(())
     }
@@ -157,7 +157,12 @@ impl Validate for PairsSynthesizeRequest {
         // The local route loads weights and so needs a model; the brama route
         // loads nothing and needs a gateway route instead.
         match self.generator.as_str() {
-            "" => return Err("pairs synthesize requires a generator, local or brama".to_owned()),
+            "" => {
+                return Err(
+                    "pairs synthesize requires a generator: set generator to local or brama"
+                        .to_owned(),
+                );
+            }
             "local" => self.model.check("pairs synthesize")?,
             "brama" => {
                 let missing =
@@ -167,7 +172,9 @@ impl Validate for PairsSynthesizeRequest {
                     None => return Err(missing),
                 }
             }
-            _ => return Err("unknown generator; expected local or brama".to_owned()),
+            other => {
+                return Err(format!("unknown generator {other:?}; expected local or brama"));
+            }
         }
         require(
             &self.trait_description,
@@ -179,7 +186,10 @@ impl Validate for PairsSynthesizeRequest {
         )?;
         // Refused here, before a local model loads, rather than inside the run.
         if self.count.is_none() {
-            return Err("pairs synthesize requires count, a pair count above zero".to_owned());
+            return Err(
+                "pairs synthesize requires count, a pair count above zero; the request names none"
+                    .to_owned(),
+            );
         }
         DedupeOptions::new(self.dedupe_bits, self.dedupe_bands)
             .validate()

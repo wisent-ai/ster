@@ -38,7 +38,9 @@ impl DeviceChoice {
                 }
                 #[cfg(not(feature = "metal"))]
                 {
-                    bail!("this Ster binary was built without the metal feature")
+                    bail!(
+                        "this Ster binary was built without the metal feature; rebuild it with --features metal"
+                    )
                 }
             }
             Self::Cuda => {
@@ -51,7 +53,9 @@ impl DeviceChoice {
                 }
                 #[cfg(not(feature = "cuda"))]
                 {
-                    bail!("this Ster binary was built without the cuda feature")
+                    bail!(
+                        "this Ster binary was built without the cuda feature; rebuild it with --features cuda"
+                    )
                 }
             }
         }

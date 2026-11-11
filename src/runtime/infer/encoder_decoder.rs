@@ -138,7 +138,9 @@ impl Runtime {
     /// the `n_positions` the checkpoint states.
     fn check_source(&self, model: &t5::Model, source: &[u32]) -> Result<()> {
         if source.is_empty() {
-            bail!("a T5 prompt needs at least one token for its encoder to read");
+            bail!(
+                "a T5 prompt needs at least one token for its encoder to read; this one tokenized to none"
+            );
         }
         if let Some(limit) = model.config().context_length {
             if source.len() > limit {

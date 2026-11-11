@@ -79,11 +79,17 @@ pub fn evaluate_direction(
 
 pub fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f32> {
     if left.len() != right.len() || left.is_empty() {
-        bail!("cosine similarity requires equal non-empty vectors");
+        bail!(
+            "cosine similarity requires equal non-empty vectors; got lengths {} and {}",
+            left.len(),
+            right.len()
+        );
     }
     let denominator = dot(left, left).sqrt() * dot(right, right).sqrt();
     if denominator <= f32::EPSILON {
-        bail!("cosine similarity is undefined for a zero vector");
+        bail!(
+            "cosine similarity is undefined for a zero vector: the norms multiply to {denominator}"
+        );
     }
     Ok(dot(left, right) / denominator)
 }
@@ -98,14 +104,16 @@ fn validate_examples(positive: &[Vec<f32>], negative: &[Vec<f32>]) -> Result<()>
     }
     let width = positive[0].len();
     if width == 0 {
-        bail!("activation vectors are empty");
+        bail!("activation vectors are empty: the first positive vector has width 0");
     }
     if positive
         .iter()
         .chain(negative)
         .any(|row| row.len() != width || row.iter().any(|value| !value.is_finite()))
     {
-        bail!("activation vectors must have one finite, consistent width");
+        bail!(
+            "activation vectors must have one finite, consistent width {width}; a row differs in width or holds a non-finite value"
+        );
     }
     Ok(())
 }
@@ -201,7 +209,7 @@ fn mean_rows(rows: &[Vec<f32>]) -> Vec<f32> {
 fn normalize(mut vector: Vec<f32>) -> Result<Vec<f32>> {
     let norm = dot(&vector, &vector).sqrt();
     if !norm.is_finite() || norm <= f32::EPSILON {
-        bail!("training produced a zero or non-finite direction");
+        bail!("training produced a zero or non-finite direction: its norm is {norm}");
     }
     for value in &mut vector {
         *value /= norm;

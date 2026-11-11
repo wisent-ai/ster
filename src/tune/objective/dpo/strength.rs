@@ -68,7 +68,9 @@ pub struct StrengthReport {
 /// names its setting.
 fn validate(options: &StrengthOptions) -> Result<()> {
     if options.strengths.is_empty() {
-        bail!("strength selection needs at least one strength to measure");
+        bail!(
+            "strength selection needs at least one strength to measure; the strengths list is empty"
+        );
     }
     if let Some(strength) = options.strengths.iter().find(|value| !value.is_finite()) {
         bail!("strength selection needs finite strengths, not {strength}");

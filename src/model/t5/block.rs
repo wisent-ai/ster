@@ -73,7 +73,9 @@ impl Block {
 
     pub fn cross_memory(&self, encoder: &Tensor) -> candle_core::Result<KeyValue> {
         let Some((attention, _)) = &self.cross else {
-            candle_core::bail!("a T5 encoder block has no cross-attention memory");
+            candle_core::bail!(
+                "a T5 encoder block has no cross-attention memory; only decoder blocks carry cross attention"
+            );
         };
         attention.key_value(encoder, Route::Base)
     }
@@ -100,10 +102,14 @@ impl Block {
             }
             (None, None) => {}
             (Some(_), None) => {
-                candle_core::bail!("T5 decoder cross-attention requires encoder memory");
+                candle_core::bail!(
+                    "T5 decoder cross-attention requires encoder memory; this call gives none"
+                );
             }
             (None, Some(_)) => {
-                candle_core::bail!("T5 encoder self-attention cannot consume decoder cross-memory");
+                candle_core::bail!(
+                    "T5 encoder self-attention cannot consume decoder cross-memory; this call gives some"
+                );
             }
         }
         let forwarded = self.feed_forward.forward(&hidden, mode)?;

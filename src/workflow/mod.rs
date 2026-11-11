@@ -93,7 +93,7 @@ fn norm(values: &[f32]) -> f64 {
 
 pub fn parse_layers(value: &str, count: usize) -> Result<Vec<usize>> {
     if count == 0 {
-        bail!("model has no layers");
+        bail!("the model has no layers, so layers {value:?} select nothing");
     }
     if value == "all" {
         let mut every = Vec::with_capacity(count);
@@ -130,7 +130,7 @@ pub fn parse_layers(value: &str, count: usize) -> Result<Vec<usize>> {
     layers.sort_unstable();
     layers.dedup();
     if layers.is_empty() {
-        bail!("no layers selected");
+        bail!("no layers selected: {value:?} names none of the model's {count} layers");
     }
     if let Some(layer) = layers.iter().copied().find(|layer| *layer >= count) {
         bail!("layer {layer} is outside the model's {count} layers, counted from the first");

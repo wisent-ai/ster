@@ -74,7 +74,11 @@ pub(super) fn sample_group(
         for turn in &turns {
             if user.is_some() && matches!(reward, Reward::Scorer(_)) {
                 let Some(position) = assistant_positions.next() else {
-                    bail!("rollout completion has no matching assistant turn in its transcript");
+                    bail!(
+                        "rollout completion has no matching assistant turn: the transcript holds {} entries for {} turns",
+                        conversation.transcript.len(),
+                        turns.len()
+                    );
                 };
                 let context = serde_json::to_string(&conversation.transcript[..position])?;
                 total += reward.score(&context, turn)?;
@@ -190,7 +194,10 @@ pub(super) fn group_loss(runtime: &Runtime, group: &Group, options: &GrpoOptions
             });
         }
         let Some(conversation) = conversation else {
-            bail!("a sampled conversation contained no assistant turns");
+            bail!(
+                "a sampled conversation of {} turns contained no assistant turns",
+                draw.turns.len()
+            );
         };
         kl_total += conversation_kl / draw.turns.len() as f64;
         let scaled = (conversation.neg()? / group.draws.len() as f64)?;
@@ -200,7 +207,7 @@ pub(super) fn group_loss(runtime: &Runtime, group: &Group, options: &GrpoOptions
         });
     }
     let Some(tensor) = summed else {
-        bail!("a sampled group contained no conversations");
+        bail!("a sampled group of {} draws contained no conversations", group.draws.len());
     };
     Ok(Loss {
         value: tensor.to_scalar::<f32>()? as f64,

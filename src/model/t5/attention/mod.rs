@@ -91,7 +91,9 @@ impl Attention {
         mode: Mode,
     ) -> candle_core::Result<Tensor> {
         if cache.is_some() && mode.pass == Pass::Differentiable {
-            candle_core::bail!("a differentiable T5 pass cannot mutate a key-value cache");
+            candle_core::bail!(
+                "a differentiable T5 pass cannot mutate a key-value cache; this call passes one"
+            );
         }
         let current = self.key_value(hidden, mode.route)?;
         let memory = match cache {

@@ -195,7 +195,12 @@ pub(super) fn pair_of(
             )
             .ok_or("labels are not a list of non-empty text")?;
             if labels.len() != choices.len() {
-                return Err("labels and choices differ in length".into());
+                return Err(format!(
+                    "labels and choices differ in length: {} labels for {} choices",
+                    labels.len(),
+                    choices.len()
+                )
+                .into());
             }
             let named = answer
                 .as_str()

@@ -36,10 +36,10 @@ pub fn import_jsonl(
     instructions: &str,
 ) -> Result<(ExampleSet, ImportReport)> {
     if question_id.trim().is_empty() {
-        bail!("an imported question needs an id");
+        bail!("an imported question needs an id; got {question_id:?}");
     }
     if instructions.trim().is_empty() {
-        bail!("an imported question needs instructions");
+        bail!("imported question {question_id} needs instructions: they hold only whitespace");
     }
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -102,10 +102,16 @@ pub fn import_jsonl(
 
 fn check(row: &JsonlRow) -> Result<(), String> {
     if row.context.trim().is_empty() {
-        return Err("the context is empty".to_owned());
+        return Err(format!(
+            "the context holds only whitespace ({} characters)",
+            row.context.len()
+        ));
     }
     if row.options.len() < 2 {
-        return Err("a row needs at least two options".to_owned());
+        return Err(format!(
+            "a row needs at least two options; it has {}",
+            row.options.len()
+        ));
     }
     if row.options.len() > MAX_OPTIONS {
         return Err(format!(
@@ -114,11 +120,14 @@ fn check(row: &JsonlRow) -> Result<(), String> {
         ));
     }
     if row.options.iter().any(|option| option.trim().is_empty()) {
-        return Err("an option is empty".to_owned());
+        return Err(format!("an option is empty: the options are {:?}", row.options));
     }
     let mut seen = std::collections::BTreeSet::new();
     if row.options.iter().any(|option| !seen.insert(option.trim())) {
-        return Err("two options carry the same text".to_owned());
+        return Err(format!(
+            "two options carry the same text: the options are {:?}",
+            row.options
+        ));
     }
     if row.label >= row.options.len() {
         return Err(format!(

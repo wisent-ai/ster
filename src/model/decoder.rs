@@ -460,7 +460,9 @@ impl SteeringLlama {
     ) -> Result<ForwardOutput> {
         let (batch, sequence) = tokens.dims2()?;
         if batch == 0 || sequence == 0 {
-            bail!("a batched forward needs at least one row of at least one token");
+            bail!(
+                "a batched forward needs at least one row of at least one token; got {batch} rows of {sequence} tokens"
+            );
         }
         if lengths.len() != batch {
             bail!(
@@ -469,7 +471,9 @@ impl SteeringLlama {
             );
         }
         if cache.use_kv_cache {
-            bail!("a batched forward cannot share one key-value cache across rows");
+            bail!(
+                "a batched forward cannot share one key-value cache across rows; this call has use_kv_cache set"
+            );
         }
         if sequence > self.config.max_position_embeddings {
             bail!(

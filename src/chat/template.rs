@@ -120,7 +120,7 @@ impl Template {
     /// tokens begin.
     pub fn prompt(&self, prompt: &str) -> Result<String> {
         if prompt.trim().is_empty() {
-            bail!("prompt must not be empty");
+            bail!("prompt must not be empty: it holds {} characters of whitespace", prompt.len());
         }
         self.render(
             &[Message {
@@ -163,7 +163,7 @@ impl Template {
         completion: &str,
     ) -> Result<(String, String)> {
         if prompt.trim().is_empty() {
-            bail!("prompt must not be empty");
+            bail!("prompt must not be empty: it holds {} characters of whitespace", prompt.len());
         }
         let mut turns: Vec<Message<'_>> = system
             .map(|content| Message {
@@ -199,7 +199,9 @@ impl Template {
         };
         let tail = &full[start..];
         if tail.is_empty() {
-            bail!("this model's chat template rendered an empty assistant turn");
+            bail!(
+                "this model's chat template rendered an empty assistant turn at character {start}"
+            );
         }
         Ok((full[..start].to_owned(), tail.to_owned()))
     }
@@ -214,7 +216,10 @@ impl Template {
     /// operator's data that the operator did not write.
     pub fn response(&self, text: &str) -> Result<String> {
         if text.trim().is_empty() {
-            bail!("prompt must not be empty");
+            bail!(
+                "the response must not be empty: it holds {} characters of whitespace",
+                text.len()
+            );
         }
         self.render(
             &[Message {
@@ -252,10 +257,19 @@ fn embedded_template(config: &serde_json::Value) -> Result<Option<String>> {
             match named.or_else(|| entries.first().filter(|_| entries.len() == 1)) {
                 Some(entry) => match entry.get("template").and_then(serde_json::Value::as_str) {
                     Some(source) => Ok(Some(source.to_owned())),
-                    None => bail!("this model's chat template list has an entry with no template"),
+                    None => {
+                        bail!(
+                            "this model's chat template list has an entry with no template: {entry}"
+                        )
+                    }
                 },
                 None => bail!(
-                    "this model publishes several named chat templates and none of them is the default"
+                    "this model publishes several named chat templates and none of them is the default: {}",
+                    entries
+                        .iter()
+                        .filter_map(|entry| entry.get("name").and_then(serde_json::Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             }
         }

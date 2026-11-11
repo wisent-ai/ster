@@ -60,7 +60,7 @@ pub(super) fn parse_targets(value: &str) -> Result<Vec<lora::Target>> {
         }
     }
     if targets.is_empty() {
-        bail!("no targets selected");
+        bail!("no targets selected: {value:?} names none");
     }
     Ok(targets)
 }

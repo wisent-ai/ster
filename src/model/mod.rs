@@ -2656,7 +2656,7 @@ impl SteeringPlan {
             tensors.insert(layer, tensor);
         }
         if tensors.is_empty() {
-            bail!("steering plan contains no vectors");
+            bail!("steering plan contains no vectors for model width {hidden_size}");
         }
         Ok(Self {
             vectors: tensors,
@@ -2688,7 +2688,7 @@ impl SteeringPlan {
             tensors.insert(layer, tensor.to_dtype(dtype)?);
         }
         if tensors.is_empty() {
-            bail!("steering plan contains no vectors");
+            bail!("steering plan contains no vectors for model width {hidden_size}");
         }
         Ok(Self {
             vectors: tensors,

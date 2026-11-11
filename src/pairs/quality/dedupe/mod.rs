@@ -57,7 +57,11 @@ impl DedupeOptions {
             );
         }
         if self.word_ngram < 1 || self.char_ngram < 1 {
-            bail!("dedupe n-gram sizes must be at least 1");
+            bail!(
+                "dedupe n-gram sizes must be at least 1; got word {} and char {}",
+                self.word_ngram,
+                self.char_ngram
+            );
         }
         if self.threshold_bits > SIMHASH_BIT_WIDTH {
             bail!(

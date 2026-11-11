@@ -174,7 +174,10 @@ impl Runtime {
         suffixes: &[&[u32]],
     ) -> Result<Vec<Vec<f32>>> {
         if suffixes.is_empty() || suffixes.iter().any(|suffix| suffix.is_empty()) {
-            bail!("a decision forward pass needs at least one token");
+            bail!(
+                "a decision forward pass needs at least one token in every suffix; got suffix lengths {:?}",
+                suffixes.iter().map(|suffix| suffix.len()).collect::<Vec<_>>()
+            );
         }
         let model = match &self.model {
             Network::Causal(model) => model,

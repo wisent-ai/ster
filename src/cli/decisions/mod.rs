@@ -214,7 +214,10 @@ fn synthesize(args: SynthesizeArgs) -> Result<()> {
 fn split(args: SplitArgs) -> Result<()> {
     let set = ExampleSet::load(&args.examples)?;
     if !(args.holdout > 0.0 && args.holdout < 1.0) {
-        anyhow::bail!("the held-out fraction must be above zero and below one");
+        anyhow::bail!(
+            "the held-out fraction must be above zero and below one; got {}",
+            args.holdout
+        );
     }
     let (train, holdout) = decide::split(&set, args.holdout, args.seed);
     write(&args.train_output, &train)?;

@@ -163,7 +163,7 @@ pub fn evaluate(
     // something impossible, and being handed a full set of scores instead is
     // the wrong answer to that question.
     if options.batch == 0 {
-        bail!("evaluation requires a batch of at least one example");
+        bail!("evaluation requires a batch of at least one example; batch is 0");
     }
     examples.validate(&examples.label())?;
     if let Some(adapter) = adapter {

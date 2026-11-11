@@ -26,10 +26,15 @@ pub(super) fn completion_loss(
         );
     };
     let Some((start, _)) = prompt.iter().enumerate().last() else {
-        bail!("a training example must begin with at least one prompt token");
+        bail!(
+            "a training example must begin with at least one prompt token; its completion starts at token {boundary}"
+        );
     };
     if completion.is_empty() {
-        bail!("a training example must end with at least one completion token");
+        bail!(
+            "a training example must end with at least one completion token; all {} tokens are prompt",
+            ids.len()
+        );
     }
     let (_, positions, vocab) = logits.dims3()?;
     if positions != ids.len() {

@@ -114,7 +114,7 @@ pub fn calibrate(
     ece_bins: usize,
 ) -> Result<Calibration> {
     if ece_bins == 0 {
-        bail!("the expected calibration error needs at least one bin");
+        bail!("the expected calibration error needs at least one bin; got {ece_bins}");
     }
     examples.validate()?;
     let count = examples.examples.len();
@@ -291,7 +291,7 @@ fn question_logits(
     options: Options,
 ) -> Result<(Vec<QuestionLogits>, Usage)> {
     if !(options.temperature.is_finite() && options.temperature > 0.0) {
-        bail!("temperature must be a positive number");
+        bail!("temperature must be a positive number; got {}", options.temperature);
     }
     let (rows, labels) = render_rows(runtime, request, options.permutations)?;
     let shared = shared_prefix(&rows);

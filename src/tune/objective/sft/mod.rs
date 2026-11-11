@@ -182,7 +182,9 @@ pub fn sft(
             let Some(summed) = summed else {
                 // `plan` never yields a step with no forwards and never a
                 // forward with no rows; refusing beats stepping on nothing.
-                bail!("an accumulation group contained no examples");
+                bail!(
+                    "an accumulation group contained no examples; the training plan never yields one, so this is a defect in it"
+                );
             };
             optimizer
                 .backward_step(&summed)

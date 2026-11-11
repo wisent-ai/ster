@@ -50,7 +50,10 @@ impl Runtime {
         let spec = spec.resolved(self.layer_count());
         let adapters = self.model.adapters();
         if adapters.is_empty() {
-            bail!("this runtime carries no adapters to write");
+            bail!(
+                "this runtime carries no adapters to write for layers {:?}",
+                spec.layers
+            );
         }
         let mut tensors = BTreeMap::new();
         for &layer in &spec.layers {

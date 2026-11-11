@@ -146,11 +146,16 @@ pub(crate) fn token_logprobs(
     device: &Device,
 ) -> Result<Tensor> {
     if start == 0 {
-        bail!("a scored sequence must begin with at least one context token");
+        bail!(
+            "a scored sequence must begin with at least one context token; it starts scoring at 0"
+        );
     }
     let scored = ids.len().saturating_sub(start);
     if scored == 0 {
-        bail!("a scored sequence must end with at least one predicted token");
+        bail!(
+            "a scored sequence must end with at least one predicted token; all {} tokens are context",
+            ids.len()
+        );
     }
     let (_, positions, vocab) = logits.dims3()?;
     if positions != ids.len() {

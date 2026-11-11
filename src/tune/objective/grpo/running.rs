@@ -89,7 +89,9 @@ impl GrpoOptions {
         }
         let turns = self.turns;
         if turns == 0 {
-            bail!("group-relative policy optimization requires at least one assistant turn");
+            bail!(
+                "group-relative policy optimization requires at least one assistant turn; turns is 0"
+            );
         }
         // A simulated user writes the turns between assistant turns, one
         // fewer than there are assistant turns.
@@ -107,7 +109,10 @@ impl GrpoOptions {
         // off, so zero is a valid beta and only a negative one is refused:
         // https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_config.py
         if !(self.beta.is_finite() && self.beta >= 0.0) {
-            bail!("group-relative policy optimization requires a finite beta of zero or more");
+            bail!(
+                "group-relative policy optimization requires a finite beta of zero or more; got {}",
+                self.beta
+            );
         }
         // Sampling divides the logits by the temperature, which Transformers'
         // `TemperatureLogitsWarper` refuses unless strictly positive:

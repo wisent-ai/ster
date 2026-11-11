@@ -82,7 +82,10 @@ impl Runtime {
         completion: &str,
     ) -> Result<(Vec<u32>, usize)> {
         if completion.trim().is_empty() {
-            bail!("training example has an empty completion");
+            bail!(
+                "training example has an empty completion: it holds {} characters of whitespace",
+                completion.len()
+            );
         }
         let (mut ids, tail) = match (self.applied_template(), system) {
             (Some(template), _) => {
@@ -102,7 +105,10 @@ impl Runtime {
             ),
         };
         if tail.is_empty() {
-            bail!("training example completion produced no tokens");
+            bail!(
+                "training example completion produced no tokens from {} characters",
+                completion.len()
+            );
         }
         let boundary = ids.len();
         ids.extend_from_slice(&tail);
@@ -127,7 +133,10 @@ impl Runtime {
             Some(template) => {
                 let ids = self.tokenize(&template.response(text)?, false, "prompt")?;
                 if ids.is_empty() {
-                    bail!("tokenizer produced no tokens");
+                    bail!(
+                        "tokenizer produced no tokens for a response of {} characters",
+                        text.len()
+                    );
                 }
                 Ok(ids)
             }
@@ -144,11 +153,11 @@ impl Runtime {
     /// real token a position to be predicted from.
     pub fn encode(&self, prompt: &str) -> Result<Vec<u32>> {
         if prompt.trim().is_empty() {
-            bail!("prompt must not be empty");
+            bail!("prompt must not be empty: it holds {} characters of whitespace", prompt.len());
         }
         let ids = self.tokenize(prompt, true, "prompt")?;
         if ids.is_empty() {
-            bail!("tokenizer produced no tokens");
+            bail!("tokenizer produced no tokens for a prompt of {} characters", prompt.len());
         }
         Ok(ids)
     }

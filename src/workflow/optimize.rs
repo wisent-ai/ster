@@ -214,7 +214,7 @@ pub fn optimize(
 /// fraction; one that leaves either side without a pair is refused.
 pub(super) fn split_holdout(total: usize, holdout: f64) -> Result<Holdout> {
     if !(holdout > 0.0 && holdout < 1.0) {
-        bail!("the held-out fraction must be above zero and below one");
+        bail!("the held-out fraction must be above zero and below one; got {holdout}");
     }
     let holdout_pairs = (total as f64 * holdout).round() as usize;
     if holdout_pairs == 0 || holdout_pairs >= total {

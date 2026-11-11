@@ -193,7 +193,10 @@ fn require_files(config: &Path, tokenizer: &Path, weights: &[PathBuf]) -> Result
         bail!("tokenizer is missing: {}", tokenizer.display());
     }
     if weights.is_empty() {
-        bail!("model directory contains no safetensors or GGUF weights");
+        bail!(
+            "model directory {} contains no safetensors or GGUF weights",
+            config.parent().unwrap_or(config).display()
+        );
     }
     Ok(())
 }

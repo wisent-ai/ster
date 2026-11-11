@@ -121,10 +121,16 @@ impl Runtime {
         // reported.
         match (kind, artifact.kind) {
             (lora::Kind::Adapter, lora::Kind::Reward) => {
-                bail!("adapter artifact is a reward model, not a generation adapter")
+                bail!(
+                    "adapter artifact {} is a reward model, not a generation adapter",
+                    path.display()
+                )
             }
             (lora::Kind::Reward, lora::Kind::Adapter) => {
-                bail!("adapter artifact is a generation adapter, not a reward model")
+                bail!(
+                    "adapter artifact {} is a generation adapter, not a reward model",
+                    path.display()
+                )
             }
             _ => {}
         }

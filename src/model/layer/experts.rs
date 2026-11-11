@@ -693,7 +693,7 @@ impl Experts {
                     row.iter().map(|expert| *expert as usize).collect()
                 }
                 (Some(_), None) => candle_core::bail!(
-                    "this layer routes by token id (tid2eid) and was given no token ids"
+                    "this layer routes by token id through mlp.gate.tid2eid, so it needs token ids, and none were given"
                 ),
                 (None, _) => self.choose(row),
             };

@@ -89,7 +89,7 @@ pub(in crate::model::t5) fn causal(
 
 fn validate_lengths(lengths: &[usize], width: usize) -> Result<()> {
     if lengths.is_empty() {
-        bail!("T5 padding lengths contain no rows");
+        bail!("T5 padding lengths contain no rows for width {width}");
     }
     for (row, length) in lengths.iter().enumerate() {
         // An empty row has no visible key for the attention softmax.

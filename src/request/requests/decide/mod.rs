@@ -38,7 +38,10 @@ impl Validate for DecideRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("decide")?;
         let Some(request) = &self.request else {
-            return Err("decide requires a request with a state and questions".to_owned());
+            return Err(
+                "decide requires a request with a state and questions; the job carries none"
+                    .to_owned(),
+            );
         };
         request.validate().map_err(|error| format!("{error:#}"))
     }

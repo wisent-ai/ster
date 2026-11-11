@@ -38,10 +38,10 @@ impl Schema {
         let schema: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid decision schema {}", path.display()))?;
         if schema.domain.trim().is_empty() {
-            bail!("a decision schema needs a domain");
+            bail!("decision schema {} needs a domain", path.display());
         }
         if schema.questions.is_empty() {
-            bail!("a decision schema needs at least one question");
+            bail!("decision schema {} needs at least one question", path.display());
         }
         Request {
             state: Value::String("schema".to_owned()),
@@ -88,10 +88,10 @@ pub fn synthesize(
     options: &SynthesizeOptions,
 ) -> Result<(ExampleSet, SynthesizeReport)> {
     if options.per_option == 0 {
-        bail!("synthesis needs at least one state per option");
+        bail!("synthesis needs at least one state per option; per_option is 0");
     }
     if options.retry_multiplier == 0 {
-        bail!("synthesis needs a retry multiplier of at least one");
+        bail!("synthesis needs a retry multiplier of at least one; retry_multiplier is 0");
     }
     let mut examples = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -142,7 +142,9 @@ pub fn synthesize(
         }
     }
     if examples.is_empty() {
-        bail!("the writer produced no usable state");
+        bail!(
+            "the writer produced no usable state: {rejected_empty} were empty and {rejected_duplicates} duplicated another"
+        );
     }
     let set = ExampleSet { examples };
     set.validate()?;

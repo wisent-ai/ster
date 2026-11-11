@@ -122,7 +122,7 @@ impl Runtime {
 
 pub(super) fn validate_layers(layers: &[usize], count: usize) -> Result<()> {
     if layers.is_empty() {
-        bail!("at least one layer is required");
+        bail!("at least one layer is required; none of the model's {count} layers was selected");
     }
     if let Some(layer) = layers.iter().copied().find(|layer| *layer >= count) {
         bail!(
