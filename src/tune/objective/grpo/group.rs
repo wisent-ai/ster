@@ -207,7 +207,10 @@ pub(super) fn group_loss(runtime: &Runtime, group: &Group, options: &GrpoOptions
         });
     }
     let Some(tensor) = summed else {
-        bail!("a sampled group of {} draws contained no conversations", group.draws.len());
+        bail!(
+            "a sampled group of {} draws contained no conversations",
+            group.draws.len()
+        );
     };
     Ok(Loss {
         value: tensor.to_scalar::<f32>()? as f64,

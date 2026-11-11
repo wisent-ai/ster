@@ -180,7 +180,10 @@ impl Artifact {
             );
         }
         if self.hidden_size == 0 {
-            bail!("adapter artifact of rank {} declares hidden size 0", self.rank);
+            bail!(
+                "adapter artifact of rank {} declares hidden size 0",
+                self.rank
+            );
         }
         if self.targets.is_empty() {
             bail!("adapter artifact of rank {} names no targets", self.rank);

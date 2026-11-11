@@ -173,7 +173,9 @@ impl Validate for PairsSynthesizeRequest {
                 }
             }
             other => {
-                return Err(format!("unknown generator {other:?}; expected local or brama"));
+                return Err(format!(
+                    "unknown generator {other:?}; expected local or brama"
+                ));
             }
         }
         require(

@@ -120,7 +120,10 @@ fn check(row: &JsonlRow) -> Result<(), String> {
         ));
     }
     if row.options.iter().any(|option| option.trim().is_empty()) {
-        return Err(format!("an option is empty: the options are {:?}", row.options));
+        return Err(format!(
+            "an option is empty: the options are {:?}",
+            row.options
+        ));
     }
     let mut seen = std::collections::BTreeSet::new();
     if row.options.iter().any(|option| !seen.insert(option.trim())) {

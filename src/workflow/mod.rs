@@ -28,7 +28,9 @@ pub use evaluate::{EvaluationReport, LayerEvaluation, evaluate};
 pub use extract::{PromptSet, extract};
 pub use optimize::{Candidate, Holdout, Selection, optimize};
 pub use parity::{ParityReport, parity};
-pub use project::{ProjectOptions, ProjectionReport, ScoreReport, Side, TokenScore, project, score};
+pub use project::{
+    ProjectOptions, ProjectionReport, ScoreReport, Side, TokenScore, project, score,
+};
 pub use train::train;
 
 /// Progress lines the workflows print while running. The CLI leaves the sink

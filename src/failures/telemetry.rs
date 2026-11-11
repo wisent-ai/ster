@@ -52,5 +52,6 @@ pub(super) static SUPPORT: Operation = Operation {
 /// Ster's own functionalities first, then the ones they use, which a
 /// catalogue lists so `ster errors show ster.telemetry` and `ster errors show
 /// ster.support` reach their causes.
-pub(super) static OPERATIONS: &[&Operation] =
-    &[&TELEMETRY, &SUPPORT, &RECORD, &CONSENT, &DELIVER, &REPORT, &STATUS];
+pub(super) static OPERATIONS: &[&Operation] = &[
+    &TELEMETRY, &SUPPORT, &RECORD, &CONSENT, &DELIVER, &REPORT, &STATUS,
+];

@@ -106,12 +106,19 @@ pub(in crate::cli) struct ScoreArgs {
 }
 
 pub(in crate::cli) fn score(args: ScoreArgs) -> Result<()> {
-    let ScoreArgs { model, vector, layer, input, input_file, chat_template, precision } = args;
+    let ScoreArgs {
+        model,
+        vector,
+        layer,
+        input,
+        input_file,
+        chat_template,
+        precision,
+    } = args;
     let text = match (input, input_file) {
         (Some(text), None) => text,
-        (None, Some(file)) => {
-            std::fs::read_to_string(&file).with_context(|| format!("--input-file {} cannot be read", file.display()))?
-        }
+        (None, Some(file)) => std::fs::read_to_string(&file)
+            .with_context(|| format!("--input-file {} cannot be read", file.display()))?,
         (None, None) => bail!("give the text to score with --input or --input-file"),
         (Some(_), Some(_)) => bail!("give the text once: --input or --input-file, not both"),
     };

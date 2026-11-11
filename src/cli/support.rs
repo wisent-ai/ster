@@ -83,14 +83,18 @@ pub(crate) fn request_document(verb: &str, body: &Value) -> Result<Value, String
     match verb {
         "report" => {
             let text = |name: &str| body.get(name).and_then(Value::as_str);
-            let description = text("description")
-                .ok_or("support/report needs {\"description\": \"what you were doing and what happened\"}")?;
+            let description = text("description").ok_or(
+                "support/report needs {\"description\": \"what you were doing and what happened\"}",
+            )?;
             telemetry
                 .file_report(&Report {
                     subject: text("subject"),
                     description,
                     email: text("email"),
-                    with_failure: body.get("with_failure").and_then(Value::as_bool).unwrap_or(true),
+                    with_failure: body
+                        .get("with_failure")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
                 })
                 .map_err(said)
         }

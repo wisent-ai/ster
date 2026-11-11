@@ -120,7 +120,10 @@ impl Template {
     /// tokens begin.
     pub fn prompt(&self, prompt: &str) -> Result<String> {
         if prompt.trim().is_empty() {
-            bail!("prompt must not be empty: it holds {} characters of whitespace", prompt.len());
+            bail!(
+                "prompt must not be empty: it holds {} characters of whitespace",
+                prompt.len()
+            );
         }
         self.render(
             &[Message {
@@ -163,7 +166,10 @@ impl Template {
         completion: &str,
     ) -> Result<(String, String)> {
         if prompt.trim().is_empty() {
-            bail!("prompt must not be empty: it holds {} characters of whitespace", prompt.len());
+            bail!(
+                "prompt must not be empty: it holds {} characters of whitespace",
+                prompt.len()
+            );
         }
         let mut turns: Vec<Message<'_>> = system
             .map(|content| Message {

@@ -291,7 +291,10 @@ fn question_logits(
     options: Options,
 ) -> Result<(Vec<QuestionLogits>, Usage)> {
     if !(options.temperature.is_finite() && options.temperature > 0.0) {
-        bail!("temperature must be a positive number; got {}", options.temperature);
+        bail!(
+            "temperature must be a positive number; got {}",
+            options.temperature
+        );
     }
     let (rows, labels) = render_rows(runtime, request, options.permutations)?;
     let shared = shared_prefix(&rows);

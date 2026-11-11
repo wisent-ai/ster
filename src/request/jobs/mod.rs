@@ -204,7 +204,12 @@ pub(in crate::request) fn score_job(request: ScoreRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(request.precision)?;
     let chat = runtime.set_chat_template(request.chat_template)?;
     tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
-    let mut report = serde_json::to_value(workflow::score(&runtime, &artifact, &request.text, request.layer)?)?;
+    let mut report = serde_json::to_value(workflow::score(
+        &runtime,
+        &artifact,
+        &request.text,
+        request.layer,
+    )?)?;
     chat.annotate(&mut report)?;
     Ok(report)
 }

@@ -95,15 +95,17 @@ pub(super) fn run(command: TelemetryCommand) -> Result<()> {
 /// wisent-errors' catalogue of every event, as `ster telemetry events`
 /// prints it: the queue takes only these, with exactly these properties.
 pub(crate) fn events_document() -> serde_json::Value {
-    json!(wisent_errors::telemetry::EVENTS
-        .iter()
-        .map(|event| json!({
-            "name": event.name,
-            "consent": event.consent.as_str(),
-            "summary": event.summary,
-            "properties": event.properties,
-        }))
-        .collect::<Vec<_>>())
+    json!(
+        wisent_errors::telemetry::EVENTS
+            .iter()
+            .map(|event| json!({
+                "name": event.name,
+                "consent": event.consent.as_str(),
+                "summary": event.summary,
+                "properties": event.properties,
+            }))
+            .collect::<Vec<_>>()
+    )
 }
 
 /// What `ster request telemetry/<verb>` answers, the same document the CLI
@@ -111,7 +113,10 @@ pub(crate) fn events_document() -> serde_json::Value {
 /// status; `show`, the waiting events; `flush`, what it sent; `events`, every
 /// kind of event Ster can send. A refusal, or a flush that stopped, is the
 /// sentence the CLI prints.
-pub(crate) fn request_document(verb: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+pub(crate) fn request_document(
+    verb: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let telemetry = telemetry();
     let said = |failure: Failure| refusal(failure).to_string();
     match verb {
