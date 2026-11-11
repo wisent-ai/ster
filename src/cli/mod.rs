@@ -16,6 +16,7 @@ mod command;
 mod converse;
 mod decide;
 mod decisions;
+mod doctor;
 mod errors;
 pub(crate) mod input;
 mod model;
@@ -200,6 +201,7 @@ pub(crate) fn run() -> Result<()> {
         Command::Errors { command } => errors::run(command),
         Command::Telemetry { command } => telemetry::run(command),
         Command::Support { command } => support::run(command),
+        Command::Doctor { json } => doctor::run(json),
         Command::Converse(args) => converse::run(args),
         Command::Request { operation } => {
             let status = crate::request::run(&operation)?;

@@ -271,6 +271,14 @@ filed with its status and replies
 ([reference](https://ster.wisent.com/docs/cli/support)). Ster Desktop's Help →
 Report a Problem files and reads the same reports.
 
+`ster doctor [--json]` tries every functionality Ster's failure catalogue
+declares with an entry point, now, on this machine: the telemetry directory
+can be written and where events go, where support reports go and their
+replies, the workspace and its active pair set. Each is said to work with what
+was seen, to fail with what failed and how to fix it, or to be skipped because
+it changes your data; it exits 1 when one failed
+([reference](https://ster.wisent.com/docs/cli/doctor)).
+
 ## Architecture
 
 The runtime uses Candle directly. Ster owns its Llama decoder loop so every

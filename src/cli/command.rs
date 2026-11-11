@@ -95,6 +95,14 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: SupportCommand,
     },
+    /// Try every functionality Ster depends on, now, on this machine, and say
+    /// for each that it works, or what failed and how to fix it, or why it was
+    /// not tried; exits 1 when one failed.
+    Doctor {
+        /// Print the findings as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run one JSON request from a desktop app to completion: the body on
     /// stdin, NDJSON log events and one result event on stdout, and the
     /// result's status as the exit status.
