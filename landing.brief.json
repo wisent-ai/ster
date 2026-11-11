@@ -1,6 +1,5 @@
 {
   "schemaVersion": 1,
-  "product": "Ster",
   "audience": "Developers and researchers working with local open-weight language models who need to read representations, learn measured directions, and steer generation.",
   "problem": "Representation work often crosses opaque framework boundaries, making it difficult to bind a learned direction to the exact model, layer, width, method, and intervention point where it is valid.",
   "promise": "A native Rust path from contrastive examples and hidden states to measured steering artifacts and controlled generation.",
