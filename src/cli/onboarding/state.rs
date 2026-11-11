@@ -19,13 +19,21 @@ pub(super) fn load_or_start_state(definition: &Value) -> Result<Value> {
             &fs::read_to_string(&path)
                 .with_context(|| format!("read onboarding state {}", path.display()))?,
         )
-        .context("parse onboarding state")?;
-        if state.get("schema").and_then(Value::as_str) != Some(STATE_SCHEMA)
-            || state.get("product_id").and_then(Value::as_str) != Some(PRODUCT_ID)
-            || state.get("journey_id").and_then(Value::as_str) != Some(JOURNEY_ID)
-            || state.get("journey_version").and_then(Value::as_str) != Some(JOURNEY_VERSION)
+        .with_context(|| format!("parse onboarding state {}", path.display()))?;
+        let identity = |key: &str| state.get(key).and_then(Value::as_str);
+        if identity("schema") != Some(STATE_SCHEMA)
+            || identity("product_id") != Some(PRODUCT_ID)
+            || identity("journey_id") != Some(JOURNEY_ID)
+            || identity("journey_version") != Some(JOURNEY_VERSION)
         {
-            bail!("stored onboarding state identity mismatch; use --reset to replace it");
+            bail!(
+                "stored onboarding state {} is of {:?}/{:?}/{:?} version {:?}, not {STATE_SCHEMA}/{PRODUCT_ID}/{JOURNEY_ID} version {JOURNEY_VERSION}; use --reset to replace it",
+                path.display(),
+                identity("schema"),
+                identity("product_id"),
+                identity("journey_id"),
+                identity("journey_version"),
+            );
         }
         let current_screen_id = state
             .get("current_screen_id")
