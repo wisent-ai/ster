@@ -149,7 +149,7 @@ than refused. A fraction that leaves either side without a pair is refused
 before any activation is read:
 `a held-out fraction of 0.1 over 4 contrastive pairs leaves 4 pairs to fit and 0 to rank on; both need at least one`.
 A fraction outside (0, 1) is refused as
-`the held-out fraction must be above zero and below one`. Ranking prefers accuracy and breaks ties on margin,
+`the held-out fraction must be above zero and below one; got 1.5` for `--holdout 1.5`. Ranking prefers accuracy and breaks ties on margin,
 so on a holdout of one pair the tiebreak is doing all of the work.
 
 The published direction is then refitted on every pair, holdout included, and

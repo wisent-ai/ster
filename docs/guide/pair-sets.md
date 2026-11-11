@@ -264,9 +264,9 @@ loop and returns the written path and the report. The synthesize operation requi
 `local` or `brama`, takes `generatorModel`, takes `chatTemplate` and
 `precision` on the local route, and requires `model` only on that route; it
 refuses a request without a generator with
-`pairs synthesize requires a generator, local or brama`, a hosted run without a route with
+`pairs synthesize requires a generator: set generator to local or brama`, a hosted run without a route with
 `pairs synthesize with the brama generator requires generatorModel`, an
-unrecognized value with `unknown generator; expected local or brama`, and a
+unrecognized value with `unknown generator "<value>"; expected local or brama`, and a
 local run without a model with `pairs synthesize requires a model`. This is how
 Ster Desktop offers pair authoring, inspection, and synthesis beside its six
 workflows.
