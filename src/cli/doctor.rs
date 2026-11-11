@@ -13,7 +13,9 @@ fn operation(id: &str) -> &'static Operation {
     ster::failures::operations()
         .into_iter()
         .find(|operation| operation.id == id)
-        .unwrap_or_else(|| panic!("the catalogue declares no {id}; tests/doctor holds the checks to it"))
+        .unwrap_or_else(|| {
+            panic!("the catalogue declares no {id}; tests/doctor holds the checks to it")
+        })
 }
 
 /// A failure the way the command that runs `point` would raise it.
@@ -27,14 +29,26 @@ fn failure_of(point: &str, error: &anyhow::Error) -> Failure {
 /// Every functionality with an entry point and how the diagnosis tries it.
 pub(crate) fn checks() -> Vec<Check> {
     vec![
-        Check { operation: operation("ster.errors"), probe: Probe::Run(errors) },
-        Check { operation: operation("ster.telemetry"), probe: Probe::Run(telemetry) },
-        Check { operation: operation("ster.support"), probe: Probe::Run(support) },
+        Check {
+            operation: operation("ster.errors"),
+            probe: Probe::Run(errors),
+        },
+        Check {
+            operation: operation("ster.telemetry"),
+            probe: Probe::Run(telemetry),
+        },
+        Check {
+            operation: operation("ster.support"),
+            probe: Probe::Run(support),
+        },
         Check {
             operation: operation("ster.workspace.import"),
             probe: Probe::Skipped("it copies a pair set the user names into the workspace"),
         },
-        Check { operation: operation("ster.workspace.show"), probe: Probe::Run(show) },
+        Check {
+            operation: operation("ster.workspace.show"),
+            probe: Probe::Run(show),
+        },
         Check {
             operation: operation("ster.workspace.select"),
             probe: Probe::Skipped("it changes which pair set is active"),
@@ -43,18 +57,32 @@ pub(crate) fn checks() -> Vec<Check> {
             operation: operation("ster.workspace.remove"),
             probe: Probe::Skipped("it removes a pair set from the workspace"),
         },
-        Check { operation: operation("ster.workspace.active"), probe: Probe::Run(active) },
-        Check { operation: operation("wisent-errors.telemetry.consent"), probe: Probe::Run(consent) },
-        Check { operation: operation("wisent-errors.telemetry.record"), probe: Probe::Run(record) },
+        Check {
+            operation: operation("ster.workspace.active"),
+            probe: Probe::Run(active),
+        },
+        Check {
+            operation: operation("wisent-errors.telemetry.consent"),
+            probe: Probe::Run(consent),
+        },
+        Check {
+            operation: operation("wisent-errors.telemetry.record"),
+            probe: Probe::Run(record),
+        },
         Check {
             operation: operation("wisent-errors.telemetry.deliver"),
-            probe: Probe::Skipped("it sends the events that wait; `ster telemetry flush` does, and ster.telemetry checks where they go"),
+            probe: Probe::Skipped(
+                "it sends the events that wait; `ster telemetry flush` does, and ster.telemetry checks where they go",
+            ),
         },
         Check {
             operation: operation("wisent-errors.support.report"),
             probe: Probe::Skipped("it files a report with Ster's support"),
         },
-        Check { operation: operation("wisent-errors.support.status"), probe: Probe::Run(replies) },
+        Check {
+            operation: operation("wisent-errors.support.status"),
+            probe: Probe::Run(replies),
+        },
     ]
 }
 
@@ -62,10 +90,16 @@ fn errors() -> Result<String, Failure> {
     let operations = ster::failures::operations();
     let problems = wisent_errors::catalogue_problems(&operations);
     if problems.is_empty() {
-        Ok(format!("the catalogue declares {} functionalities and holds together", operations.len()))
+        Ok(format!(
+            "the catalogue declares {} functionalities and holds together",
+            operations.len()
+        ))
     } else {
         Err(Failure::or_fallback("ster.errors", Code::Unknown, "ster")
-            .detail(format!("the failure catalogue this build carries does not hold together: {}", problems.join("; ")))
+            .detail(format!(
+                "the failure catalogue this build carries does not hold together: {}",
+                problems.join("; ")
+            ))
             .remedy("install a released ster: `stado product update ster --surface cli`"))
     }
 }
@@ -84,10 +118,17 @@ fn telemetry() -> Result<String, Failure> {
         .map_err(|error| {
             Failure::or_fallback("ster.telemetry", Code::Config, "ster")
                 .detail(format!("writing in {}: {error}", directory.display()))
-                .remedy(format!("make {} writable for this user, or set WISENT_TELEMETRY_HOME to one that is", directory.display()))
+                .remedy(format!(
+                    "make {} writable for this user, or set WISENT_TELEMETRY_HOME to one that is",
+                    directory.display()
+                ))
         })?;
     let collector = telemetry.collector()?;
-    Ok(format!("{} can be written; events go to {}", directory.display(), collector.url))
+    Ok(format!(
+        "{} can be written; events go to {}",
+        directory.display(),
+        collector.url
+    ))
 }
 
 fn support() -> Result<String, Failure> {
@@ -116,7 +157,8 @@ fn record() -> Result<String, Failure> {
 }
 
 fn show() -> Result<String, Failure> {
-    let summary = ster::workspace::summary().map_err(|error| failure_of("ster.workspace.show", &error))?;
+    let summary =
+        ster::workspace::summary().map_err(|error| failure_of("ster.workspace.show", &error))?;
     Ok(format!(
         "the workspace holds {} pair set(s), active: {}",
         summary.pair_sets.len(),
@@ -125,7 +167,8 @@ fn show() -> Result<String, Failure> {
 }
 
 fn active() -> Result<String, Failure> {
-    let path = ster::workspace::active_pair_set().map_err(|error| failure_of("ster.workspace.active", &error))?;
+    let path = ster::workspace::active_pair_set()
+        .map_err(|error| failure_of("ster.workspace.active", &error))?;
     Ok(format!("the active pair set {} is there", path.display()))
 }
 
@@ -144,7 +187,10 @@ pub(crate) fn document() -> serde_json::Value {
 pub(super) fn run(json: bool) -> Result<()> {
     let findings = diagnosis::diagnose(&checks());
     if json {
-        println!("{}", serde_json::to_string_pretty(&diagnosis::to_json(&findings))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&diagnosis::to_json(&findings))?
+        );
     } else {
         println!("{}", diagnosis::render(&findings));
     }

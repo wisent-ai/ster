@@ -122,9 +122,7 @@ pub(in crate::request) fn pairs_save_job(request: PairsSaveRequest) -> Result<Va
 
 pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
     let Some(count) = request.count else {
-        bail!(
-            "pairs synthesize requires count, a pair count above zero; the request names none"
-        );
+        bail!("pairs synthesize requires count, a pair count above zero; the request names none");
     };
     let options = SynthesisOptions {
         trait_description: request.trait_description,

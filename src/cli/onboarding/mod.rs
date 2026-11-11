@@ -133,8 +133,14 @@ fn canonical_definition() -> Result<Value> {
     {
         bail!(
             "canonical onboarding journey identity mismatch: it names journey {} version {}, this build knows {JOURNEY_ID} version {JOURNEY_VERSION}",
-            definition.get("journey_id").and_then(Value::as_str).unwrap_or("none"),
-            definition.get("journey_version").and_then(Value::as_str).unwrap_or("none")
+            definition
+                .get("journey_id")
+                .and_then(Value::as_str)
+                .unwrap_or("none"),
+            definition
+                .get("journey_version")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
         );
     }
 

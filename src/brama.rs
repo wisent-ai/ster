@@ -152,9 +152,8 @@ impl Gateway {
                 text
             }
         };
-        let value: Value = serde_json::from_str(&text).with_context(|| {
-            format!("the completion body is not JSON: {text}")
-        })?;
+        let value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("the completion body is not JSON: {text}"))?;
         let content = value
             .get("choices")
             .and_then(Value::as_array)

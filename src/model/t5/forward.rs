@@ -50,7 +50,11 @@ impl Model {
         if !captures.is_empty() && (batch != 1 || inputs.decoder_lengths.is_some()) {
             bail!(
                 "T5 activation capture requires one unpadded decoder sequence; this batch has {batch} rows{}",
-                if inputs.decoder_lengths.is_some() { " and padding" } else { "" }
+                if inputs.decoder_lengths.is_some() {
+                    " and padding"
+                } else {
+                    ""
+                }
             );
         }
         if let Some(layer) = captures.iter().find(|layer| **layer >= self.decoder.len()) {

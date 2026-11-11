@@ -41,7 +41,10 @@ impl Schema {
             bail!("decision schema {} needs a domain", path.display());
         }
         if schema.questions.is_empty() {
-            bail!("decision schema {} needs at least one question", path.display());
+            bail!(
+                "decision schema {} needs at least one question",
+                path.display()
+            );
         }
         Request {
             state: Value::String("schema".to_owned()),

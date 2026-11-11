@@ -39,14 +39,18 @@ impl Runtime {
         };
         let states = states.to_dtype(DType::F32)?.to_vec2::<f32>()?;
         if states.len() != ids.len() {
-            bail!("the forward pass kept {} states for {} tokens at layer {layer}", states.len(), ids.len());
+            bail!(
+                "the forward pass kept {} states for {} tokens at layer {layer}",
+                states.len(),
+                ids.len()
+            );
         }
         let texts = ids
             .iter()
             .map(|id| {
-                self.tokenizer
-                    .decode(&[*id], false)
-                    .map_err(|error| anyhow::anyhow!("token {id} cannot be spelled by the tokenizer: {error}"))
+                self.tokenizer.decode(&[*id], false).map_err(|error| {
+                    anyhow::anyhow!("token {id} cannot be spelled by the tokenizer: {error}")
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(TokenStates { ids, texts, states })

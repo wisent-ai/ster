@@ -165,7 +165,8 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
                 }
             }
         }
-        "telemetry/status" | "telemetry/set" | "telemetry/show" | "telemetry/flush" | "telemetry/events" => {
+        "telemetry/status" | "telemetry/set" | "telemetry/show" | "telemetry/flush"
+        | "telemetry/events" => {
             let verb = operation.trim_start_matches("telemetry/");
             let body = match serde_json::from_slice::<Value>(request_document(body)) {
                 Ok(body) => body,

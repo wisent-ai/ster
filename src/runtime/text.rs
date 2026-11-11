@@ -153,11 +153,17 @@ impl Runtime {
     /// real token a position to be predicted from.
     pub fn encode(&self, prompt: &str) -> Result<Vec<u32>> {
         if prompt.trim().is_empty() {
-            bail!("prompt must not be empty: it holds {} characters of whitespace", prompt.len());
+            bail!(
+                "prompt must not be empty: it holds {} characters of whitespace",
+                prompt.len()
+            );
         }
         let ids = self.tokenize(prompt, true, "prompt")?;
         if ids.is_empty() {
-            bail!("tokenizer produced no tokens for a prompt of {} characters", prompt.len());
+            bail!(
+                "tokenizer produced no tokens for a prompt of {} characters",
+                prompt.len()
+            );
         }
         Ok(ids)
     }

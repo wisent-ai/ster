@@ -176,7 +176,10 @@ impl Runtime {
         if suffixes.is_empty() || suffixes.iter().any(|suffix| suffix.is_empty()) {
             bail!(
                 "a decision forward pass needs at least one token in every suffix; got suffix lengths {:?}",
-                suffixes.iter().map(|suffix| suffix.len()).collect::<Vec<_>>()
+                suffixes
+                    .iter()
+                    .map(|suffix| suffix.len())
+                    .collect::<Vec<_>>()
             );
         }
         let model = match &self.model {

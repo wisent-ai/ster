@@ -27,7 +27,13 @@ pub(in crate::request) struct ScoreRequest {
 impl Validate for ScoreRequest {
     fn validate(&self) -> Result<(), String> {
         self.model.check("vector/score")?;
-        require(&self.vector, "vector/score requires a steering artifact".to_owned())?;
-        require(&self.text, "vector/score requires the text to score".to_owned())
+        require(
+            &self.vector,
+            "vector/score requires a steering artifact".to_owned(),
+        )?;
+        require(
+            &self.text,
+            "vector/score requires the text to score".to_owned(),
+        )
     }
 }
