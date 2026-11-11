@@ -1,8 +1,6 @@
 {
   "schemaVersion": 1,
-  "siteName": "Ster",
-  "domain": "https://ster.wisent.com",
-  "docsUrl": "https://ster.wisent.com/docs",
+  "docsUrl": "/docs",
   "discordUrl": "https://discord.gg/qRjpkthq54",
   "ogImageAlt": "Ster by Wisent — native representation reading and activation steering",
   "navLinks": [
