@@ -140,7 +140,10 @@ impl ModelArgs {
 }
 
 pub(crate) fn run() -> Result<()> {
-    let matches = Cli::command().get_matches();
+    let started = Instant::now();
+    let matches = Cli::command()
+        .try_get_matches()
+        .unwrap_or_else(|error| refused_by_clap(error, started));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     let mut words = Vec::new();
     let mut current = &matches;
@@ -212,6 +215,46 @@ pub(crate) fn run() -> Result<()> {
         star::observe();
     }
     Ok(())
+}
+
+/// clap answers `--help` and a usage error (exit 2) itself and exits before
+/// any command runs, so telemetry is told here: help right after a failure,
+/// and the same usage error again, are frustration signals (wisent-errors
+/// docs/telemetry.md). The command is named from clap's own subcommand tree,
+/// never from the arguments, so no value the user typed is sent.
+fn refused_by_clap(error: clap::Error, started: Instant) -> ! {
+    use clap::error::ErrorKind;
+    let command = subcommand_words(&std::env::args().skip(1).collect::<Vec<_>>());
+    if telemetry::reports(&command) {
+        let telemetry = telemetry::telemetry();
+        match error.kind() {
+            ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+                telemetry.help(&command);
+            }
+            ErrorKind::DisplayVersion => {}
+            _ => telemetry.command(&command, error.exit_code(), started.elapsed()),
+        }
+    }
+    error.exit()
+}
+
+/// The subcommands `arguments` name, as far as they name subcommands of
+/// Ster's command tree: `workspace select x` is `workspace select`, and a
+/// value or a flag ends the walk.
+fn subcommand_words(arguments: &[String]) -> String {
+    let mut current = Cli::command();
+    let mut words = Vec::new();
+    for argument in arguments {
+        if argument == "help" && words.is_empty() {
+            continue;
+        }
+        let Some(below) = current.find_subcommand(argument).cloned() else {
+            break;
+        };
+        words.push(below.get_name().to_owned());
+        current = below;
+    }
+    words.join(" ")
 }
 
 /// The pair-set file a command reads: the one `--pairs` names, else the

@@ -59,7 +59,7 @@ ureq = "2.12"
 # (src/failures), and `ster errors list|show|check` prints it. Its telemetry
 # reports what failed on a user's machine, with their consent (`ster telemetry`),
 # and its diagnosis is `ster doctor`.
-wisent-errors = { git = "https://github.com/wisent-ai/wisent-errors", rev = "150d2163603486b1d0d14f505b631cae47b97c07", features = ["telemetry", "diagnosis"] }
+wisent-errors = { git = "https://github.com/wisent-ai/wisent-errors", rev = "0d77d790713ac6877ecb5c003bfc9689c5b8a423", features = ["telemetry", "diagnosis"] }
 
 # A bool is tested with if/else, never matched against true and false.
 [lints.clippy]
