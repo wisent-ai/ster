@@ -88,9 +88,8 @@ a file URL is reported as a selection failure.
 
 ## Real qualification
 
-Not written yet: `tests/fixture/creation.mjs` does not exist in the
-repository, so nothing runs it and no result of it qualifies Ster. It is
-specified as a journey that runs the real CLI and native request API. It reads
+`tests/fixture/creation.mjs` is the journey; it runs the real CLI and native
+request API, and a run qualifies only the candidate it ran against. It reads
 actual checkpoint headers and float payloads, checks repeated native outputs,
 protects existing output and original inputs, exercises declaration and
 request refusals, and verifies failed output cleanup at a singular decoder
@@ -105,7 +104,7 @@ STER_TEST_BINARY_SHA256=<artifact SHA-256 from the qualification build>
 STER_TEST_MODEL_SPEC=<absolute fixture declaration path>
 ```
 
-When it exists it runs with Node's environment-file support, as
+It runs with Node's environment-file support, as
 `node --env-file=.build/qualification.env tests/fixture/creation.mjs`.
 
 The runner requires the exact clean source candidate and matching artifact

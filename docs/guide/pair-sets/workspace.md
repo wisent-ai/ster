@@ -50,9 +50,8 @@ provokes it, is on [How the workspace fails](../errors/workspace.md);
 
 ## Lifecycle qualification
 
-Not written yet: `tests/workspace/lifecycle.mjs` does not exist in the
-repository, so nothing runs it and no result of it qualifies Ster. It is
-specified as a journey that runs the real CLI and native request interface.
+`tests/workspace/lifecycle.mjs` is the journey; it runs the real CLI and native
+request interface, and a run qualifies only the candidate it ran against.
 It imports caller-supplied canonical pairs, checks the durable copy and active
 manifest, repeats the import, refuses conflicting and malformed imports without
 changing that state, selects imported sets, and removes them while preserving
@@ -69,7 +68,7 @@ STER_TEST_BINARY_SHA256=<artifact SHA-256 from the qualification build>
 STER_TEST_PAIRS=<absolute path to canonical pairs with an explicit trait_name>
 ```
 
-When it exists it runs with Node's environment-file support, as
+It runs with Node's environment-file support, as
 `node --env-file=.build/qualification.env tests/workspace/lifecycle.mjs`.
 
 The runner refuses a mismatched executable digest or a dirty or different

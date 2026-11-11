@@ -2,10 +2,10 @@
 
 This page specifies the journeys that qualify Ster's steering through its
 actual CLI and native request interface with a real locally created
-checkpoint. One of them is in the repository: `tests/steering/score.sh`
-(Token scores, below). Every other section specifies a journey whose file
-does not exist in the repository yet: nothing runs it, and no result of it
-qualifies Ster. Each journey binds its run to the declared committed source
+checkpoint. Each section names the journey file under `tests/` that runs it
+with `node --env-file=.build/qualification.env <file>` (Token scores, below,
+is the shell journey `tests/steering/score.sh`). A journey that has not run
+against a candidate qualifies nothing. Each journey binds its run to the declared committed source
 revision and executable digest, isolates HOME and XDG data/state directories,
 retains commands, stdin, stdout, stderr, exit statuses and observed
 artifacts, and removes only its own fixture state.
@@ -37,8 +37,7 @@ or duplicate-vector composition merely because every answer is equal.
 
 ## Prompt batches
 
-Not written yet: `tests/generate/prompts.mjs` does not exist in the
-repository, so nothing runs it.
+`tests/generate/prompts.mjs` runs this journey.
 
 The journey reads the persisted batch and compares every ordered prompt and
 answer with independent single-prompt CLI and native request executions. An
@@ -48,8 +47,7 @@ No refusal wording or chosen sampled sentence is pinned. Reports are under
 
 ## Mixtures
 
-Not written yet: `tests/steering/mixed.mjs` does not exist in the
-repository, so nothing runs it.
+`tests/steering/mixed.mjs` runs this journey.
 
 Actual CAA directions are fitted to the checked-in pairs and their reversed
 sides. Equal-strength opposite directions must cancel; duplicate directions
@@ -61,8 +59,7 @@ and original inputs must remain unchanged. Reports are under
 
 ## Pair and activation counts
 
-Not written yet: `tests/pairs/counts.mjs` does not exist in the repository,
-so nothing runs it.
+`tests/pairs/counts.mjs` runs this journey.
 
 Real BiPO CSV imports with unanswered rows and insufficient yield must refuse
 without output. Empty pair and prompt sets must also refuse. A successful
@@ -73,8 +70,7 @@ Reports are under `.build/pairs/counts/`.
 
 ## Strength selection
 
-Not written yet: `tests/steering/strength.mjs` does not exist in the
-repository, so nothing runs it.
+`tests/steering/strength.mjs` runs this journey.
 
 Declare `STER_TEST_STRENGTHS` as comma-separated finite alternatives,
 `STER_TEST_BATCH_SIZE` and `STER_TEST_MAX_SEQUENCE` in the environment file.
@@ -88,8 +84,7 @@ Reports are under `.build/steering/strength/`.
 
 ## Merged pair sets
 
-Not written yet: `tests/pairs/merge.mjs` does not exist in the repository,
-so nothing runs it.
+`tests/pairs/merge.mjs` runs this journey.
 
 Every persisted pair and source receipt must agree with both input sets in
 order. The merged dataset then trains a real direction consumed by native
@@ -110,8 +105,7 @@ Declare `STER_TEST_PAIRS`, `STER_TEST_ABLATION_STRENGTH`,
 `STER_TEST_MAX_NEW_TOKENS` and the generation seed alongside the candidate and
 fixture inputs.
 
-Not written yet: `tests/vectors/ablate/lifecycle.mjs` does not exist in the
-repository, so nothing runs it.
+`tests/vectors/ablate/lifecycle.mjs` runs this journey.
 
 The journey fits real CAA directions and rewrites actual checkpoint tensors
 through CLI and native ablation. Native F32 payload inspection must show that
@@ -128,8 +122,7 @@ the source model, learned artifact or pair set. Reports are retained under
 This journey needs the candidate, fixture declaration and `STER_TEST_PAIRS`,
 not a sampled-generation seed or budget.
 
-Not written yet: `tests/vectors/compare/geometry.mjs` does not exist in the
-repository, so nothing runs it.
+`tests/vectors/compare/geometry.mjs` runs this journey.
 
 Actual CAA, reversed-CAA and PCA directions are trained independently.
 Comparison must preserve their identity/order and shared layers, identify the
@@ -150,8 +143,7 @@ Sizes and the rounded holdout must leave valid fitting and held-out sets;
 they are experiment declarations, never fractions or presets synthesized from
 the data size.
 
-Not written yet: `tests/vectors/curve/sampling.mjs` does not exist in the
-repository, so nothing runs it.
+`tests/vectors/curve/sampling.mjs` runs this journey.
 
 Every model layer must retain the declared sample order and the actual split
 counts. The reported sufficient size must be the smallest declared size that
@@ -168,8 +160,7 @@ Declare `STER_TEST_PAIRS`, `STER_TEST_PROJECTION_LAYER`,
 Each projection parameter is an explicit native JSON number; the declared
 experiment must observably move the measured negative states.
 
-Not written yet: `tests/vectors/project/geometry.mjs` does not exist in the
-repository, so nothing runs it.
+`tests/vectors/project/geometry.mjs` runs this journey.
 
 Actual CAA directions are fitted at every model layer. Projection must retain
 every source pair field and steering-state combination exactly once, produce
@@ -185,8 +176,7 @@ not enter native execution. Reports are retained under
 Declare `STER_TEST_PAIRS` as the source pair file and `STER_TEST_HOLDOUT`
 as the explicit native fraction to rank candidates on.
 
-Not written yet: `tests/vectors/optimize/selection.mjs` does not exist in the
-repository, so nothing runs it.
+`tests/vectors/optimize/selection.mjs` runs this journey.
 
 The journey independently trains and consumes actual CAA, PCA and logistic
 artifacts. Their measured layer/method results on the held-out suffix must
