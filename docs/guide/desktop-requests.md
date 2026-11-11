@@ -27,6 +27,8 @@ a body that leaves one out is refused before anything runs, naming it:
 | `pairs/import`, `pairs/inspect`, `pairs/merge`, `pairs/save`, `pairs/synthesize` | the [pair-set](pair-sets.md) commands (`pairs/import` takes `benchmark`, `source`, `output`, `seed` and optional `examples`, `count`, `traitName`, and for `benchmark: "choices"` the row fields `question`, `choices`, `answer`, `answerForm` and `labels`; it answers `ster pairs import`'s document with the skipped-row report; `pairs/merge` takes `sources`, two or more paths, `traitName` and `output`) |
 | `tune/sft`, `tune/dpo`, `tune/bipo`, `tune/reward`, `tune/grpo`, `tune/decide`, `tune/merge`, `tune/export`, `tune/evaluate`, `tune/inspect` | the [training](tuning/objectives.md) and [adapter](tuning/adapters.md) commands; tuning bodies deserialize into the actual CLI argument types, not a second request schema |
 | `errors/list`, `errors/show` | `ster errors list`, `ster errors show` (`errors/show` takes the functionality's `id`); see [How Ster fails](errors.md) |
+| `doctor` | `ster doctor --json`: completes with `{"findings": [...], "status": 0 or 1}` even when a functionality fails, so the desktop's Diagnosis screen shows every finding |
+| `telemetry/status`, `telemetry/set`, `telemetry/show`, `telemetry/flush`, `telemetry/events` | `ster telemetry status`, `on`/`off` (`set` takes `{"level": "off"\|"errors"\|"usage"}`), `show`, `flush`, `events`: what the Settings and What Ster Sends windows show and change; `telemetry/events` answers `{"events": [...]}`, the list `ster telemetry events` prints |
 
 `decide` takes its request document inline under `request`, and `pairs/save`
 takes the pairs inline under `entries`, because the desktop composes both;

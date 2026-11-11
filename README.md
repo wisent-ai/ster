@@ -260,8 +260,10 @@ failures and the commands that ran (`usage`), or nothing; a script or a coding
 agent is never asked. No file, prompt, pair or command argument is sent, and
 your home directory and host name are taken out first. `ster telemetry
 status|on|off|show|export|flush` reads and changes it and shows exactly what
-waits to be sent ([reference](https://ster.wisent.com/docs/cli/telemetry));
-`DO_NOT_TRACK=1` sends nothing.
+waits to be sent, and `ster telemetry events` lists every kind of event Ster
+can send, the consent each needs and every property it carries
+([reference](https://ster.wisent.com/docs/cli/telemetry)); `DO_NOT_TRACK=1`
+sends nothing.
 
 `ster support report --description "what you did and what happened"
 [--subject …] [--email …] [--without-failure]` asks Ster's support for help,
@@ -270,6 +272,14 @@ telemetry holds; `ster support status` prints every report this installation
 filed with its status and replies
 ([reference](https://ster.wisent.com/docs/cli/support)). Ster Desktop's Help →
 Report a Problem files and reads the same reports.
+
+`ster doctor [--json]` tries every functionality Ster's failure catalogue
+declares with an entry point, now, on this machine: the telemetry directory
+can be written and where events go, where support reports go and their
+replies, the workspace and its active pair set. Each is said to work with what
+was seen, to fail with what failed and how to fix it, or to be skipped because
+it changes your data; it exits 1 when one failed
+([reference](https://ster.wisent.com/docs/cli/doctor)).
 
 ## Architecture
 
