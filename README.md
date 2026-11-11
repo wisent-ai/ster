@@ -260,8 +260,10 @@ failures and the commands that ran (`usage`), or nothing; a script or a coding
 agent is never asked. No file, prompt, pair or command argument is sent, and
 your home directory and host name are taken out first. `ster telemetry
 status|on|off|show|export|flush` reads and changes it and shows exactly what
-waits to be sent ([reference](https://ster.wisent.com/docs/cli/telemetry));
-`DO_NOT_TRACK=1` sends nothing.
+waits to be sent, and `ster telemetry events` lists every kind of event Ster
+can send, the consent each needs and every property it carries
+([reference](https://ster.wisent.com/docs/cli/telemetry)); `DO_NOT_TRACK=1`
+sends nothing.
 
 `ster support report --description "what you did and what happened"
 [--subject …] [--email …] [--without-failure]` asks Ster's support for help,

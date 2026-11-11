@@ -108,8 +108,9 @@ pub(crate) fn events_document() -> serde_json::Value {
 
 /// What `ster request telemetry/<verb>` answers, the same document the CLI
 /// prints: `status`; `set` with `{"level": "off"|"errors"|"usage"}`, then the
-/// status; `show`, the waiting events; `flush`, what it sent. A refusal, or a
-/// flush that stopped, is the sentence the CLI prints.
+/// status; `show`, the waiting events; `flush`, what it sent; `events`, every
+/// kind of event Ster can send. A refusal, or a flush that stopped, is the
+/// sentence the CLI prints.
 pub(crate) fn request_document(verb: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
     let telemetry = telemetry();
     let said = |failure: Failure| refusal(failure).to_string();
@@ -132,6 +133,7 @@ pub(crate) fn request_document(verb: &str, body: &serde_json::Value) -> Result<s
                 None => Ok(delivered.to_json()),
             }
         }
+        "events" => Ok(events_document()),
         other => Err(format!("unknown operation: telemetry/{other}")),
     }
 }

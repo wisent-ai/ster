@@ -28,6 +28,7 @@ a body that leaves one out is refused before anything runs, naming it:
 | `tune/sft`, `tune/dpo`, `tune/bipo`, `tune/reward`, `tune/grpo`, `tune/decide`, `tune/merge`, `tune/export`, `tune/evaluate`, `tune/inspect` | the [training](tuning/objectives.md) and [adapter](tuning/adapters.md) commands; tuning bodies deserialize into the actual CLI argument types, not a second request schema |
 | `errors/list`, `errors/show` | `ster errors list`, `ster errors show` (`errors/show` takes the functionality's `id`); see [How Ster fails](errors.md) |
 | `doctor` | `ster doctor --json`: completes with `{"findings": [...], "status": 0 or 1}` even when a functionality fails, so the desktop's Diagnosis screen shows every finding |
+| `telemetry/status`, `telemetry/set`, `telemetry/show`, `telemetry/flush`, `telemetry/events` | `ster telemetry status`, `on`/`off` (`set` takes `{"level": "off"\|"errors"\|"usage"}`), `show`, `flush`, `events`: what the Settings window shows and changes |
 
 `decide` takes its request document inline under `request`, and `pairs/save`
 takes the pairs inline under `entries`, because the desktop composes both;
