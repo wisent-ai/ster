@@ -129,6 +129,17 @@ fn active() -> Result<String, Failure> {
     Ok(format!("the active pair set {} is there", path.display()))
 }
 
+/// The findings and the status `ster doctor` exits with, as `ster request
+/// doctor` answers them: the diagnosis completed even when a functionality
+/// failed, and the desktop's Diagnosis screen shows each finding.
+pub(crate) fn document() -> serde_json::Value {
+    let findings = diagnosis::diagnose(&checks());
+    serde_json::json!({
+        "findings": diagnosis::to_json(&findings),
+        "status": diagnosis::exit_status(&findings),
+    })
+}
+
 /// Print the findings, as lines or `--json`, and exit 1 when one failed.
 pub(super) fn run(json: bool) -> Result<()> {
     let findings = diagnosis::diagnose(&checks());

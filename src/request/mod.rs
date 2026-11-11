@@ -201,6 +201,10 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
                 }
             }
         }
+        "doctor" => {
+            emit_result(COMPLETED, crate::cli::doctor::document());
+            COMPLETED
+        }
         "errors/list" => job.run(errors_list_job),
         "errors/show" => job.run(errors_show_job),
         _ => refuse(&format!("unknown operation: {operation}")),

@@ -16,7 +16,7 @@ mod command;
 mod converse;
 mod decide;
 mod decisions;
-mod doctor;
+pub(crate) mod doctor;
 mod errors;
 pub(crate) mod input;
 mod model;

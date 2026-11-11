@@ -79,5 +79,18 @@ chmod 0700 "$ROOT/state"
 jq -e --arg dir "$ROOT/state" '.[] | select(.operation == "ster.telemetry") | (.detail | contains($dir)) and (.remedy | contains("writable"))' \
   "$ROOT/unwritable.out" >/dev/null || fail "the telemetry failure does not name the directory and its fix: $(cat "$ROOT/unwritable.out")"
 
+# The desktop's Diagnosis screen reads the same findings through the request.
+set +e
+echo '{}' | "$BIN" request doctor >"$ROOT/request.out" 2>"$ROOT/request.err"
+status=$?
+set -e
+echo "ster request doctor -> $status" >>"$REPORT"
+[ "$status" -eq 0 ] || fail "ster request doctor exited $status: $(cat "$ROOT/request.err")"
+jq -s -e '[.[] | select(.type == "result")] | length == 1 and .[0].status == 0 and .[0].json.status == 0 and (.[0].json.findings | length) > 0' \
+  "$ROOT/request.out" >/dev/null || fail "ster request doctor does not answer the findings: $(cat "$ROOT/request.out")"
+jq -s -r '.[] | select(.type == "result") | .json.findings | sort_by(.operation) | map(.operation + " " + .state) | .[]' "$ROOT/request.out" >"$ROOT/request.txt"
+jq -r 'sort_by(.operation) | map(.operation + " " + .state) | .[]' "$ROOT/ready.out" >"$ROOT/ready.txt"
+diff "$ROOT/ready.txt" "$ROOT/request.txt" >/dev/null || fail "the request's findings differ from ster doctor --json's"
+
 echo "PASS" >>"$REPORT"
 echo "PASS: $REPORT"
