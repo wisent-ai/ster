@@ -43,6 +43,9 @@ pub(super) enum TelemetryCommand {
     Export { file: PathBuf },
     /// Send every waiting event now.
     Flush,
+    /// Every kind of event Ster can send, the consent each needs and every
+    /// property it carries: what the privacy page shows.
+    Events,
 }
 
 pub(super) fn telemetry() -> Telemetry {
@@ -84,8 +87,23 @@ pub(super) fn run(command: TelemetryCommand) -> Result<()> {
                 None => Ok(()),
             };
         }
+        TelemetryCommand::Events => return super::answer_document(&events_document()),
     }
     super::answer_document(&telemetry.status())
+}
+
+/// wisent-errors' catalogue of every event, as `ster telemetry events`
+/// prints it: the queue takes only these, with exactly these properties.
+pub(crate) fn events_document() -> serde_json::Value {
+    json!(wisent_errors::telemetry::EVENTS
+        .iter()
+        .map(|event| json!({
+            "name": event.name,
+            "consent": event.consent.as_str(),
+            "summary": event.summary,
+            "properties": event.properties,
+        }))
+        .collect::<Vec<_>>())
 }
 
 /// What `ster request telemetry/<verb>` answers, the same document the CLI
