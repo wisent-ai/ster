@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "docsUrl": "/docs",
   "discordUrl": "https://discord.gg/qRjpkthq54",
-  "ogImageAlt": "Ster by Wisent — native representation reading and activation steering",
+  "ogImageDescription": "native representation reading and activation steering",
   "navLinks": [
     { "label": "Workflow", "href": "https://github.com/wisent-ai/ster#first-steering-workflow" },
     { "label": "Artifacts", "href": "/docs/concept-steering-artifact" },
