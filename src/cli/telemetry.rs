@@ -133,7 +133,8 @@ pub(crate) fn request_document(verb: &str, body: &serde_json::Value) -> Result<s
                 None => Ok(delivered.to_json()),
             }
         }
-        "events" => Ok(events_document()),
+        // An object, as every request result is read: the CLI prints the list.
+        "events" => Ok(json!({ "events": events_document() })),
         other => Err(format!("unknown operation: telemetry/{other}")),
     }
 }
