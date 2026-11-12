@@ -2,11 +2,12 @@
 
 How the binary reaches a machine inside Wisent, and where a `--model`
 argument that is not a local directory puts its weights. The
-[README](../../../README.md) covers the `cargo install` route.
+[README](../../../README.md) covers building it from a checkout with kompilator.
 
 ## Installing through Stado
 
-Inside Wisent, the built binary is delivered by Stado rather than by `cargo`.
+Inside Wisent, the built binary is delivered by Stado, which builds it with
+kompilator; no Cargo builds or installs it.
 Ster ships the two files that make this work — `.wisent-release.json` and
 `release/build.sh` — and Stado reads them:
 
@@ -28,7 +29,7 @@ restores. A `status` of `stale` means the installed revision is behind
 The build script leaves the bare binary beside the tarball on purpose: a
 `stado-release` install copies individual `bin/` members out of `.wisent-output`
 and never unpacks an archive. The dependency runs one way — Stado installs Ster,
-and Ster never calls Stado. `cargo install` needs none of it.
+and Ster never calls Stado.
 
 ## Where checkpoint downloads land
 

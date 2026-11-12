@@ -68,7 +68,7 @@ its report on both surfaces.
 Each page below its marker is what
 `ster errors list --markdown --page docs/guide/errors/<area>.md` prints, which
 is `Operation::markdown` of every functionality the page lists:
-`tests/errors/pages.rs` (`cargo test --test error-pages`) refuses a page that
+`tests/errors/pages.rs` (`kompilator test --manifest-path Cargo.toml --test error-pages`) refuses a page that
 differs from it, a page no functionality names, and a functionality naming a
 page this checkout does not hold, and `tests/errors/catalogue.sh` does the same
 through the built binary. Regenerate a page's section with that command; never

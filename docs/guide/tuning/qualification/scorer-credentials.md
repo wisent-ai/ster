@@ -16,7 +16,7 @@ Declare the qualification inputs in the test host's environment:
 - `STER_TEST_REWARD_URL`: the real scorer's URL with the JSON-pointer fragment
   naming its reward field. Malformed credentials must prevent contacting it.
 
-Run `cargo test --test scorer-credentials` on the qualification host.
+Run `kompilator test --manifest-path Cargo.toml --test scorer-credentials` on the qualification host.
 Reports are retained under `target/real-tests/scorer-credentials/`, one per
 refusal, with source revision, source patch, command arguments, exit status,
 stdout and stderr. The invalid credential values are not written into reports.

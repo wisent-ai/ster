@@ -4,10 +4,11 @@
 # Written by the wisent-visuals banner bot from .github/banner.toml; the
 # repository edits the source that generates it, never the file.
 assets/readme-banner.svg
-# Resolved by cargo from Cargo.toml and committed because this crate ships a
-# binary. A person never edits it, and `cargo build` rewrites it whole.
+# The lock of Cargo.toml's dependencies, committed because this crate ships a
+# binary. A person never edits it: kompilator relock and kompilator update
+# write it, and kompilator builds from it as it stands.
 Cargo.lock
-# The repository root. Cargo reads Cargo.toml and Cargo.lock from here, git
+# The repository root. kompilator reads Cargo.toml and Cargo.lock from here, git
 # reads .gitignore, GitHub reads README.md and LICENSE, and the pack's release
 # and landing tooling reads .wisent-release.json and the three landing.*.json
 # files by that exact path from other repositories. None of them can move into
