@@ -20,7 +20,7 @@ mkdir -p "$ROOT/home"
 ROOT=$(cd "$ROOT" && pwd -P)
 REPORT="$ROOT/report.txt"
 export HOME="$ROOT/home" XDG_STATE_HOME="$ROOT/state" XDG_DATA_HOME="$ROOT/data"
-STATE="$ROOT/state/ster/onboarding.json"
+STATE="$ROOT/state/ster/first-use.json"
 echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-locks diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 trap 'chmod -R u+w "$ROOT" 2>/dev/null || true' EXIT
@@ -100,7 +100,7 @@ a_state_directory_this_account_may_not_write_is_refused() {
   err=$(cat "$ROOT/stderr")
   printf '$ XDG_STATE_HOME=%s ster onboarding\nexit: %s\nstderr: %s\n\n' "$ROOT/closed-state" "$status" "$err" >>"$REPORT"
   [ "$status" -eq 1 ] || fail "a read-only state directory exited $status, expected 1: $err"
-  said "Error: creating the directory of the onboarding state $ROOT/closed-state/ster/onboarding.json: this account may not change $ROOT/closed-state/ster or "
+  said "Error: creating the directory of the onboarding state $ROOT/closed-state/ster/first-use.json: this account may not change $ROOT/closed-state/ster or "
   said "; the progress shown is not kept, and the state that was there is unchanged; the system answered: "
   [ ! -e "$ROOT/closed-state/ster" ] || fail "a refused run created $ROOT/closed-state/ster"
   passed a_state_directory_this_account_may_not_write_is_refused
@@ -118,12 +118,34 @@ a_walkthrough_without_a_home_is_refused() {
   passed a_walkthrough_without_a_home_is_refused
 }
 
+# Progress an earlier Ster kept in onboarding.json, the shared journey
+# runtime's file (the star request), is moved to first-use.json; a second copy
+# there once first-use.json exists is set aside; the runtime's own journey
+# state there is left as it is.
+progress_in_the_shared_journey_file_is_moved_out() {
+  shared="$ROOT/state/ster/onboarding.json"
+  mv "$STATE" "$shared"
+  journey=$(jq -r .journey_id "$shared")
+  run 0 onboarding
+  [ ! -e "$shared" ] || fail "the shared journey file still holds the walkthrough's progress: $(cat "$shared")"
+  [ "$(jq -r .journey_id "$STATE")" = "$journey" ] || fail "the progress did not reach $STATE: $(cat "$STATE")"
+  cp "$STATE" "$shared"
+  run 0 onboarding
+  [ ! -e "$shared" ] || fail "a second copy of the progress stayed in the shared journey file"
+  [ -f "$ROOT/state/ster/first-use.previous.json" ] || fail "the second copy was not set aside as first-use.previous.json"
+  printf '{"bundles":{},"progress":{},"events":{}}' >"$shared"
+  run 0 onboarding
+  [ "$(cat "$shared")" = '{"bundles":{},"progress":{},"events":{}}' ] || fail "the shared runtime's own state was changed: $(cat "$shared")"
+  passed progress_in_the_shared_journey_file_is_moved_out
+}
+
 a_first_run_keeps_its_progress
 a_state_of_another_journey_is_refused
 a_state_at_an_unknown_screen_is_refused
 a_state_that_is_not_json_is_refused
 a_state_directory_this_account_may_not_write_is_refused
 a_walkthrough_without_a_home_is_refused
+progress_in_the_shared_journey_file_is_moved_out
 
 touch "$ROOT/passed"
 echo "PASS" >>"$REPORT"

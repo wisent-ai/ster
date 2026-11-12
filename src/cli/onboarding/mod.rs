@@ -17,6 +17,7 @@ mod state;
 
 use journey::{Screen, journey};
 use state::{fresh_state, load_or_start_state, save_state};
+pub(super) use state::state_path;
 
 pub fn run(reset: bool, import_pairs: Option<&Path>, name: Option<&str>) -> Result<()> {
     let journey = journey();

@@ -18,8 +18,11 @@ active set. Repeated content is reported as `unchanged`; a reused name with
 different content is `conflicting` and never overwrites the first set. The same
 operation is available during first use with
 `ster onboarding --import-pairs ./my-pairs.json`. `ster onboarding` keeps its
-progress in `$XDG_STATE_HOME/ster/onboarding.json` (or
-`~/.local/state/ster/onboarding.json`); a progress file of another journey or
+progress in `$XDG_STATE_HOME/ster/first-use.json` (or
+`~/.local/state/ster/first-use.json`), apart from `onboarding.json` beside it,
+where the shared journey runtime keeps the star request; progress an earlier
+Ster kept in `onboarding.json` is moved to `first-use.json` the first time it
+is read. A progress file of another journey or
 release, or one standing at a screen this journey does not hold, is refused
 with the field it found, and `ster onboarding --reset` starts the walkthrough
 anew ([refusals](../errors/onboarding.md)).

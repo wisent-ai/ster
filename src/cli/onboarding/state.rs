@@ -109,19 +109,72 @@ pub(super) fn save_state(state: &State) -> Result<()> {
     })
 }
 
-/// `$XDG_STATE_HOME/ster`, else `$HOME/.local/state/ster`. With neither it
-/// is refused: the temporary directory it used instead is cleared by the
-/// system and shared by every account, so progress vanished or crossed users.
-fn state_path() -> Result<PathBuf> {
+/// `$XDG_STATE_HOME/ster/first-use.json`, else
+/// `$HOME/.local/state/ster/first-use.json`. With neither it is refused: the
+/// temporary directory it used instead is cleared by the system and shared by
+/// every account, so progress vanished or crossed users. It is apart from
+/// `onboarding.json` beside it, the shared journey runtime's file (where the
+/// star request is kept): this journey's own schema written there made each
+/// refuse the other's. Every reader and writer comes through here, so this
+/// journey's state still in `onboarding.json` is moved out first.
+pub(crate) fn state_path() -> Result<PathBuf> {
+    let path = own_file()?;
+    take_over_shared_file(&path)?;
+    Ok(path)
+}
+
+fn own_file() -> Result<PathBuf> {
     let xdg = std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty());
     if let Some(path) = xdg {
-        return Ok(PathBuf::from(path).join("ster/onboarding.json"));
+        return Ok(PathBuf::from(path).join("ster").join(STATE_FILE));
     }
     match std::env::var_os("HOME").filter(|value| !value.is_empty()) {
-        Some(home) => Ok(PathBuf::from(home).join(".local/state/ster/onboarding.json")),
+        Some(home) => Ok(PathBuf::from(home).join(".local/state/ster").join(STATE_FILE)),
         None => Err(refuse(
             &causes::HOME_UNSET,
             &[("xdg", "unset or empty"), ("home", "unset or empty")],
         )),
     }
+}
+
+const STATE_FILE: &str = "first-use.json";
+/// Where this journey's state was kept before it had a file of its own.
+const SHARED_FILE: &str = "onboarding.json";
+/// Where a copy left in the shared file is set aside when this journey
+/// already has its own file: never deleted, never read again.
+const SUPERSEDED_FILE: &str = "first-use.previous.json";
+
+/// Moves this journey's state out of the shared journey file it was once kept
+/// in. `onboarding.json` is moved only when it holds this journey's own
+/// schema, product and journey: to `first-use.json` when that does not exist
+/// yet, otherwise aside to `first-use.previous.json`, so the shared runtime
+/// gets its file back either way. The runtime's journey state, or anything
+/// else there, is left where it is.
+fn take_over_shared_file(path: &Path) -> Result<()> {
+    let shared = path.with_file_name(SHARED_FILE);
+    let bytes = match fs::read(&shared) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(file::read::refusal(ROLE, &shared, &error)),
+    };
+    let ours = serde_json::from_slice::<State>(&bytes).is_ok_and(|state| {
+        state.schema == STATE_SCHEMA && state.product_id == PRODUCT_ID && state.journey_id == JOURNEY_ID
+    });
+    if !ours {
+        return Ok(());
+    }
+    let target = match path.try_exists() {
+        Ok(false) => path.to_path_buf(),
+        Ok(true) => path.with_file_name(SUPERSEDED_FILE),
+        Err(error) => return Err(file::read::refusal(ROLE, path, &error)),
+    };
+    fs::rename(&shared, &target).map_err(|error| {
+        file::write::refusal(
+            "moving",
+            ROLE,
+            &shared,
+            "the state stays where it was",
+            &error,
+        )
+    })
 }

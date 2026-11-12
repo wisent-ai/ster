@@ -119,7 +119,7 @@ try {
   assert.equal(persisted.trait_name, input.trait_name);
   assert.equal((await summary()).active_pair_set, first);
   const imported = state('first imported');
-  const onboarding = JSON.parse(readFileSync(join(stateHome, 'ster', 'onboarding.json'), 'utf8'));
+  const onboarding = JSON.parse(readFileSync(join(stateHome, 'ster', 'first-use.json'), 'utf8'));
   assert.equal(onboarding.status, 'completed');
   assert.equal(onboarding.evidence.contrastive_pair_set_imported, true);
   assert.equal(onboarding.evidence.pair_set_path, accepted.path);

@@ -35,6 +35,11 @@ pub(super) enum StarCommand {
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 fn request() -> Result<ProductStarRequest, JourneyError> {
+    // The first-use journey once kept its own state in this same file; reading
+    // its path moves that state out to first-use.json, so the runtime reads a
+    // journey file of its own. What stops that move is said as the runtime's
+    // storage failure, never skipped.
+    super::onboarding::state_path().map_err(|unmoved| JourneyError::Storage(format!("{unmoved:#}")))?;
     let product = StarProduct::from_package("ster", "Ster", REPOSITORY)?;
     ProductStarRequest::new(product)
 }

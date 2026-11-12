@@ -56,7 +56,7 @@ pub static ONBOARDING: Operation = Operation {
     id: "ster.onboarding",
     entries: &["ster onboarding"],
     uses: &[&FILE, &IMPORT],
-    summary: "show the first-use walkthrough from the screen the operator reached, keep the progress in $XDG_STATE_HOME/ster/onboarding.json, and record its completion once a pair set is imported",
+    summary: "show the first-use walkthrough from the screen the operator reached, keep the progress in $XDG_STATE_HOME/ster/first-use.json, and record its completion once a pair set is imported",
     docs: DOCS,
     warnings: &[],
     causes: &[&HOME_UNSET, &STATE_FOREIGN, &SCREEN_UNKNOWN],
