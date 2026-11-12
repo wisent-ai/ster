@@ -1,0 +1,34 @@
+{
+  "generated_by": "stado product name sync",
+  "decided_in": "the product's record in stado/catalog/products.yml; change a name with `stado product name set`",
+  "own": {
+    "id": "ster",
+    "name": "Ster",
+    "program": "ster",
+    "programs": [
+      "ster"
+    ],
+    "state_directory": ".ster",
+    "environment_prefix": "STER_",
+    "site": "https://ster.wisent.com",
+    "address": "ster.wisent.com",
+    "unit_label": "com.wisent.ster",
+    "owner_repository": "wisent-ai/ster",
+    "former_ids": []
+  },
+  "authority": {
+    "id": "stado",
+    "name": "Stado",
+    "program": "stado",
+    "programs": [
+      "stado"
+    ],
+    "state_directory": ".stado",
+    "environment_prefix": "STADO_",
+    "site": "https://stado.wisent.com",
+    "address": "stado.wisent.com",
+    "unit_label": "com.wisent.stado",
+    "owner_repository": "wisent-ai/stado",
+    "former_ids": []
+  }
+}
