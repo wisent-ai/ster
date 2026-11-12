@@ -6,7 +6,9 @@
 # archive a person downloads, and its checksum.
 set -euo pipefail
 
-export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# Stado hands a release build the kompilator it compiles with as KOMPILATOR.
+kompilator=${KOMPILATOR:?KOMPILATOR is required: Stado names the kompilator a release build compiles with}
 source_dir=${WISENT_SOURCE_DIR:?WISENT_SOURCE_DIR is required}
 output_dir=${WISENT_OUTPUT_DIR:?WISENT_OUTPUT_DIR is required}
 platform=${WISENT_PLATFORM:?WISENT_PLATFORM is required}
@@ -32,19 +34,20 @@ fi
 build_root="$output_dir/.build"
 release_dir="$output_dir/release"
 mkdir -p "$build_root" "$release_dir"
-# Through Stado's Cargo executor, which replaces the locked private Git
-# package (the onboarding runtime the GitHub star request runs on) with the
-# manifest's private-cargo-sources input: a worker holds no Git credential.
-CARGO_TARGET_DIR="$build_root" stado product cargo --manifest-path "$source_dir/Cargo.toml" build --locked --release --bin ster
+# kompilator reads the locked private Git package (the onboarding runtime
+# the GitHub star request runs on) from the manifest's private-cargo-sources
+# input, whose mount Stado names as WISENT_INPUT_PRIVATE_CARGO_SOURCES_DIR:
+# a worker holds no Git credential.
+built=$("$kompilator" build --manifest-path "$source_dir/Cargo.toml" --release --bin ster --out "$build_root/release")
 
 # The bare binary is what a stado-release install copies out of the stage
 # map; the archive beside it is what a person downloads.
-install -m 0755 "$build_root/release/ster" "$release_dir/ster"
+install -m 0755 "$built" "$release_dir/ster"
 stage="$release_dir/ster-$platform"
 archive="$release_dir/ster-$platform.tar.gz"
 rm -rf "$stage" "$archive" "$archive.sha256"
 mkdir -p "$stage"
-install -m 0755 "$build_root/release/ster" "$stage/ster"
+install -m 0755 "$built" "$stage/ster"
 install -m 0644 "$source_dir/LICENSE" "$stage/LICENSE"
 install -m 0644 "$source_dir/README.md" "$stage/README.md"
 tar -C "$release_dir" -czf "$archive" "ster-$platform"
