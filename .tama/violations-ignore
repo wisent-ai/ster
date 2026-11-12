@@ -13,3 +13,9 @@ Cargo.lock
 # files by that exact path from other repositories. None of them can move into
 # a sub-folder.
 .
+
+# One page per failing area, written below its marker by
+# `ster errors list --markdown`; every refusal links its page by the path
+# the catalogue's page! declarations name, so a page moved into a sub-folder
+# breaks the link in each refusal already printed.
+docs/guide/errors
