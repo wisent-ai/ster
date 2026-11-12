@@ -114,9 +114,9 @@ run that wrote the checkpoint; otherwise it is refused before a step is
 taken:
 
 - `checkpoint <DIR>/<checkpoint> belongs to another run, so continuing it would train an adapter no single run produced: <field> was <old> and is <new>; …`, naming every field that differs;
-- `--resume <DIR> holds no checkpoint: <DIR>/latest could not be read`;
-- `<DIR>/latest names invalid checkpoint "<name>"; expected one step directory inside <DIR>` when the pointer escapes the checkpoint directory or does not name a checkpoint;
-- `<DIR>/<checkpoint>/state.json is not a Ster checkpoint state`, or `… says it is "<kind>", not a ster tune checkpoint`;
+- `--resume <DIR> holds no checkpoint: no latest pointer in it names one, …`;
+- `reading <DIR>/latest, which names the newest checkpoint: it names "<name>", which is not one step directory inside <DIR>` when the pointer escapes the checkpoint directory or does not name a checkpoint;
+- `reading checkpoint state <DIR>/<checkpoint>/state.json: the step directory latest names holds no state.json: …`, a state that is not JSON (`reading the checkpoint state …: it is not JSON, …`), or `… says it is "<kind>", not a ster tune checkpoint`;
 - `<DIR>/<checkpoint>/tensors.safetensors holds no <part>/<tensor>, which this run trains`, or `… holds <name>, which this run does not train`.
 
 The report of a resumed run carries `resumed_from` (the step it continued

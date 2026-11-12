@@ -5,19 +5,25 @@
 
 use std::{fs, path::Path};
 
-use anyhow::{Context, Result};
-use serde_json::Value;
+use anyhow::Result;
+use serde_json::{Map, Value};
 
+use crate::failures::model::{config_malformed, config_not_object, config_unreadable};
+
+use crate::model::keys::stated;
 use super::mistral::{self, Layout};
 
 /// The decoder's config as Transformers would state it, and the prefix its
 /// weights sit below.
 pub(super) fn read(path: &Path, layout: Layout) -> Result<(Value, &'static str)> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let bytes = fs::read(path).map_err(|error| config_unreadable(path, &error))?;
     let outer: Value = serde_json::from_slice(&finite_literals(&bytes))
-        .with_context(|| format!("invalid model config {}", path.display()))?;
+        .map_err(|error| config_malformed(path, &error))?;
+    if !outer.is_object() {
+        return Err(config_not_object(path, &outer));
+    }
     Ok(match layout {
-        Layout::Transformers | Layout::Gguf => language_model(outer),
+        Layout::Transformers | Layout::Gguf => language_model(outer, path)?,
         Layout::Mistral => (mistral::transformers_config(outer, path)?, ""),
     })
 }
@@ -86,14 +92,17 @@ fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 /// (`eos_token_id`, `bos_token_id`, `tie_word_embeddings`,
 /// `quantization_config`) are copied in. Any other config is returned as it
 /// is, with no prefix.
-fn language_model(outer: Value) -> (Value, &'static str) {
+fn language_model(outer: Value, path: &Path) -> Result<(Value, &'static str)> {
     const INHERITED: [&str; 4] = [
         "eos_token_id",
         "bos_token_id",
         "tie_word_embeddings",
         "quantization_config",
     ];
-    let prefix = match outer.get("model_type").and_then(|value| value.as_str()) {
+    // A model_type that is no string is refused by name once the family is
+    // chosen; here it names no wrapper.
+    let wrapper = outer.get("model_type").and_then(Value::as_str);
+    let prefix = match wrapper {
         Some("gemma3" | "mistral3" | "llama4" | "kimi_k25" | "kimi_k3" | "minimax_m3_vl") => {
             "language_model"
         }
@@ -109,12 +118,14 @@ fn language_model(outer: Value) -> (Value, &'static str) {
         ) => "model.language_model",
         Some("step3_vl") => "",
         Some("inkling_mm_model") => "model.llm",
-        _ => return (outer, ""),
+        _ => return Ok((outer, "")),
     };
-    let Some(mut inner) = outer.get("text_config").cloned() else {
-        return (outer, "");
+    let inkling = wrapper == Some("inkling_mm_model");
+    let Some(inner) = stated::<&Map<String, Value>>(&outer, "text_config", path)? else {
+        return Ok((outer, ""));
     };
-    if outer.get("model_type").and_then(Value::as_str) == Some("inkling_mm_model") {
+    let mut inner = Value::Object(inner.clone());
+    if inkling {
         inkling_text(&mut inner);
     }
     if let Some(object) = inner.as_object_mut() {
@@ -124,7 +135,7 @@ fn language_model(outer: Value) -> (Value, &'static str) {
             }
         }
     }
-    (inner, prefix)
+    Ok((inner, prefix))
 }
 
 /// Inkling's text config as Transformers' `InklingTextConfig` reads it.

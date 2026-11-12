@@ -9,8 +9,9 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde_json::json;
+use ster::failures::{amend, file, refuse, tune::rollout::TURNS_FEW};
 use ster::{ChatChoice, GenerationOptions, Precision, PromptSet, Runtime, UserSimulator, tune};
 
 use super::ModelArgs;
@@ -57,9 +58,10 @@ pub(super) struct ConverseArgs {
 
 pub(super) fn run(args: ConverseArgs) -> Result<()> {
     if args.turns < 2 {
-        bail!(
-            "a conversation with a simulated user needs --turns of at least 2; one turn is ster generate"
-        );
+        return Err(refuse(
+            &TURNS_FEW,
+            &[("turns", &args.turns.to_string()), ("user", &args.user_model)],
+        ));
     }
     let prompts = PromptSet::load(&args.prompts)?;
     let user = UserSimulator::load(
@@ -80,17 +82,20 @@ pub(super) fn run(args: ConverseArgs) -> Result<()> {
     };
     runtime.set_chat_template(ChatChoice::Auto)?;
     let generation = GenerationOptions {
-        strength: None,
         max_new_tokens: args.max_new_tokens,
         temperature: args.temperature,
         top_p: args.top_p,
         seed: args.seed,
     };
-    let file = File::create(&args.output)
-        .with_context(|| format!("cannot create {}", args.output.display()))?;
+    let role = "the conversations ster converse writes";
+    let shown = args.output.display().to_string();
+    let file = File::create(&args.output).map_err(|error| {
+        file::write::refusal("creating", role, &args.output, "no conversation was played", &error)
+    })?;
     let mut output = BufWriter::new(file);
     let mut draw = 0u64;
     let mut turns_played = 0usize;
+    let total = prompts.prompts.len();
     for (index, prompt) in prompts.prompts.iter().enumerate() {
         let played = tune::rollout(
             &runtime,
@@ -101,7 +106,9 @@ pub(super) fn run(args: ConverseArgs) -> Result<()> {
             args.max_sequence,
             &mut draw,
         )
-        .with_context(|| format!("prompt {index} could not be played"))?;
+        .map_err(|error| {
+            amend(error, format!("it was prompt {index} of {total}; {shown} holds at most the {index} conversations played before it"))
+        })?;
         turns_played += played.turns.len();
         let messages: Vec<_> = played
             .transcript
@@ -112,11 +119,16 @@ pub(super) fn run(args: ConverseArgs) -> Result<()> {
             output,
             "{}",
             json!({"prompt_index": index, "messages": messages})
-        )?;
+        )
+        .map_err(|error| {
+            let left = format!("{shown} holds at most the {index} conversations before prompt {index}");
+            file::write::refusal("writing", role, &args.output, &left, &error)
+        })?;
     }
-    output
-        .flush()
-        .with_context(|| format!("cannot write {}", args.output.display()))?;
+    output.flush().map_err(|error| {
+        let left = format!("{shown} holds what was flushed of the {total} conversations");
+        file::write::refusal("writing", role, &args.output, &left, &error)
+    })?;
     super::answer(&json!({
         "output": args.output.display().to_string(),
         "conversations": prompts.prompts.len(),

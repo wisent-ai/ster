@@ -4,9 +4,10 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Args, CommandFactory, FromArgMatches, Parser};
 use serde::Serialize;
 use serde_json::Value;
@@ -47,8 +48,9 @@ struct Cli {
     command: Command,
 }
 
-/// Whether this invocation asked for text; set once before any command runs.
-static TEXT: OnceLock<bool> = OnceLock::new();
+/// Whether this invocation asked for text; `run` stores it before any
+/// command answers, and nothing else writes it.
+static TEXT: AtomicBool = AtomicBool::new(false);
 
 /// The command this run is and when it started, set once it parsed, for the
 /// telemetry `main` finishes with.
@@ -62,19 +64,27 @@ pub(crate) fn finish(error: Option<&anyhow::Error>, status: i32) {
     }
 }
 
+/// The command this run is, as a refusal names it (`ster tune dpo`), once
+/// it parsed; `ster` before.
+pub(crate) fn shown() -> String {
+    match STARTED.get() {
+        Some(started) => format!("ster {}", started.command),
+        None => "ster".to_owned(),
+    }
+}
+
 /// Print one answer: the pretty JSON document, or with `--text` one
 /// `path: value` line per leaf field, nested keys joined with dots.
 pub(crate) fn answer<T: Serialize>(value: &T) -> Result<()> {
-    answer_document(&serde_json::to_value(value)?)
+    let document = ster::json::value(value);
+    answer_document(&document)
 }
 
 /// Print an already constructed document without copying its JSON tree.
 pub(crate) fn answer_document(value: &Value) -> Result<()> {
-    let text = TEXT
-        .get()
-        .context("Ster command output mode was not initialized before printing its answer")?;
-    if !*text {
-        println!("{}", serde_json::to_string_pretty(value)?);
+    if !TEXT.load(Ordering::Relaxed) {
+        let pretty = ster::json::pretty(value);
+        println!("{pretty}");
         return Ok(());
     }
     let mut lines = String::new();
@@ -159,12 +169,8 @@ pub(crate) fn run() -> Result<()> {
         command,
         at: Instant::now(),
     });
-    TEXT.set(cli.text).map_err(|attempted| {
-        anyhow::anyhow!(
-            "Ster command output mode is already {:?}; cannot replace it with --text={attempted}",
-            TEXT.get()
-        )
-    })?;
+    // `fn main() -> ExitCode { match cli::run() { ... } }` is the only caller.
+    TEXT.store(cli.text, Ordering::Relaxed);
     // A run of a model that answered what was asked counts toward the
     // GitHub star request once it completed; a command that failed returns
     // its error before anything is counted.

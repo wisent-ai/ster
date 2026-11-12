@@ -121,7 +121,12 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
     let source = match fs::canonicalize(source) {
         Ok(source) => source,
         Err(error) => {
-            let refusal = failures::pairs::read_refusal(&source.display().to_string(), &error);
+            let refusal = failures::file::read::refusal_or(
+                &failures::pairs::MISSING,
+                "the pair set",
+                source,
+                &error,
+            );
             return Ok(rejected(source, None, refusal));
         }
     };
@@ -197,34 +202,51 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
     }
     pair_set
         .save(&temporary)
-        .map_err(|error| error.context(format!("staging the import of {shown} as {id}")))?;
+        .map_err(|error| failures::amend(error, format!("it was staging the import of {shown} as {id}")))?;
     if let Err(error) = fs::hard_link(&temporary, &destination) {
         let left = left_behind(&temporary);
-        let error_text = error.to_string();
-        let values: [(&str, &str); 6] = [
-            ("source", &shown),
-            ("id", &id),
-            ("path", &destination_shown),
-            ("staging", &staging),
-            ("error", &error_text),
-            ("left", &left),
-        ];
         if error.kind() == std::io::ErrorKind::AlreadyExists {
+            let error_text = error.to_string();
+            let values: [(&str, &str); 6] = [
+                ("source", &shown),
+                ("id", &id),
+                ("path", &destination_shown),
+                ("staging", &staging),
+                ("error", &error_text),
+                ("left", &left),
+            ];
             let refusal = refuse(&import::DESTINATION_APPEARED, &values);
             return conflicting(destination.as_path(), refusal);
         }
-        return Err(refuse(&import::COMMIT_FAILED, &values));
+        if error.kind() == std::io::ErrorKind::Unsupported {
+            return Err(refuse(
+                &import::LINK_UNSUPPORTED,
+                &[
+                    ("source", &shown),
+                    ("id", &id),
+                    ("path", &destination_shown),
+                    ("directory", &pairs_dir.display().to_string()),
+                    ("error", &error.to_string()),
+                    ("left", &left),
+                ],
+            ));
+        }
+        let action = format!("linking {staging} into place as");
+        return Err(failures::file::write::refusal(
+            &action,
+            "the pair set's copy",
+            &destination,
+            &left,
+            &error,
+        ));
     }
     if let Err(error) = fs::remove_file(&temporary) {
-        return Err(refuse(
-            &import::STAGING_UNREMOVABLE,
-            &[
-                ("source", &shown),
-                ("id", &id),
-                ("staging", &staging),
-                ("error", &error.to_string()),
-                ("left", &left_behind(&destination)),
-            ],
+        return Err(failures::file::write::refusal(
+            "removing",
+            "the import's staging file",
+            &temporary,
+            &left_behind(&destination),
+            &error,
         ));
     }
 
@@ -239,7 +261,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
     state.active_pair_set = Some(id.clone());
     if let Err(error) = save_state(&state) {
         let left = left_behind(&destination);
-        return Err(error.context(format!("importing {shown} as {id} was undone: {left}")));
+        return Err(failures::amend(error, format!("importing {shown} as {id} was undone: {left}")));
     }
     Ok(ImportReport::accepted_as(
         ImportStatus::Imported,
@@ -256,7 +278,7 @@ fn rejected(source: &Path, pair_count: Option<usize>, refusal: anyhow::Error) ->
 }
 
 fn pair_set_digest(pair_set: &PairSet) -> Result<String> {
-    let bytes = serde_json::to_vec(pair_set)?;
+    let bytes = crate::json::compact(pair_set).into_bytes();
     let digest = Blake2b512::digest(bytes);
     Ok(digest[..PAIR_SET_DIGEST_BYTES]
         .iter()

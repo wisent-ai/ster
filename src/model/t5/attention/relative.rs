@@ -1,8 +1,14 @@
 //! T5's learned scalar position bias, shared by all blocks in one stack.
 //! The encoder distinguishes both directions; the decoder only counts past keys.
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{DType, Tensor};
+
+use crate::failures::model::{
+    Unrunnable, settings,
+    t5::{overflow, unreserved},
+};
+use crate::failures::tensor::computing;
 
 #[derive(Debug, Clone)]
 pub(in crate::model::t5) struct RelativeBias {
@@ -16,7 +22,9 @@ pub(in crate::model::t5) struct RelativeBias {
 
 impl RelativeBias {
     pub fn new(weight: Tensor, max_distance: usize, bidirectional: bool) -> Result<Self> {
-        let (buckets, heads) = weight.dims2()?;
+        let (buckets, heads) = weight
+            .dims2()
+            .map_err(|error| computing("reading the T5 relative attention bias's axes", error))?;
         // Signed encoder distances share the available buckets equally.
         // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
         let per_direction = if bidirectional { buckets / 2 } else { buckets };
@@ -26,25 +34,35 @@ impl RelativeBias {
         // The logarithmic partition divides by exact and by log(max_distance / exact).
         // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
         if exact == 0 || max_distance <= exact {
-            bail!(
-                "T5 relative attention cannot partition {buckets} buckets at maximum distance {max_distance}: the exact-distance range must be nonempty and shorter than the maximum distance"
-            );
+            return Err(settings(
+                Unrunnable::Contradictory,
+                format!(
+                    "T5 relative attention cannot partition {buckets} buckets at maximum distance {max_distance}: the exact-distance range of {exact} must be nonempty and shorter than the maximum distance"
+                ),
+                format!(
+                    "relative_attention_num_buckets: {buckets}, relative_attention_max_distance: {max_distance}"
+                ),
+            ));
         }
-        let direction_width = u32::try_from(per_direction)
-            .context("T5 relative attention bucket count exceeds the tensor index range")?;
+        let index = |count: usize| {
+            u32::try_from(count).map_err(|_| {
+                overflow(
+                    "the relative attention buckets",
+                    &format!("{count} buckets; a bucket index is a u32"),
+                )
+            })
+        };
+        let direction_width = index(per_direction)?;
         // Distances at and beyond the maximum use the final bucket in their direction.
         // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
-        let saturated = u32::try_from(per_direction - 1)?;
+        let saturated = index(per_direction - 1)?;
         // The largest table index must remain representable by Candle's index tensor.
         // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
-        u32::try_from(buckets - 1)
-            .context("T5 relative attention bucket count exceeds the tensor index range")?;
+        index(buckets - 1)?;
         let denominator = ((max_distance as f64) / (exact as f64)).ln() as f32;
         let mut distances = Vec::new();
-        distances.try_reserve_exact(max_distance).with_context(|| {
-            format!(
-                "cannot allocate T5 relative-distance lookup for relative_attention_max_distance={max_distance}"
-            )
+        distances.try_reserve_exact(max_distance).map_err(|error| {
+            unreserved("the relative-distance lookup", max_distance, &error)
         })?;
         // The reference evaluates distance arithmetic in F32, then truncates.
         // Compute each distance once at load, not once per attention matrix cell.
@@ -58,7 +76,7 @@ impl RelativeBias {
                     // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
                     .min(per_direction - 1)
             };
-            distances.push(u32::try_from(bucket)?);
+            distances.push(index(bucket)?);
         }
         Ok(Self {
             weight: weight.to_dtype(DType::F32)?,
@@ -72,18 +90,22 @@ impl RelativeBias {
 
     /// `[1, heads, queries, keys]`; `start` is the absolute decoder query position.
     pub fn forward(&self, queries: usize, keys: usize, start: usize) -> Result<Tensor> {
-        let end = start
-            .checked_add(queries)
-            .context("T5 query position overflow")?;
-        let cells = queries
-            .checked_mul(keys)
-            .context("T5 position-bias shape overflow")?;
+        let Some(end) = start.checked_add(queries) else {
+            return Err(overflow(
+                "the position bias",
+                &format!("position {start} plus {queries} queries"),
+            ));
+        };
+        let Some(cells) = queries.checked_mul(keys) else {
+            return Err(overflow(
+                "the position bias",
+                &format!("{queries} queries by {keys} keys"),
+            ));
+        };
         let mut indices = Vec::new();
-        indices.try_reserve_exact(cells).with_context(|| {
-            format!(
-                "cannot allocate T5 position-bias indices for {queries} queries and {keys} keys"
-            )
-        })?;
+        indices
+            .try_reserve_exact(cells)
+            .map_err(|error| unreserved("the position-bias indices", cells, &error))?;
         for query in start..end {
             // Memory positions count from the beginning of the cached key sequence.
             // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py

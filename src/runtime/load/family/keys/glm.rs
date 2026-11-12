@@ -1,8 +1,11 @@
 //! ChatGLM's and Nemotron Puzzle's keys under Llama's names.
 
+use std::path::Path;
+
+use anyhow::Result;
 use serde_json::Value;
 
-use crate::runtime::load::family::read::{flag, number};
+use crate::runtime::load::family::read::{flag, list, number_or, text};
 use crate::runtime::load::family::rope::DEFAULT_ROPE_THETA;
 
 /// The share of each ChatGLM head that rotates (vLLM's `chatglm.py`,
@@ -13,17 +16,18 @@ pub(in crate::runtime::load::family) const CHATGLM_ROTARY_SHARE: f64 = 0.5;
 /// (`multi_query_group_num` under `multi_query_attention`), head width
 /// (`kv_channels`), vocabulary (`padded_vocab_size`), the half of each head
 /// that rotates, and the base `10000 · rope_ratio`.
-pub(in crate::runtime::load::family) fn chatglm_keys(raw: &mut Value) {
-    let groups = raw
-        .get("multi_query_group_num")
-        .filter(|_| flag(raw, "multi_query_attention"))
-        .cloned();
+pub(in crate::runtime::load::family) fn chatglm_keys(raw: &mut Value, path: &Path) -> Result<()> {
+    let groups = if flag(raw, "multi_query_attention", path)? {
+        raw.get("multi_query_group_num").cloned()
+    } else {
+        None
+    };
     let heads = raw.get("num_attention_heads").cloned();
     let width = raw.get("kv_channels").cloned();
     let vocabulary = raw.get("padded_vocab_size").cloned();
-    let base = DEFAULT_ROPE_THETA * number(raw, "rope_ratio").unwrap_or(1.0);
+    let base = DEFAULT_ROPE_THETA * number_or(raw, "rope_ratio", 1.0, path)?;
     let Some(object) = raw.as_object_mut() else {
-        return;
+        return Ok(());
     };
     if let Some(key_value_heads) = groups.or(heads) {
         object
@@ -40,6 +44,7 @@ pub(in crate::runtime::load::family) fn chatglm_keys(raw: &mut Value) {
         .entry("partial_rotary_factor")
         .or_insert(Value::from(CHATGLM_ROTARY_SHARE));
     object.entry("rope_theta").or_insert(Value::from(base));
+    Ok(())
 }
 
 /// Nemotron Puzzle's config, put in Nemotron-H's shape: its
@@ -49,33 +54,34 @@ pub(in crate::runtime::load::family) fn chatglm_keys(raw: &mut Value) {
 /// the top-level ones the per-layer `block_configs` override. A block type
 /// it does not know is left as `?`, which the Nemotron-H reading refuses
 /// by layer.
-pub(in crate::runtime::load::family) fn nemotron_puzzle_keys(raw: &mut Value) {
-    let pattern: Option<String> =
-        raw.get("layers_block_type")
-            .and_then(Value::as_array)
-            .map(|kinds| {
-                kinds
-                    .iter()
-                    .map(|kind| match kind.as_str() {
-                        Some("mamba") => 'M',
-                        Some("attention") => '*',
-                        Some("mlp") => '-',
-                        Some("moe") => 'E',
-                        _ => '?',
-                    })
-                    .collect()
-            });
-    let first_moe = raw
-        .get("block_configs")
-        .and_then(Value::as_array)
-        .and_then(|blocks| {
-            blocks
+pub(in crate::runtime::load::family) fn nemotron_puzzle_keys(
+    raw: &mut Value,
+    path: &Path,
+) -> Result<()> {
+    let pattern: Option<String> = match list(raw, "layers_block_type", path)? {
+        Some(kinds) => Some(
+            kinds
                 .iter()
-                .find(|block| block.get("block_type").and_then(Value::as_str) == Some("moe"))
-        })
-        .cloned();
+                .map(|kind| match kind.as_str() {
+                    Some("mamba") => 'M',
+                    Some("attention") => '*',
+                    Some("mlp") => '-',
+                    Some("moe") => 'E',
+                    _ => '?',
+                })
+                .collect(),
+        ),
+        None => None,
+    };
+    let mut first_moe = None;
+    for block in list(raw, "block_configs", path)?.into_iter().flatten() {
+        if text(block, "block_type", path)? == Some("moe") {
+            first_moe = Some(block.clone());
+            break;
+        }
+    }
     let Some(object) = raw.as_object_mut() else {
-        return;
+        return Ok(());
     };
     if let Some(pattern) = pattern {
         object
@@ -89,4 +95,5 @@ pub(in crate::runtime::load::family) fn nemotron_puzzle_keys(raw: &mut Value) {
             }
         }
     }
+    Ok(())
 }

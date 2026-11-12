@@ -5,11 +5,15 @@ mod scorer;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    failures::{
+        refuse,
+        tune::policy::{SOURCE_BLANK, SOURCE_UNKNOWN},
+    },
     runtime::{Completion, DeviceChoice, GenerationOptions},
     workflow,
 };
@@ -48,10 +52,9 @@ impl Reward {
         device: DeviceChoice,
     ) -> Result<Self> {
         let trimmed = value.trim();
+        let shown = format!("{value:?}");
         if trimmed.is_empty() {
-            bail!(
-                "group-relative policy optimization requires a reward source; pass length or a reward artifact"
-            );
+            return Err(refuse(&SOURCE_BLANK, &[("value", &shown)]));
         }
         if trimmed == Self::LENGTH {
             return Ok(Self::Length);
@@ -61,7 +64,7 @@ impl Reward {
         }
         let path = Path::new(trimmed);
         if !path.exists() {
-            bail!("reward source {trimmed:?} is neither the keyword length nor a file that exists");
+            return Err(refuse(&SOURCE_UNKNOWN, &[("value", &shown)]));
         }
         workflow::progress(format!("loading the reward model at {trimmed}"));
         Ok(Self::Model(Box::new(RewardModel::load(

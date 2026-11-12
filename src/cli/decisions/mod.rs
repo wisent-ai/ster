@@ -4,13 +4,13 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Subcommand;
 use serde_json::json;
 use ster::{
     ChatChoice, DecideOptions, Precision, RAW_TEMPERATURE, Runtime,
-    brama::Gateway,
     decide::{self, Calibration, ExampleSet, FetchOptions, Schema, SynthesizeOptions},
+    inference::Inference,
 };
 
 use super::ModelArgs;
@@ -21,7 +21,7 @@ pub(super) enum DecisionsCommand {
     Fetch(FetchArgs),
     /// Read a JSONL file of {"context", "options", "label"} rows into labelled decisions.
     Import(ImportArgs),
-    /// Write labelled decisions with a hosted model through Brama, one label per state by construction.
+    /// Write labelled decisions with a hosted model through Stado's inference alternatives, one label per state by construction.
     Synthesize(SynthesizeArgs),
     /// Split labelled decisions into a training set and a held-out set.
     Split(SplitArgs),
@@ -83,7 +83,7 @@ pub(super) struct SynthesizeArgs {
     /// The schema: a domain and the questions, with no state.
     #[arg(long)]
     schema: PathBuf,
-    /// A Brama alias or route the writer runs on.
+    /// The route the writer asks Stado's inference alternatives for: a Brama alias, a provider/model route or a selector.
     #[arg(long)]
     generator_model: String,
     /// States written per option of each question; Ster assumes none.
@@ -159,16 +159,25 @@ pub(super) fn run(command: DecisionsCommand) -> Result<()> {
     }
 }
 
-fn write(path: &Path, set: &ExampleSet) -> Result<()> {
+/// Writes `set` to `path`, the file holding `role`.
+fn write(path: &Path, role: &str, set: &impl serde::Serialize) -> Result<()> {
+    let file = |action: &str, left: &str, error: std::io::Error| {
+        ster::failures::file::write::refusal(action, role, path, left, &error)
+    };
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+            .map_err(|error| file("creating the directory of", "nothing was written", error))?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(set)?)
-        .with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(path, ster::json::pretty(set)).map_err(|error| {
+        file(
+            "writing",
+            "a file that was there may be emptied or cut short",
+            error,
+        )
+    })
 }
 
 fn fetch(args: FetchArgs) -> Result<()> {
@@ -184,44 +193,42 @@ fn fetch(args: FetchArgs) -> Result<()> {
         offset: args.offset,
     };
     let (set, report) = decide::fetch(&options)?;
-    write(&args.output, &set)?;
+    write(&args.output, "the labelled decisions", &set)?;
     super::answer(&json!({"path": args.output.display().to_string(), "report": report}))?;
     Ok(())
 }
 
 fn import(args: ImportArgs) -> Result<()> {
     let (set, report) = decide::import_jsonl(&args.input, &args.question_id, &args.instructions)?;
-    write(&args.output, &set)?;
+    write(&args.output, "the labelled decisions", &set)?;
     super::answer(&json!({"path": args.output.display().to_string(), "report": report}))?;
     Ok(())
 }
 
 fn synthesize(args: SynthesizeArgs) -> Result<()> {
-    let schema = Schema::load(&args.schema)?;
-    let gateway = Gateway::from_env(&args.generator_model)?;
+    // The route and the settings are option checks: refused before the
+    // schema is read.
+    let writer = Inference::new(&args.generator_model)?;
     let options = SynthesizeOptions {
         per_option: args.per_option,
         retry_multiplier: args.retry_multiplier,
         temperature: args.temperature,
         max_tokens: args.max_tokens,
     };
-    let (set, report) = decide::synthesize(&gateway, &schema, &options)?;
-    write(&args.output, &set)?;
+    options.check()?;
+    let schema = Schema::load(&args.schema)?;
+    let (set, report) = decide::synthesize(&writer, &schema, &options)?;
+    write(&args.output, "the labelled decisions", &set)?;
     super::answer(&json!({"path": args.output.display().to_string(), "report": report}))?;
     Ok(())
 }
 
 fn split(args: SplitArgs) -> Result<()> {
+    decide::check_holdout(args.holdout)?;
     let set = ExampleSet::load(&args.examples)?;
-    if !(args.holdout > 0.0 && args.holdout < 1.0) {
-        anyhow::bail!(
-            "the held-out fraction must be above zero and below one; got {}",
-            args.holdout
-        );
-    }
     let (train, holdout) = decide::split(&set, args.holdout, args.seed);
-    write(&args.train_output, &train)?;
-    write(&args.holdout_output, &holdout)?;
+    write(&args.train_output, "the training set", &train)?;
+    write(&args.holdout_output, "the held-out set", &holdout)?;
     super::answer(&json!({
         "train": {"path": args.train_output.display().to_string(), "examples": train.examples.len()},
         "holdout": {"path": args.holdout_output.display().to_string(), "examples": holdout.examples.len()},
@@ -231,6 +238,8 @@ fn split(args: SplitArgs) -> Result<()> {
 }
 
 fn benchmark(args: BenchmarkArgs) -> Result<()> {
+    // The bin count is a setting: it is refused before the examples are read.
+    decide::check_bins(args.ece_bins)?;
     let set = ExampleSet::load(&args.examples)?;
     let calibration = args
         .calibration
@@ -276,16 +285,9 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
         ece_bins: args.ece_bins,
     };
     let report = decide::benchmark(&runtime, &set, &options)?;
-    if let Some(parent) = args
-        .output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(&args.output, serde_json::to_string_pretty(&report)?)
-        .with_context(|| format!("failed to write {}", args.output.display()))?;
+    // The report is printed first, so an output the disk refuses does not
+    // lose a benchmark the model already ran.
     super::answer(&report)?;
+    write(&args.output, "the benchmark report", &report)?;
     Ok(())
 }

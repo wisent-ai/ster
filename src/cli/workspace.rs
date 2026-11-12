@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Subcommand;
 
 use super::onboarding;
@@ -39,10 +39,12 @@ pub(super) fn run(command: WorkspaceCommand) -> Result<()> {
             let mut report = ster::workspace::import_pair_set(&source, name.as_deref())?;
             let refusal = report.take_refusal();
             if refusal.is_none() {
+                // An import that was not refused is imported or unchanged,
+                // and both name the copy the workspace holds.
                 let path = report
                     .path
                     .as_deref()
-                    .context("accepted pair-set import did not return a destination")?;
+                    .expect("an accepted import names the workspace copy");
                 onboarding::record_pair_set_imported(std::path::Path::new(path))?;
             }
             super::answer(&report)?;

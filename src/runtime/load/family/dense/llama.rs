@@ -1,7 +1,6 @@
 //! Llama, Mistral, Mixtral, Phi, PhiMoE, StableLM, StarCoder2, Cohere and Nemotron.
 
-use anyhow::{Result, bail};
-use serde_json::Value;
+use anyhow::Result;
 
 use crate::model::{
     Architecture, ExpertLayout, FeedForwardKind, Names, NormKind, QkvLayout, QueryKeyNorm, Scoring,
@@ -10,7 +9,7 @@ use crate::runtime::load::family::At;
 use crate::runtime::load::family::custom::llama4::llama4_temperature;
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::{every_layer, fits};
-use crate::runtime::load::family::read::{flag, number, whole};
+use crate::runtime::load::family::read::{flag, flag_or, number, whole};
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
 /// sends only their `model_type` values here.
@@ -32,20 +31,20 @@ pub(in crate::runtime::load::family) fn configure(
             // with Llama 4's query temperature, `llama_4_scaling_beta` past
             // every `original_max_position_embeddings` positions, both
             // stated beside its rotation (vLLM's `llama_4_scaling`).
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.sliding_window = whole(raw, "sliding_window");
+            architecture.sliding_window = whole(raw, "sliding_window", path)?;
             if architecture.sliding_window.is_some() {
                 architecture.sliding_layers = every_layer(layers, path)?;
             }
             architecture.query_temperature = llama4_temperature(raw, scaling, layers, path)?;
         }
         "llama" | "mistral" | "mixtral" | "phi3" | "phimoe" => {
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
             // Mistral's own weights rotate adjacent pairs (their reading
             // states `rope_interleave`).
-            architecture.interleaved_rotary = flag(raw, "rope_interleave");
+            architecture.interleaved_rotary = flag(raw, "rope_interleave", path)?;
             if model_type == "phi3" {
                 architecture.qkv_layout = QkvLayout::Stacked;
             }
@@ -54,7 +53,7 @@ pub(in crate::runtime::load::family) fn configure(
             // full attention on every layer; Phi-3 states a window it applies
             // on every layer.
             if model_type != "llama" {
-                architecture.sliding_window = whole(raw, "sliding_window");
+                architecture.sliding_window = whole(raw, "sliding_window", path)?;
                 if architecture.sliding_window.is_some() {
                     architecture.sliding_layers = every_layer(layers, path)?;
                 }
@@ -76,7 +75,7 @@ pub(in crate::runtime::load::family) fn configure(
                 // and SparseMixer routing, which Transformers defines for
                 // two experts per token.
                 architecture.norm = NormKind::Layer { bias: true };
-                architecture.lm_head_bias = flag(raw, "lm_head_bias");
+                architecture.lm_head_bias = flag(raw, "lm_head_bias", path)?;
                 let mut routed = experts(
                     raw,
                     "num_local_experts",
@@ -87,14 +86,20 @@ pub(in crate::runtime::load::family) fn configure(
                     path,
                 )?;
                 if routed.top_k != SPARSE_MIXER_EXPERTS {
-                    bail!(
+                    refused!(
+                        Unimplemented,
+                        in raw,
+                        ["num_experts_per_tok"],
                         "{} routes {} experts per token; PhiMoE's SparseMixer chooses exactly {SPARSE_MIXER_EXPERTS}",
                         path.display(),
                         routed.top_k
                     );
                 }
-                let Some(jitter) = number(raw, "router_jitter_noise") else {
-                    bail!(
+                let Some(jitter) = number(raw, "router_jitter_noise", path)? else {
+                    refused!(
+                        Incomplete,
+                        in raw,
+                        ["router_jitter_noise"],
                         "{} states no router_jitter_noise; PhiMoE's SparseMixer needs it to bound the experts it weighs",
                         path.display()
                     );
@@ -107,21 +112,21 @@ pub(in crate::runtime::load::family) fn configure(
         }
         "stablelm" => {
             architecture.norm = NormKind::Layer { bias: true };
-            architecture.query_key_value_bias = flag(raw, "use_qkv_bias");
-            architecture.parallel = flag(raw, "use_parallel_residual");
-            if flag(raw, "qk_layernorm") {
+            architecture.query_key_value_bias = flag(raw, "use_qkv_bias", path)?;
+            architecture.parallel = flag(raw, "use_parallel_residual", path)?;
+            if flag(raw, "qk_layernorm", path)? {
                 architecture.query_key_norm = QueryKeyNorm::HeadModules;
             }
         }
         "starcoder2" => {
-            let bias = raw.get("use_bias").and_then(Value::as_bool).unwrap_or(true);
+            let bias = flag_or(raw, "use_bias", true, path)?;
             architecture.norm = NormKind::Layer { bias: true };
             architecture.query_key_value_bias = bias;
             architecture.output_bias = bias;
             architecture.feed_forward_bias = bias;
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.names = Names::STARCODER2;
-            architecture.sliding_window = whole(raw, "sliding_window");
+            architecture.sliding_window = whole(raw, "sliding_window", path)?;
             if architecture.sliding_window.is_some() {
                 architecture.sliding_layers = every_layer(layers, path)?;
             }
@@ -130,17 +135,17 @@ pub(in crate::runtime::load::family) fn configure(
             architecture.norm = NormKind::Layer { bias: false };
             architecture.parallel = true;
             architecture.interleaved_rotary = true;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.logits_multiplier = number(raw, "logit_scale");
-            if flag(raw, "use_qk_norm") {
+            architecture.logits_multiplier = number(raw, "logit_scale", path)?;
+            if flag(raw, "use_qk_norm", path)? {
                 architecture.query_key_norm = QueryKeyNorm::HeadWeights;
             }
             if model_type == "cohere2" {
                 // Every `sliding_window_pattern`-th layer attends globally and
                 // applies no rotary embedding; the rest are local and rotate.
-                architecture.sliding_window = whole(raw, "sliding_window");
-                if let Some(pattern) = whole(raw, "sliding_window_pattern").filter(|p| *p > 0) {
+                architecture.sliding_window = whole(raw, "sliding_window", path)?;
+                if let Some(pattern) = whole(raw, "sliding_window_pattern", path)?.filter(|p| *p > 0) {
                     fits(layers, path)?;
                     architecture.sliding_layers = (0..layers)
                         .filter(|layer| (layer + 1) % pattern != 0)
@@ -152,15 +157,18 @@ pub(in crate::runtime::load::family) fn configure(
             // LayerNorm1P: a LayerNorm whose stored scale is an offset from one.
             architecture.norm = NormKind::Layer { bias: true };
             architecture.norm_offset = true;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.names = Names::UP_DOWN;
         }
         "phi" => {
-            if flag(raw, "qk_layernorm") {
-                bail!(
+            if flag(raw, "qk_layernorm", path)? {
+                refused!(
+                    Unimplemented,
+                    in raw,
+                    ["qk_layernorm"],
                     "{} declares qk_layernorm; Ster implements Phi without query and key norms",
                     path.display()
                 );
@@ -174,7 +182,12 @@ pub(in crate::runtime::load::family) fn configure(
             architecture.lm_head_bias = true;
             architecture.names = Names::PHI;
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }

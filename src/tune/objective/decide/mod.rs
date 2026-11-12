@@ -33,7 +33,7 @@
 mod options;
 mod rows;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::Tensor;
 use candle_nn::{ParamsAdamW, VarMap};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
@@ -43,11 +43,11 @@ pub use options::{DecideOptions, DecideReport};
 use super::super::{
     batch,
     checkpoint::{Position, optimizer::AdamW},
-    preflight::{Preflight, Trainable},
+    preflight::Trainable,
     schedule,
 };
 use crate::{decide::ExampleSet, runtime::Runtime, workflow};
-use options::Running;
+use options::{Running, SUBJECT};
 use rows::{Rows, decision_loss, training_rows};
 
 /// Trains the adapters `varmap` owns against the labelled questions in
@@ -65,18 +65,7 @@ pub fn decide(
         tensors: trainable_tensors,
         parameters: trainable_parameters,
         limit,
-    } = Preflight {
-        subject: "calibrated decision training",
-        unit: "row",
-        pass: "epoch",
-        noun: "adapter tensors",
-        epochs: options.epochs,
-        accumulation: options.accumulation,
-        batch: Some(options.batch),
-        learning_rate: options.learning_rate,
-        max_sequence: options.max_sequence,
-    }
-    .open(runtime, varmap, &options.spec)?;
+    } = options.preflight().open(runtime, varmap, &options.spec)?;
 
     let Rows {
         rows,
@@ -84,9 +73,6 @@ pub fn decide(
         rendered,
         skipped_long,
     } = training_rows(runtime, examples, options.permutations, limit)?;
-    if rows.is_empty() {
-        bail!("every rendering is longer than the sequence limit, so there is nothing to train on");
-    }
 
     let fingerprint = options.fingerprint();
     let mut optimizer = AdamW::over(
@@ -95,13 +81,10 @@ pub fn decide(
             lr: options.learning_rate,
             ..Default::default()
         },
-    )
-    .context("failed to initialize the AdamW optimizer")?;
+    )?;
     let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     let mut running: Running = match &resumed {
-        Some(position) => serde_json::from_value(position.running.clone()).context(
-            "the checkpoint's running report is not one calibrated decision training wrote",
-        )?,
+        Some(position) => position.running(SUBJECT)?,
         None => Running::default(),
     };
     let mut checkpoints = Vec::new();
@@ -120,15 +103,7 @@ pub fn decide(
         let plans = batch::plan(&order, &lengths, options.batch, options.accumulation);
         let remaining = match &resumed {
             Some(position) if position.pass > epoch => continue,
-            Some(position) if position.pass == epoch => {
-                plans.get(position.within..).with_context(|| {
-                    format!(
-                        "the checkpoint stands {} steps into epoch {epoch}, which has {} steps",
-                        position.within,
-                        plans.len()
-                    )
-                })?
-            }
+            Some(position) if position.pass == epoch => position.remaining(&plans, SUBJECT)?,
             _ => {
                 running.epoch_losses.clear();
                 running.epoch_units.clear();
@@ -146,33 +121,30 @@ pub fn decide(
             let mut summed: Option<Tensor> = None;
             let mut losses: Vec<f64> = Vec::with_capacity(plan.units);
             for forward in &plan.forwards {
-                let ids: Vec<&[u32]> = forward
-                    .iter()
-                    .map(|&slot| rows[slot].ids.as_slice())
-                    .collect();
-                // One sequence is one row.
-                let read =
-                    batch::read_rows(&ids, options.batch, ids.len() / forward.len(), |pass| {
-                        runtime.forward_train_rows(pass)
-                    })?;
-                for (logits, &slot) in read.iter().zip(forward) {
-                    let value = decision_loss(logits, &rows[slot], runtime)?;
-                    losses.push(value.to_scalar::<f32>()? as f64);
-                    let scaled = (value / scale)?;
-                    summed = Some(match summed {
-                        Some(total) => (total + scaled)?,
-                        None => scaled,
-                    });
-                }
+                let mut take = || -> Result<()> {
+                    let ids: Vec<&[u32]> = forward
+                        .iter()
+                        .map(|&slot| rows[slot].ids.as_slice())
+                        .collect();
+                    // One sequence is one row.
+                    let read =
+                        batch::read_rows(&ids, options.batch, ids.len() / forward.len(), |pass| {
+                            runtime.forward_train_rows(pass)
+                        })?;
+                    for (logits, &slot) in read.iter().zip(forward) {
+                        let value = decision_loss(logits, &rows[slot], runtime)?;
+                        losses.push(value.to_scalar::<f32>()? as f64);
+                        let scaled = (value / scale)?;
+                        summed = Some(match summed.take() {
+                            Some(total) => (total + scaled)?,
+                            None => scaled,
+                        });
+                    }
+                    Ok(())
+                };
+                take().map_err(|error| optimizer.failed(error))?;
             }
-            let Some(summed) = summed else {
-                bail!(
-                    "an accumulation group contained no rows; the training plan never yields one, so this is a defect in it"
-                );
-            };
-            optimizer
-                .backward_step(&summed)
-                .context("failed to backpropagate the accumulated loss")?;
+            optimizer.backward_summed(summed, plan.forwards.len(), plan.units, "row")?;
 
             let group_loss: f64 = losses.iter().sum();
             let step_loss = (group_loss / plan.units as f64) as f32;
@@ -193,7 +165,7 @@ pub fn decide(
                     pass: epoch,
                     step,
                     within: running.epoch_units.len(),
-                    running: serde_json::to_value(&running)?,
+                    running: crate::json::value(&running),
                 };
                 options.durable.save(&optimizer, &fingerprint, &position)?;
                 checkpoints.push(step);
@@ -201,7 +173,13 @@ pub fn decide(
         }
 
         if running.epoch_units.is_empty() {
-            bail!("epoch {epoch} took no step, so it has no mean loss");
+            // Only a checkpoint can bring a run to an epoch it took no step
+            // in: one that was not resumed takes `_ => &plans[..]`, every
+            // step of a plan `Position::unreported` shows is never empty.
+            let position = resumed
+                .as_ref()
+                .expect("a run that was not resumed steps in every epoch");
+            return Err(position.epoch_lossless(SUBJECT, epoch));
         }
         let seen: usize = running.epoch_units.iter().sum();
         let epoch_mean = (running.epoch_losses.iter().sum::<f64>() / seen as f64) as f32;
@@ -218,7 +196,7 @@ pub fn decide(
         running.final_loss,
         running.epoch_means.last(),
     ) else {
-        bail!("the run took no step, so it has no loss to report");
+        return Err(Position::unreported(resumed.as_ref(), SUBJECT));
     };
     Ok(DecideReport {
         examples: examples.examples.len(),

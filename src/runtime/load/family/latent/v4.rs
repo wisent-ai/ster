@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{
     Architecture, CompressYarn, CompressedSpec, ExpertLayout, Scoring, SharedExpert, SharedForm,
@@ -11,7 +11,9 @@ use crate::model::{
 };
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::fits;
-use crate::runtime::load::family::read::{number, text, whole};
+use crate::runtime::load::family::read::{
+    list, number, stated, text, whole, whole_or, within, within_or,
+};
 use crate::runtime::load::family::sparse::hy_v4::hyper_connections;
 
 /// DeepSeek-V4's compression rates by layer kind when its config states
@@ -46,31 +48,28 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
 ) -> Result<()> {
     fits(layers, path)?;
     let size = |key: &str| -> Result<usize> {
-        whole(raw, key).filter(|size| *size > 0).with_context(|| {
+        whole(raw, key, path)?.filter(|size| *size > 0).or_refuse(raw, &[key], || {
             format!(
                 "{} declares a DeepSeek-V4 model without {key}",
                 path.display()
             )
         })
     };
-    let rates = raw.get("compress_rates");
+    stated::<&serde_json::Map<String, Value>>(raw, "compress_rates", path)?;
     let rate = |kind: &str, default: usize| {
-        rates
-            .and_then(|rates| rates.get(kind))
-            .and_then(Value::as_u64)
-            .map_or(default, |rate| rate as usize)
+        whole_or(raw, &format!("compress_rates.{kind}"), default, path)
     };
     let (sparse_rate, heavy_rate) = (
-        rate("compressed_sparse_attention", DEEPSEEK_V4_SPARSE_RATE),
-        rate("heavily_compressed_attention", DEEPSEEK_V4_HEAVY_RATE),
+        rate("compressed_sparse_attention", DEEPSEEK_V4_SPARSE_RATE)?,
+        rate("heavily_compressed_attention", DEEPSEEK_V4_HEAVY_RATE)?,
     );
     let kinds: Vec<String> = match (
-        raw.get("layer_types").and_then(Value::as_array),
-        raw.get("compress_ratios").and_then(Value::as_array),
+        list(raw, "layer_types", path)?,
+        list(raw, "compress_ratios", path)?,
     ) {
         (Some(types), _) => types
             .iter()
-            .map(|kind| kind.as_str().unwrap_or_default().to_owned())
+            .map(|kind| kind.as_str().map_or_else(|| kind.to_string(), str::to_owned))
             .collect(),
         (None, Some(ratios)) => ratios
             .iter()
@@ -82,7 +81,10 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
                 Some(ratio) if ratio as usize == DEEPSEEK_V4_HEAVY_RATE => {
                     Ok("heavily_compressed_attention".to_owned())
                 }
-                _ => bail!(
+                _ => refused!(
+                    Unimplemented,
+                    in raw,
+                    ["compress_ratios"],
                     "{} lists compress_ratios entry {ratio}; DeepSeek-V4 reads 0, 4 and 128",
                     path.display()
                 ),
@@ -100,7 +102,10 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
             .collect(),
     };
     if kinds.len() < layers {
-        bail!(
+        refused!(
+            Contradictory,
+            in raw,
+            ["layer_types", "compress_ratios", "num_hidden_layers"],
             "{} lists {} layer kinds for {layers} layers",
             path.display(),
             kinds.len()
@@ -112,20 +117,26 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
             "sliding_attention" => {}
             "compressed_sparse_attention" => sparse_layers |= 1u128 << layer,
             "heavily_compressed_attention" => heavy_layers |= 1u128 << layer,
-            other => bail!(
+            other => refused!(
+                Unimplemented,
+                in raw,
+                ["layer_types", "compress_ratios"],
                 "{} declares layer {layer} as {other:?}; Ster implements DeepSeek-V4's sliding_attention, compressed_sparse_attention and heavily_compressed_attention",
                 path.display()
             ),
         }
     }
-    let hash_layers = match raw.get("mlp_layer_types").and_then(Value::as_array) {
+    let hash_layers = match list(raw, "mlp_layer_types", path)? {
         Some(types) => {
             let mut set = 0u128;
             for (layer, kind) in types.iter().take(layers).enumerate() {
                 match kind.as_str() {
                     Some("hash_moe") => set |= 1u128 << layer,
                     Some("moe") => {}
-                    other => bail!(
+                    other => refused!(
+                        Malformed,
+                        in raw,
+                        ["mlp_layer_types"],
                         "{} declares feed-forward {layer} as {other:?}; DeepSeek-V4's are hash_moe and moe",
                         path.display()
                     ),
@@ -134,26 +145,31 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
             set
         }
         None => {
-            let count = whole(raw, "num_hash_layers")
-                .unwrap_or(DEEPSEEK_V4_HASH_LAYERS)
+            let count = whole_or(raw, "num_hash_layers", DEEPSEEK_V4_HASH_LAYERS, path)?
                 .min(layers);
             (0..count).fold(0u128, |set, layer| set | 1u128 << layer)
         }
     };
     let head_dim = size("head_dim")?;
     let rotary_dim = match (
-        number(raw, "partial_rotary_factor"),
-        whole(raw, "qk_rope_head_dim"),
+        number(raw, "partial_rotary_factor", path)?,
+        whole(raw, "qk_rope_head_dim", path)?,
     ) {
         (Some(factor), _) => (head_dim as f64 * factor) as usize,
         (None, Some(rotary)) => rotary,
-        (None, None) => bail!(
+        (None, None) => refused!(
+            Incomplete,
+            in raw,
+            ["partial_rotary_factor", "qk_rope_head_dim"],
             "{} declares neither partial_rotary_factor nor qk_rope_head_dim",
             path.display()
         ),
     };
     if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
-        bail!(
+        refused!(
+            OutOfRange,
+            in raw,
+            ["head_dim", "partial_rotary_factor", "qk_rope_head_dim"],
             "{} rotates {rotary_dim} of each head's {head_dim} channels; it must be even and within the head",
             path.display()
         );
@@ -161,24 +177,28 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
     let heads = size("num_attention_heads")?;
     let output_groups = size("o_groups")?;
     if (heads * head_dim) % output_groups != 0 {
-        bail!(
+        refused!(
+            Contradictory,
+            in raw,
+            ["num_attention_heads", "head_dim", "o_groups"],
             "{} splits {heads} heads of {head_dim} into {output_groups} output groups unevenly",
             path.display()
         );
     }
-    let scaling = scaling.filter(|scaling| scaling.is_object());
-    let compress_yarn = match scaling {
-        Some(scaling)
-            if matches!(
-                scaling
-                    .get("type")
-                    .or_else(|| scaling.get("rope_type"))
-                    .and_then(Value::as_str),
-                Some("yarn")
-            ) =>
-        {
-            let field = |key: &str| {
-                scaling.get(key).and_then(Value::as_f64).with_context(|| {
+    let yarn = match scaling.filter(|scaling| scaling.is_object()) {
+        Some(scaling) => {
+            let kind = match within::<&str>(scaling, "rope_scaling", "type", path)? {
+                Some(kind) => Some(kind),
+                None => within(scaling, "rope_scaling", "rope_type", path)?,
+            };
+            (kind == Some("yarn")).then_some(scaling)
+        }
+        None => None,
+    };
+    let compress_yarn = match yarn {
+        Some(scaling) => {
+            let field = |key: &str| -> Result<f64> {
+                within(scaling, "rope_scaling", key, path)?.or_refuse(scaling, &[key], || {
                     format!("{} states a YaRN rotation without {key}", path.display())
                 })
             };
@@ -187,22 +207,25 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
                 original: field("original_max_position_embeddings")? as usize,
                 beta_fast: field("beta_fast")? as f32,
                 beta_slow: field("beta_slow")? as f32,
-                truncate: scaling
-                    .get("truncate")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                truncate: within_or(scaling, "rope_scaling", "truncate", true, path)?,
             })
         }
-        _ => None,
+        None => None,
     };
-    let Some(main_theta) = number(raw, "rope_theta") else {
-        bail!(
+    let Some(main_theta) = number(raw, "rope_theta", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["rope_theta"],
             "{} declares a DeepSeek-V4 model without rope_theta",
             path.display()
         );
     };
-    let Some(compress_theta) = number(raw, "compress_rope_theta") else {
-        bail!(
+    let Some(compress_theta) = number(raw, "compress_rope_theta", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["compress_rope_theta"],
             "{} declares a DeepSeek-V4 model without compress_rope_theta",
             path.display()
         );
@@ -227,8 +250,11 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
         compress_theta: compress_theta as f32,
         compress_yarn,
     });
-    if whole(raw, "n_shared_experts").unwrap_or(1) != 1 {
-        bail!(
+    if whole_or(raw, "n_shared_experts", 1, path)? != 1 {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["n_shared_experts"],
             "{} declares n_shared_experts other than one; DeepSeek-V4 has one shared expert",
             path.display()
         );
@@ -242,18 +268,21 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
         0,
         path,
     )?;
-    routed.scoring = match text(raw, "scoring_func") {
+    routed.scoring = match text(raw, "scoring_func", path)? {
         Some("sqrtsoftplus") => Scoring::SqrtSoftplus,
         Some("sigmoid") => Scoring::Sigmoid,
         Some("softmax") => Scoring::Softmax,
-        other => bail!(
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["scoring_func"],
             "{} declares scoring_func {other:?}; Ster implements sqrtsoftplus, sigmoid and softmax",
             path.display()
         ),
     };
     routed.selection_bias = Some("mlp.gate.e_score_correction_bias");
-    routed.routed_scale = number(raw, "routed_scaling_factor");
-    routed.swiglu_limit = number(raw, "swiglu_limit").map(SwigluLimit::Inner);
+    routed.routed_scale = number(raw, "routed_scaling_factor", path)?;
+    routed.swiglu_limit = number(raw, "swiglu_limit", path)?.map(SwigluLimit::Inner);
     routed.hash_layers = hash_layers;
     routed.shared = Some(SharedExpert {
         intermediate: routed.intermediate,

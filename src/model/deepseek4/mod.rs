@@ -18,6 +18,7 @@
 
 pub(super) mod attention;
 mod compressor;
+mod indexer;
 pub(crate) mod names;
 
 pub(super) use compressor::CompressorState;

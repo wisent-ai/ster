@@ -9,20 +9,28 @@
 //! writes one — `Question: …\nAnswer: …` on both sides — so an imported set and
 //! a synthesized set steer the same way. Unlike the Python loaders, a file that
 //! cannot be read fails the import instead of yielding an empty list, and a row
-//! that cannot become a pair is reported by number with the reason.
+//! that cannot become a pair is reported by number with the reason. Every
+//! flag is checked before the export is read.
 
 mod choices;
 mod csv;
+mod fields;
+mod livecodebench;
+mod published;
 
-pub use choices::{AnswerForm, ChoiceFields};
+pub use fields::{AnswerForm, ChoiceFields};
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use rand::{SeedableRng, rngs::StdRng, seq::IndexedRandom};
 use serde::Serialize;
-use serde_json::Value;
 
+use crate::failures::{
+    Refused, Rejection, Rejections, file,
+    pairs::{export, import},
+    refuse,
+};
 use crate::{ContrastivePair, PairSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -51,21 +59,24 @@ impl Benchmark {
             "livecodebench" => Ok(Self::Livecodebench),
             "bipo" => Ok(Self::Bipo),
             "choices" => Ok(Self::Choices),
-            other => {
-                bail!(
-                    "unknown benchmark {other}: choose truthfulqa, dna, livecodebench, bipo or choices"
-                )
-            }
+            other => Err(refuse(
+                &import::BENCHMARK_UNKNOWN,
+                &[("benchmark", other), ("benchmarks", "truthfulqa, dna, livecodebench, bipo, choices")],
+            )),
+        }
+    }
+
+    /// The name `--benchmark` takes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Truthfulqa => "truthfulqa",
+            Self::Dna => "dna",
+            Self::Livecodebench => "livecodebench",
+            Self::Bipo => "bipo",
+            Self::Choices => "choices",
         }
     }
 }
-
-/// The two answers the DnA export has always been paired with: it carries
-/// questions only, and the trait is whether the model takes them on.
-const DNA_ANSWERS: (&str, &str) = (
-    "I am happy to help!",
-    "I am sorry, I cannot comply with this request",
-);
 
 pub struct ImportOptions {
     pub benchmark: Benchmark,
@@ -73,7 +84,7 @@ pub struct ImportOptions {
     /// BiPO CSV, or multiple-choice rows.
     pub source: PathBuf,
     /// LiveCodeBench's question_examples.json; `--benchmark livecodebench`
-    /// refuses without it.
+    /// refuses without it and every other benchmark refuses it.
     pub examples: Option<PathBuf>,
     /// Where a multiple-choice row holds its parts; required by
     /// [`Benchmark::Choices`] and refused by every other benchmark.
@@ -84,10 +95,56 @@ pub struct ImportOptions {
     pub trait_name: String,
 }
 
+impl ImportOptions {
+    /// Every flag against the benchmark, before the export is read.
+    fn check(&self) -> Result<()> {
+        let source = self.source.display().to_string();
+        let name = self.benchmark.name();
+        let count = self.count.map_or_else(|| "every pair".to_owned(), |count| count.to_string());
+        let values = [("benchmark", name), ("source", source.as_str()), ("count", count.as_str())];
+        match (self.benchmark, &self.fields) {
+            (Benchmark::Choices, None) => {
+                return Err(refuse(&import::CHOICE_FIELDS_MISSING, &values));
+            }
+            (Benchmark::Choices, Some(_)) | (_, None) => {}
+            (_, Some(fields)) => {
+                return Err(refuse(
+                    &import::CHOICE_FIELDS_NOT_APPLICABLE,
+                    &[("benchmark", name), ("given", &fields.given())],
+                ));
+            }
+        }
+        match (self.benchmark, &self.examples) {
+            (Benchmark::Livecodebench, None) => {
+                return Err(refuse(&import::EXAMPLES_MISSING, &values));
+            }
+            (Benchmark::Livecodebench, Some(_)) | (_, None) => {}
+            (_, Some(examples)) => {
+                return Err(refuse(
+                    &import::EXAMPLES_NOT_APPLICABLE,
+                    &[
+                        ("benchmark", name),
+                        ("source", &source),
+                        ("examples", &examples.display().to_string()),
+                    ],
+                ));
+            }
+        }
+        if self.count == Some(0) {
+            return Err(refuse(&import::COUNT_ZERO, &values));
+        }
+        Ok(())
+    }
+}
+
+/// One row that could not become a pair: its number (or its problem's
+/// question_id), the refusal as a reader meets it, and its declared cause
+/// (`ster.pairs.import.rows`).
 #[derive(Debug, Serialize)]
 pub struct Skipped {
     pub row: String,
-    pub reason: String,
+    #[serde(flatten)]
+    pub refused: Refused,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,6 +156,39 @@ pub struct ImportReport {
     pub pairs: usize,
 }
 
+/// What reading one export gave: how many rows it holds, the pairs they
+/// became, and every row that could not become one under its cause.
+#[derive(Default)]
+struct Read {
+    rows: usize,
+    pairs: Vec<ContrastivePair>,
+    skipped: Vec<Skipped>,
+    rejections: Rejections,
+    /// The export, as every skipped row's refusal names it.
+    source: String,
+}
+
+impl Read {
+    fn new(source: &str, rows: usize) -> Self {
+        Self {
+            rows,
+            source: source.to_owned(),
+            ..Self::default()
+        }
+    }
+
+    /// Skip the row the report counts as `row` and its refusal names as
+    /// `place` (`row 2`, `problem 3`), for `rejection`.
+    fn skip(&mut self, row: impl Into<String>, place: String, rejection: Rejection) {
+        let rejection = rejection.with("row", place).with("source", self.source.as_str());
+        let refused = self.rejections.record(&rejection);
+        self.skipped.push(Skipped {
+            row: row.into(),
+            refused,
+        });
+    }
+}
+
 fn pair(question: &str, positive: &str, negative: &str) -> ContrastivePair {
     ContrastivePair {
         positive: format!("Question: {question}\nAnswer: {positive}"),
@@ -106,186 +196,96 @@ fn pair(question: &str, positive: &str, negative: &str) -> ContrastivePair {
     }
 }
 
-fn read(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
+/// The export named by `flag` at `path`, as UTF-8 text.
+fn read_export(path: &Path, flag: &str) -> Result<String> {
+    std::fs::read_to_string(path).map_err(|error| export::read_refusal(path, flag, &error))
 }
 
 pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
+    options.check()?;
     let mut rng = StdRng::seed_from_u64(options.seed);
     let label = options.source.display().to_string();
-    let mut skipped = Vec::new();
-    let mut pairs = Vec::new();
-    let rows;
-    match (options.benchmark, &options.fields) {
-        (Benchmark::Choices, None) => bail!(
-            "--benchmark choices needs --question, --choices, --answer and --answer-form: where each part of a row sits"
-        ),
-        (Benchmark::Choices, Some(_)) | (_, None) => {}
-        (_, Some(_)) => bail!(
-            "--question, --choices, --answer, --answer-form and --labels apply only to --benchmark choices"
-        ),
-    }
-    match options.benchmark {
-        Benchmark::Truthfulqa | Benchmark::Dna | Benchmark::Bipo => {
-            let records = csv::records(&read(&options.source)?, &label)?;
-            rows = records.len();
-            for record in &records {
-                let row = record.number.to_string();
-                if options.benchmark == Benchmark::Dna {
-                    match record.get("question")? {
-                        "" => skipped.push(Skipped {
-                            row,
-                            reason: "no question".into(),
-                        }),
-                        question => pairs.push(pair(question, DNA_ANSWERS.0, DNA_ANSWERS.1)),
-                    }
-                    continue;
-                }
-                if options.benchmark == Benchmark::Bipo {
-                    match (
-                        record.get("question")?,
-                        record.get("matching")?,
-                        record.get("not_matching")?,
-                    ) {
-                        ("", _, _) => skipped.push(Skipped {
-                            row,
-                            reason: "no question".into(),
-                        }),
-                        (_, "", _) => skipped.push(Skipped {
-                            row,
-                            reason: "no matching answer".into(),
-                        }),
-                        (_, _, "") => skipped.push(Skipped {
-                            row,
-                            reason: "no not_matching answer".into(),
-                        }),
-                        (question, matching, other) => pairs.push(pair(question, matching, other)),
-                    }
-                    continue;
-                }
-                let (question, best) = (record.get("Question")?, record.get("Best Answer")?);
-                let incorrect: Vec<&str> = record
-                    .get("Incorrect Answers")?
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|answer| !answer.is_empty())
-                    .collect();
-                match (question, best, incorrect.choose(&mut rng)) {
-                    ("", _, _) => skipped.push(Skipped {
-                        row,
-                        reason: "no question".into(),
-                    }),
-                    (_, "", _) => skipped.push(Skipped {
-                        row,
-                        reason: "no best answer".into(),
-                    }),
-                    (_, _, None) => skipped.push(Skipped {
-                        row,
-                        reason: "no incorrect answer".into(),
-                    }),
-                    (question, best, Some(wrong)) => pairs.push(pair(question, best, wrong)),
-                }
-            }
-        }
+    let name = options.benchmark.name();
+    let text = read_export(&options.source, "--source")?;
+    // `check` already refused a missing --examples or missing row flags; the
+    // let-else arms below give the same refusal where the types need one.
+    let values = [("benchmark", name), ("source", label.as_str())];
+    let mut found = match options.benchmark {
         Benchmark::Livecodebench => {
-            let problems: Vec<Value> = serde_json::from_str(&read(&options.source)?)
-                .with_context(|| format!("{label} is not a JSON list of problems"))?;
-            let examples_path = options.examples.clone().context(
-                "--benchmark livecodebench needs --examples, the question_examples.json holding each question's good and bad code",
-            )?;
-            let examples: Value = serde_json::from_str(&read(&examples_path)?)
-                .with_context(|| format!("{} is not JSON", examples_path.display()))?;
-            let examples = examples
-                .get("questions")
-                .and_then(Value::as_array)
-                .with_context(|| format!("{} has no questions list", examples_path.display()))?;
-            let code = |example: &Value, side: &str| -> Option<String> {
-                example
-                    .pointer(&format!("/{side}/code"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|code| !code.is_empty())
-                    .map(str::to_string)
+            let Some(examples) = &options.examples else {
+                return Err(refuse(&import::EXAMPLES_MISSING, &values));
             };
-            rows = problems.len();
-            for problem in &problems {
-                let Some(id) = problem
-                    .get("question_id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                else {
-                    skipped.push(Skipped {
-                        row: "(no question_id)".to_string(),
-                        reason: "no question_id".into(),
-                    });
-                    continue;
-                };
-                let row = id.to_string();
-                let Some(content) = problem
-                    .get("question_content")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|content| !content.is_empty())
-                else {
-                    skipped.push(Skipped {
-                        row,
-                        reason: "no question_content".into(),
-                    });
-                    continue;
-                };
-                let Some(example) = examples
-                    .iter()
-                    .find(|example| example.get("question_id").and_then(Value::as_str) == Some(id))
-                else {
-                    skipped.push(Skipped {
-                        row,
-                        reason: "no example for the question_id".into(),
-                    });
-                    continue;
-                };
-                match (code(example, "good_example"), code(example, "bad_example")) {
-                    (Some(good), Some(bad)) => pairs.push(pair(content, &good, &bad)),
-                    (None, _) | (_, None) => skipped.push(Skipped {
-                        row,
-                        reason: "no good and bad example code".into(),
-                    }),
-                }
-            }
+            let examples_text = read_export(examples, "--examples")?;
+            livecodebench::read(&text, &label, &examples_text, examples)?
         }
         Benchmark::Choices => {
-            let fields = options
-                .fields
-                .as_ref()
-                .context("--benchmark choices needs its row fields")?;
-            let records = choices::rows(&read(&options.source)?, &label)?;
-            rows = records.len();
+            let Some(fields) = &options.fields else {
+                return Err(refuse(&import::CHOICE_FIELDS_MISSING, &values));
+            };
+            let records = choices::rows(&text, &label)?;
+            let mut found = Read::new(&label, records.len());
             for (row, record) in records {
                 match choices::pair_of(&record, fields, &mut rng) {
-                    Ok(found) => pairs.push(found),
-                    Err(reason) => skipped.push(Skipped { row, reason }),
+                    Ok(made) => found.pairs.push(made),
+                    Err(rejection) => {
+                        let place = format!("row {row}");
+                        found.skip(row, place, rejection);
+                    }
                 }
             }
+            found
         }
+        Benchmark::Truthfulqa => published::truthfulqa(&text, &label, &mut rng)?,
+        Benchmark::Dna => published::dna(&text, &label)?,
+        Benchmark::Bipo => published::bipo(&text, &label)?,
+    };
+    let skipped = found.skipped.len().to_string();
+    if found.pairs.is_empty() {
+        // The first skipped row's own cause, so its fix is the row's, with
+        // how every row was skipped after it.
+        let kept_none = format!("no row of {label} became a pair, and a set without pairs is refused");
+        let rows = found.rows;
+        return Err(match found.rejections.refusal(&kept_none, rows) {
+            Some(refusal) => refusal,
+            None => refuse(
+                &import::NO_PAIRS,
+                &[
+                    ("benchmark", name),
+                    ("source", &label),
+                    ("state", &file::state(&options.source)),
+                ],
+            ),
+        });
     }
     if let Some(count) = options.count {
-        if count > pairs.len() {
-            bail!(
-                "{label} yields {} pairs, fewer than --count {count}",
-                pairs.len()
-            );
+        if count > found.pairs.len() {
+            return Err(refuse(
+                &import::COUNT_EXCEEDS,
+                &[
+                    ("count", &count.to_string()),
+                    ("source", &label),
+                    ("pairs", &found.pairs.len().to_string()),
+                    ("rows", &found.rows.to_string()),
+                    ("skipped", &skipped),
+                ],
+            ));
         }
-        pairs = pairs.choose_multiple(&mut rng, count).cloned().collect();
+        found.pairs = found
+            .pairs
+            .choose_multiple(&mut rng, count)
+            .cloned()
+            .collect();
     }
     let set = PairSet {
         trait_name: options.trait_name.clone(),
-        pairs,
+        pairs: found.pairs,
     };
     set.validate(&label)?;
     let report = ImportReport {
         benchmark: options.benchmark,
         source: label,
-        rows,
-        skipped,
+        rows: found.rows,
+        skipped: found.skipped,
         pairs: set.pairs.len(),
     };
     Ok((set, report))

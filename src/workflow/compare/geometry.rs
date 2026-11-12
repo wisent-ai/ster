@@ -1,7 +1,9 @@
 //! The vector arithmetic a comparison of steering directions needs, in
 //! `f64` so a sum over a residual stream's width keeps its low bits.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use crate::failures::{refuse, workflow::compare as causes};
 
 pub(super) fn dot(left: &[f64], right: &[f64]) -> f64 {
     left.iter().zip(right).map(|(a, b)| a * b).sum()
@@ -9,13 +11,20 @@ pub(super) fn dot(left: &[f64], right: &[f64]) -> f64 {
 
 /// A direction scaled to unit length. One without a usable length has no
 /// angle to anything; it is refused by name rather than reported as
-/// orthogonal.
-pub(super) fn unit(vector: &[f64], label: &str, layer: usize) -> Result<Vec<f64>> {
+/// orthogonal. `labels` names every artifact compared.
+pub(super) fn unit(vector: &[f64], label: &str, layer: usize, labels: &str) -> Result<Vec<f64>> {
     let length = dot(vector, vector).sqrt();
     if !length.is_normal() {
-        bail!(
-            "{label}'s direction at layer {layer} has length {length}, so it has no angle to compare"
-        );
+        return Err(refuse(
+            &causes::DIRECTION_LENGTHLESS,
+            &[
+                ("labels", labels),
+                ("label", label),
+                ("layer", &layer.to_string()),
+                ("length", &length.to_string()),
+                ("width", &vector.len().to_string()),
+            ],
+        ));
     }
     Ok(vector.iter().map(|value| value / length).collect())
 }

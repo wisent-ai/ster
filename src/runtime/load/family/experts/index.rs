@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
-use crate::model::{IndexerSpec, KeyPool};
+use crate::model::{IndexerSpec, KeyPool, LatentAttention};
 use crate::runtime::load::family::read::layers::fits;
-use crate::runtime::load::family::read::{flag, whole};
+use crate::runtime::load::family::read::{flag, flag_or, list, text, whole, whole_or};
 
 /// DeepSeek Sparse Attention's defaults when a config leaves them out
 /// (Transformers' `DeepseekV32Config`: `index_topk` 2048, `index_head_dim`
@@ -41,72 +41,116 @@ pub(in crate::runtime::load::family) const HY_V4_INDEX_EVERY: usize = 4;
 /// `index_skip_topk_offset` as `GlmMoeDsaConfig.__post_init__` does: layer
 /// `i` indexes when `max(i − offset + 1, 0)` is a multiple of the frequency.
 /// HY-V4's indexer rotates adjacent pairs at the end of each head.
+///
+/// The indexer reads the latent query `q_lora_rank` sizes and rotates as many
+/// of its own components as `latent` rotates of each head, so a config
+/// stating no `q_lora_rank`, or rotating more than `index_head_dim`, is
+/// refused here rather than at the first forward pass.
 pub(in crate::runtime::load::family) fn sparse_index(
     raw: &Value,
     model_type: &str,
     layers: usize,
+    latent: Option<LatentAttention>,
     path: &Path,
 ) -> Result<IndexerSpec> {
     fits(layers, path)?;
+    let Some(LatentAttention {
+        query_rank: Some(_),
+        rotated,
+        ..
+    }) = latent
+    else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["kv_lora_rank", "q_lora_rank"],
+            "{} declares DeepSeek Sparse Attention's indexer (index_topk) without latent attention under q_lora_rank; the indexer reads the latent query q_lora_rank sizes",
+            path.display()
+        );
+    };
+    let head_dim = whole_or(raw, "index_head_dim", INDEX_HEAD_DIM, path)?;
+    if rotated > head_dim {
+        refused!(
+            Contradictory,
+            in raw,
+            ["qk_rope_head_dim", "index_head_dim"],
+            "{} rotates {rotated} components of each latent head and the indexer's heads are {head_dim} wide; the indexer rotates as many of its own components",
+            path.display()
+        );
+    }
     let glm = matches!(model_type, "glm_moe_dsa" | "glm5_next_text");
     let hy = model_type == "hy_v4";
     let mut shared_layers = 0u128;
     if glm || hy {
-        let listed: Option<Vec<bool>> = match (raw.get("indexer_types"), raw.get("index_topk_pattern")) {
-            (Some(Value::Array(kinds)), _) => Some(
+        let kinds = list(raw, "indexer_types", path)?;
+        let pattern = text(raw, "index_topk_pattern", path)?;
+        let listed: Option<Vec<bool>> = match (kinds, pattern) {
+            (Some(kinds), _) => Some(
                 kinds
                     .iter()
                     .enumerate()
                     .map(|(layer, kind)| match kind.as_str() {
                         Some("full") => Ok(false),
                         Some("shared") => Ok(true),
-                        other => bail!(
+                        other => refused!(
+                            Malformed,
+                            in raw,
+                            ["indexer_types"],
                             "{} names layer {layer}'s indexer {other:?}; an indexer is full or shared",
                             path.display()
                         ),
                     })
                     .collect::<Result<_>>()?,
             ),
-            (_, Some(Value::String(pattern))) => Some(
+            (None, Some(pattern)) => Some(
                 pattern
                     .chars()
                     .enumerate()
                     .map(|(layer, mark)| match mark {
                         'F' => Ok(false),
                         'S' => Ok(true),
-                        other => bail!(
+                        other => refused!(
+                            Malformed,
+                            in raw,
+                            ["index_topk_pattern"],
                             "{} marks layer {layer}'s indexer {other:?} in index_topk_pattern; a mark is F or S",
                             path.display()
                         ),
                     })
                     .collect::<Result<_>>()?,
             ),
-            _ => None,
+            (None, None) => None,
         };
         let shared: Vec<bool> = match listed {
             Some(shared) => shared,
             None => {
-                let frequency = match whole(raw, "index_topk_freq") {
+                let frequency = match whole(raw, "index_topk_freq", path)? {
                     Some(stated) => stated,
                     None if hy => HY_V4_INDEX_EVERY,
                     None => INDEX_FREQUENCY,
                 }
                 .max(1);
-                let offset = whole(raw, "index_skip_topk_offset").unwrap_or(INDEX_SKIP_OFFSET);
+                let offset = whole_or(raw, "index_skip_topk_offset", INDEX_SKIP_OFFSET, path)?;
                 (0..layers)
                     .map(|layer| (layer + 1).saturating_sub(offset) % frequency != 0)
                     .collect()
             }
         };
         if shared.len() != layers {
-            bail!(
+            refused!(
+                Contradictory,
+                in raw,
+                ["indexer_types", "index_topk_pattern", "num_hidden_layers"],
                 "{} marks {} layers' indexers for {layers} layers",
                 path.display(),
                 shared.len()
             );
         }
         if shared.first() == Some(&true) {
-            bail!(
+            refused!(
+                Contradictory,
+                in raw,
+                ["indexer_types", "index_topk_pattern"],
                 "{} makes layer 0's indexer shared, with no earlier layer to share from",
                 path.display()
             );
@@ -118,36 +162,36 @@ pub(in crate::runtime::load::family) fn sparse_index(
             .fold(0u128, |set, (layer, _)| set | (1u128 << layer));
     }
     let pool = if model_type == "glm5_next_text" {
-        let Some(size) = whole(raw, "index_kpool").filter(|size| *size > 0) else {
-            bail!(
+        let Some(size) = whole(raw, "index_kpool", path)?.filter(|size| *size > 0) else {
+            refused!(
+                Incomplete,
+                in raw,
+                ["index_kpool"],
                 "{} declares a GLM-5-Next indexer without index_kpool",
                 path.display()
             );
         };
         Some(KeyPool {
             size,
-            tail: flag(raw, "index_kpool_always_select_tail"),
+            tail: flag(raw, "index_kpool_always_select_tail", path)?,
         })
     } else {
         None
     };
     Ok(IndexerSpec {
-        heads: match whole(raw, "index_n_heads") {
+        heads: match whole(raw, "index_n_heads", path)? {
             Some(stated) => stated,
             None if hy => HY_V4_INDEX_HEADS,
             None if glm => GLM_INDEX_HEADS,
             None => DEEPSEEK_INDEX_HEADS,
         },
-        head_dim: whole(raw, "index_head_dim").unwrap_or(INDEX_HEAD_DIM),
-        top_k: whole(raw, "index_topk").unwrap_or(INDEX_TOP_K),
+        head_dim,
+        top_k: whole_or(raw, "index_topk", INDEX_TOP_K, path)?,
         // vLLM's HY-V4 indexer rotates adjacent pairs (`is_neox_style=False`):
         // its checkpoints are in Megatron's layout.
         interleaved: hy
             || (glm || model_type == "dots3_note")
-                && raw
-                    .get("indexer_rope_interleave")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                && flag_or(raw, "indexer_rope_interleave", true, path)?,
         shared_layers,
         pool,
         rotate_tail: hy,

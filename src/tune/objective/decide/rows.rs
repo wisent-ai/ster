@@ -1,12 +1,13 @@
 //! The training rows of calibrated decision training, and the loss each one
 //! produces.
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{D, DType, IndexOp, Tensor};
 use candle_nn::ops::log_softmax;
 
 use crate::{
-    decide::{ExampleSet, Request, render_rows},
+    decide::{ExampleSet, Question, Request, render_rows},
+    failures::tune::run::nothing_fits,
     runtime::Runtime,
     workflow,
 };
@@ -42,32 +43,35 @@ pub(super) fn training_rows(
     let mut questions = Vec::new();
     let mut rendered = Vec::new();
     for (index, example) in examples.examples.iter().enumerate() {
+        // The labelled questions, each with the canonical index of the
+        // option its label names; `ExampleSet::validate` refused a label
+        // naming none, so none is dropped here.
+        let labelled: Vec<(&String, &Question, usize)> = example
+            .request
+            .questions
+            .iter()
+            .filter_map(|(id, question)| {
+                let truth = question.truth_index(example.answers.get(id)?)?;
+                Some((id, question, truth))
+            })
+            .collect();
+        if labelled.is_empty() {
+            continue;
+        }
         let request = Request {
             state: example.request.state.clone(),
             model: None,
-            questions: example
-                .request
-                .questions
+            questions: labelled
                 .iter()
-                .filter(|(id, _)| example.answers.contains_key(*id))
-                .map(|(id, question)| (id.clone(), question.clone()))
+                .map(|(id, question, _)| ((*id).clone(), (*question).clone()))
                 .collect(),
         };
-        if request.questions.is_empty() {
-            continue;
-        }
-        questions.extend(request.questions.iter().map(|(id, _)| id.clone()));
-        let truths = request
-            .questions
-            .iter()
-            .map(|(id, question)| {
-                question.truth_index(&example.answers[id]).with_context(|| {
-                    format!("example {index} labels question {id} with an answer that is none of its options")
-                })
-            })
-            .collect::<Result<Vec<usize>>>()?;
-        let (renderings, labels) = render_rows(runtime, &request, permutations)
-            .with_context(|| format!("example {index} could not be rendered"))?;
+        questions.extend(labelled.iter().map(|(id, _, _)| (*id).clone()));
+        // In the order `request.questions` iterates: both follow the ids.
+        let truths: Vec<usize> = labelled.iter().map(|(_, _, truth)| *truth).collect();
+        let (renderings, labels) = render_rows(runtime, &request, permutations).map_err(|error| {
+            crate::failures::amend(error, format!("it was rendering example {index}"))
+        })?;
         for row in renderings {
             rendered.push(row.ids.len());
             if row.ids.len() > limit {
@@ -77,29 +81,28 @@ pub(super) fn training_rows(
                 ));
                 continue;
             }
-            let truth = row
-                .order
-                .iter()
-                .position(|&option| option == truths[row.question])
-                .with_context(|| {
-                    format!("a rendering of example {index} does not show its correct option")
-                })?;
-            let spellings = row
-                .order
-                .iter()
-                .enumerate()
-                .map(|(position, _)| {
-                    labels.get(&position).cloned().with_context(|| {
-                        format!("answer letter {position} has no spelling in this vocabulary")
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
+            // Each row's order is a cyclic shift of its question's options,
+            // so the labelled option has a position in it, and `labels`
+            // holds the spellings of every position below its length.
+            let Some(truth) = truths
+                .get(row.question)
+                .and_then(|truth| row.order.iter().position(|option| option == truth))
+            else {
+                continue;
+            };
+            let spellings = labels
+                .range(..row.order.len())
+                .map(|(_, spelling)| spelling.clone())
+                .collect();
             rows.push(TrainingRow {
                 ids: row.ids,
                 truth,
                 labels: spellings,
             });
         }
+    }
+    if rows.is_empty() {
+        return Err(nothing_fits("rendering", "train on", rendered, limit));
     }
     let skipped_long = rendered.len() - rows.len();
     Ok(Rows {
@@ -126,15 +129,13 @@ pub(super) fn decision_loss(
     runtime: &Runtime,
 ) -> Result<Tensor> {
     let (_, positions, _) = logits.dims3()?;
-    if positions != row.ids.len() {
-        bail!(
-            "the forward pass returned {positions} positions for {} tokens",
-            row.ids.len()
-        );
-    }
-    let Some((answer, _)) = row.ids.iter().enumerate().last() else {
-        bail!("a training row holds no token, so no distribution answers it");
-    };
+    assert_eq!(
+        positions,
+        row.ids.len(),
+        "the forward pass answers one position per token"
+    );
+    // A rendering always holds its question's text, so it has a last token.
+    let answer = row.ids.len() - 1;
     // `[1, n, vocab]` read as `[n, vocab]`, then the answering position.
     let last = logits
         .flatten_to(D::Minus2)?

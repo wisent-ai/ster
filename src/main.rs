@@ -14,7 +14,9 @@ use std::process::ExitCode;
 /// is queued for telemetry as the user agreed (`ster telemetry`), which never
 /// changes the output or the status.
 fn main() -> ExitCode {
-    let result = cli::run();
+    // A `?` on a Candle result no site declared is declared here by its
+    // variant, so every command ends in a declared refusal naming it.
+    let result = cli::run().map_err(|error| ster::failures::tensor::settle(error, &cli::shown()));
     let status = match &result {
         Ok(()) => 0,
         Err(error) => {

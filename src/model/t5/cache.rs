@@ -2,9 +2,11 @@
 
 use std::num::NonZeroUsize;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::Tensor;
 use candle_nn::kv_cache::KvCache;
+
+use crate::failures::model::t5::{CACHE_EMPTY, CACHE_UNEVEN, inconsistent};
 
 use super::attention::KeyValue;
 
@@ -46,16 +48,20 @@ impl Cache {
             // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
             return Ok(0);
         };
-        let first = layers
-            .first()
-            .context("T5 decoder cache contains no layers")?;
+        let Some(first) = layers.first() else {
+            return Err(inconsistent(&CACHE_EMPTY, "decoder", "a key-value cache of no layers"));
+        };
         let position = first.current_seq_len();
         for (index, layer) in layers.iter().enumerate() {
             if layer.current_seq_len() != position {
-                bail!(
-                    "T5 decoder cache layer {index} holds {} positions, but the first layer holds {position}; discard the incomplete pass before reusing its cache",
-                    layer.current_seq_len()
-                );
+                return Err(inconsistent(
+                    &CACHE_UNEVEN,
+                    "decoder",
+                    &format!(
+                        "cache layer {index} holds {} positions and the first {position}: an earlier pass ended half done and its cache was reused",
+                        layer.current_seq_len()
+                    ),
+                ));
             }
         }
         Ok(position)

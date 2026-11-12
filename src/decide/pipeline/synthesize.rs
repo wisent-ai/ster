@@ -1,4 +1,5 @@
-//! Labelled decisions written by a hosted model through Brama.
+//! Labelled decisions written by a hosted model through Stado's inference
+//! alternatives.
 //!
 //! The label is known by construction: for every option of every question
 //! in the schema, the writer is asked for states that clearly belong to that
@@ -13,15 +14,19 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    brama::Gateway,
     decide::{Example, ExampleSet, Question, Request, request::text_of},
+    failures::{decide::pipeline as causes, file, refuse},
+    inference::Inference,
     workflow,
 };
+
+/// What a decision schema is called in a refusal of its file.
+const ROLE: &str = "the decision schema";
 
 /// The questions a synthesized set asks: a request with no state.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -34,17 +39,21 @@ pub struct Schema {
 
 impl Schema {
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let bytes = fs::read(path).map_err(|error| file::read::refusal(ROLE, path, &error))?;
         let schema: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid decision schema {}", path.display()))?;
+            .map_err(|error| file::json::refusal(ROLE, causes::SCHEMA_FORM, path, &error))?;
+        let shown = path.display().to_string();
         if schema.domain.trim().is_empty() {
-            bail!("decision schema {} needs a domain", path.display());
+            return Err(refuse(
+                &causes::DOMAIN_BLANK,
+                &[
+                    ("path", &shown),
+                    ("domain", &format!("{:?}", schema.domain)),
+                ],
+            ));
         }
         if schema.questions.is_empty() {
-            bail!(
-                "decision schema {} needs at least one question",
-                path.display()
-            );
+            return Err(refuse(&causes::QUESTIONS_NONE, &[("path", &shown)]));
         }
         Request {
             state: Value::String("schema".to_owned()),
@@ -68,6 +77,20 @@ pub struct SynthesizeOptions {
     pub max_tokens: usize,
 }
 
+impl SynthesizeOptions {
+    /// Refuses settings that write nothing; checked before the schema is
+    /// read and before any model is asked.
+    pub fn check(&self) -> Result<()> {
+        if self.per_option == 0 {
+            return Err(refuse(&causes::PER_OPTION_NONE, &[]));
+        }
+        if self.retry_multiplier == 0 {
+            return Err(refuse(&causes::RETRIES_NONE, &[]));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SynthesizeReport {
     pub generator: String,
@@ -84,18 +107,13 @@ pub struct SynthesizeReport {
 }
 
 /// Writes `per_option` states for every option of every question through
-/// `gateway`, each labelled with the option it was written for.
+/// `writer`, each labelled with the option it was written for.
 pub fn synthesize(
-    gateway: &Gateway,
+    writer: &Inference,
     schema: &Schema,
     options: &SynthesizeOptions,
 ) -> Result<(ExampleSet, SynthesizeReport)> {
-    if options.per_option == 0 {
-        bail!("synthesis needs at least one state per option; per_option is 0");
-    }
-    if options.retry_multiplier == 0 {
-        bail!("synthesis needs a retry multiplier of at least one; retry_multiplier is 0");
-    }
+    options.check()?;
     let mut examples = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut attempts = 0usize;
@@ -117,7 +135,7 @@ pub fn synthesize(
                     options.per_option
                 ));
                 let prompt = writer_prompt(&schema.domain, question, &text);
-                let state = gateway.complete(&prompt, options.max_tokens, options.temperature)?;
+                let state = writer.complete(&prompt, options.max_tokens, options.temperature)?;
                 let state = state.trim().trim_matches('"').trim().to_owned();
                 if state.is_empty() {
                     rejected_empty += 1;
@@ -145,14 +163,24 @@ pub fn synthesize(
         }
     }
     if examples.is_empty() {
-        bail!(
-            "the writer produced no usable state: {rejected_empty} were empty and {rejected_duplicates} duplicated another"
-        );
+        return Err(refuse(
+            &causes::NONE_WRITTEN,
+            &[
+                ("domain", &schema.domain),
+                ("attempts", &attempts.to_string()),
+                ("empty", &rejected_empty.to_string()),
+                ("repeated", &rejected_duplicates.to_string()),
+                (
+                    "generator",
+                    &format!("{}:{}", writer.provider(), writer.model()),
+                ),
+            ],
+        ));
     }
     let set = ExampleSet { examples };
     set.validate()?;
     let report = SynthesizeReport {
-        generator: format!("{}:{}", gateway.provider(), gateway.model()),
+        generator: format!("{}:{}", writer.provider(), writer.model()),
         domain: schema.domain.clone(),
         questions: schema.questions.len(),
         requested,

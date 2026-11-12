@@ -2,13 +2,13 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::model::{Architecture, ExpertGroups, ExpertLayout, Scoring, SharedExpert, SharedForm};
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::fits;
-use crate::runtime::load::family::read::{number, text, whole};
+use crate::runtime::load::family::read::{flag_or, number_or, text, whole, whole_or};
 
 /// The routed scale Sarvam's latent model uses when its config leaves
 /// `routed_scaling_factor` out (vLLM's `sarvam.py`,
@@ -33,22 +33,22 @@ pub(in crate::runtime::load::family) fn sarvam_mla(
     path: &Path,
 ) -> Result<()> {
     if architecture.latent.is_none() {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["kv_lora_rank"],
             "{} declares a Sarvam MLA model without kv_lora_rank",
             path.display()
         );
     }
     fits(layers, path)?;
     architecture.interleaved_rotary = true;
-    let first = whole(raw, "first_k_dense_replace").unwrap_or(1);
-    let frequency = whole(raw, "moe_layer_freq").unwrap_or(1).max(1);
+    let first = whole_or(raw, "first_k_dense_replace", 1, path)?;
+    let frequency = whole_or(raw, "moe_layer_freq", 1, path)?.max(1);
     let dense = (0..layers)
         .filter(|layer| *layer < first || (layer - first) % frequency != 0)
         .fold(0u128, |set, layer| set | (1u128 << layer));
-    let normalize = raw
-        .get("norm_topk_prob")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let normalize = flag_or(raw, "norm_topk_prob", true, path)?;
     let mut routed = experts(
         raw,
         "num_experts",
@@ -58,24 +58,27 @@ pub(in crate::runtime::load::family) fn sarvam_mla(
         dense,
         path,
     )?;
-    routed.scoring = match text(raw, "score_function") {
+    routed.scoring = match text(raw, "score_function", path)? {
         None | Some("sigmoid") => Scoring::Sigmoid,
         Some("softmax") => Scoring::Softmax,
-        Some(other) => bail!(
+        Some(other) => refused!(
+            Unimplemented,
+            in raw,
+            ["score_function"],
             "{} declares score_function {other:?}; Ster implements sigmoid and softmax expert scores",
             path.display()
         ),
     };
-    let biased = raw
-        .get("moe_router_enable_expert_bias")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let biased = flag_or(raw, "moe_router_enable_expert_bias", true, path)?;
     routed.selection_bias = biased.then_some("mlp.gate.e_score_correction_bias");
-    routed.routed_scale = Some(number(raw, "routed_scaling_factor").unwrap_or(SARVAM_ROUTED_SCALE));
-    routed.groups = match (whole(raw, "n_group"), whole(raw, "topk_group")) {
+    routed.routed_scale = Some(number_or(raw, "routed_scaling_factor", SARVAM_ROUTED_SCALE, path)?);
+    routed.groups = match (whole(raw, "n_group", path)?, whole(raw, "topk_group", path)?) {
         (Some(groups), Some(chosen_groups)) => {
             if groups == 0 || routed.count % groups != 0 || chosen_groups > groups {
-                bail!(
+                refused!(
+                    Contradictory,
+                    in raw,
+                    ["num_experts", "n_group", "topk_group"],
                     "{} splits {} experts into {groups} groups and keeps {chosen_groups}; the groups must divide the experts evenly and at least as many must exist as are kept",
                     path.display(),
                     routed.count
@@ -90,8 +93,8 @@ pub(in crate::runtime::load::family) fn sarvam_mla(
         _ => None,
     };
     let shared_width =
-        whole(raw, "moe_shared_expert_intermediate_size").unwrap_or(routed.intermediate);
-    routed.shared = Some(whole(raw, "num_shared_experts").unwrap_or(1))
+        whole_or(raw, "moe_shared_expert_intermediate_size", routed.intermediate, path)?;
+    routed.shared = Some(whole_or(raw, "num_shared_experts", 1, path)?)
         .filter(|shared| *shared > 0)
         .map(|shared| SharedExpert {
             intermediate: shared * shared_width,

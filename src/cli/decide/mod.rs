@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ster::{
     ChatChoice, DecideOptions, Precision,
     decide::{self, Calibration, ExampleSet, RAW_TEMPERATURE, Request},
@@ -114,11 +114,15 @@ pub(super) fn decide(args: DecideArgs) -> Result<()> {
             .map(|(path, _)| path.to_string_lossy())
             .as_deref(),
     )?;
-    if let Some(output) = output {
-        fs::write(&output, serde_json::to_string_pretty(&response)?)
-            .with_context(|| format!("failed to write {}", output.display()))?;
-    }
+    // The answer is printed first, so a --output the disk refuses does not
+    // lose a decision the model already made.
     super::answer(&response)?;
+    if let Some(output) = output {
+        fs::write(&output, ster::json::pretty(&response)).map_err(|error| {
+            let left = "the answer is printed on standard output above; the file may be emptied or cut short";
+            ster::failures::file::write::refusal("writing", "the decision", &output, left, &error)
+        })?;
+    }
     Ok(())
 }
 
@@ -129,6 +133,8 @@ pub(super) fn calibrate(args: CalibrateArgs) -> Result<()> {
         output,
         ece_bins,
     } = args;
+    // The bin count is a setting: it is refused before the examples are read.
+    decide::check_bins(ece_bins)?;
     let examples = ExampleSet::load(&examples)?;
     let (mut runtime, options) = read.load()?;
     runtime.set_chat_template(read.chat_template)?;
@@ -164,15 +170,13 @@ impl ReadArgs {
 }
 
 fn load_request(path: &Path) -> Result<Request> {
-    if path.as_os_str() == "-" {
-        let mut bytes = Vec::new();
-        std::io::stdin()
-            .read_to_end(&mut bytes)
-            .context("failed to read the request from standard input")?;
-        let request: Request =
-            serde_json::from_slice(&bytes).context("invalid decide request on standard input")?;
-        request.validate()?;
-        return Ok(request);
+    if path.as_os_str() != "-" {
+        return Request::load(path);
     }
-    Request::load(path)
+    let source = Path::new("/dev/stdin");
+    let mut bytes = Vec::new();
+    std::io::stdin().read_to_end(&mut bytes).map_err(|error| {
+        ster::failures::file::read::refusal(decide::REQUEST_ROLE, source, &error)
+    })?;
+    Request::parse(&bytes, source)
 }

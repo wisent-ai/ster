@@ -1,12 +1,18 @@
 //! `ster pairs edit`: the counterpart of `add` for changing one pair in
 //! place, by the zero-based index `remove` takes. Only the sides given change;
-//! an edit that changes nothing is refused, and so is an index past the end.
+//! an edit that changes nothing, or gives a side no text, is refused before
+//! the set is read, and an index past the end once it is.
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::json;
-use ster::PairSet;
+use ster::{
+    PairSet,
+    failures::{pairs::author, refuse},
+};
+
+use super::{outside, side};
 
 pub(super) fn run(
     file: &Path,
@@ -16,16 +22,24 @@ pub(super) fn run(
     trait_name: Option<String>,
 ) -> Result<()> {
     if positive.is_none() && negative.is_none() && trait_name.is_none() {
-        bail!("pairs edit changes nothing without --positive, --negative or --trait");
+        return Err(refuse(
+            &author::NOTHING_TO_CHANGE,
+            &[
+                ("index", &index.to_string()),
+                ("path", &file.display().to_string()),
+                ("state", &ster::failures::file::state(file)),
+            ],
+        ));
+    }
+    if let Some(text) = &positive {
+        side("positive", text, file)?;
+    }
+    if let Some(text) = &negative {
+        side("negative", text, file)?;
     }
     let mut pair_set = PairSet::load(file)?;
-    let count = pair_set.pairs.len();
-    let Some(pair) = pair_set.pairs.get_mut(index) else {
-        bail!(
-            "pair index {index} is outside the set: {} holds {count} pair(s), indexed from 0",
-            file.display()
-        );
-    };
+    outside(index, pair_set.pairs.len(), file)?;
+    let pair = &mut pair_set.pairs[index];
     if let Some(positive) = positive {
         pair.positive = positive;
     }

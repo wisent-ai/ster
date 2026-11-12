@@ -6,9 +6,11 @@
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use ster::{
-    ChatChoice, PairSet, Precision, SteeringArtifact, tune,
+    ChatChoice, PairSet, Precision, SteeringArtifact,
+    failures::{file, refuse, workflow::project as causes},
+    tune,
     workflow::{self, ProjectOptions},
 };
 
@@ -71,7 +73,7 @@ pub(in crate::cli) fn project(args: ProjectArgs) -> Result<()> {
         components,
     };
     let mut report =
-        serde_json::to_value(workflow::project(&runtime, &pair_set, &artifact, &options)?)?;
+        ster::json::value(workflow::project(&runtime, &pair_set, &artifact, &options)?);
     chat.annotate(&mut report)?;
     super::super::answer(&report)
 }
@@ -89,7 +91,7 @@ pub(in crate::cli) struct ScoreArgs {
     layer: usize,
     /// The text to score. (`--text` is Ster's global switch for answers
     /// written for a person, so the scored text is the input.)
-    #[arg(long, conflicts_with = "input_file")]
+    #[arg(long)]
     input: Option<String>,
     /// A file holding the text to score.
     #[arg(long)]
@@ -115,20 +117,46 @@ pub(in crate::cli) fn score(args: ScoreArgs) -> Result<()> {
         chat_template,
         precision,
     } = args;
-    let text = match (input, input_file) {
-        (Some(text), None) => text,
-        (None, Some(file)) => std::fs::read_to_string(&file)
-            .with_context(|| format!("--input-file {} cannot be read", file.display()))?,
-        (None, None) => bail!("give the text to score with --input or --input-file"),
-        (Some(_), Some(_)) => bail!("give the text once: --input or --input-file, not both"),
+    // The text is read and checked before the artifact and the weights, so
+    // a missing or empty one is refused before the checkpoint is paid for.
+    let (text, source) = match (input, input_file) {
+        (Some(text), None) => (text, "--input".to_owned()),
+        (None, Some(file)) => {
+            let text = std::fs::read_to_string(&file).map_err(|error| {
+                file::read::refusal_or(
+                    &causes::INPUT_FILE_MISSING,
+                    "the text to score",
+                    &file,
+                    &error,
+                )
+            })?;
+            (text, format!("--input-file {}", file.display()))
+        }
+        (None, None) => {
+            return Err(refuse(
+                &causes::INPUT_ABSENT,
+                &[
+                    ("vector", &vector.display().to_string()),
+                    ("layer", &layer.to_string()),
+                ],
+            ));
+        }
+        (Some(text), Some(file)) => {
+            return Err(refuse(
+                &causes::INPUT_TWICE,
+                &[
+                    ("characters", &text.chars().count().to_string()),
+                    ("path", &file.display().to_string()),
+                ],
+            ));
+        }
     };
-    // The artifact is read before a weight is mapped, so a wrong file is
-    // refused before the checkpoint is paid for.
+    workflow::check_text(&text, &source)?;
     let artifact = SteeringArtifact::load(&vector)?;
     let mut runtime = model.load_at(precision)?;
     let chat = runtime.set_chat_template(chat_template)?;
     tune::warn_on_provenance(&vector, "direction", &runtime);
-    let mut report = serde_json::to_value(workflow::score(&runtime, &artifact, &text, layer)?)?;
+    let mut report = ster::json::value(workflow::score(&runtime, &artifact, &text, layer)?);
     chat.annotate(&mut report)?;
     super::super::answer(&report)
 }

@@ -8,9 +8,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use clap::Subcommand;
-use serde_json::json;
+use serde_json::{Value, json};
+use ster::failures::{relay, telemetry as causes};
 use wisent_errors::telemetry::{Level, Product, Telemetry};
 use wisent_errors::{Code, Failure};
 
@@ -36,7 +37,8 @@ pub(super) enum TelemetryCommand {
     },
     /// Send nothing, and drop every event still waiting.
     Off,
-    /// Every event waiting to be sent, exactly as it will go.
+    /// Every event waiting to be sent, exactly as it will go, as
+    /// `{"events": [...]}`.
     Show,
     /// Write every waiting event to FILE as one JSON array, for a machine
     /// without network.
@@ -52,14 +54,10 @@ pub(super) fn telemetry() -> Telemetry {
     Telemetry::new(PRODUCT)
 }
 
-fn refusal(failure: Failure) -> anyhow::Error {
-    let detail = failure
-        .detail
-        .unwrap_or_else(|| failure.code.as_str().to_owned());
-    match failure.remedy {
-        Some(remedy) => anyhow!("{detail}; fix: {remedy}"),
-        None => anyhow!(detail),
-    }
+/// The refusal wisent-errors' telemetry declared and handed back as
+/// `failure`, with `step`, what Ster was running, after its sentence.
+fn refusal(failure: Failure, step: &str) -> anyhow::Error {
+    relay(&failure, &causes::operations(), &causes::UNDECLARED, step)
 }
 
 pub(super) fn run(command: TelemetryCommand) -> Result<()> {
@@ -67,23 +65,37 @@ pub(super) fn run(command: TelemetryCommand) -> Result<()> {
     match command {
         TelemetryCommand::Status => {}
         TelemetryCommand::On { level } => {
-            let level = Level::parse(&level, PRODUCT.id).map_err(refusal)?;
-            telemetry.set_level(level).map_err(refusal)?;
+            let step = format!("`ster telemetry on --level {level}`");
+            let level =
+                Level::parse(&level, PRODUCT.id).map_err(|failure| refusal(failure, &step))?;
+            telemetry
+                .set_level(level)
+                .map_err(|failure| refusal(failure, &step))?;
         }
-        TelemetryCommand::Off => telemetry.set_level(Level::Off).map_err(refusal)?,
+        TelemetryCommand::Off => telemetry
+            .set_level(Level::Off)
+            .map_err(|failure| refusal(failure, "`ster telemetry off`"))?,
         TelemetryCommand::Show => {
-            let queued = telemetry.queued().map_err(refusal)?;
-            return super::answer_document(&json!(queued));
+            let queued = telemetry
+                .queued()
+                .map_err(|failure| refusal(failure, "`ster telemetry show`"))?;
+            return super::answer_document(&json!({ "events": queued }));
         }
         TelemetryCommand::Export { file } => {
-            let events = telemetry.export(&file).map_err(refusal)?;
+            let step = format!("`ster telemetry export {}`", file.display());
+            let events = telemetry
+                .export(&file)
+                .map_err(|failure| refusal(failure, &step))?;
             return super::answer_document(&json!({ "file": file, "events": events }));
         }
         TelemetryCommand::Flush => {
-            let delivered = telemetry.flush().map_err(refusal)?;
+            let step = "`ster telemetry flush`";
+            let delivered = telemetry
+                .flush()
+                .map_err(|failure| refusal(failure, step))?;
             super::answer_document(&delivered.to_json())?;
             return match delivered.stopped {
-                Some(stopped) => Err(refusal(stopped)),
+                Some(stopped) => Err(refusal(stopped, step)),
                 None => Ok(()),
             };
         }
@@ -109,38 +121,39 @@ pub(crate) fn events_document() -> serde_json::Value {
 }
 
 /// What `ster request telemetry/<verb>` answers, the same document the CLI
-/// prints: `status`; `set` with `{"level": "off"|"errors"|"usage"}`, then the
-/// status; `show`, the waiting events; `flush`, what it sent; `events`, every
-/// kind of event Ster can send. A refusal, or a flush that stopped, is the
-/// sentence the CLI prints.
-pub(crate) fn request_document(
-    verb: &str,
-    body: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
+/// prints: `status`; `set` to `level` (`off`, `errors` or `usage`), then the
+/// status; `show`, the waiting events as `{"events": [...]}`, the object a
+/// request result must be; `flush`, what it sent; `events`, every kind of
+/// event Ster can send, as `{"events": [...]}`. A refusal, or a flush that
+/// stopped, is the declared refusal the CLI exits with.
+pub(crate) fn request_document(verb: &str, level: Option<&str>) -> Result<Value> {
     let telemetry = telemetry();
-    let said = |failure: Failure| refusal(failure).to_string();
-    match verb {
-        "status" => Ok(telemetry.status()),
-        "set" => {
-            let level = body
-                .get("level")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("telemetry/set needs {\"level\": \"off\"|\"errors\"|\"usage\"}")?;
-            let level = Level::parse(level, PRODUCT.id).map_err(said)?;
-            telemetry.set_level(level).map_err(said)?;
+    let step = format!("`ster request telemetry/{verb}`");
+    match (verb, level) {
+        ("set", Some(level)) => {
+            let level =
+                Level::parse(level, PRODUCT.id).map_err(|failure| refusal(failure, &step))?;
+            telemetry
+                .set_level(level)
+                .map_err(|failure| refusal(failure, &step))?;
             Ok(telemetry.status())
         }
-        "show" => telemetry.queued().map(|queued| json!(queued)).map_err(said),
-        "flush" => {
-            let delivered = telemetry.flush().map_err(said)?;
+        ("show", _) => telemetry
+            .queued()
+            .map(|queued| json!({ "events": queued }))
+            .map_err(|failure| refusal(failure, &step)),
+        ("flush", _) => {
+            let delivered = telemetry
+                .flush()
+                .map_err(|failure| refusal(failure, &step))?;
             match delivered.stopped {
-                Some(stopped) => Err(said(stopped)),
+                Some(stopped) => Err(refusal(stopped, &step)),
                 None => Ok(delivered.to_json()),
             }
         }
         // An object, as every request result is read: the CLI prints the list.
-        "events" => Ok(json!({ "events": events_document() })),
-        other => Err(format!("unknown operation: telemetry/{other}")),
+        ("events", _) => Ok(json!({ "events": events_document() })),
+        _ => Ok(telemetry.status()),
     }
 }
 
@@ -164,7 +177,8 @@ pub(super) fn ask() {
 }
 
 /// Queue what this run did, as the user agreed, and start the detached flush.
-/// Nothing here changes the run's own output or exit status.
+/// Nothing here changes the run's exit status; a flush that cannot start is
+/// said on standard error, and its events stay queued for the next run.
 pub(crate) fn finish(started: &Started, error: Option<&anyhow::Error>, status: i32) {
     if !reports(&started.command) {
         return;
@@ -182,7 +196,18 @@ pub(crate) fn finish(started: &Started, error: Option<&anyhow::Error>, status: i
         }
     }
     telemetry.command(&started.command, status, started.at.elapsed());
-    if let Ok(program) = std::env::current_exe() {
-        telemetry.spawn_flush(&program, &["telemetry", "flush"]);
+    match std::env::current_exe() {
+        Ok(program) => telemetry.spawn_flush(&program, &["telemetry", "flush"]),
+        Err(error) => eprintln!(
+            "ster: {}",
+            ster::failures::refuse(
+                &causes::PROGRAM_UNNAMED,
+                &[
+                    ("command", &started.command),
+                    ("kind", &ster::failures::file::kind(&error)),
+                    ("error", &error.to_string()),
+                ],
+            )
+        ),
     }
 }

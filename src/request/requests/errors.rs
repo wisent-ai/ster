@@ -1,6 +1,7 @@
 //! The failure catalogue's requests: the same answers `ster errors list`
 //! and `ster errors show` print.
 
+use anyhow::Result;
 use serde::Deserialize;
 
 use super::{Validate, require};
@@ -11,7 +12,7 @@ use super::{Validate, require};
 pub(in crate::request) struct ErrorsListRequest {}
 
 impl Validate for ErrorsListRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -25,10 +26,13 @@ pub(in crate::request) struct ErrorsShowRequest {
 }
 
 impl Validate for ErrorsShowRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
         require(
             &self.id,
-            "errors/show requires the functionality's id, as errors/list names it".to_owned(),
+            "errors/show",
+            "id",
+            "the functionality's id, as errors/list names it",
+            "the FUNCTIONALITY argument of `ster errors show`",
         )
     }
 }

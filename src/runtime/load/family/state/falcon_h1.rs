@@ -1,7 +1,6 @@
 //! Falcon-H1 and LFM2.
 
-use anyhow::{Result, bail};
-use serde_json::Value;
+use anyhow::Result;
 
 use crate::model::{
     Architecture, ExpertLayout, Names, ParallelScan, ParameterNorm, QueryKeyNorm, Scoring,
@@ -10,7 +9,9 @@ use crate::model::{
 use crate::runtime::load::family::At;
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::{every_layer, fits};
-use crate::runtime::load::family::read::{flag, number, numbers, whole};
+use crate::runtime::load::family::read::{
+    flag, flag_or, list, number, number_or, numbers, whole, whole_or,
+};
 use crate::runtime::load::family::state::mamba::structured;
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
@@ -36,15 +37,24 @@ pub(in crate::runtime::load::family) fn configure(
             // input and output, every key, the scan input, the five parts
             // of its projection and its output, the feed-forward's gate and
             // output, and the logits.
-            let scale = |key: &str| number(raw, key).unwrap_or(1.0);
+            let scale = |key: &str| number_or(raw, key, 1.0, path);
             if raw
                 .get("attn_layer_indices")
                 .is_some_and(|indices| !indices.is_null())
-                || raw.get("mamba_use_mlp").and_then(Value::as_bool) == Some(false)
-                || flag(raw, "mamba_norm_before_gate")
-                || flag(raw, "mamba_proj_bias") != flag(raw, "projectors_bias")
+                || !flag_or(raw, "mamba_use_mlp", true, path)?
+                || flag(raw, "mamba_norm_before_gate", path)?
+                || flag(raw, "mamba_proj_bias", path)? != flag(raw, "projectors_bias", path)?
             {
-                bail!(
+                refused!(
+                    Unimplemented,
+                    in raw,
+                    [
+                        "attn_layer_indices",
+                        "mamba_use_mlp",
+                        "mamba_norm_before_gate",
+                        "mamba_proj_bias",
+                        "projectors_bias",
+                    ],
                     "{} declares attn_layer_indices, mamba_use_mlp false, mamba_norm_before_gate, or a projectors_bias unlike mamba_proj_bias; Ster implements Falcon-H1 with attention, a scan and a feed-forward on every layer, the gate before the norm, and one bias setting for the scan's projections",
                     path.display()
                 );
@@ -52,18 +62,28 @@ pub(in crate::runtime::load::family) fn configure(
             let mut heads =
                 structured(raw, "mamba_n_heads", "mamba_d_head", "mamba_n_groups", path)?;
             let (Some(state), Some(kernel)) =
-                (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+                (whole(raw, "mamba_d_state", path)?, whole(raw, "mamba_d_conv", path)?)
             else {
-                bail!(
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["mamba_d_state", "mamba_d_conv"],
                     "{} declares a Falcon-H1 model without mamba_d_state and mamba_d_conv",
                     path.display()
                 );
             };
-            let inner = whole(raw, "mamba_d_ssm").unwrap_or_else(|| {
-                (number(raw, "mamba_expand").unwrap_or(2.0) * llama.hidden_size as f64) as usize
-            });
+            let inner = match whole(raw, "mamba_d_ssm", path)? {
+                Some(inner) => inner,
+                None => {
+                    (number_or(raw, "mamba_expand", 2.0, path)? * llama.hidden_size as f64)
+                        as usize
+                }
+            };
             if inner != heads.heads * heads.head_dim {
-                bail!(
+                refused!(
+                    Contradictory,
+                    in raw,
+                    ["mamba_d_ssm", "mamba_expand", "mamba_n_heads", "mamba_d_head"],
                     "{} sizes its scan at {inner} but {} heads of {} make {}; the inner width must be the heads' total",
                     path.display(),
                     heads.heads,
@@ -72,35 +92,29 @@ pub(in crate::runtime::load::family) fn configure(
                 );
             }
             let [gate_scale, output_scale] = numbers::<2>(raw, "mlp_multipliers", path)?;
-            heads.input_scale = scale("ssm_in_multiplier");
+            heads.input_scale = scale("ssm_in_multiplier")?;
             heads.projection_scales = Some(numbers::<5>(raw, "ssm_multipliers", path)?);
-            heads.gated_norm = raw
-                .get("mamba_rms_norm")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
+            heads.gated_norm = flag_or(raw, "mamba_rms_norm", true, path)?;
             architecture.names = Names::JAMBA;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.feed_forward_bias = flag(raw, "mlp_bias");
-            architecture.embedding_multiplier = number(raw, "embedding_multiplier");
-            architecture.logits_multiplier = number(raw, "lm_head_multiplier");
-            architecture.key_scale = number(raw, "key_multiplier");
+            architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
+            architecture.embedding_multiplier = number(raw, "embedding_multiplier", path)?;
+            architecture.logits_multiplier = number(raw, "lm_head_multiplier", path)?;
+            architecture.key_scale = number(raw, "key_multiplier", path)?;
             architecture.feed_forward_scales = Some((gate_scale, output_scale));
             architecture.parallel_scan = Some(ParallelScan {
-                attention_in: scale("attention_in_multiplier"),
-                attention_out: scale("attention_out_multiplier"),
-                scan_out: scale("ssm_out_multiplier"),
+                attention_in: scale("attention_in_multiplier")?,
+                attention_out: scale("attention_out_multiplier")?,
+                scan_out: scale("ssm_out_multiplier")?,
             });
             architecture.state_space = Some(StateSpaceSpec {
                 inner,
                 state,
                 kernel,
                 step_rank: 0,
-                projection_bias: flag(raw, "mamba_proj_bias"),
-                convolution_bias: raw
-                    .get("mamba_conv_bias")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                projection_bias: flag(raw, "mamba_proj_bias", path)?,
+                convolution_bias: flag_or(raw, "mamba_conv_bias", true, path)?,
                 parameter_norm: ParameterNorm::None,
                 // The scan runs inside every layer's parallel block, never
                 // as a layer of its own.
@@ -114,25 +128,34 @@ pub(in crate::runtime::load::family) fn configure(
             // `full_attn_idxs` (or `layer_types`' `full_attention`) names,
             // per-head query and key norms on the attention layers.
             fits(layers, path)?;
-            let attention: u128 = match raw.get("layer_types").and_then(Value::as_array) {
+            let attention: u128 = match list(raw, "layer_types", path)? {
                 Some(types) => types
                     .iter()
                     .enumerate()
                     .filter(|(_, kind)| kind.as_str() == Some("full_attention"))
                     .fold(0, |set, (layer, _)| set | (1u128 << layer)),
-                None => raw
-                    .get("full_attn_idxs")
-                    .and_then(Value::as_array)
-                    .map(|list| {
-                        list.iter()
-                            .filter_map(Value::as_u64)
-                            .filter(|layer| (*layer as usize) < layers)
-                            .fold(0u128, |set, layer| set | (1u128 << layer))
-                    })
-                    .unwrap_or(0),
+                None => {
+                    let mut set = 0u128;
+                    for entry in list(raw, "full_attn_idxs", path)?.into_iter().flatten() {
+                        match entry.as_u64().map(|layer| layer as usize) {
+                            Some(layer) if layer < layers => set |= 1u128 << layer,
+                            _ => refused!(
+                                OutOfRange,
+                                in raw,
+                                ["full_attn_idxs"],
+                                "{} lists full_attn_idxs entry {entry}, which names no layer below {layers}",
+                                path.display()
+                            ),
+                        }
+                    }
+                    set
+                }
             };
-            let Some(kernel) = whole(raw, "conv_L_cache") else {
-                bail!(
+            let Some(kernel) = whole(raw, "conv_L_cache", path)? else {
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["conv_L_cache"],
                     "{} declares an LFM2 model without conv_L_cache",
                     path.display()
                 );
@@ -141,7 +164,7 @@ pub(in crate::runtime::load::family) fn configure(
             architecture.query_key_norm = QueryKeyNorm::PerHead;
             architecture.short_convolution = Some(ShortConvolution {
                 kernel,
-                bias: flag(raw, "conv_bias"),
+                bias: flag(raw, "conv_bias", path)?,
                 layers: every_layer(layers, path)? & !attention,
             });
             if model_type == "lfm2_moe" {
@@ -152,25 +175,30 @@ pub(in crate::runtime::load::family) fn configure(
                 // scores, chosen with `feed_forward.expert_bias` added when
                 // `use_expert_bias` holds, renormalised under
                 // `norm_topk_prob`, scaled by `routed_scaling_factor`.
-                let dense_count = whole(raw, "num_dense_layers").unwrap_or(0).min(layers);
+                let dense_count = whole_or(raw, "num_dense_layers", 0, path)?.min(layers);
                 let dense = (0..dense_count).fold(0u128, |set, layer| set | (1u128 << layer));
                 let mut routed = experts(
                     raw,
                     "num_experts",
                     "moe_intermediate_size",
-                    flag(raw, "norm_topk_prob"),
+                    flag(raw, "norm_topk_prob", path)?,
                     ExpertLayout::Lfm2,
                     dense,
                     path,
                 )?;
                 routed.scoring = Scoring::Sigmoid;
                 routed.selection_bias =
-                    flag(raw, "use_expert_bias").then_some("feed_forward.expert_bias");
-                routed.routed_scale = number(raw, "routed_scaling_factor");
+                    flag(raw, "use_expert_bias", path)?.then_some("feed_forward.expert_bias");
+                routed.routed_scale = number(raw, "routed_scaling_factor", path)?;
                 architecture.experts = Some(routed);
             }
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }

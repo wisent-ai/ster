@@ -41,10 +41,8 @@ impl ResidualConv {
     ) -> candle_core::Result<Self> {
         let stored = builder.pp(name).get_unchecked("weight")?;
         if stored.elem_count() != channels * kernel {
-            candle_core::bail!(
-                "{name}.weight holds {:?}, not {channels} channels of {kernel} taps",
-                stored.dims()
-            );
+            let name = format!("{name}.weight");
+            return Err(super::misshapen(&name, (channels, kernel), stored.shape()));
         }
         Ok(Self {
             taps: stored.reshape((channels, kernel))?.to_dtype(DType::F32)?,
@@ -181,16 +179,11 @@ impl FeedForward {
             let shared_w2 = block
                 .pp("shared_experts")
                 .get((shared, hidden, width), "shared_w2_weight")?;
-            let global = gate
-                .get_unchecked("global_scale")?
-                .to_dtype(DType::F32)?
-                .flatten_all()?
-                .to_vec1::<f32>()?;
-            let [global] = global.as_slice() else {
-                candle_core::bail!(
-                    "layer {layer}'s mlp.gate.global_scale holds {} values, not one",
-                    global.len()
-                );
+            let stored = gate.get_unchecked("global_scale")?;
+            let values = stored.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let [global] = values.as_slice() else {
+                let name = format!("layer {layer}'s mlp.gate.global_scale");
+                return Err(super::misshapen(&name, (1,), stored.shape()));
             };
             Inner::Routed(Box::new(Routed {
                 router: linear_no_bias(hidden, count + shared, gate.clone())?,
@@ -268,19 +261,11 @@ impl Routed {
                 .collect();
             order.sort_by(|left, right| ranked[*right].total_cmp(&ranked[*left]));
             order.truncate(self.top_k);
-            let total: f32 = order
-                .iter()
-                .map(|expert| sigmoid(row[*expert]))
-                .sum::<f32>()
-                + row[count..]
-                    .iter()
-                    .map(|logit| sigmoid(*logit))
-                    .sum::<f32>();
+            let total: f32 = order.iter().map(|expert| sigmoid(row[*expert])).sum::<f32>()
+                + row[count..].iter().map(|logit| sigmoid(*logit)).sum::<f32>();
             for expert in order {
                 routed[expert].0.push(token as u32);
-                routed[expert]
-                    .1
-                    .push(sigmoid(row[expert]) / total * self.scale);
+                routed[expert].1.push(sigmoid(row[expert]) / total * self.scale);
             }
             for (index, logit) in row[count..].iter().enumerate() {
                 shared[index].push(sigmoid(*logit) / total * self.scale);

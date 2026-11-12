@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{Architecture, InklingSpec, Names, Positions, RelativeHeads};
 use crate::runtime::load::family::read::layers::fits;
-use crate::runtime::load::family::read::{number, text, whole};
+use crate::runtime::load::family::read::{list, number, stated, text, whole, whole_or};
 
 /// Inkling (`inkling_text`, inside `inkling_mm_model` below `model.llm`):
 /// see [`InklingSpec`]. The sliding layers are `layer_types`'
@@ -28,9 +28,11 @@ pub(in crate::runtime::load::family) fn inkling(
 ) -> Result<()> {
     fits(layers, path)?;
     let size = |key: &str| -> Result<usize> {
-        whole(raw, key)
+        whole(raw, key, path)?
             .filter(|size| *size > 0)
-            .with_context(|| format!("{} declares an Inkling model without {key}", path.display()))
+            .or_refuse(raw, &[key], || {
+                format!("{} declares an Inkling model without {key}", path.display())
+            })
     };
     for (key, required) in [
         ("use_sconv", true),
@@ -42,9 +44,12 @@ pub(in crate::runtime::load::family) fn inkling(
         ("q_bias", false),
         ("o_bias", false),
     ] {
-        if let Some(stated) = raw.get(key).and_then(Value::as_bool) {
+        if let Some(stated) = stated::<bool>(raw, key, path)? {
             if stated != required {
-                bail!(
+                refused!(
+                    Unimplemented,
+                    in raw,
+                    [key],
                     "{} declares {key} {stated}; Ster implements Inkling with {key} {required}",
                     path.display()
                 );
@@ -52,9 +57,12 @@ pub(in crate::runtime::load::family) fn inkling(
         }
     }
     if let Some(activation) =
-        text(raw, "gate_activation").filter(|activation| *activation != "sigmoid")
+        text(raw, "gate_activation", path)?.filter(|activation| *activation != "sigmoid")
     {
-        bail!(
+        refused!(
+            Unimplemented,
+            in raw,
+            ["gate_activation"],
             "{} declares gate_activation {activation:?}; Ster implements Inkling's sigmoid router",
             path.display()
         );
@@ -63,17 +71,22 @@ pub(in crate::runtime::load::family) fn inkling(
         .get("final_logit_softcapping")
         .is_some_and(|cap| !cap.is_null())
     {
-        bail!(
+        refused!(
+            Unimplemented,
+            in raw,
+            ["final_logit_softcapping"],
             "{} declares final_logit_softcapping; Ster implements Inkling without it",
             path.display()
         );
     }
     let listed = |key: &str, chosen: &str| -> Result<Option<u128>> {
-        let Some(entries) = raw.get(key).and_then(Value::as_array) else {
+        let Some(entries) = list(raw, key, path)? else {
             return Ok(None);
         };
         if entries.len() != layers {
-            bail!(
+            refused!(
+                Contradictory,
+                [key => format!("{} entries", entries.len()), "num_hidden_layers" => layers],
                 "{} lists {} {key} entries for {layers} layers",
                 path.display(),
                 entries.len()
@@ -90,8 +103,11 @@ pub(in crate::runtime::load::family) fn inkling(
     let sliding_layers = match listed("layer_types", "hybrid_sliding")? {
         Some(set) => set,
         None => {
-            let Some(local) = raw.get("local_layer_ids").and_then(Value::as_array) else {
-                bail!(
+            let Some(local) = list(raw, "local_layer_ids", path)? else {
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["layer_types", "local_layer_ids"],
                     "{} declares an Inkling model with neither layer_types nor local_layer_ids",
                     path.display()
                 );
@@ -100,7 +116,10 @@ pub(in crate::runtime::load::family) fn inkling(
             for entry in local {
                 match entry.as_u64().map(|layer| layer as usize) {
                     Some(layer) if layer < layers => set |= 1u128 << layer,
-                    _ => bail!(
+                    _ => refused!(
+                        OutOfRange,
+                        in raw,
+                        ["local_layer_ids"],
                         "{} lists local_layer_ids entry {entry}, outside layers 0 to {}",
                         path.display(),
                         layers - 1
@@ -113,28 +132,37 @@ pub(in crate::runtime::load::family) fn inkling(
     let routed_layers = match listed("mlp_layer_types", "sparse")? {
         Some(set) => set,
         None => {
-            let dense = whole(raw, "dense_mlp_idx").unwrap_or(0).min(layers);
+            let dense = whole_or(raw, "dense_mlp_idx", 0, path)?.min(layers);
             (dense..layers).fold(0u128, |set, layer| set | 1u128 << layer)
         }
     };
-    let log_scaling = match number(raw, "log_scaling_n_floor") {
+    let log_scaling = match number(raw, "log_scaling_n_floor", path)? {
         Some(floor) if floor > 0.0 => {
-            let Some(alpha) = number(raw, "log_scaling_alpha") else {
-                bail!(
+            let Some(alpha) = number(raw, "log_scaling_alpha", path)? else {
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["log_scaling_n_floor", "log_scaling_alpha"],
                     "{} declares log_scaling_n_floor without log_scaling_alpha",
                     path.display()
                 );
             };
             Some((alpha, floor))
         }
-        Some(floor) => bail!(
+        Some(floor) => refused!(
+            OutOfRange,
+            in raw,
+            ["log_scaling_n_floor"],
             "{} declares log_scaling_n_floor {floor}; it must be positive",
             path.display()
         ),
         None => None,
     };
-    let Some(route_scale) = number(raw, "route_scale") else {
-        bail!(
+    let Some(route_scale) = number(raw, "route_scale", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["route_scale"],
             "{} declares an Inkling model without route_scale",
             path.display()
         );
@@ -165,7 +193,15 @@ pub(in crate::runtime::load::family) fn inkling(
     };
     for shape in [spec.full, spec.sliding] {
         if shape.heads % shape.key_value_heads != 0 {
-            bail!(
+            refused!(
+                Contradictory,
+                in raw,
+                [
+                    "num_attention_heads",
+                    "num_key_value_heads",
+                    "swa_num_attention_heads",
+                    "swa_num_key_value_heads",
+                ],
                 "{} shares {} key-value heads among {} heads; they must divide evenly",
                 path.display(),
                 shape.key_value_heads,
@@ -174,7 +210,10 @@ pub(in crate::runtime::load::family) fn inkling(
         }
     }
     if spec.top_k > spec.experts {
-        bail!(
+        refused!(
+            OutOfRange,
+            in raw,
+            ["num_experts_per_tok", "n_routed_experts"],
             "{} chooses {} of {} experts",
             path.display(),
             spec.top_k,
@@ -184,10 +223,10 @@ pub(in crate::runtime::load::family) fn inkling(
     architecture.names = Names::INKLING;
     architecture.positions = Positions::None;
     architecture.embedding_norm = true;
-    architecture.logits_multiplier = number(raw, "logits_mup_width_multiplier")
+    architecture.logits_multiplier = number(raw, "logits_mup_width_multiplier", path)?
         .filter(|width| *width > 0.0)
         .map(|width| width.recip());
-    architecture.vocabulary_limit = whole(raw, "unpadded_vocab_size");
+    architecture.vocabulary_limit = whole(raw, "unpadded_vocab_size", path)?;
     architecture.inkling = Some(spec);
     Ok(())
 }

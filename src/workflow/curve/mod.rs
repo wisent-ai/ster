@@ -5,11 +5,12 @@
 
 use std::num::NonZeroUsize;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::{
     artifact::PairSet,
+    failures::{refuse, workflow::holdout as causes},
     representation::{TrainingMethod, evaluate_direction, train_direction},
     runtime::Runtime,
 };
@@ -62,17 +63,7 @@ pub fn curve(
     holdout: f64,
     sizes: &[NonZeroUsize],
 ) -> Result<CurveReport> {
-    let holdout = split_holdout(pairs.pairs.len(), holdout)?;
-    if sizes.is_empty() {
-        bail!("vector curve needs at least one size to fit on; the sizes list is empty");
-    }
-    if let Some(size) = sizes.iter().find(|size| size.get() > holdout.fit_pairs) {
-        bail!(
-            "a size of {size} pairs does not fit in the {} pairs left to fit on after holding out {}",
-            holdout.fit_pairs,
-            holdout.holdout_pairs
-        );
-    }
+    let holdout = check_sizes(pairs, holdout, sizes, method)?;
     let captured = capture_pairs(runtime, pairs, layers)?;
     let split = holdout.fit_pairs;
     progress(format!(
@@ -87,10 +78,18 @@ pub fn curve(
         let read = captured.get(&layer).expect("requested layer is captured");
         for size in sizes {
             let size = size.get();
-            let direction =
-                train_direction(&read.positive[..size], &read.negative[..size], method)?;
-            let (accuracy, margin) =
-                evaluate_direction(&read.positive[split..], &read.negative[split..], &direction)?;
+            let direction = train_direction(
+                &read.positive[..size],
+                &read.negative[..size],
+                method,
+                layer,
+            )?;
+            let (accuracy, margin) = evaluate_direction(
+                &read.positive[split..],
+                &read.negative[split..],
+                &direction,
+                layer,
+            )?;
             points.push(CurvePoint {
                 size,
                 layer,
@@ -132,4 +131,44 @@ pub fn curve(
         points,
         enough,
     })
+}
+
+/// The holdout `curve` ranks on, once every size is checked to fit in the
+/// part left to fit on. It reads no model, so a command checks it before
+/// loading one. `sizes` holds one size or more: clap requires `--sizes`, and
+/// a request without one is refused as `ster.request` too-few.
+pub fn check_sizes(
+    pairs: &PairSet,
+    holdout: f64,
+    sizes: &[NonZeroUsize],
+    method: TrainingMethod,
+) -> Result<Holdout> {
+    let holdout = split_holdout(pairs, holdout)?;
+    let fit = holdout.fit_pairs.to_string();
+    let held = holdout.holdout_pairs.to_string();
+    let named: Vec<String> = sizes.iter().map(|size| size.to_string()).collect();
+    let past: Vec<String> = sizes
+        .iter()
+        .filter(|size| size.get() > holdout.fit_pairs)
+        .map(|size| size.to_string())
+        .collect();
+    let values = [
+        ("method", method.name()),
+        ("fit", fit.as_str()),
+        ("held", held.as_str()),
+        ("trait", pairs.trait_name.as_str()),
+    ];
+    if let Some(size) = past.first() {
+        let total = pairs.pairs.len().to_string();
+        let (sizes, past) = (named.join(","), past.join(", "));
+        let mut values = values.to_vec();
+        values.extend([
+            ("size", size.as_str()),
+            ("sizes", sizes.as_str()),
+            ("past", past.as_str()),
+            ("total", total.as_str()),
+        ]);
+        return Err(refuse(&causes::SIZE_PAST, &values));
+    }
+    Ok(holdout)
 }

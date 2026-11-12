@@ -2925,7 +2925,6 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "clap",
- "half",
  "hf-hub",
  "minijinja",
  "rand 0.9.5",

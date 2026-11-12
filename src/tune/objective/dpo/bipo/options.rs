@@ -3,12 +3,19 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::super::super::super::checkpoint::Durable;
+use super::super::super::super::{checkpoint::Durable, preflight::Preflight};
 use super::super::DpoLoss;
+use crate::failures::{
+    refuse,
+    tune::objectives::{BETA_UNUSABLE, LAYER_OUTSIDE, STRENGTH_UNUSABLE},
+};
+
+/// How BiPO names itself in what it says.
+pub(super) const SUBJECT: &str = "bi-directional preference optimization";
 
 /// Every setting one BiPO run takes; Ster assumes none of them.
 #[derive(Debug, Clone)]
@@ -61,38 +68,51 @@ pub struct BipoReport {
 }
 
 impl BipoOptions {
-    /// Refuses a run whose settings cannot train: each refusal names its
-    /// setting.
-    pub(super) fn validate(&self, layers: usize) -> Result<()> {
-        if self.layer >= layers {
-            bail!(
-                "layer {} is outside the model's {layers} layers",
-                self.layer
-            );
+    /// Refuses the settings no BiPO run can train with, before any model or
+    /// data is read. Beta and strength must be normal positive floats:
+    /// finite, not zero, not subnormal.
+    pub fn check(&self) -> Result<()> {
+        Preflight {
+            subject: SUBJECT,
+            unit: "pair",
+            pass: "epoch",
+            noun: "steering vector",
+            epochs: self.epochs,
+            accumulation: self.accumulation,
+            batch: Some(self.batch),
+            learning_rate: self.learning_rate,
+            max_sequence: self.max_sequence,
         }
-        for (name, value) in [
-            ("beta", self.beta),
-            ("strength", self.strength),
-            ("learning rate", self.learning_rate),
-        ] {
-            // A normal, positive float: finite, not zero, not subnormal.
-            if !(value.is_normal() && value.is_sign_positive()) {
-                bail!(
-                    "bi-directional preference optimization requires a finite {name} above zero, not {value}"
-                );
-            }
+        .check()?;
+        let usable = |value: f64| value.is_normal() && value.is_sign_positive();
+        if !usable(self.beta) {
+            return Err(refuse(
+                &BETA_UNUSABLE,
+                &[("subject", SUBJECT), ("value", &self.beta.to_string())],
+            ));
         }
-        for (name, value) in [
-            ("epochs", self.epochs),
-            ("accumulation", self.accumulation),
-            ("batch size", self.batch),
-            ("sequence limit", self.max_sequence),
-        ] {
-            if value == 0 {
-                bail!("bi-directional preference optimization requires {name} of at least one");
-            }
+        if !usable(self.strength) {
+            return Err(refuse(
+                &STRENGTH_UNUSABLE,
+                &[("value", &self.strength.to_string())],
+            ));
         }
         Ok(())
+    }
+
+    /// Refuses a layer the loaded model, of `layers` layers, does not have.
+    pub(super) fn check_layer(&self, layers: usize) -> Result<()> {
+        if self.layer < layers {
+            return Ok(());
+        }
+        Err(refuse(
+            &LAYER_OUTSIDE,
+            &[
+                ("layer", &self.layer.to_string()),
+                ("layers", &layers.to_string()),
+                ("last", &layers.saturating_sub(1).to_string()),
+            ],
+        ))
     }
 
     /// Everything a resumed run must share with the run that wrote the

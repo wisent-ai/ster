@@ -3,12 +3,47 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_nn::VarMap;
 
-use crate::{lora, model::SteeringLlama};
+use crate::{
+    failures::{model::weights as causes, refuse},
+    lora,
+};
 
 use super::{DeviceChoice, Runtime, device::Precision, validate_layers};
+
+/// Refuses a setting a config states that the decoder cannot run, through
+/// the declared cause of its reason (`ster.model.config.settings-*`, one per
+/// [`Unrunnable`](crate::failures::model::Unrunnable) kind): `Unimplemented`,
+/// `Contradictory`, `OutOfRange`, `Incomplete` or `Malformed`, the first
+/// argument. The refusal's observed state is what the config states for the
+/// keys the sentence names: `refused!(Kind, in raw, ["key", ...],
+/// sentence...)` reads them from the config object `raw` (a dotted key
+/// through nested objects), and `refused!(Kind, ["key" => value, ...],
+/// sentence...)` names values the reading already holds, such as a
+/// `rope_scaling` taken out of the config. The rest is the sentence, as
+/// `format!` takes it. Every family's reading, and the Mistral and HY-V4
+/// conversions, refuse through it.
+macro_rules! refused {
+    ($kind:ident, in $config:expr, [$($key:expr),* $(,)?], $($sentence:tt)*) => {
+        return Err($crate::failures::model::settings(
+            $crate::failures::model::Unrunnable::$kind,
+            format!($($sentence)*),
+            $crate::failures::model::stated(
+                $config,
+                &[$(::std::convert::AsRef::<str>::as_ref(&$key)),*],
+            ),
+        ))
+    };
+    ($kind:ident, [$($key:expr => $value:expr),* $(,)?], $($sentence:tt)*) => {
+        return Err($crate::failures::model::settings(
+            $crate::failures::model::Unrunnable::$kind,
+            format!($($sentence)*),
+            [$(format!("{}: {}", $key, $value)),*].join(", "),
+        ))
+    };
+}
 
 mod base;
 mod checkpoint;
@@ -42,9 +77,7 @@ impl Runtime {
         precision: Precision,
     ) -> Result<Self> {
         let base = BaseLoad::resolve(model, revision, device, precision)?;
-        let builder = base.builder()?;
-        let model_impl =
-            SteeringLlama::load(builder, base.config.clone(), base.architecture.clone())?;
+        let model_impl = base.decoder(model, lora::Adapters::default())?;
         Ok(base.finish(model, model_impl))
     }
 
@@ -119,47 +152,55 @@ impl Runtime {
         // score with. Either substitution answers a question nobody asked, and
         // does it plausibly, which is the reason it is refused rather than
         // reported.
+        let shown = path.display().to_string();
+        let refuse_kind = |found: &str, wanted: &str| {
+            refuse(
+                &causes::ARTIFACT_KIND,
+                &[
+                    ("path", &shown),
+                    ("model", model),
+                    ("found", found),
+                    ("wanted", wanted),
+                    ("kind", artifact.kind.name()),
+                ],
+            )
+        };
         match (kind, artifact.kind) {
             (lora::Kind::Adapter, lora::Kind::Reward) => {
-                bail!(
-                    "adapter artifact {} is a reward model, not a generation adapter",
-                    path.display()
-                )
+                return Err(refuse_kind("reward model", "generation adapter"));
             }
             (lora::Kind::Reward, lora::Kind::Adapter) => {
-                bail!(
-                    "adapter artifact {} is a generation adapter, not a reward model",
-                    path.display()
-                )
+                return Err(refuse_kind("generation adapter", "reward model"));
             }
             _ => {}
         }
         if artifact.model != model {
-            bail!(
-                "adapter was trained for model {:?}, current model is {:?}",
-                artifact.model,
-                model
-            );
+            return Err(refuse(
+                &causes::ARTIFACT_MODEL,
+                &[
+                    ("path", &shown),
+                    ("model", &format!("{model:?}")),
+                    ("trained", &format!("{:?}", artifact.model)),
+                ],
+            ));
         }
         if artifact.hidden_size != base.config.hidden_size {
-            bail!(
-                "adapter width {} does not match model width {}",
-                artifact.hidden_size,
-                base.config.hidden_size
-            );
+            return Err(refuse(
+                &causes::ARTIFACT_WIDTH,
+                &[
+                    ("path", &shown),
+                    ("model", model),
+                    ("trained", &artifact.hidden_size.to_string()),
+                    ("width", &base.config.hidden_size.to_string()),
+                ],
+            ));
         }
         validate_layers(&artifact.layers, base.config.num_hidden_layers)?;
         base.architecture
-            .check_targets(&artifact.targets, &base.config)?;
+            .check_targets(&artifact.targets, &base.config, model)?;
         artifact.validate_widths(lora::Widths::for_decoder(&base.config, &base.architecture))?;
         let adapters = lora::Adapters::from_artifact(&artifact, &base.device, base.dtype)?;
-        let builder = base.builder()?;
-        let model_impl = SteeringLlama::load_with_adapters(
-            builder,
-            base.config.clone(),
-            base.architecture.clone(),
-            adapters,
-        )?;
+        let model_impl = base.decoder(model, adapters)?;
         Ok((base.finish(model, model_impl), artifact))
     }
 
@@ -202,19 +243,13 @@ impl Runtime {
         let base = BaseLoad::resolve(model, revision, device, precision)?;
         spec.validate(base.config.num_hidden_layers)?;
         base.architecture
-            .check_targets(&spec.targets, &base.config)?;
+            .check_targets(&spec.targets, &base.config, model)?;
         let spec = spec.resolved(base.config.num_hidden_layers);
         let widths = lora::Widths::for_decoder(&base.config, &base.architecture);
         let varmap = VarMap::new();
         let adapters =
             lora::Adapters::fresh(&spec, &varmap, widths, &base.device, base.param_dtype)?;
-        let builder = base.builder()?;
-        let model_impl = SteeringLlama::load_with_adapters(
-            builder,
-            base.config.clone(),
-            base.architecture.clone(),
-            adapters,
-        )?;
+        let model_impl = base.decoder(model, adapters)?;
         Ok((base.finish(model, model_impl), varmap))
     }
 }

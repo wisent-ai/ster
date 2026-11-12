@@ -1,17 +1,24 @@
 //! One prompt's group: the conversations drawn for it, the advantage each one
 //! carries against the group's own mean, and the loss the group produces.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_core::Tensor;
 
 use crate::{
+    failures::{
+        refuse,
+        tune::{
+            objectives::{GROUP_TOO_SMALL, TURNS_NONE},
+            policy::{GROUP_SPREAD_NOT_FINITE, REWARD_NOT_FINITE},
+        },
+    },
     model::Route,
     runtime::{Completion, Runtime},
 };
 
 use super::super::super::preflight::token_logprobs;
 use super::rollout::{UserSimulator, rollout};
-use super::{GrpoIteration, GrpoOptions, Reward};
+use super::{GrpoOptions, Reward};
 
 /// One assistant turn with the frozen reference's view of it.
 pub(super) struct Turn {
@@ -54,7 +61,7 @@ pub(super) fn sample_group(
 ) -> Result<Group> {
     let mut conversations = Vec::with_capacity(options.group);
     let mut rewards = Vec::with_capacity(options.group);
-    for _ in 0..options.group {
+    for conversation_index in 0..options.group {
         let conversation = rollout(
             runtime,
             user,
@@ -64,38 +71,36 @@ pub(super) fn sample_group(
             limit,
             draw,
         )?;
-        let turns = conversation.turns;
-        let mut assistant_positions = conversation
-            .transcript
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (role, _))| (*role == "assistant").then_some(index));
         let mut total = 0f64;
-        for turn in &turns {
-            if user.is_some() && matches!(reward, Reward::Scorer(_)) {
-                let Some(position) = assistant_positions.next() else {
-                    bail!(
-                        "rollout completion has no matching assistant turn: the transcript holds {} entries for {} turns",
-                        conversation.transcript.len(),
-                        turns.len()
-                    );
-                };
-                let context = serde_json::to_string(&conversation.transcript[..position])?;
-                total += reward.score(&context, turn)?;
+        for (turn, (completion, &before)) in conversation
+            .turns
+            .iter()
+            .zip(&conversation.before)
+            .enumerate()
+        {
+            let score = if user.is_some() && matches!(reward, Reward::Scorer(_)) {
+                let context = crate::json::compact(&conversation.transcript[..before]);
+                reward.score(&context, completion)?
             } else {
-                total += reward.score(prompt, turn)?;
-            }
+                reward.score(prompt, completion)?
+            };
+            total += score;
             if !total.is_finite() {
-                bail!(
-                    "GRPO conversation reward sum is not finite ({total}); refusing the group before a policy update"
-                );
+                return Err(refuse(
+                    &REWARD_NOT_FINITE,
+                    &[
+                        ("conversation", &(conversation_index + 1).to_string()),
+                        ("group", &options.group.to_string()),
+                        ("turn", &(turn + 1).to_string()),
+                        ("score", &score.to_string()),
+                        ("total", &total.to_string()),
+                        ("source", source(reward)),
+                    ],
+                ));
             }
         }
         rewards.push(total);
-        conversations.push(turns);
-    }
-    if rewards.is_empty() {
-        bail!("GRPO reward normalization requires a sampled conversation; the group is empty");
+        conversations.push(conversation.turns);
     }
 
     let count = rewards.len() as f64;
@@ -106,10 +111,17 @@ pub(super) fn sample_group(
         .sum::<f64>()
         / count;
     if !mean.is_finite() || !variance.is_finite() {
-        bail!(
-            "GRPO reward normalization is not finite for {} conversations: mean={mean}, variance={variance}; refusing the group before a policy update",
-            rewards.len()
-        );
+        let listed: Vec<String> = rewards.iter().map(f64::to_string).collect();
+        return Err(refuse(
+            &GROUP_SPREAD_NOT_FINITE,
+            &[
+                ("count", &rewards.len().to_string()),
+                ("rewards", &listed.join(", ")),
+                ("mean", &mean.to_string()),
+                ("variance", &variance.to_string()),
+                ("source", source(reward)),
+            ],
+        ));
     }
     let spread = variance.sqrt();
     // No epsilon. A group whose conversations all scored the same has no
@@ -148,6 +160,15 @@ pub(super) fn sample_group(
     })
 }
 
+/// What `--reward` chose, as a refusal of its rewards names it.
+fn source(reward: &Reward) -> &'static str {
+    match reward {
+        Reward::Length => "the length reward",
+        Reward::Model(_) => "a reward artifact's head",
+        Reward::Scorer(_) => "an outside scorer",
+    }
+}
+
 /// The loss for one group, plus the scalars the report is built from.
 pub(super) struct Loss {
     pub(super) tensor: Tensor,
@@ -156,6 +177,15 @@ pub(super) struct Loss {
 }
 
 pub(super) fn group_loss(runtime: &Runtime, group: &Group, options: &GrpoOptions) -> Result<Loss> {
+    // The group is the baseline: fewer than two conversations compare
+    // nothing, so the check `ster tune grpo` makes of --group is made again
+    // of the group actually drawn.
+    if group.draws.len() < 2 {
+        return Err(refuse(
+            &GROUP_TOO_SMALL,
+            &[("group", &group.draws.len().to_string())],
+        ));
+    }
     let mut summed: Option<Tensor> = None;
     let mut kl_total = 0f64;
     for draw in &group.draws {
@@ -193,12 +223,11 @@ pub(super) fn group_loss(runtime: &Runtime, group: &Group, options: &GrpoOptions
                 None => scaled,
             });
         }
-        let Some(conversation) = conversation else {
-            bail!(
-                "a sampled conversation of {} turns contained no assistant turns",
-                draw.turns.len()
-            );
-        };
+        // `rollout` refuses a draw whose first assistant turn is empty
+        // (`turn-empty`) and `--turns` is at least one (`turns-none`), so
+        // every draw holds a turn and the loop above summed it.
+        let conversation = conversation
+            .expect("every draw holds a turn: rollout refuses one without, --turns is at least 1");
         kl_total += conversation_kl / draw.turns.len() as f64;
         let scaled = (conversation.neg()? / group.draws.len() as f64)?;
         summed = Some(match summed {
@@ -207,10 +236,7 @@ pub(super) fn group_loss(runtime: &Runtime, group: &Group, options: &GrpoOptions
         });
     }
     let Some(tensor) = summed else {
-        bail!(
-            "a sampled group of {} draws contained no conversations",
-            group.draws.len()
-        );
+        return Err(refuse(&GROUP_TOO_SMALL, &[("group", "0")]));
     };
     Ok(Loss {
         value: tensor.to_scalar::<f32>()? as f64,
@@ -225,68 +251,4 @@ fn sequence(completion: &Completion) -> Vec<u32> {
     ids.extend_from_slice(&completion.prompt);
     ids.extend_from_slice(&completion.tokens);
     ids
-}
-
-/// Running totals over one iteration.
-#[derive(Debug, Default)]
-pub(super) struct Totals {
-    pub(super) groups: usize,
-    pub(super) completions: usize,
-    pub(super) turns: usize,
-    pub(super) reward: f64,
-    pub(super) spread: f64,
-    pub(super) kl: f64,
-    pub(super) loss: f64,
-    pub(super) tokens: usize,
-}
-
-impl Totals {
-    pub(super) fn record(&mut self, group: &Group, loss: &Loss) {
-        self.groups += 1;
-        self.completions += group.draws.len();
-        self.turns += group
-            .draws
-            .iter()
-            .map(|draw| draw.turns.len())
-            .sum::<usize>();
-        self.reward += group.mean_reward;
-        self.spread += group.spread;
-        self.kl += loss.kl;
-        self.loss += loss.value;
-        self.tokens += group
-            .draws
-            .iter()
-            .flat_map(|draw| &draw.turns)
-            .map(|turn| turn.completion.tokens.len())
-            .sum::<usize>();
-    }
-
-    /// Every mean divides by the group count, guarded at one so an iteration
-    /// that recorded nothing reports zero rather than a JSON `NaN` no client
-    /// can parse.
-    pub(super) fn mean(&self, total: f64) -> f32 {
-        (total / self.groups.max(1) as f64) as f32
-    }
-
-    pub(super) fn mean_reward(&self) -> f32 {
-        self.mean(self.reward)
-    }
-
-    pub(super) fn mean_kl(&self) -> f32 {
-        self.mean(self.kl)
-    }
-
-    pub(super) fn finish(&self, iteration: usize) -> GrpoIteration {
-        GrpoIteration {
-            iteration,
-            groups: self.groups,
-            completions: self.completions,
-            mean_reward: self.mean_reward(),
-            reward_spread: self.mean(self.spread),
-            mean_kl: self.mean_kl(),
-            policy_loss: self.mean(self.loss),
-            mean_turns: self.turns as f32 / self.completions.max(1) as f32,
-            mean_completion_tokens: self.tokens as f32 / self.turns.max(1) as f32,
-        }
-    }
 }

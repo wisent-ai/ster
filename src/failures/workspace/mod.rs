@@ -3,6 +3,7 @@
 
 use wisent_errors::Operation;
 
+use super::file::FILE as FILES;
 use super::pairs::FILE;
 
 /// docs/guide/errors/workspace.md, where these functionalities are listed.
@@ -16,17 +17,13 @@ pub mod store;
 pub static STORE: Operation = Operation {
     id: "ster.workspace.store",
     entries: &[],
-    uses: &[],
+    uses: &[&FILES],
     summary: "locate the workspace under XDG_DATA_HOME or HOME, read its document, and write it so a reader never sees half of it",
     docs: DOCS,
     warnings: &[],
     causes: &[
         &store::HOME_UNSET,
-        &store::UNREADABLE,
-        &store::MALFORMED,
         &store::SCHEMA,
-        &store::DIRECTORY,
-        &store::WRITE,
     ],
 };
 
@@ -56,12 +53,13 @@ pub static IMPORT: Operation = Operation {
     causes: &[
         &import::NAME_INVALID,
         &import::NAME_UNDERIVABLE,
+        &import::NAME_FILELESS,
+        &import::NAME_NOT_UTF8,
         &import::NAME_CONFLICT,
         &import::DESTINATION_EXISTS,
         &import::DESTINATION_APPEARED,
         &import::STAGING_LEFT,
-        &import::COMMIT_FAILED,
-        &import::STAGING_UNREMOVABLE,
+        &import::LINK_UNSUPPORTED,
     ],
 };
 
@@ -91,27 +89,18 @@ pub static SELECT: Operation = Operation {
 pub static REMOVE: Operation = Operation {
     id: "ster.workspace.remove",
     entries: &["ster workspace remove", "ster request workspace/remove"],
-    uses: &[&SET, &STORE],
+    uses: &[&SET, &STORE, &FILES],
     summary: "delete the workspace's copy of an imported pair set and take it out of the workspace; the source file is not touched",
     docs: DOCS,
     warnings: &[],
-    causes: &[&manage::COPY_UNDELETABLE],
+    causes: &[],
 };
 
-/// Reading the active set for a command given no --pairs.
+/// Reading the active set for a command given no --pairs; every command
+/// that reads a pair set uses it (src/failures/workflow, tune/commands.rs).
 pub static ACTIVE: Operation = Operation {
     id: "ster.workspace.active",
-    entries: &[
-        "ster pairs inspect",
-        "ster vector train",
-        "ster vector optimize",
-        "ster vector evaluate",
-        "ster vector curve",
-        "ster vector project",
-        "ster tune dpo",
-        "ster tune bipo",
-        "ster tune reward",
-    ],
+    entries: &[],
     uses: &[&STORE],
     summary: "name the active imported pair set's copy for a command run without --pairs",
     docs: DOCS,

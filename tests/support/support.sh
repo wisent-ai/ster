@@ -27,11 +27,15 @@ RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/support/$RUN"
 REPORT="$ROOT/report.txt"
 mkdir -p "$ROOT"
-echo "revision: $(git rev-parse HEAD)$(git diff --quiet || echo ' (dirty)')" >"$REPORT"
+echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-locks diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 echo "support: $STER_TEST_SUPPORT" >>"$REPORT"
 echo "support agent: ${STER_TEST_SUPPORT_AGENT:-${STER_TEST_SUPPORT%%/v1/*}}" >>"$REPORT"
 export WISENT_TELEMETRY_HOME="$ROOT/state"
+# The binary runs under this run's own home, never the operator's; the pair
+# set it misses lies inside that home, which the report must not carry.
+export HOME="$ROOT/home" XDG_DATA_HOME="$ROOT/data" XDG_STATE_HOME="$ROOT/xdg-state"
+mkdir -p "$HOME"
 # Port 9, the IANA discard port: the failure this test queues is sent nowhere.
 export WISENT_TELEMETRY_COLLECTOR_URL="http://127.0.0.1:9/api/analytics/mobile/collect"
 export WISENT_SUPPORT_URL="$STER_TEST_SUPPORT"
@@ -66,7 +70,7 @@ agent() {
 kept() { find "$ROOT/state/support" -name '*.json' 2>/dev/null | wc -l | tr -d ' '; }
 
 run 0 telemetry on --level errors
-run 1 pairs inspect --pairs "$ROOT/absent.json" --dedupe-bits 3 --dedupe-bands 4 --unbalanced-ratio 3
+run 1 pairs inspect --pairs "$HOME/absent.json" --dedupe-bits 3 --dedupe-bands 4 --unbalanced-ratio 3
 run 0 telemetry status
 INSTALLATION=$(printf '%s' "$out" | jq -r '.installation')
 [ -n "$INSTALLATION" ] && [ "$INSTALLATION" != null ] || fail "no installation id after a queued failure: $out"

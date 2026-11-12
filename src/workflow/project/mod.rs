@@ -6,11 +6,12 @@
 
 use std::num::NonZeroUsize;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::{
     artifact::{PairSet, SteeringArtifact},
+    failures::{refuse, workflow::project as causes},
     runtime::Runtime,
 };
 
@@ -20,7 +21,7 @@ mod pca;
 mod score;
 
 use pca::dot;
-pub use score::{ScoreReport, TokenScore, score};
+pub use score::{ScoreReport, TokenScore, check_text, score};
 
 /// What the caller decides about one projection.
 pub struct ProjectOptions {
@@ -93,8 +94,8 @@ pub fn project(
         let captured = runtime.activations_steered(text, &layers, steered.then_some(&plan))?;
         let (_, values) = captured
             .into_iter()
-            .find(|(layer, _)| *layer == options.layer)
-            .ok_or_else(|| anyhow::anyhow!("layer {} was not captured", options.layer))?;
+            .next()
+            .expect("activations_steered returns one read per requested layer (requested_activations asserts it)");
         Ok(values.into_iter().map(f64::from).collect())
     };
     let mut plain = Vec::with_capacity(pairs.pairs.len());
@@ -119,10 +120,16 @@ pub fn project(
         .collect();
     let fitted = pca::principal(&centred, options.components.get());
     if fitted.axes.is_empty() {
-        bail!(
-            "the unsteered reads at layer {} do not vary, so they have no component to project onto",
-            options.layer
-        );
+        return Err(refuse(
+            &causes::READS_INVARIANT,
+            &[
+                ("pairs", &pairs.pairs.len().to_string()),
+                ("trait", &pairs.trait_name),
+                ("layer", &options.layer.to_string()),
+                ("reads", &unsteered_points.len().to_string()),
+                ("components", &options.components.to_string()),
+            ],
+        ));
     }
     let coordinates = |point: &[f64]| -> Vec<f64> {
         let offset = minus(point, &mean);

@@ -36,13 +36,13 @@ fn malformed_scorer_bearer_is_not_dropped() {
         ));
     std::fs::create_dir_all(&run).expect("create retained report directory");
     let revision = Command::new("git")
-        .args(["rev-parse", "HEAD"])
+        .args(["--no-optional-locks", "rev-parse", "HEAD"])
         .current_dir(&root)
         .output()
         .expect("read source revision");
     assert!(revision.status.success());
     let changes = Command::new("git")
-        .args(["diff", "--binary", "HEAD"])
+        .args(["--no-optional-locks", "diff", "--binary", "HEAD"])
         .current_dir(&root)
         .output()
         .expect("read source modifications");

@@ -71,6 +71,24 @@ Repeatability is for the same declaration and software build. The producer
 uses native random sampling and safetensors serialization; historical output
 captures from a different generator are not expected checkpoint bytes.
 
+## Refusals
+
+Every way `ster model fixture create` fails is a declared cause of
+`ster.model.fixture` ([errors page](../errors/model-fixture.md); `ster errors
+show ster.model.fixture`). A declaration, config or tokenizer that is absent
+(exit 2), unreadable, not JSON or of another shape names its role, path,
+state and the reader's line and column. What the inputs declare is checked
+before any tensor is drawn: a family other than Llama, `mlp_bias`, heads that
+do not group, a setting that is not finite, a negative scale, an attention
+bias without `initialization.bias`, a blank verification prompt, no or an
+out-of-range verification layer, a tokenizer the library does not read, a
+token id or a declared tokenizer past `vocab_size`, and widths past the
+host's sizes. An output that exists (exit 2), sits in a directory this
+account may not search or write, or below a file is refused before anything
+is written. A draw past what f32 holds, a write the disk refuses and a
+verification whose activations are not finite remove this invocation's
+output. `tests/models/fixture.sh` provokes each cause local state can.
+
 ## Native request and Desktop
 
 `ster request model/fixture/create` reads a JSON object with `from` and `output`

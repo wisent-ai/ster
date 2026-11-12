@@ -187,13 +187,10 @@ impl Norm {
         };
         let shape = hidden.shape().clone();
         let hidden = if self.groups > 1 {
-            let mut grouped = shape.dims().to_vec();
-            let Some(width) = grouped.pop() else {
-                candle_core::bail!(
-                    "a norm over {} groups needs a hidden state with a last dimension, and this one has shape {shape:?}",
-                    self.groups
-                );
-            };
+            // The hidden state's last axis, which Candle refuses on a scalar,
+            // split into the groups.
+            let width = hidden.dim(D::Minus1)?;
+            let mut grouped = shape.dims()[..shape.rank() - 1].to_vec();
             grouped.extend([self.groups, width / self.groups]);
             hidden.reshape(grouped)?
         } else {

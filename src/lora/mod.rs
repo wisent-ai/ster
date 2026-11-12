@@ -11,8 +11,16 @@
 //! read back from is in `artifact`. What stays here is the shape an operator
 //! asks for: which projections carry adapters, and at what rank.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::failures::{
+    lora::{
+        ALPHA_UNUSABLE, LAYER_PAST, LAYERS_NONE, RANK_ZERO, TARGET_TWICE, TARGET_UNKNOWN,
+        TARGETS_NONE,
+    },
+    refuse,
+};
 
 mod adapter;
 mod artifact;
@@ -93,9 +101,10 @@ impl Target {
             "gate" | "gate_proj" => Ok(Self::Gate),
             "up" | "up_proj" => Ok(Self::Up),
             "down" | "down_proj" => Ok(Self::Down),
-            _ => bail!(
-                "unknown adapter target {text:?}; expected one of query, key, value, output, gate, up, down"
-            ),
+            _ => Err(refuse(
+                &TARGET_UNKNOWN,
+                &[("target", &format!("{text:?}")), ("targets", text)],
+            )),
         }
     }
 
@@ -162,30 +171,46 @@ impl Spec {
     /// the CLI parses `--layers all` before it knows how many layers the model
     /// has, so it hands the emptiness down and [`Spec::resolved`] expands it
     /// once the count is known. An empty `targets` list has no such excuse.
-    pub fn validate(&self, layer_count: usize) -> Result<()> {
+    pub fn check(&self) -> Result<()> {
         if self.rank == 0 {
-            bail!("adapter rank 0 trains nothing; choose a rank of at least 1");
+            return Err(refuse(&RANK_ZERO, &[("rank", &self.rank.to_string())]));
         }
         if !self.alpha.is_finite() || self.alpha <= 0.0 {
-            bail!(
-                "adapter alpha {} is not a positive finite number",
-                self.alpha
-            );
+            return Err(refuse(&ALPHA_UNUSABLE, &[("alpha", &self.alpha.to_string())]));
         }
+        let named: Vec<&str> = self.targets.iter().map(|target| target.name()).collect();
         if self.targets.is_empty() {
-            bail!(
-                "adapter spec names no targets; choose at least one of query, key, value, output, gate, up, down"
-            );
+            return Err(refuse(&TARGETS_NONE, &[("targets", "\"\"")]));
         }
         for (index, target) in self.targets.iter().enumerate() {
             if self.targets[..index].contains(target) {
-                bail!("adapter spec names target {} twice", target.name());
+                return Err(refuse(
+                    &TARGET_TWICE,
+                    &[("target", target.name()), ("targets", &named.join(","))],
+                ));
             }
         }
-        for layer in &self.layers {
-            if *layer >= layer_count {
-                bail!("adapter spec names layer {layer}, but the model has {layer_count} layers");
-            }
+        Ok(())
+    }
+
+    /// [`Self::check`], a model with at least one layer, and every layer the
+    /// spec names within the model's `layer_count`.
+    pub fn validate(&self, layer_count: usize) -> Result<()> {
+        self.check()?;
+        if layer_count == 0 {
+            return Err(refuse(&LAYERS_NONE, &[("count", "0")]));
+        }
+        if let Some(layer) = self.layers.iter().find(|layer| **layer >= layer_count) {
+            let listed: Vec<String> = self.layers.iter().map(usize::to_string).collect();
+            return Err(refuse(
+                &LAYER_PAST,
+                &[
+                    ("layer", &layer.to_string()),
+                    ("count", &layer_count.to_string()),
+                    ("last", &layer_count.saturating_sub(1).to_string()),
+                    ("layers", &listed.join(",")),
+                ],
+            ));
         }
         Ok(())
     }

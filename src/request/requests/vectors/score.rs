@@ -1,9 +1,11 @@
 //! `ster request vector/score`: the request of `ster vector score`, every flag
 //! a camelCase field.
 
+use anyhow::Result;
 use serde::Deserialize;
 
 use super::super::{ModelRequest, Validate, defaults::*, require};
+use super::ARTIFACT;
 use ster::{ChatChoice, Precision};
 
 #[derive(Debug, Deserialize)]
@@ -25,15 +27,15 @@ pub(in crate::request) struct ScoreRequest {
 }
 
 impl Validate for ScoreRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
         self.model.check("vector/score")?;
-        require(
-            &self.vector,
-            "vector/score requires a steering artifact".to_owned(),
-        )?;
+        require(&self.vector, "vector/score", "vector", ARTIFACT, "--vector")?;
         require(
             &self.text,
-            "vector/score requires the text to score".to_owned(),
+            "vector/score",
+            "text",
+            "the text to score",
+            "--text",
         )
     }
 }

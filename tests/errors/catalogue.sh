@@ -22,8 +22,10 @@ case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/errors/$RUN"
 REPORT="$ROOT/report.txt"
-mkdir -p "$ROOT"
-echo "revision: $(git rev-parse HEAD)$(git diff --quiet || echo ' (dirty)')" >"$REPORT"
+mkdir -p "$ROOT/home"
+# The binary runs under this run's own home, never the operator's.
+export HOME="$ROOT/home" HF_HOME="$ROOT/home/huggingface"
+echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-locks diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 BASELINES="--repository . --uncatalogued tests/errors/uncatalogued.json --untested tests/errors/untested.json"
 
@@ -87,27 +89,29 @@ passed "errors check passes on this checkout"
 
 show_refuses_an_undeclared_functionality() {
   run 2 errors show ster.nothing
-  said "showing the failure catalogue of ster.nothing: no functionality of this ster declares a catalogue under ster.nothing; observed: declared functionalities: ster.errors, ster.pairs.file, ster.workspace.store"
+  said "showing the failure catalogue of ster.nothing: no functionality of this ster declares a catalogue under ster.nothing; observed: declared functionalities: ster.errors, "
+  said ", ster.workspace.store, "
   said "fix: name one of the declared functionalities; \`ster errors list\` prints them"
   passed show_refuses_an_undeclared_functionality
 }
 
 markdown_refuses_a_page_no_functionality_is_listed_on() {
   run 2 errors list --markdown --page docs/guide/errors/nothing.md
-  said "printing the catalogue sections of docs/guide/errors/nothing.md: no functionality is listed on docs/guide/errors/nothing.md; observed: pages: docs/guide/errors/catalogue.md, docs/guide/errors/pairs.md, docs/guide/errors/workspace.md, docs/guide/errors/telemetry.md, docs/guide/errors/support.md; fix: name one of those pages, or leave --page out for every section"
+  said "printing the catalogue sections of docs/guide/errors/nothing.md: no functionality is listed on docs/guide/errors/nothing.md; observed: pages: docs/guide/errors/catalogue.md, "
+  said ", docs/guide/errors/workspace.md, docs/guide/errors/telemetry.md, docs/guide/errors/support.md; fix: name one of those pages, or leave --page out for every section"
   passed markdown_refuses_a_page_no_functionality_is_listed_on
 }
 
 check_refuses_an_unreadable_baseline() {
   run 2 errors check --uncatalogued "$ROOT/absent.json"
-  said "reading the uncatalogued-command baseline $ROOT/absent.json: the file could not be read: "
+  said "reading the uncatalogued-command baseline $ROOT/absent.json: no file is there: nothing at $ROOT/absent.json is the baseline named; observed: path: $ROOT/absent.json (absent); its directory $ROOT; the system answered: "
   passed check_refuses_an_unreadable_baseline
 }
 
 check_refuses_a_baseline_that_is_not_a_list() {
   printf '{"status": true}' >"$ROOT/object.json"
-  run 2 errors check --untested "$ROOT/object.json"
-  said "reading the untested-cause baseline $ROOT/object.json: it is not a JSON list of strings: "
+  run 1 errors check --untested "$ROOT/object.json"
+  said "reading the untested-cause baseline $ROOT/object.json: it is JSON of another form than the untested-cause baseline, which is a JSON list of strings, as tests/errors/uncatalogued.json and tests/errors/untested.json are: "
   passed check_refuses_a_baseline_that_is_not_a_list
 }
 

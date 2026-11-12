@@ -156,14 +156,20 @@ impl Family {
 
     /// The family a config without `model_type` belongs to, from the model
     /// class its `architectures` names, for the families whose published
-    /// configs leave `model_type` to their remote-code config class.
-    pub(in crate::runtime::load) fn of_architectures(raw: &Value) -> Option<Self> {
-        let names = raw.get("architectures")?.as_array()?;
-        Self::ALL.iter().copied().find(|family| {
+    /// configs leave `model_type` to their remote-code config class; an
+    /// `architectures` that is no list is refused by name.
+    pub(in crate::runtime::load) fn of_architectures(
+        raw: &Value,
+        path: &std::path::Path,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(names) = super::read::list(raw, "architectures", path)? else {
+            return Ok(None);
+        };
+        Ok(Self::ALL.iter().copied().find(|family| {
             family
                 .remote_class()
                 .is_some_and(|class| names.iter().any(|name| name.as_str() == Some(class)))
-        })
+        }))
     }
 
     /// The remote-code model class that stands in for `model_type` in this

@@ -1,0 +1,96 @@
+#!/bin/sh
+# Real test of how reading an example set fails (`ster.tune.examples`), and
+# of the one way encoding a valid example fails on a model without a chat
+# template (`ster.runtime.encode`), through `ster tune sft` and
+# `ster tune evaluate` on the four-layer fixture. Every refusal exits 1 and
+# no run that refused writes an adapter.
+#
+# Usage: tests/tuning/examples.sh   (STER selects the binary, default target/debug/ster)
+AREA=examples
+. "$(dirname "$0")/harness.sh"
+
+EVALUATE="--model $MODEL --examples $ROOT/examples.json --max-sequence 64 --batch-size 1"
+# examples NAME JQ: an example set at $ROOT/NAME.json, the docs' set through JQ.
+examples() {
+  SET="$ROOT/$1.json"
+  jq "$2" "$ROOT/examples.json" >"$SET"
+}
+no_adapter() {
+  [ ! -e "$ROOT/sft/adapter.safetensors" ] || fail "a refused run wrote an adapter"
+}
+
+a_missing_example_set_is_refused() {
+  tune 1 sft "$SFT" --examples "$ROOT/absent.json"
+  said "Error: reading example set $ROOT/absent.json: no file is there: nothing at $ROOT/absent.json is the example set named; observed: path: $ROOT/absent.json (absent); its directory $ROOT; the system answered: "
+  no_adapter
+  tune 1 evaluate "$EVALUATE" --examples "$ROOT/absent.json"
+  said "Error: reading example set $ROOT/absent.json: no file is there: "
+  passed a_missing_example_set_is_refused
+}
+
+a_directory_named_as_an_example_set_is_refused() {
+  mkdir -p "$ROOT/folder"
+  tune 1 sft "$SFT" --examples "$ROOT/folder"
+  said "Error: reading the example set $ROOT/folder: $ROOT/folder is a directory, and the example set is one file; observed: path: $ROOT/folder (a directory, "
+  no_adapter
+  passed a_directory_named_as_an_example_set_is_refused
+}
+
+a_file_that_is_not_an_example_set_is_refused() {
+  echo nope >"$ROOT/nope.json"
+  tune 1 sft "$SFT" --examples "$ROOT/nope.json"
+  said "Error: reading the example set $ROOT/nope.json: it is not JSON, and the example set is {\"examples\": [{\"prompt\": \"<text>\", \"completion\": \"<text>\"}]}, as docs/examples/tuning/examples.json is: it is another kind of file, or one broken by hand; observed: path: $ROOT/nope.json (a file, 5 bytes, "
+  examples no-completion 'del(.examples[0].completion)'
+  tune 1 sft "$SFT" --examples "$SET"
+  said "it is JSON of another form than the example set, which is {\"examples\": "
+  said "the reader answered: missing field \`completion\`"
+  no_adapter
+  passed a_file_that_is_not_an_example_set_is_refused
+}
+
+an_example_set_without_examples_is_refused() {
+  examples empty '.examples = []'
+  tune 1 sft "$SFT" --examples "$SET"
+  said "Error: reading example set $SET: example set $SET contains no examples; observed: examples: 0"
+  no_adapter
+  passed an_example_set_without_examples_is_refused
+}
+
+an_example_with_an_empty_side_is_refused() {
+  examples blank '.examples[2].completion = "  "'
+  tune 1 sft "$SFT" --examples "$SET"
+  said "Error: reading example set $SET: example set $SET contains an empty prompt or completion; observed: example 2: prompt \"question : describe the harbor .\", completion \"  \"; fix: give example 2 text in both its prompt and its completion, or remove it"
+  no_adapter
+  passed an_example_with_an_empty_side_is_refused
+}
+
+an_empty_system_prompt_is_refused() {
+  examples empty-system '.examples[1].system = ""'
+  tune 1 sft "$SFT" --examples "$SET"
+  said "Error: reading example set $SET: example set $SET contains an empty system prompt; observed: example 1: system \"\""
+  no_adapter
+  passed an_empty_system_prompt_is_refused
+}
+
+a_system_prompt_without_a_chat_template_is_refused() {
+  examples system '.examples[0].system = "answer calmly ."'
+  tune 1 sft "$SFT" --examples "$SET"
+  said "encoding example 0"
+  said "encoding a training example: the example has a system prompt, which only a chat template can place, and this run's chat template is absent; observed: system: \"answer calmly .\"; chat template: absent"
+  tune 1 sft "$SFT" --examples "$SET" --chat-template off
+  said "and this run's chat template is off; observed: system: \"answer calmly .\"; chat template: off"
+  no_adapter
+  passed a_system_prompt_without_a_chat_template_is_refused
+}
+
+a_missing_example_set_is_refused
+a_directory_named_as_an_example_set_is_refused
+a_file_that_is_not_an_example_set_is_refused
+an_example_set_without_examples_is_refused
+an_example_with_an_empty_side_is_refused
+an_empty_system_prompt_is_refused
+a_system_prompt_without_a_chat_template_is_refused
+
+touch "$ROOT/passed"
+echo "PASS" >>"$REPORT"
+echo "PASS: $REPORT"

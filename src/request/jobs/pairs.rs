@@ -1,13 +1,14 @@
 //! Running the pair-authoring operations: workspace import, audit, save, and
 //! synthesis with either a local runtime or a hosted writer.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::{Value, json};
 
 use std::path::Path;
 
 use ster::{
-    ContrastivePair, GenerationOptions, PairSet, brama,
+    ContrastivePair, GenerationOptions, PairSet,
+    failures::{pairs::synthesize, refuse},
     pairs::{self, InspectOptions, SynthesisOptions, quality::dedupe::DedupeOptions},
 };
 
@@ -36,7 +37,7 @@ pub(in crate::request) fn workspace_import_pairs_job(
     let mut report =
         ster::workspace::import_pair_set(Path::new(&request.source), request.name.as_deref())?;
     let refusal = report.take_refusal();
-    let document = serde_json::to_value(&report)?;
+    let document = ster::json::value(&report);
     Ok(match refusal {
         None => JobOutcome::Completed(document),
         Some(refusal) => JobOutcome::Failed { document, refusal },
@@ -45,29 +46,30 @@ pub(in crate::request) fn workspace_import_pairs_job(
 
 /// The same answer as `ster workspace show`.
 pub(in crate::request) fn workspace_show_job(_request: WorkspaceShowRequest) -> Result<Value> {
-    Ok(serde_json::to_value(ster::workspace::summary()?)?)
+    Ok(ster::json::value(ster::workspace::summary()?))
 }
 
 /// The same operation as `ster workspace select`.
 pub(in crate::request) fn workspace_select_job(request: WorkspacePairSetRequest) -> Result<Value> {
-    Ok(serde_json::to_value(ster::workspace::select_pair_set(
+    Ok(ster::json::value(ster::workspace::select_pair_set(
         &request.id,
-    )?)?)
+    )?))
 }
 
 /// The same operation as `ster workspace remove`.
 pub(in crate::request) fn workspace_remove_job(request: WorkspacePairSetRequest) -> Result<Value> {
-    Ok(serde_json::to_value(ster::workspace::remove_pair_set(
+    Ok(ster::json::value(ster::workspace::remove_pair_set(
         &request.id,
-    )?)?)
+    )?))
 }
 
 /// A benchmark export read into a pair set by the same `pairs::benchmark`
 /// the `ster pairs import` command runs; `report.skipped` names every row
 /// that could not become a pair.
 pub(in crate::request) fn pairs_import_job(request: PairsImportRequest) -> Result<Value> {
+    let benchmark = pairs::benchmark::Benchmark::parse(&request.benchmark)?;
     let options = pairs::benchmark::ImportOptions {
-        benchmark: pairs::benchmark::Benchmark::parse(&request.benchmark)?,
+        benchmark,
         // As `ster pairs import` documents: the set is named for its benchmark
         // unless the caller names its trait.
         trait_name: match request.trait_name {
@@ -77,6 +79,7 @@ pub(in crate::request) fn pairs_import_job(request: PairsImportRequest) -> Resul
         source: request.source.into(),
         examples: request.examples.map(Into::into),
         fields: pairs::benchmark::ChoiceFields::from_parts(
+            benchmark,
             request.question,
             request.choices,
             request.answer,
@@ -92,13 +95,13 @@ pub(in crate::request) fn pairs_import_job(request: PairsImportRequest) -> Resul
 }
 
 pub(in crate::request) fn pairs_inspect_job(request: PairsInspectRequest) -> Result<Value> {
-    let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let options = InspectOptions {
         dedupe: DedupeOptions::new(request.dedupe_bits, request.dedupe_bands),
         unbalanced_ratio: request.unbalanced_ratio,
     };
+    let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let report = pairs::inspect(&pair_set, &options)?;
-    Ok(serde_json::to_value(&report)?)
+    Ok(ster::json::value(&report))
 }
 
 /// The editor's write path. `PairSet::save` validates before it writes, so a
@@ -122,7 +125,10 @@ pub(in crate::request) fn pairs_save_job(request: PairsSaveRequest) -> Result<Va
 
 pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) -> Result<Value> {
     let Some(count) = request.count else {
-        bail!("pairs synthesize requires count, a pair count above zero; the request names none");
+        return Err(refuse(
+            &synthesize::COUNT_MISSING,
+            &[("trait", &request.trait_description)],
+        ));
     };
     let options = SynthesisOptions {
         trait_description: request.trait_description,
@@ -132,15 +138,17 @@ pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) 
         retry_multiplier: request.retry_multiplier,
         dedupe: DedupeOptions::new(request.dedupe_bits, request.dedupe_bands),
         generation: GenerationOptions {
-            strength: None,
             max_new_tokens: request.max_new_tokens,
             temperature: request.temperature,
             top_p: Some(request.top_p),
             seed: request.seed,
         },
     };
+    // Every setting is checked before a model loads or a route is asked.
+    options.validate()?;
     // Same two arms as the CLI, calling the same `pairs::synthesize`: a brama
-    // request loads no weights and never touches a device.
+    // request loads no weights, never touches a device, and is answered by
+    // Stado's inference alternatives.
     let (pair_set, report) = match request.generator.as_str() {
         "local" => {
             let mut runtime = request.model.load_runtime_at(request.precision)?;
@@ -155,12 +163,20 @@ pub(in crate::request) fn pairs_synthesize_job(request: PairsSynthesizeRequest) 
             // `Validate` refuses a brama request without a route; a job built
             // any other way is refused the same way rather than routed to "".
             let Some(route) = request.generator_model.as_deref() else {
-                bail!("pairs synthesize with the brama generator requires generatorModel");
+                return Err(refuse(
+                    &synthesize::ROUTE_MISSING,
+                    &[("trait", &options.trait_description)],
+                ));
             };
-            let gateway = brama::Gateway::from_env(route)?;
-            pairs::synthesize(pairs::Generator::Gateway(&gateway), &options)?
+            let writer = ster::inference::Inference::new(route)?;
+            pairs::synthesize(pairs::Generator::Inference(&writer), &options)?
         }
-        value => bail!("unknown generator {value:?}; expected local or brama"),
+        value => {
+            return Err(refuse(
+                &synthesize::GENERATOR_UNKNOWN,
+                &[("generator", value)],
+            ));
+        }
     };
     pair_set.save(Path::new(&request.output))?;
     Ok(json!({"path": request.output, "report": report}))

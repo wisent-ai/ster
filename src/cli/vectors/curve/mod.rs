@@ -58,11 +58,14 @@ pub(in crate::cli) fn curve(args: CurveArgs) -> Result<()> {
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let pair_set = PairSet::load(&pairs)?;
+    // The holdout and the sizes read no model, so both are refused before
+    // the checkpoint is paid for.
+    workflow::check_sizes(&pair_set, holdout, &sizes, method)?;
     let mut runtime = model.load_at(precision)?;
     let chat = runtime.set_chat_template(chat_template)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
     let report = workflow::curve(&runtime, &pair_set, &layers, method, holdout, &sizes)?;
-    let mut report = serde_json::to_value(report)?;
+    let mut report = ster::json::value(report);
     chat.annotate(&mut report)?;
     super::super::answer(&report)
 }

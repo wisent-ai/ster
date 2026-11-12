@@ -5,6 +5,8 @@
 #   * nothing is queued before the user answers, and a script is never asked;
 #   * with `errors`, a declared refusal is queued with its cause, and the
 #     home directory is taken out of everything queued;
+#   * `show` and `request telemetry/show` answer `{"events": [...]}`, the
+#     object a request result must be;
 #   * `flush` sends it to the collector, and Echo's failure groups hold it
 #     under this installation;
 #   * a command that ends with events waiting sends them from a detached
@@ -29,10 +31,14 @@ RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/telemetry/$RUN"
 REPORT="$ROOT/report.txt"
 mkdir -p "$ROOT"
-echo "revision: $(git rev-parse HEAD)$(git diff --quiet || echo ' (dirty)')" >"$REPORT"
+echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-locks diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 echo "collector: $STER_TEST_TELEMETRY_COLLECTOR" >>"$REPORT"
 export WISENT_TELEMETRY_HOME="$ROOT/state"
+# The binary runs under this run's own home, never the operator's; the pair
+# set it misses lies inside that home, so the queued detail shows it as ~/.
+export HOME="$ROOT/home" XDG_DATA_HOME="$ROOT/data" XDG_STATE_HOME="$ROOT/xdg-state"
+mkdir -p "$HOME"
 unset WISENT_TELEMETRY_COLLECTOR_URL DO_NOT_TRACK
 
 fail() {
@@ -58,14 +64,14 @@ said() {
 }
 passed() { echo "ok: $1" >>"$REPORT"; }
 inspect_missing() {
-  run 1 pairs inspect --pairs "$ROOT/absent.json" --dedupe-bits 3 --dedupe-bands 4 --unbalanced-ratio 3
+  run 1 pairs inspect --pairs "$HOME/absent.json" --dedupe-bits 3 --dedupe-bands 4 --unbalanced-ratio 3
 }
 
 run 0 telemetry status
 printf '%s' "$out" | jq -e '.level == "unanswered" and .queued == 0 and .installation == null' >/dev/null \
   || fail "a new installation is not unanswered and empty: $out"
 inspect_missing
-said "reading pair set $ROOT/absent.json: no file is there"
+said "reading pair set $HOME/absent.json: no file is there"
 run 0 telemetry status
 printf '%s' "$out" | jq -e '.queued == 0 and .installation == null' >/dev/null \
   || fail "a failure was queued before anyone answered: $out"
@@ -76,16 +82,27 @@ printf '%s' "$out" | jq -e '.level == "errors"' >/dev/null || fail "on --level e
 inspect_missing
 run 0 telemetry show
 EVENT=$out
-printf '%s' "$EVENT" | jq -e 'length == 1 and .[0].eventName == "failure" and .[0].appId == "ster-cli"
+printf '%s' "$EVENT" | jq -e '.events | length == 1 and .[0].eventName == "failure" and .[0].appId == "ster-cli"
   and .[0].properties.cause_id == "pair-set-missing" and .[0].properties.error_code == "not_found"' >/dev/null \
   || fail "the refusal is not queued with its declared cause: $EVENT"
 case "$EVENT" in *"$HOME"*) fail "the queued event still holds the home directory: $EVENT" ;; esac
-printf '%s' "$EVENT" | jq -e '.[0].properties.detail | contains("~/")' >/dev/null \
+printf '%s' "$EVENT" | jq -e '.events[0].properties.detail | contains("~/")' >/dev/null \
   || fail "the home directory is not written as ~ in the detail: $EVENT"
-EVENT_ID=$(printf '%s' "$EVENT" | jq -r '.[0].eventId')
-INSTALLATION=$(printf '%s' "$EVENT" | jq -r '.[0].anonymousId')
-POINT=$(printf '%s' "$EVENT" | jq -r '.[0].properties.failure_point')
+EVENT_ID=$(printf '%s' "$EVENT" | jq -r '.events[0].eventId')
+INSTALLATION=$(printf '%s' "$EVENT" | jq -r '.events[0].anonymousId')
+POINT=$(printf '%s' "$EVENT" | jq -r '.events[0].properties.failure_point')
 passed "a declared refusal is queued with its cause and without the home directory"
+
+set +e
+request=$(printf '{}' | "$BIN" request telemetry/show 2>"$ROOT/stderr")
+request_status=$?
+set -e
+printf '$ ster request telemetry/show\nexit: %s\nstdout: %s\n\n' "$request_status" "$request" >>"$REPORT"
+[ "$request_status" -eq 0 ] || fail "ster request telemetry/show exited $request_status: $(cat "$ROOT/stderr")"
+printf '%s' "$request" | tail -n 1 | jq -e --arg event "$EVENT_ID" \
+  '.status == 0 and (.json.events | length == 1) and .json.events[0].eventId == $event' >/dev/null \
+  || fail "ster request telemetry/show does not answer the waiting event as {\"events\": [...]}: $request"
+passed "request telemetry/show answers the object telemetry show prints"
 
 export WISENT_TELEMETRY_COLLECTOR_URL="$STER_TEST_TELEMETRY_COLLECTOR"
 run 0 telemetry flush

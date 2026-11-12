@@ -21,7 +21,7 @@
 mod loss;
 mod options;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::Tensor;
 use candle_nn::{ParamsAdamW, VarMap};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
@@ -31,12 +31,13 @@ pub use options::{SftOptions, SftReport};
 use super::super::{
     batch,
     checkpoint::{Position, optimizer::AdamW},
+    encode::encode_examples,
     examples::ExampleSet,
-    preflight::{Preflight, Trainable},
+    preflight::Trainable,
     schedule,
 };
 use crate::{runtime::Runtime, workflow};
-use options::Running;
+use options::{Running, SUBJECT};
 
 /// Trains the adapters `varmap` owns against `examples`.
 ///
@@ -56,43 +57,12 @@ pub fn sft(
         tensors: trainable_tensors,
         parameters: trainable_parameters,
         limit,
-    } = Preflight {
-        subject: "supervised fine-tuning",
-        unit: "example",
-        pass: "epoch",
-        noun: "adapter tensors",
-        epochs: options.epochs,
-        accumulation: options.accumulation,
-        batch: Some(options.batch),
-        learning_rate: options.learning_rate,
-        max_sequence: options.max_sequence,
-    }
-    .open(runtime, varmap, &options.spec)?;
+    } = options.preflight().open(runtime, varmap, &options.spec)?;
 
     // Tokenized once, up front. Encoding is deterministic, so repeating it per
     // epoch would buy nothing, and doing it here means the skip report is
     // complete before the first gradient is taken.
-    let mut encoded: Vec<(usize, Vec<u32>, usize)> = Vec::with_capacity(examples.examples.len());
-    for (index, example) in examples.examples.iter().enumerate() {
-        let (ids, boundary) = runtime
-            .encode_example(
-                example.system.as_deref(),
-                &example.prompt,
-                &example.completion,
-            )
-            .with_context(|| format!("example {index} could not be encoded"))?;
-        if ids.len() > limit {
-            workflow::progress(format!(
-                "skipping example {index}: {} tokens exceed the {limit} token limit",
-                ids.len()
-            ));
-            continue;
-        }
-        encoded.push((index, ids, boundary));
-    }
-    if encoded.is_empty() {
-        bail!("every example is longer than the sequence limit, so there is nothing to train on");
-    }
+    let encoded = encode_examples(runtime, examples, limit, "train on")?;
 
     let fingerprint = options.fingerprint();
     let mut optimizer = AdamW::over(
@@ -101,12 +71,10 @@ pub fn sft(
             lr: options.learning_rate,
             ..Default::default()
         },
-    )
-    .context("failed to initialize the AdamW optimizer")?;
+    )?;
     let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     let mut running: Running = match &resumed {
-        Some(position) => serde_json::from_value(position.running.clone())
-            .context("the checkpoint's running report is not one supervised fine-tuning wrote")?,
+        Some(position) => position.running(SUBJECT)?,
         None => Running::default(),
     };
     let mut checkpoints = Vec::new();
@@ -127,15 +95,7 @@ pub fn sft(
         let plans = batch::plan(&order, &lengths, options.batch, options.accumulation);
         let remaining = match &resumed {
             Some(position) if position.pass > epoch => continue,
-            Some(position) if position.pass == epoch => {
-                plans.get(position.within..).with_context(|| {
-                    format!(
-                        "the checkpoint stands {} steps into epoch {epoch}, which has {} steps",
-                        position.within,
-                        plans.len()
-                    )
-                })?
-            }
+            Some(position) if position.pass == epoch => position.remaining(&plans, SUBJECT)?,
             _ => {
                 running.epoch_losses.clear();
                 running.epoch_units.clear();
@@ -158,37 +118,39 @@ pub fn sft(
             let mut summed: Option<Tensor> = None;
             let mut losses: Vec<f64> = Vec::with_capacity(plan.units);
             for forward in &plan.forwards {
-                let rows: Vec<&[u32]> = forward
-                    .iter()
-                    .map(|&slot| encoded[slot].1.as_slice())
-                    .collect();
-                // One sequence is one example.
-                let read =
-                    batch::read_rows(&rows, options.batch, rows.len() / forward.len(), |pass| {
-                        runtime.forward_train_rows(pass)
-                    })?;
-                for (position, &slot) in forward.iter().enumerate() {
-                    let (index, ids, boundary) = &encoded[slot];
-                    let value = loss::completion_loss(&read[position], ids, *boundary, runtime)
-                        .with_context(|| format!("example {index} produced no usable loss"))?;
-                    losses.push(value.to_scalar::<f32>()? as f64);
-                    let scaled = (value / scale)?;
-                    summed = Some(match summed {
-                        Some(total) => (total + scaled)?,
-                        None => scaled,
-                    });
-                }
+                let mut take = || -> Result<()> {
+                    let rows: Vec<&[u32]> = forward
+                        .iter()
+                        .map(|&slot| encoded[slot].1.as_slice())
+                        .collect();
+                    // One sequence is one example.
+                    let read = batch::read_rows(
+                        &rows,
+                        options.batch,
+                        rows.len() / forward.len(),
+                        |pass| runtime.forward_train_rows(pass),
+                    )?;
+                    for (position, &slot) in forward.iter().enumerate() {
+                        let (index, ids, boundary) = &encoded[slot];
+                        let value = loss::completion_loss(&read[position], ids, *boundary, runtime)
+                            .map_err(|error| {
+                                crate::failures::amend(
+                                    error,
+                                    format!("it was the loss of example {index}"),
+                                )
+                            })?;
+                        losses.push(value.to_scalar::<f32>()? as f64);
+                        let scaled = (value / scale)?;
+                        summed = Some(match summed.take() {
+                            Some(total) => (total + scaled)?,
+                            None => scaled,
+                        });
+                    }
+                    Ok(())
+                };
+                take().map_err(|error| optimizer.failed(error))?;
             }
-            let Some(summed) = summed else {
-                // `plan` never yields a step with no forwards and never a
-                // forward with no rows; refusing beats stepping on nothing.
-                bail!(
-                    "an accumulation group contained no examples; the training plan never yields one, so this is a defect in it"
-                );
-            };
-            optimizer
-                .backward_step(&summed)
-                .context("failed to backpropagate the accumulated loss")?;
+            optimizer.backward_summed(summed, plan.forwards.len(), plan.units, "example")?;
 
             let group_loss: f64 = losses.iter().sum();
             let step_loss = (group_loss / plan.units as f64) as f32;
@@ -209,7 +171,7 @@ pub fn sft(
                     pass: epoch,
                     step,
                     within: running.epoch_units.len(),
-                    running: serde_json::to_value(&running)?,
+                    running: crate::json::value(&running),
                 };
                 options.durable.save(&optimizer, &fingerprint, &position)?;
                 checkpoints.push(step);
@@ -217,7 +179,13 @@ pub fn sft(
         }
 
         if running.epoch_units.is_empty() {
-            bail!("epoch {epoch} took no step, so it has no mean loss");
+            // Only a checkpoint can bring a run to an epoch it took no step
+            // in: one that was not resumed takes `_ => &plans[..]`, every
+            // step of a plan `Position::unreported` shows is never empty.
+            let position = resumed
+                .as_ref()
+                .expect("a run that was not resumed steps in every epoch");
+            return Err(position.epoch_lossless(SUBJECT, epoch));
         }
         let seen: usize = running.epoch_units.iter().sum();
         let epoch_mean = (running.epoch_losses.iter().sum::<f64>() / seen as f64) as f32;
@@ -234,7 +202,7 @@ pub fn sft(
         running.final_loss,
         running.epoch_means.last(),
     ) else {
-        bail!("the run took no step, so it has no loss to report");
+        return Err(Position::unreported(resumed.as_ref(), SUBJECT));
     };
     Ok(SftReport {
         examples: examples.examples.len(),

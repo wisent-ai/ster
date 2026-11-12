@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use candle_core::Device;
 use serde_json::json;
 use ster::{ChatChoice, EvaluateOptions, ExampleSet, Precision, Runtime, lora, tune};
@@ -110,7 +110,7 @@ pub(crate) struct InspectArgs {
 }
 
 impl InputCheck for MergeArgs {
-    fn check(&self) -> std::result::Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         self.model.check()?;
         input::required_path(&self.adapter, "tune/merge adapter")?;
         input::required_path(&self.output, "tune/merge output")
@@ -118,7 +118,7 @@ impl InputCheck for MergeArgs {
 }
 
 impl InputCheck for ExportArgs {
-    fn check(&self) -> std::result::Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         self.model.check()?;
         input::required_path(&self.adapter, "tune/export adapter")?;
         input::required_path(&self.output, "tune/export output")
@@ -126,7 +126,7 @@ impl InputCheck for ExportArgs {
 }
 
 impl InputCheck for EvaluateArgs {
-    fn check(&self) -> std::result::Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         self.model.check()?;
         input::required_path(&self.examples, "tune/evaluate examples")?;
         if let Some(adapter) = &self.adapter {
@@ -137,7 +137,7 @@ impl InputCheck for EvaluateArgs {
 }
 
 impl InputCheck for InspectArgs {
-    fn check(&self) -> std::result::Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         input::required_path(&self.artifact, "tune/inspect artifact")
     }
 }
@@ -181,6 +181,14 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<serde_json::Value> {
         batch_size,
         precision,
     } = args;
+    let options = EvaluateOptions {
+        max_sequence,
+        batch: batch_size,
+    };
+    // The settings are refused before the examples or a weight are read,
+    // and the examples before a weight is mapped.
+    options.check()?;
+    let example_set = ExampleSet::load(&examples)?;
     // The adapter is attached while the weights are mapped, exactly as
     // `generate --adapter` attaches one, so the score is the score of
     // the model an operator would actually run.
@@ -200,17 +208,8 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<serde_json::Value> {
         )?,
     };
     let chat = runtime.set_chat_template(chat_template)?;
-    let example_set = ExampleSet::load(&examples)?;
-    let report = tune::evaluate(
-        &runtime,
-        &example_set,
-        adapter.as_deref(),
-        &EvaluateOptions {
-            max_sequence,
-            batch: batch_size,
-        },
-    )?;
-    let mut report = serde_json::to_value(&report)?;
+    let report = tune::evaluate(&runtime, &example_set, adapter.as_deref(), &options)?;
+    let mut report = ster::json::value(&report);
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
     Ok(report)
@@ -220,7 +219,6 @@ pub(super) fn inspect(args: InspectArgs) -> Result<serde_json::Value> {
     let InspectArgs { artifact } = args;
     // Inspection reads the adapter document alone: no model is
     // loaded, so the tensors land on the CPU whatever trained them.
-    let loaded = lora::Artifact::load(&artifact, &Device::Cpu)
-        .with_context(|| format!("failed to inspect {}", artifact.display()))?;
+    let loaded = lora::Artifact::load(&artifact, &Device::Cpu)?;
     Ok(tune::inspect(&loaded))
 }

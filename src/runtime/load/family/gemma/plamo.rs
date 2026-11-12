@@ -2,13 +2,13 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{Architecture, GateFunction, Names, QkvLayout, QueryKeyNorm};
 use crate::runtime::load::family::read::layers::{fits, listed_layers};
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{first, flag, flag_or, list, number, number_or, text, whole};
 use crate::runtime::load::family::rope::bases::layer_bases;
 use crate::runtime::load::family::rope::scaling::rope_scaling;
 
@@ -43,15 +43,18 @@ pub(in crate::runtime::load::family) fn plamo3(
     architecture: &mut Architecture,
     path: &Path,
 ) -> Result<()> {
-    if text(raw, "linear_type").is_some_and(|kind| kind != "normal") {
-        bail!(
+    if text(raw, "linear_type", path)?.is_some_and(|kind| kind != "normal") {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["linear_type"],
             "{} declares a linear_type other than normal; Ster reads PLaMo 3's unquantized projections",
             path.display()
         );
     }
-    let pattern = whole(raw, "sliding_window_pattern")
+    let pattern = whole(raw, "sliding_window_pattern", path)?
         .filter(|pattern| *pattern > 0)
-        .with_context(|| {
+        .or_refuse(raw, &["sliding_window_pattern"], || {
             format!(
                 "{} declares a PLaMo 3 model without a sliding_window_pattern above zero",
                 path.display()
@@ -66,23 +69,26 @@ pub(in crate::runtime::load::family) fn plamo3(
     architecture.output_norm_shifts =
         Some((PLAMO3_POST_MIXER_NORM_OFFSET, PLAMO3_POST_MLP_NORM_OFFSET));
     architecture.query_key_norm = QueryKeyNorm::PerHead;
-    architecture.sliding_window =
-        whole(raw, "window_size").or_else(|| whole(raw, "sliding_window"));
+    architecture.sliding_window = first(raw, &["window_size", "sliding_window"], path)?;
     architecture.sliding_layers = (0..layers)
         .filter(|layer| (layer + 1) % pattern != 0)
         .fold(0u128, |set, layer| set | (1u128 << layer));
-    architecture.local_rope_theta = number(raw, "rope_local_theta").map(|theta| theta as f32);
-    if flag(raw, "scale_embedding") {
+    architecture.local_rope_theta = number(raw, "rope_local_theta", path)?.map(|theta| theta as f32);
+    if flag(raw, "scale_embedding", path)? {
         architecture.embedding_multiplier = Some((llama.hidden_size as f64).sqrt());
     }
-    let factor = number(raw, "rope_scaling_factor").unwrap_or(1.0);
+    let factor = number_or(raw, "rope_scaling_factor", 1.0, path)?;
     if factor != 1.0 {
-        let original = whole(raw, "initial_context_length").with_context(|| {
-            format!(
-                "{} scales its rotation without initial_context_length",
-                path.display()
-            )
-        })?;
+        let original = whole(raw, "initial_context_length", path)?.or_refuse(
+            raw,
+            &["rope_scaling_factor", "initial_context_length"],
+            || {
+                format!(
+                    "{} scales its rotation without initial_context_length",
+                    path.display()
+                )
+            },
+        )?;
         let yarn = serde_json::json!({
             "rope_type": "yarn",
             "factor": factor,
@@ -118,8 +124,11 @@ pub(in crate::runtime::load::family) fn muse_glimmer(
     architecture: &mut Architecture,
     path: &Path,
 ) -> Result<()> {
-    let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-        bail!(
+    let Some(types) = list(raw, "layer_types", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["layer_types"],
             "{} declares a MuseGlimmer model without layer_types",
             path.display()
         );
@@ -128,17 +137,17 @@ pub(in crate::runtime::load::family) fn muse_glimmer(
     architecture.norm_offset = true;
     architecture.plain_final_norm = true;
     architecture.output_norms = true;
-    architecture.output_norm_eps = number(raw, "post_norm_eps");
+    architecture.output_norm_eps = number(raw, "post_norm_eps", path)?;
     architecture.embedding_norm = true;
-    architecture.sliding_window = whole(raw, "sliding_window");
+    architecture.sliding_window = whole(raw, "sliding_window", path)?;
     architecture.sliding_layers = listed_layers(types, layers, path)?;
     layer_bases(raw, layers, llama, architecture, path)?;
-    if raw.get("use_qk_norm").and_then(Value::as_bool) != Some(false) {
+    if flag_or(raw, "use_qk_norm", true, path)? {
         architecture.query_key_norm = QueryKeyNorm::Weightless;
         let head_dim = architecture.head_dim as f64;
         let prescale = match (
-            number(raw, "scale_query_by"),
-            number(raw, "qk_scale_factor"),
+            number(raw, "scale_query_by", path)?,
+            number(raw, "qk_scale_factor", path)?,
         ) {
             (Some(explicit), _) => explicit,
             (None, Some(factor)) if factor >= head_dim.sqrt() => factor / head_dim.sqrt(),
@@ -146,17 +155,20 @@ pub(in crate::runtime::load::family) fn muse_glimmer(
             (None, None) => 1.0,
         };
         if prescale <= 0.0 {
-            bail!(
+            refused!(
+                OutOfRange,
+                in raw,
+                ["scale_query_by", "qk_scale_factor"],
                 "{} scales its queries by {prescale}; the scale must be above zero",
                 path.display()
             );
         }
         architecture.score_divisor = head_dim.sqrt() / prescale;
     }
-    if raw.get("use_attn_output_gate").and_then(Value::as_bool) != Some(false) {
+    if flag_or(raw, "use_attn_output_gate", true, path)? {
         architecture.attention_gate = Some(GateFunction::Sigmoid);
     }
-    architecture.logits_multiplier = number(raw, "output_multiplier");
-    architecture.final_softcap = number(raw, "final_logit_softcapping");
+    architecture.logits_multiplier = number(raw, "output_multiplier", path)?;
+    architecture.final_softcap = number(raw, "final_logit_softcapping", path)?;
     Ok(())
 }

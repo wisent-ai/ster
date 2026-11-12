@@ -28,23 +28,27 @@
 
 mod options;
 
-use anyhow::{Context, Result, anyhow, bail};
+use std::sync::PoisonError;
+
+use anyhow::Result;
 use candle_core::{DType, Tensor, Var};
 use candle_nn::{ParamsAdamW, VarMap};
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 
+use options::SUBJECT;
 pub use options::{BipoOptions, BipoReport};
 
 use super::super::super::{
     batch,
     checkpoint::{Position, optimizer::AdamW},
-    preflight::{encode_pairs, pair_set_label},
+    encode::{encode_pairs, pair_set_label},
     schedule,
 };
 use super::options::{Running, Totals};
 use super::scoring::{Preference, Scored, Summary, reference_scores, step_loss};
 use crate::{
     artifact::{LayerVector, PairSet, SteeringArtifact},
+    failures::tune::run::{score_failed, unallocatable},
     model::SteeringPlan,
     runtime::Runtime,
     workflow,
@@ -62,9 +66,13 @@ pub fn bipo(
     pairs: &PairSet,
     options: &BipoOptions,
 ) -> Result<(SteeringArtifact, BipoReport)> {
-    options.validate(runtime.layer_count())?;
+    options.check()?;
+    options.check_layer(runtime.layer_count())?;
     pairs.validate(&pair_set_label(pairs))?;
-    let mut encoded: Vec<Scored> = encode_pairs(runtime, pairs, options.max_sequence)?
+    // Past its context the model's positions are untrained, and its batched
+    // forward holds no more: the limit is clamped as every trainer's is.
+    let limit = options.max_sequence.min(runtime.context_length()?);
+    let mut encoded: Vec<Scored> = encode_pairs(runtime, pairs, limit, "train on")?
         .into_iter()
         .map(Scored::new)
         .collect();
@@ -73,12 +81,12 @@ pub fn bipo(
 
     let hidden = runtime.hidden_size();
     let vector = Var::zeros(hidden, DType::F32, runtime.device())
-        .context("failed to create the steering vector")?;
+        .map_err(|error| unallocatable("the steering vector", &[hidden], error))?;
     let varmap = VarMap::new();
     varmap
         .data()
         .lock()
-        .map_err(|poisoned| anyhow!("the run's tensor map is unreadable: {poisoned}"))?
+        .unwrap_or_else(PoisonError::into_inner)
         .insert(VECTOR.to_owned(), vector.clone());
     let fingerprint = options.fingerprint();
     let mut optimizer = AdamW::over(
@@ -87,12 +95,10 @@ pub fn bipo(
             lr: options.learning_rate,
             ..Default::default()
         },
-    )
-    .context("failed to initialize the AdamW optimizer")?;
+    )?;
     let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     let mut running: Running = match &resumed {
-        Some(position) => serde_json::from_value(position.running.clone())
-            .context("the checkpoint's running report is not one preference optimization wrote")?,
+        Some(position) => position.running(SUBJECT)?,
         None => Running::default(),
     };
     let mut checkpoints = Vec::new();
@@ -115,14 +121,8 @@ pub fn bipo(
         let remaining = match &resumed {
             Some(position) if position.pass > epoch => continue,
             Some(position) if position.pass == epoch => {
-                let (taken, remaining) =
-                    plans.split_at_checked(position.within).with_context(|| {
-                        format!(
-                            "the checkpoint stands {} steps into epoch {epoch}, which has {} steps",
-                            position.within,
-                            plans.len()
-                        )
-                    })?;
+                let remaining = position.remaining(&plans, SUBJECT)?;
+                let taken = &plans[..plans.len() - remaining.len()];
                 // One direction was drawn per forward of every step taken;
                 // drawing them again leaves the generator where it stood.
                 for _ in taken.iter().flat_map(|plan| &plan.forwards) {
@@ -154,63 +154,55 @@ pub fn bipo(
                 } else {
                     (options.strength, options.beta)
                 };
-                let steering = SteeringPlan::from_tensors(
-                    [(options.layer, vector.as_tensor().clone())],
-                    strength,
-                    hidden,
-                    runtime.dtype(),
-                )?;
-                let rows: Vec<&[u32]> = forward
-                    .iter()
-                    .flat_map(|&slot| {
-                        [
-                            encoded[slot].pair.chosen.as_slice(),
-                            encoded[slot].pair.rejected.as_slice(),
-                        ]
-                    })
-                    .collect();
-                let sides = rows.len() / forward.len();
-                let read = batch::read_rows(&rows, options.batch, sides, |pass| {
-                    runtime.forward_steered_rows(pass, &steering)
-                })?;
-                for (&slot, logits) in forward.iter().zip(read.chunks_exact(sides)) {
-                    let [chosen, rejected] = logits else {
-                        bail!(
-                            "a preference pair read back {} rows instead of a chosen and a rejected side",
-                            logits.len()
-                        );
-                    };
-                    let scored = &encoded[slot];
-                    let value = step_loss(
-                        runtime,
-                        scored,
-                        chosen,
-                        rejected,
-                        Preference {
+                let mut take = || -> Result<()> {
+                    let steering = SteeringPlan::from_tensors(
+                        [(options.layer, vector.as_tensor().clone())],
+                        strength,
+                        hidden,
+                        runtime.dtype(),
+                    )?;
+                    let rows: Vec<&[u32]> = forward
+                        .iter()
+                        .flat_map(|&slot| {
+                            [
+                                encoded[slot].pair.chosen.as_slice(),
+                                encoded[slot].pair.rejected.as_slice(),
+                            ]
+                        })
+                        .collect();
+                    let sides = rows.len() / forward.len();
+                    let read = batch::read_rows(&rows, options.batch, sides, |pass| {
+                        runtime.forward_steered_rows(pass, &steering)
+                    })?;
+                    for (&slot, logits) in forward.iter().zip(read.chunks_exact(sides)) {
+                        let [chosen, rejected] = logits else {
+                            unreachable!("every pair is read as its two sides");
+                        };
+                        let scored = &encoded[slot];
+                        let preference = Preference {
                             loss: options.loss,
                             beta,
-                        },
-                    )
-                    .with_context(|| {
-                        format!("pair {} produced no usable loss", scored.pair.index)
-                    })?;
-                    pair_losses.push(value.loss);
-                    summary.record(&value);
-                    let scaled = (value.tensor / scale)?;
-                    summed = Some(match summed {
-                        Some(total) => (total + scaled)?,
-                        None => scaled,
-                    });
-                }
+                        };
+                        let value = step_loss(runtime, scored, chosen, rejected, preference)
+                            .map_err(|error| {
+                                crate::failures::amend(
+                                    error,
+                                    format!("it was pair {}", scored.pair.index),
+                                )
+                            })?;
+                        pair_losses.push(value.loss);
+                        summary.record(&value);
+                        let scaled = (value.tensor / scale)?;
+                        summed = Some(match summed.take() {
+                            Some(total) => (total + scaled)?,
+                            None => scaled,
+                        });
+                    }
+                    Ok(())
+                };
+                take().map_err(|error| optimizer.failed(error))?;
             }
-            let Some(summed) = summed else {
-                bail!(
-                    "an accumulation group contained no pairs; the training plan never yields one, so this is a defect in it"
-                );
-            };
-            optimizer
-                .backward_step(&summed)
-                .context("failed to backpropagate the accumulated loss")?;
+            optimizer.backward_summed(summed, plan.forwards.len(), plan.units, "pair")?;
             let mean = (pair_losses.iter().sum::<f64>() / plan.units as f64) as f32;
             running.first_loss.get_or_insert(mean);
             running.final_loss = Some(mean);
@@ -228,7 +220,7 @@ pub fn bipo(
                     pass: epoch,
                     step,
                     within: running.steps.len(),
-                    running: serde_json::to_value(&running)?,
+                    running: crate::json::value(&running),
                 };
                 options.durable.save(&optimizer, &fingerprint, &position)?;
                 checkpoints.push(step);
@@ -242,10 +234,13 @@ pub fn bipo(
         running.final_loss,
         running.finished.last(),
     ) else {
-        bail!("the run took no step, so it has no loss to report");
+        return Err(Position::unreported(resumed.as_ref(), SUBJECT));
     };
     let epoch_summary = Summary::from(last);
-    let values: Vec<f32> = vector.as_tensor().to_vec1::<f32>()?;
+    let values: Vec<f32> = vector
+        .as_tensor()
+        .to_vec1::<f32>()
+        .map_err(|error| score_failed("the trained steering vector", error.into()))?;
     let vector_norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
     let report = BipoReport {
         layer: options.layer,

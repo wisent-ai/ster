@@ -1,8 +1,15 @@
 //! Turning text into the exact token sequence this checkpoint expects,
 //! including the conversation format it was post-trained in.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
+use crate::failures::{
+    refuse,
+    runtime::encode::{
+        CONVERSATION_UNTEMPLATED, LABEL_UNSPELLED, PIECE_UNKNOWN, SYSTEM_UNPLACEABLE, TEXT_BLANK,
+        TOKENIZER_FAILED, TOKENS_NONE,
+    },
+};
 use crate::{chat, workflow};
 
 use super::Runtime;
@@ -21,11 +28,17 @@ impl Runtime {
     /// `auto` only: `off` runs the checkpoint on raw text whatever its
     /// template says.
     pub fn set_chat_template(&mut self, choice: chat::Choice) -> Result<chat::Status> {
+        if matches!(choice, chat::Choice::Auto) && self.chat.is_err() {
+            // The refusal is raised once, by the run that asked for the
+            // template; the runtime keeps no template in its place.
+            if let Err(refusal) = std::mem::replace(&mut self.chat, Ok(None)) {
+                return Err(refusal);
+            }
+        }
         self.chat_status = match (choice, &self.chat) {
             (chat::Choice::Off, _) => chat::Status::Off,
-            (chat::Choice::Auto, Err(refusal)) => bail!("{refusal}"),
             (chat::Choice::Auto, Ok(Some(_))) => chat::Status::Applied,
-            (chat::Choice::Auto, Ok(None)) => chat::Status::Absent,
+            (chat::Choice::Auto, Ok(None) | Err(_)) => chat::Status::Absent,
         };
         workflow::progress(self.chat_status.sentence().to_owned());
         Ok(self.chat_status)
@@ -81,42 +94,30 @@ impl Runtime {
         prompt: &str,
         completion: &str,
     ) -> Result<(Vec<u32>, usize)> {
-        if completion.trim().is_empty() {
-            bail!(
-                "training example has an empty completion: it holds {} characters of whitespace",
-                completion.len()
-            );
-        }
         let (mut ids, tail) = match (self.applied_template(), system) {
             (Some(template), _) => {
                 let (head, tail) = template.example(system, prompt, completion)?;
                 (
-                    self.tokenize(&head, false, "prompt")?,
-                    self.tokenize(&tail, false, "completion")?,
+                    self.tokens(&head, false, "prompt")?,
+                    self.tokens(&tail, false, "completion")?,
                 )
             }
-            (None, Some(_)) => bail!(
-                "training example has a system prompt, which only a chat template can place, and this run's chat template is {}",
-                self.chat_status.label()
-            ),
+            (None, Some(system)) => {
+                let status = self.chat_status.label();
+                return Err(refuse(
+                    &SYSTEM_UNPLACEABLE,
+                    &[("system", &format!("{system:?}")), ("status", status)],
+                ));
+            }
             (None, None) => (
                 self.encode(prompt)?,
-                self.tokenize(completion, false, "completion")?,
+                self.tokens(completion, false, "completion")?,
             ),
         };
-        if tail.is_empty() {
-            bail!(
-                "training example completion produced no tokens from {} characters",
-                completion.len()
-            );
-        }
+        // Both halves hold a token, so the first completion token always has
+        // one before it to be predicted from.
         let boundary = ids.len();
         ids.extend_from_slice(&tail);
-        if ids.len() < 2 {
-            bail!(
-                "training example encodes to fewer than two tokens, so there is nothing to predict"
-            );
-        }
         Ok((ids, boundary))
     }
 
@@ -130,16 +131,7 @@ impl Runtime {
     /// unchanged.
     pub fn encode_response(&self, text: &str) -> Result<Vec<u32>> {
         match self.applied_template() {
-            Some(template) => {
-                let ids = self.tokenize(&template.response(text)?, false, "prompt")?;
-                if ids.is_empty() {
-                    bail!(
-                        "tokenizer produced no tokens for a response of {} characters",
-                        text.len()
-                    );
-                }
-                Ok(ids)
-            }
+            Some(template) => self.tokens(&template.response(text)?, false, "response"),
             None => self.encode(text),
         }
     }
@@ -153,19 +145,12 @@ impl Runtime {
     /// real token a position to be predicted from.
     pub fn encode(&self, prompt: &str) -> Result<Vec<u32>> {
         if prompt.trim().is_empty() {
-            bail!(
-                "prompt must not be empty: it holds {} characters of whitespace",
-                prompt.len()
-            );
+            return Err(refuse(
+                &TEXT_BLANK,
+                &[("what", "prompt"), ("text", &format!("{prompt:?}"))],
+            ));
         }
-        let ids = self.tokenize(prompt, true, "prompt")?;
-        if ids.is_empty() {
-            bail!(
-                "tokenizer produced no tokens for a prompt of {} characters",
-                prompt.len()
-            );
-        }
-        Ok(ids)
+        self.tokens(prompt, true, "prompt")
     }
 
     /// A whole conversation, rendered by the model's chat template and ending
@@ -176,12 +161,12 @@ impl Runtime {
     /// refusal naming what the run decided, not a guess at the markers.
     pub fn encode_conversation(&self, messages: &[chat::Message<'_>]) -> Result<Vec<u32>> {
         let Some(template) = self.applied_template() else {
-            bail!(
-                "a conversation of several turns needs the model's chat template, and this run's chat template is {}",
-                self.chat_status.label()
-            );
+            return Err(refuse(
+                &CONVERSATION_UNTEMPLATED,
+                &[("status", self.chat_status.label())],
+            ));
         };
-        self.tokenize(&template.render(messages, true)?, false, "conversation")
+        self.tokens(&template.render(messages, true)?, false, "conversation")
     }
 
     /// Every id this tokenizer spells `label` with as exactly one token.
@@ -199,21 +184,30 @@ impl Runtime {
     /// rather than a guess.
     pub fn label_tokens(&self, label: &str) -> Result<Vec<u32>> {
         let mut ids = Vec::with_capacity(3);
-        for spelling in [
+        let spellings = [
             label.to_owned(),
             format!("\u{2581}{label}"),
             format!("\u{0120}{label}"),
-        ] {
-            if let Some(id) = self.tokenizer.token_to_id(&spelling)
+        ];
+        for spelling in &spellings {
+            if let Some(id) = self.tokenizer.token_to_id(spelling)
                 && !ids.contains(&id)
             {
                 ids.push(id);
             }
         }
         if ids.is_empty() {
-            bail!(
-                "this tokenizer has no single token for the answer label {label:?}, so it cannot be read from one position"
-            );
+            let looked: Vec<String> = spellings
+                .iter()
+                .map(|spelling| format!("{spelling:?}"))
+                .collect();
+            return Err(refuse(
+                &LABEL_UNSPELLED,
+                &[
+                    ("label", &format!("{label:?}")),
+                    ("spellings", &looked.join(", ")),
+                ],
+            ));
         }
         Ok(ids)
     }
@@ -223,11 +217,43 @@ impl Runtime {
     /// which is why it is passed rather than derived: the same call tokenizes
     /// a prompt and a completion and the operator needs to know which failed.
     pub(super) fn tokenize(&self, text: &str, special: bool, what: &str) -> Result<Vec<u32>> {
-        Ok(self
-            .tokenizer
-            .encode(text, special)
-            .map_err(|error| anyhow::anyhow!("failed to tokenize {what}: {error}"))?
-            .get_ids()
-            .to_vec())
+        let encoding = self.tokenizer.encode(text, special).map_err(|error| {
+            let said = error.to_string();
+            // The tokenizers library has no error type to tell its reasons
+            // apart; a model that meets a piece outside its vocabulary with
+            // no unknown token to stand in says so in these words.
+            let cause = if said.contains("unk_id") {
+                &PIECE_UNKNOWN
+            } else {
+                &TOKENIZER_FAILED
+            };
+            refuse(
+                cause,
+                &[
+                    ("what", what),
+                    ("text", &format!("{text:?}")),
+                    (
+                        "vocabulary",
+                        &self.tokenizer.get_vocab_size(true).to_string(),
+                    ),
+                    ("error", &said),
+                ],
+            )
+        })?;
+        Ok(encoding.get_ids().to_vec())
+    }
+
+    /// [`Self::tokenize`], refusing a text the tokenizer turns into no
+    /// tokens: every caller of this one hands the ids to the model, which
+    /// reads nothing from an empty sequence.
+    fn tokens(&self, text: &str, special: bool, what: &str) -> Result<Vec<u32>> {
+        let ids = self.tokenize(text, special, what)?;
+        if ids.is_empty() {
+            return Err(refuse(
+                &TOKENS_NONE,
+                &[("what", what), ("text", &format!("{text:?}"))],
+            ));
+        }
+        Ok(ids)
     }
 }

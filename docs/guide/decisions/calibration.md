@@ -106,32 +106,52 @@ the number; fit on the decisions your workflow actually makes.
 `ster decide --calibration <CALIBRATION>` divides every question's averaged
 log-scores by the fitted temperature and records the path and the value in
 the response's `calibration` and `temperature` fields. The artifact names the
-model it was fitted on, and a decision on a different model is refused before
-a weight is mapped:
+model it was fitted on, and a decision on a different model is refused once
+that model is loaded, before a question is read:
 
 ```text
-Error: calibration calibration.json was fitted for model 'HuggingFaceTB/SmolLM2-1.7B-Instruct', not 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
+Error: applying calibration calibration.json: it was fitted for model HuggingFaceTB/SmolLM2-1.7B-Instruct, and a temperature fitted on one checkpoint says nothing about another; observed: calibration model: HuggingFaceTB/SmolLM2-1.7B-Instruct; loaded model: TinyLlama/TinyLlama-1.1B-Chat-v1.0; fix: fit a calibration for TinyLlama/TinyLlama-1.1B-Chat-v1.0 with `ster calibrate --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --examples <labelled.json> --output <file>`, or name the calibration fitted for it
 ```
 
 ## Refusals
 
-All exit `1` with `Error:` and the sentence, before the checkpoint loads;
-`ster request calibrate` ends with the same sentence as its last log event and
-a status-`1` result.
+Every refusal is a declared cause listed with its fix and its test on
+[errors/decide-calibration.md](../errors/decide-calibration.md). All exit
+`1` with `Error:` and the sentence except `--ece-bins 0`, a usage refusal
+(exit `2`); all but the model check are made before the checkpoint loads.
+`ster request calibrate` refuses `eceBins: 0` with a result event of status
+`2` before anything runs, and ends any other refusal with the sentence as its
+last log event and a status-`1` result.
 
 A labelled set:
 
-- `the expected calibration error needs at least one bin` (`--ece-bins 0`)
-- `calibration needs at least one labelled example`
-- `calibration needs at least one labelled question`
-- `calibration example <i> is not a valid request`, over the request refusal
-- `example <i> labels question '<id>', which it does not ask`
-- `example <i> answers question '<id>' with <label>, which is not one of its options`
-- `invalid calibration examples <path>`, `failed to read <path>`
+- `checking the calibration settings: … zero bins measure nothing`
+  (`bins-none`, `--ece-bins 0`)
+- `checking the labelled examples: the set holds no example, …`
+  (`examples-none`) and `… none of its <n> examples labels a question, …`
+  (`labels-none`)
+- a request refusal from [errors/decide.md](../errors/decide.md), followed by
+  `in labelled example <i>`
+- `checking labelled example <i>: it labels question '<id>', which its
+  request does not ask` (`label-unasked`)
+- `checking labelled example <i>: it answers question '<id>' with <label>,
+  which is not one of its options` (`label-not-option`)
+- `reading labelled examples <path>: no file is there: …` (`examples-missing`);
+  a file that cannot be read or is not the example set's JSON is the
+  [file layer's](../errors/file.md) `reading the labelled example set <path>: …`
 
-An artifact handed to `ster decide --calibration`:
+An artifact handed to `ster decide --calibration`, or written by
+`ster calibrate --output`:
 
-- `invalid calibration <path>`
-- `calibration <path> has schema "<schema>"; this Ster reads ster-calibration/1`
-- `calibration <path> has a temperature that is not a positive number`
-- `calibration <path> was fitted for model '<fitted>', not '<loaded>'`
+- `reading calibration <path>: no file is there: …` (`calibration-missing`);
+  a file that cannot be read or is not a calibration's JSON is the
+  [file layer's](../errors/file.md) `reading the calibration <path>: …`
+- `reading calibration <path>: it declares schema "<schema>", and this Ster
+  reads ster-calibration/1` (`calibration-schema`)
+- `reading calibration <path>: its temperature is <t>, …`
+  (`calibration-temperature`)
+- `applying calibration <path>: it was fitted for model <fitted>, …`
+  (`calibration-model`)
+- `creating the directory of the calibration <path>: …` and `writing the
+  calibration <path>: …`, the [file layer's](../errors/file.md) refusals,
+  naming the account's access, a path through a file or a full disk

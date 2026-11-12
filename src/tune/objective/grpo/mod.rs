@@ -45,16 +45,17 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::Tensor;
 use candle_nn::{ParamsAdamW, VarMap};
 
 use super::super::{
     checkpoint::{Position, optimizer::AdamW},
-    preflight::{Preflight, Trainable},
+    preflight::Trainable,
     schedule,
 };
 use crate::{
+    failures::{amend, tune::run::nothing_fits},
     runtime::Runtime,
     workflow::{self, PromptSet},
 };
@@ -63,12 +64,14 @@ mod group;
 mod reward;
 mod rollout;
 mod running;
+mod totals;
 
 pub use reward::{GrpoIteration, GrpoOptions, GrpoReport, Reward};
 pub use rollout::{Rollout, UserSimulator, rollout};
 
-use group::{Totals, group_loss, sample_group};
-use running::Running;
+use group::{group_loss, sample_group};
+use running::{Running, SUBJECT};
+use totals::Totals;
 
 /// Runs the loop against `prompts`, scoring with `reward`.
 ///
@@ -87,7 +90,7 @@ pub fn grpo(
     user: Option<(&UserSimulator, &str)>,
     options: &GrpoOptions,
 ) -> Result<GrpoReport> {
-    options.refusals(user.is_some())?;
+    options.check(user.map(|(_, model)| model))?;
     let max_new_tokens = options.generation.max_new_tokens;
     let simulator = user.map(|(simulator, _)| simulator);
     // The judge is a different model from the policy, but it reads the same
@@ -104,30 +107,21 @@ pub fn grpo(
         tensors,
         parameters,
         limit,
-    } = Preflight {
-        subject: "group-relative policy optimization",
-        unit: "prompt",
-        pass: "iteration",
-        noun: "adapter tensors",
-        epochs: options.iterations,
-        accumulation: options.accumulation,
-        // No batch: this objective's cost is autoregressive sampling, and it
-        // samples and scores one completion at a time; `--group` is already
-        // the word for how many completions share a prompt.
-        batch: None,
-        learning_rate: options.learning_rate,
-        max_sequence: options.max_sequence,
-    }
-    .open(runtime, varmap, &options.spec)?;
+    } = options.preflight().open(runtime, varmap, &options.spec)?;
 
     // The prompt is tokenized once here only to decide whether the prompt plus
     // its longest possible completion can fit; the sampler tokenizes it again
     // per draw and that encode is the one the scored sequence comes from.
     let mut usable: Vec<usize> = Vec::with_capacity(prompts.prompts.len());
+    let mut lengths = Vec::with_capacity(prompts.prompts.len());
     for (index, prompt) in prompts.prompts.iter().enumerate() {
-        let ids = runtime
-            .encode(prompt)
-            .with_context(|| format!("prompt {index} could not be encoded"))?;
+        let ids = runtime.encode(prompt).map_err(|error| {
+            amend(
+                error,
+                format!("it was prompt {index} of {}", prompts.prompts.len()),
+            )
+        })?;
+        lengths.push(ids.len() + max_new_tokens);
         if ids.len() + max_new_tokens > limit {
             workflow::progress(format!(
                 "skipping prompt {index}: {} prompt tokens plus {max_new_tokens} sampled tokens exceed the {limit} token limit",
@@ -138,7 +132,7 @@ pub fn grpo(
         usable.push(index);
     }
     if usable.is_empty() {
-        bail!("every prompt is longer than the sequence limit, so there is nothing to train on");
+        return Err(nothing_fits("prompt", "train on", lengths, limit));
     }
 
     let fingerprint = options.fingerprint(requested_reward, user.map(|(_, model)| model));
@@ -148,16 +142,13 @@ pub fn grpo(
             lr: options.learning_rate,
             ..Default::default()
         },
-    )
-    .context("failed to initialize the AdamW optimizer")?;
+    )?;
     let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     // Every draw gets its own seed, advanced from the operator's and counted in
     // `running.draw`: a fixed seed would draw one completion `--group` times
     // over, and a group with no variety has no baseline.
     let mut running: Running = match &resumed {
-        Some(position) => serde_json::from_value(position.running.clone()).context(
-            "the checkpoint's running report is not one group-relative policy optimization wrote",
-        )?,
+        Some(position) => position.running(SUBJECT)?,
         None => Running::default(),
     };
     let mut checkpoints = Vec::new();
@@ -168,13 +159,7 @@ pub fn grpo(
         let (mut rest, mut totals) = match &resumed {
             Some(position) if position.pass > iteration => continue,
             Some(position) if position.pass == iteration => (
-                steps.get(position.within..).with_context(|| {
-                    format!(
-                        "the checkpoint stands {} steps into iteration {iteration}, which has {} steps",
-                        position.within,
-                        steps.len()
-                    )
-                })?,
+                position.remaining(&steps, SUBJECT)?,
                 Totals::from(&running.totals),
             ),
             _ => (&steps[..], Totals::default()),
@@ -207,27 +192,26 @@ pub fn grpo(
                     limit,
                     &mut running.draw,
                 )
-                .with_context(|| format!("prompt {index} produced no usable group"))?;
-                let loss = group_loss(runtime, &group, options)
-                    .with_context(|| format!("prompt {index} produced no usable loss"))?;
+                .map_err(|error| {
+                    optimizer.failed(amend(
+                        error,
+                        format!("it was sampling the group of prompt {index}"),
+                    ))
+                })?;
+                let loss = group_loss(runtime, &group, options).map_err(|error| {
+                    optimizer.failed(amend(error, format!("it was the loss of prompt {index}")))
+                })?;
                 totals.record(&group, &loss);
                 losses.push(loss.value);
-                let scaled = (loss.tensor / options.accumulation as f64)?;
-                summed = Some(match summed {
-                    Some(total) => (total + scaled)?,
-                    None => scaled,
-                });
+                let scaled = (loss.tensor / options.accumulation as f64)
+                    .and_then(|scaled| match summed.take() {
+                        Some(total) => total + scaled,
+                        None => Ok(scaled),
+                    })
+                    .map_err(|error| optimizer.failed(error.into()))?;
+                summed = Some(scaled);
             }
-            let Some(summed) = summed else {
-                // `chunks` never yields an empty slice; refusing beats
-                // stepping on nothing.
-                bail!(
-                    "an accumulation group contained no prompts; the training plan never yields one, so this is a defect in it"
-                );
-            };
-            optimizer
-                .backward_step(&summed)
-                .context("failed to backpropagate the accumulated loss")?;
+            optimizer.backward_summed(summed, group_slots.len(), group_slots.len(), "prompt")?;
 
             let group_mean = (losses.iter().sum::<f64>() / losses.len() as f64) as f32;
             running.first_loss.get_or_insert(group_mean);
@@ -247,18 +231,15 @@ pub fn grpo(
                     pass: iteration,
                     step,
                     within,
-                    running: serde_json::to_value(&running)?,
+                    running: crate::json::value(&running),
                 };
                 options.durable.save(&optimizer, &fingerprint, &position)?;
                 checkpoints.push(step);
             }
         }
 
-        running.history.push(totals.finish(iteration));
-        let done = running.history.len();
-        let Some(summary) = running.history.last_mut() else {
-            bail!("iteration {iteration} was recorded and then could not be read back");
-        };
+        let done = running.history.len() + 1;
+        let mut summary = totals.finish(iteration);
         // The report counts iterations from one, as an operator does.
         summary.iteration = done;
         workflow::progress(format!(
@@ -269,6 +250,7 @@ pub fn grpo(
             summary.mean_kl,
             summary.policy_loss
         ));
+        running.history.push(summary);
     }
 
     // The last iteration describes the adapter that was written; the whole
@@ -278,7 +260,7 @@ pub fn grpo(
         running.final_loss,
         running.history.last().cloned(),
     ) else {
-        bail!("the run finished no iteration, so it has no loss or reward to report");
+        return Err(Position::unreported(resumed.as_ref(), SUBJECT));
     };
     Ok(GrpoReport {
         reward: reward.label(requested_reward),

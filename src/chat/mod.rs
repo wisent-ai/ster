@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::Deserialize;
 
 mod jinja;
@@ -55,7 +55,10 @@ impl Choice {
         match value {
             "auto" => Ok(Self::Auto),
             "off" => Ok(Self::Off),
-            _ => bail!("unknown chat template mode {value:?}; expected auto or off"),
+            _ => Err(crate::failures::refuse(
+                &crate::failures::chat::MODE_UNKNOWN,
+                &[("value", &format!("{value:?}"))],
+            )),
         }
     }
 }
@@ -118,10 +121,14 @@ impl Status {
     /// The report is the document that gets folded into the adapter artifact,
     /// so an adapter carries the shape it was trained in rather than leaving
     /// an operator to guess months later which encoding produced it.
+    /// Every caller hands it `json::value(&report)` of a `#[derive(Serialize)]
+    /// pub struct` with named fields, or a `serde_json::json!({ ... })`
+    /// literal, and serde_json writes both as an object, so this cannot fail;
+    /// it answers a `Result` so a caller writes it beside the steps that can.
     pub fn annotate(self, report: &mut serde_json::Value) -> Result<()> {
         report
             .as_object_mut()
-            .context("a run report must be a JSON object to record its chat template")?
+            .expect("every run report is a struct with named fields or a json!({}) literal")
             .insert(
                 "chat_template".to_owned(),
                 serde_json::Value::from(self.label()),

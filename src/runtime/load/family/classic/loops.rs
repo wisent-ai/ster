@@ -2,13 +2,15 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
 use crate::model::{Architecture, LayerPlan, Loops, Names, QueryKeyNorm};
 use crate::runtime::load::family::At;
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{
+    describe, flag, flag_or, list, text, whole_or, within, within_or,
+};
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
 /// sends only their `model_type` values here.
@@ -32,12 +34,11 @@ pub(in crate::runtime::load::family) fn configure(
             // feed-forward width (`ffn_mult`), either half possibly a
             // no-op. Linear replacements, attention windows and sinks, and
             // sparsified layers are refused.
-            architecture.query_key_value_bias = flag(raw, "attention_bias") || flag(raw, "bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)? || flag(raw, "bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            if let Some(bias) = raw.get("qkv_bias").and_then(Value::as_bool) {
-                architecture.query_key_value_bias = bias;
-            }
-            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.query_key_value_bias =
+                flag_or(raw, "qkv_bias", architecture.query_key_value_bias, path)?;
+            architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
             architecture.layer_plans = Some(deci_plans(raw, layers, llama, path)?);
         }
         "nanbeige" => {
@@ -54,8 +55,11 @@ pub(in crate::runtime::load::family) fn configure(
                 "loop_share_kv",
                 "enable_depth_attention",
             ] {
-                if flag(raw, key) {
-                    bail!(
+                if flag(raw, key, path)? {
+                    refused!(
+                        Unimplemented,
+                        in raw,
+                        [key],
                         "{} turns on Nanbeige's {key}, which Ster does not implement",
                         path.display()
                     );
@@ -65,24 +69,27 @@ pub(in crate::runtime::load::family) fn configure(
                 .get("ngram_vocab_size_ratio")
                 .is_some_and(|value| !value.is_null())
             {
-                bail!(
+                refused!(
+                    Unimplemented,
+                    in raw,
+                    ["ngram_vocab_size_ratio"],
                     "{} declares Nanbeige's n-gram embeddings (ngram_vocab_size_ratio), which Ster does not implement",
                     path.display()
                 );
             }
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.feed_forward_bias = flag(raw, "mlp_bias");
-            if flag(raw, "qk_layernorm") {
+            architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
+            if flag(raw, "qk_layernorm", path)? {
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
                 architecture.names = Names::NANBEIGE;
             }
-            let count = whole(raw, "num_loops").unwrap_or(1).max(1);
+            let count = whole_or(raw, "num_loops", 1, path)?.max(1);
             if count > 1 {
                 architecture.loops = Some(Loops {
                     physical: layers,
                     count,
-                    norm_between: !flag(raw, "skip_loop_final_norm"),
+                    norm_between: !flag(raw, "skip_loop_final_norm", path)?,
                     gate_window: None,
                 });
             }
@@ -93,11 +100,11 @@ pub(in crate::runtime::load::family) fn configure(
             // attention over the first pass's keys and values with local
             // attention over its own within `loop_window_size`, gated per
             // head by `model.gate_projections.{layer}` of the rotated query.
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.feed_forward_bias = flag(raw, "mlp_bias");
-            let count = whole(raw, "loop_num").unwrap_or(LOOP_CODER_LOOPS).max(1);
-            let window = whole(raw, "loop_window_size").unwrap_or(LOOP_CODER_WINDOW);
+            architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
+            let count = whole_or(raw, "loop_num", LOOP_CODER_LOOPS, path)?.max(1);
+            let window = whole_or(raw, "loop_window_size", LOOP_CODER_WINDOW, path)?;
             if count > 1 {
                 architecture.loops = Some(Loops {
                     physical: layers,
@@ -107,7 +114,12 @@ pub(in crate::runtime::load::family) fn configure(
                 });
             }
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }
@@ -127,17 +139,22 @@ pub(in crate::runtime::load::family) const DECI_WIDTH_MULTIPLE: usize = 256;
 
 /// A DeciLM `ffn` entry's width: its `intermediate_size`, or
 /// `2 · ffn_mult · hidden / 3` truncated and rounded up to a multiple of
-/// [`DECI_WIDTH_MULTIPLE`].
+/// [`DECI_WIDTH_MULTIPLE`]; `None` when it states neither. `name` is where
+/// the entry sits in the config (`block_configs[3].ffn`).
 pub(in crate::runtime::load::family) fn deci_intermediate(
     ffn: &Value,
+    name: &str,
     hidden: usize,
-) -> Option<usize> {
-    if let Some(width) = whole(ffn, "intermediate_size") {
-        return Some(width);
+    path: &Path,
+) -> Result<Option<usize>> {
+    if let Some(width) = within(ffn, name, "intermediate_size", path)? {
+        return Ok(Some(width));
     }
-    let multiplier = number(ffn, "ffn_mult")?;
+    let Some(multiplier) = within::<f64>(ffn, name, "ffn_mult", path)? else {
+        return Ok(None);
+    };
     let width = (2.0 * multiplier * hidden as f64 / 3.0) as usize;
-    Some(width.div_ceil(DECI_WIDTH_MULTIPLE) * DECI_WIDTH_MULTIPLE)
+    Ok(Some(width.div_ceil(DECI_WIDTH_MULTIPLE) * DECI_WIDTH_MULTIPLE))
 }
 
 /// DeciLM's `block_configs`, one plan per layer.
@@ -147,14 +164,19 @@ pub(in crate::runtime::load::family) fn deci_plans(
     llama: &LlamaConfig,
     path: &Path,
 ) -> Result<Vec<LayerPlan>> {
-    let Some(blocks) = raw.get("block_configs").and_then(Value::as_array) else {
-        bail!(
+    let Some(blocks) = list(raw, "block_configs", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["block_configs"],
             "{} declares a DeciLM model without block_configs",
             path.display()
         );
     };
     if blocks.len() != layers {
-        bail!(
+        refused!(
+            Contradictory,
+            ["block_configs" => format!("{} entries", blocks.len()), "num_hidden_layers" => layers],
             "{} lists {} block_configs for {layers} layers",
             path.display(),
             blocks.len()
@@ -170,34 +192,68 @@ pub(in crate::runtime::load::family) fn deci_plans(
         .enumerate()
         .map(|(layer, block)| {
             let (Some(attention), Some(ffn)) = (block.get("attention"), block.get("ffn")) else {
-                bail!("{} gives layer {layer} no attention or ffn block config", path.display());
+                refused!(
+                    Incomplete,
+                    [format!("block_configs[{layer}]") => block],
+                    "{} gives layer {layer} no attention or ffn block config",
+                    path.display()
+                );
             };
             for (section, name) in [(attention, "attention"), (ffn, "ffn")] {
                 for key in ["replace_with_linear", "sparsify"] {
                     if stated(section, key) {
-                        bail!("{} sets layer {layer}'s {name} {key}, which Ster does not implement", path.display());
+                        refused!(
+                            Unimplemented,
+                            [format!("block_configs[{layer}].{name}") => section],
+                            "{} sets layer {layer}'s {name} {key}, which Ster does not implement",
+                            path.display()
+                        );
                     }
                 }
             }
             for key in ["window_length", "num_sink_tokens"] {
                 if stated(attention, key) {
-                    bail!("{} sets layer {layer}'s attention {key}, which Ster does not implement", path.display());
+                    refused!(
+                        Unimplemented,
+                        [format!("block_configs[{layer}].attention") => attention],
+                        "{} sets layer {layer}'s attention {key}, which Ster does not implement",
+                        path.display()
+                    );
                 }
             }
-            if text(ffn, "hidden_act").is_some_and(|act| Some(act) != text(raw, "hidden_act")) {
-                bail!(
+            let ffn_name = format!("block_configs[{layer}].ffn");
+            let attention_name = format!("block_configs[{layer}].attention");
+            let own = within::<&str>(ffn, &ffn_name, "hidden_act", path)?;
+            if own.is_some() && own != text(raw, "hidden_act", path)? {
+                refused!(
+                    Unimplemented,
+                    [
+                        format!("block_configs[{layer}].ffn.hidden_act") => describe(ffn.get("hidden_act")),
+                        "hidden_act" => describe(raw.get("hidden_act")),
+                    ],
                     "{} gives layer {layer} its own feed-forward hidden_act; Ster runs one activation in every layer",
                     path.display()
                 );
             }
-            let key_value_heads = if flag(attention, "no_op") {
+            let key_value_heads = if within_or(attention, &attention_name, "no_op", false, path)? {
                 None
             } else {
-                let Some(group) = whole(attention, "n_heads_in_group").filter(|group| *group > 0) else {
-                    bail!("{} gives layer {layer}'s attention no n_heads_in_group", path.display());
+                let group = within::<usize>(attention, &attention_name, "n_heads_in_group", path)?;
+                let Some(group) = group.filter(|group| *group > 0) else {
+                    refused!(
+                        Incomplete,
+                        [format!("block_configs[{layer}].attention") => attention],
+                        "{} gives layer {layer}'s attention no n_heads_in_group",
+                        path.display()
+                    );
                 };
                 if llama.num_attention_heads % group != 0 {
-                    bail!(
+                    refused!(
+                        Contradictory,
+                        [
+                            format!("block_configs[{layer}].attention.n_heads_in_group") => group,
+                            "num_attention_heads" => llama.num_attention_heads,
+                        ],
                         "{} groups layer {layer}'s {} heads by {group}, which does not divide them",
                         path.display(),
                         llama.num_attention_heads
@@ -205,11 +261,16 @@ pub(in crate::runtime::load::family) fn deci_plans(
                 }
                 Some(llama.num_attention_heads / group)
             };
-            let intermediate = if flag(ffn, "no_op") {
+            let intermediate = if within_or(ffn, &ffn_name, "no_op", false, path)? {
                 None
             } else {
-                let Some(width) = deci_intermediate(ffn, llama.hidden_size) else {
-                    bail!("{} gives layer {layer}'s ffn neither ffn_mult nor intermediate_size", path.display());
+                let Some(width) = deci_intermediate(ffn, &ffn_name, llama.hidden_size, path)? else {
+                    refused!(
+                        Incomplete,
+                        [format!("block_configs[{layer}].ffn") => ffn],
+                        "{} gives layer {layer}'s ffn neither ffn_mult nor intermediate_size",
+                        path.display()
+                    );
                 };
                 Some(width)
             };

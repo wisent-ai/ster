@@ -2,16 +2,16 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{
     Architecture, ExpertLayout, GateFunction, MixtureOfExperts, Scoring, SharedExpert, SharedForm,
 };
 use crate::runtime::load::family::experts::{experts, qwen_dense_layers};
 use crate::runtime::load::family::read::layers::fits;
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{flag, number, text, whole, whole_or};
 
 /// A per-layer list of numbers under `key`, one value for the
 /// full-attention layers and one for the sliding-window layers in
@@ -30,14 +30,17 @@ pub(in crate::runtime::load::family) fn per_kind(
     let values: Vec<f64> = list
         .as_array()
         .and_then(|entries| entries.iter().map(Value::as_f64).collect())
-        .with_context(|| {
+        .or_malformed(raw, &[key], || {
             format!(
                 "{} declares {key} that is not a list of numbers",
                 path.display()
             )
         })?;
     if values.len() != layers {
-        bail!(
+        refused!(
+            Contradictory,
+            in raw,
+            [key, "num_hidden_layers"],
             "{} lists {} {key} values for {layers} layers",
             path.display(),
             values.len()
@@ -48,7 +51,10 @@ pub(in crate::runtime::load::family) fn per_kind(
     for (layer, value) in values.into_iter().enumerate() {
         let slot = usize::from(windowed & (1u128 << layer) != 0);
         match kinds[slot] {
-            Some(seen) if seen != value => bail!(
+            Some(seen) if seen != value => refused!(
+                Unimplemented,
+                in raw,
+                [key, "layer_types"],
                 "{} lists more than one {key} value for its {} layers; Ster gives each attention kind one",
                 path.display(),
                 if slot == 1 {
@@ -84,63 +90,78 @@ pub(in crate::runtime::load::family) fn k2_horizon(
     path: &Path,
 ) -> Result<()> {
     let head_dim = architecture.head_dim;
-    if let Some(rotated) = whole(raw, "rope_head_dim").filter(|rotated| *rotated != head_dim) {
-        bail!(
+    if let Some(rotated) = whole(raw, "rope_head_dim", path)?.filter(|rotated| *rotated != head_dim) {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["rope_head_dim", "head_dim"],
             "{} rotates {rotated} of {head_dim} channels per head (rope_head_dim), interleaved through the head; Ster rotates whole K2-Horizon heads only",
             path.display()
         );
     }
-    if flag(raw, "query_key_norm") {
-        bail!(
+    if flag(raw, "query_key_norm", path)? {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["query_key_norm"],
             "{} declares query_key_norm, one scale per channel of every head; Ster implements K2-Horizon without query and key norms",
             path.display()
         );
     }
-    let groups = whole(raw, "layernorm_num_groups").unwrap_or(1).max(1);
+    let groups = whole_or(raw, "layernorm_num_groups", 1, path)?.max(1);
     if llama.hidden_size % groups != 0 {
-        bail!(
+        refused!(
+            Contradictory,
+            in raw,
+            ["layernorm_num_groups", "hidden_size"],
             "{} splits its {} hidden channels into {groups} norm groups unevenly",
             path.display(),
             llama.hidden_size
         );
     }
     architecture.norm_groups = groups;
-    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
     architecture.output_bias = architecture.query_key_value_bias;
-    architecture.attention_gate = match text(raw, "attention_gate_func") {
+    architecture.attention_gate = match text(raw, "attention_gate_func", path)? {
         None => None,
         Some("silu") => Some(GateFunction::Silu),
         Some("softplus") => Some(GateFunction::Softplus),
-        Some(other) => bail!(
+        Some(other) => refused!(
+            Unimplemented,
+            in raw,
+            ["attention_gate_func"],
             "{} declares attention_gate_func {other:?}; Ster implements silu and softplus",
             path.display()
         ),
     };
-    if whole(raw, "num_experts").unwrap_or(0) == 0 {
+    if whole_or(raw, "num_experts", 0, path)? == 0 {
         return Ok(());
     }
-    let scoring = match text(raw, "router_score_func") {
+    let scoring = match text(raw, "router_score_func", path)? {
         None | Some("softmax") => Scoring::Softmax,
         Some("sigmoid") => Scoring::Sigmoid,
-        Some(other) => bail!(
+        Some(other) => refused!(
+            Unimplemented,
+            in raw,
+            ["router_score_func"],
             "{} declares router_score_func {other:?}; Ster implements softmax and sigmoid expert scores",
             path.display()
         ),
     };
-    let biased = flag(raw, "moe_gate_bias");
+    let biased = flag(raw, "moe_gate_bias", path)?;
     let mut routed = experts(
         raw,
         "num_experts",
         "moe_intermediate_size",
-        flag(raw, "norm_topk_prob"),
+        flag(raw, "norm_topk_prob", path)?,
         ExpertLayout::Qwen,
         qwen_dense_layers(raw, layers, path)?,
         path,
     )?;
     routed.scoring = scoring;
-    routed.routed_scale = number(raw, "router_scaling_factor");
+    routed.routed_scale = number(raw, "router_scaling_factor", path)?;
     routed.selection_bias = biased.then_some("mlp.gate.bias");
-    routed.shared = whole(raw, "num_shared_experts")
+    routed.shared = whole(raw, "num_shared_experts", path)?
         .filter(|shared| *shared > 0)
         .map(|shared| SharedExpert {
             intermediate: shared * routed.intermediate,
@@ -148,10 +169,13 @@ pub(in crate::runtime::load::family) fn k2_horizon(
             gated: false,
             form: SharedForm::GateUpDown,
         });
-    if let Some(count) = whole(raw, "mova_num_experts").filter(|count| *count > 0) {
-        let top_k = whole(raw, "mova_num_experts_per_tok").unwrap_or(0);
+    if let Some(count) = whole(raw, "mova_num_experts", path)?.filter(|count| *count > 0) {
+        let top_k = whole_or(raw, "mova_num_experts_per_tok", 0, path)?;
         if top_k == 0 || top_k > count {
-            bail!(
+            refused!(
+                OutOfRange,
+                in raw,
+                ["mova_num_experts", "mova_num_experts_per_tok"],
                 "{} routes each value to {top_k} of {count} value experts (mova_num_experts_per_tok); it must be at least one and at most all of them",
                 path.display()
             );
@@ -159,10 +183,12 @@ pub(in crate::runtime::load::family) fn k2_horizon(
         architecture.value_experts = Some(MixtureOfExperts {
             count,
             top_k,
-            intermediate: llama
-                .num_key_value_heads
-                .unwrap_or(llama.num_attention_heads)
-                * head_dim,
+            // Candle's parse states no key-value head count when the config
+            // leaves it out: one per query head, as Llama defines it.
+            intermediate: match llama.num_key_value_heads {
+                Some(heads) => heads,
+                None => llama.num_attention_heads,
+            } * head_dim,
             normalize: top_k > 1,
             shared: None,
             layout: ExpertLayout::Mova,

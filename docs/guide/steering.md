@@ -76,15 +76,21 @@ quieter artifact. A pair set with no pairs is refused on load as
 `pair set {path} contains no pairs` (and `pairs import --count N` over an
 export that yields fewer is refused as `{source} yields {found} pairs, fewer
 than --count N`); a prompt set with no prompts as `prompt set contains no
-prompts`. Each forward pass must return one non-empty vector at every
-requested layer, or the run stops with `the forward pass returned activations
-at {found} of {requested} requested layers (missing [...], not requested
-[...])` or `the forward pass returned an empty activation vector at layer
-{layer}`; fitting a direction refuses unequal sides as `training requires the
-same non-zero number of positive and negative examples; got {positive}
-positive and {negative} negative`. `vector train`, `optimize`, `curve`,
-`evaluate`, `project` and `extract` all read through the same check, and as
-`ster request` operations they end with the same refusal as their error event.
+prompts`. Both are read before any weight, as are the holdout and `--sizes`
+of `optimize` and `curve`, so a wrong one costs no checkpoint load. A
+`--layers` selection that is not a number, a range of no layer or a layer
+past the model is a usage refusal (exit 2) naming the segment at fault and
+the model's layers. The decoder returns one hidden-size state at every
+requested layer; a read that came back otherwise is a defect of the decoder
+and stops the process. Fitting a direction refuses a read that is not finite
+(a forward pass that overflowed at its `--precision`) naming the side, the
+pair and the value, and two sides that read alike, which leave a direction
+of no length; `extract` refuses a state that is not finite rather than write
+it as `null`. Every refusal is declared on
+[errors/workflow.md](errors/workflow.md). `vector train`, `optimize`,
+`curve`, `evaluate`, `project` and `extract` all read through the same
+checks, and as `ster request` operations they end with the same refusal as
+their error event.
 
 Several `--vector`/`--strength` pairs steer several traits at once, as
 wisent's `multi-steer` did: at every layer any of them carries, the sum of

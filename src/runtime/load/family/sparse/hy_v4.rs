@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{
     Activation, Architecture, ExpertLayout, GateFunction, HyperConnections, HyperForm, Scoring,
@@ -12,7 +12,7 @@ use crate::model::{
 use crate::runtime::load::family::experts::index::sparse_index;
 use crate::runtime::load::family::experts::{experts, qwen_dense_layers};
 use crate::runtime::load::family::read::layers::{every_layer, fits};
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{flag, flag_or, number, text, whole};
 
 /// How many leading layers keep a dense feed-forward when an HY-V4 config
 /// lists no `mlp_layer_types` (`HYV4Config.__post_init__`,
@@ -73,41 +73,56 @@ pub(in crate::runtime::load::family) fn hy_v4(
         .latent
         .is_none_or(|latent| latent.query_rank.is_none())
     {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["kv_lora_rank", "q_lora_rank"],
             "{} declares HY-V4 attention without kv_lora_rank and q_lora_rank; Ster implements its latent attention, whose indexer reads the latent query",
             path.display()
         );
     }
     // The switches `HYV4Config` turns on unless the config turns them off.
-    let on = |key: &str| raw.get(key).and_then(Value::as_bool) != Some(false);
+    let on = |key: &str| flag_or(raw, key, true, path);
     architecture.stored_names = StoredNames::HyV4;
     // vLLM rotates adjacent pairs in the attention as in the indexer
     // (`is_neox_style=False`): the checkpoint is in Megatron's layout.
     architecture.interleaved_rotary = true;
-    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
     architecture.output_bias = architecture.query_key_value_bias;
-    if on("learnable_sink") {
+    if on("learnable_sink")? {
         architecture.attention_sinks = every_layer(layers, path)?;
     }
-    if on("gated_mla") {
-        match text(raw, "gating_type") {
+    if on("gated_mla")? {
+        match text(raw, "gating_type", path)? {
             None | Some("elementwise") => {
                 architecture.attention_gate = Some(GateFunction::Sigmoid);
             }
-            other => bail!(
+            other => refused!(
+                Unimplemented,
+                in raw,
+                ["gating_type"],
                 "{} declares gating_type {other:?}; Ster implements HY-V4's elementwise output gate",
                 path.display()
             ),
         }
     }
-    architecture.sparse_index = Some(sparse_index(raw, "hy_v4", layers, path)?);
-    if on("enable_ihc") {
-        let streams = match whole(raw, "hc_mult") {
+    architecture.sparse_index = Some(sparse_index(
+        raw,
+        "hy_v4",
+        layers,
+        architecture.latent,
+        path,
+    )?);
+    if on("enable_ihc")? {
+        let streams = match whole(raw, "hc_mult", path)? {
             Some(stated) => stated,
             None => HY_V4_STREAMS,
         };
         if std::num::NonZeroUsize::new(streams).is_none() {
-            bail!(
+            refused!(
+                OutOfRange,
+                in raw,
+                ["enable_ihc", "hc_mult"],
                 "{} declares hc_mult zero under enable_ihc; hyper-connections need at least one stream",
                 path.display()
             );
@@ -115,21 +130,24 @@ pub(in crate::runtime::load::family) fn hy_v4(
         architecture.hyper_connections = Some(HyperConnections {
             streams,
             form: HyperForm::Independent {
-                magnitude: match number(raw, "hc_magnitude") {
+                magnitude: match number(raw, "hc_magnitude", path)? {
                     Some(stated) => stated,
                     None => HY_V4_MAGNITUDE,
                 },
             },
-            eps: match number(raw, "hc_eps") {
+            eps: match number(raw, "hc_eps", path)? {
                 Some(stated) => stated,
                 None => HY_V4_HC_EPS,
             },
             learned_head: true,
         });
     }
-    if flag(raw, "soft_logits_capping") {
-        let Some(cap) = number(raw, "soft_logits_capping_logits") else {
-            bail!(
+    if flag(raw, "soft_logits_capping", path)? {
+        let Some(cap) = number(raw, "soft_logits_capping_logits", path)? else {
+            refused!(
+                Incomplete,
+                in raw,
+                ["soft_logits_capping", "soft_logits_capping_logits"],
                 "{} declares soft_logits_capping without soft_logits_capping_logits",
                 path.display()
             );
@@ -144,18 +162,18 @@ pub(in crate::runtime::load::family) fn hy_v4(
         raw,
         "n_routed_experts",
         "moe_intermediate_size",
-        on("norm_topk_prob"),
+        on("norm_topk_prob")?,
         ExpertLayout::Qwen,
         dense_layers,
         path,
     )?;
     routed.scoring = Scoring::Sigmoid;
     routed.selection_bias = Some("mlp.gate.e_score_correction_bias");
-    routed.routed_scale = Some(match number(raw, "routed_scaling_factor") {
+    routed.routed_scale = Some(match number(raw, "routed_scaling_factor", path)? {
         Some(stated) => stated,
         None => HY_V4_ROUTED_SCALE,
     });
-    let limit = match number(raw, "swiglu_limit") {
+    let limit = match number(raw, "swiglu_limit", path)? {
         Some(stated) => stated,
         None => HY_V4_SWIGLU_LIMIT,
     };
@@ -163,7 +181,7 @@ pub(in crate::runtime::load::family) fn hy_v4(
     routed.swiglu_limit =
         (limit.is_normal() && limit.is_sign_positive()).then_some(SwigluLimit::RoutedInner(limit));
     routed.routed_activation = Some(Activation::Silu);
-    let shared = match whole(raw, "n_shared_experts") {
+    let shared = match whole(raw, "n_shared_experts", path)? {
         Some(stated) => stated,
         None => HY_V4_SHARED_EXPERTS,
     };
@@ -186,15 +204,18 @@ pub(in crate::runtime::load::family) fn hyper_connections(
     path: &Path,
 ) -> Result<HyperConnections> {
     let size = |key: &str| -> Result<usize> {
-        whole(raw, key).filter(|size| *size > 0).with_context(|| {
+        whole(raw, key, path)?.filter(|size| *size > 0).or_refuse(raw, &[key], || {
             format!(
                 "{} declares hyper-connections without {key}",
                 path.display()
             )
         })
     };
-    let Some(eps) = number(raw, "hc_eps") else {
-        bail!(
+    let Some(eps) = number(raw, "hc_eps", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["hc_eps"],
             "{} declares hyper-connections without hc_eps",
             path.display()
         );

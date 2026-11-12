@@ -15,18 +15,6 @@ pub static ALREADY_ACTIVE: Cause = Cause {
     test: "tests/workspace/failures.sh::selecting_the_active_set_is_refused",
 };
 
-pub static COPY_UNDELETABLE: Cause = Cause {
-    id: "copy-undeletable",
-    code: Code::Config,
-    usage: false,
-    exit: None,
-    failed: "removing pair set {id}",
-    cause: "its copy {path} cannot be deleted: {error}",
-    observed: "the workspace still holds {id}; nothing was changed",
-    remedy: "make {directory} writable for this account and run `ster workspace remove {id}` again",
-    test: "tests/workspace/failures.sh::a_copy_that_cannot_be_deleted_keeps_the_set",
-};
-
 pub static NO_ACTIVE: Cause = Cause {
     id: "no-active-set",
     code: Code::NotFound,

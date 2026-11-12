@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
 use crate::model::{Architecture, DeltaRuleForm, DeltaRuleSpec, GateFunction};
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{flag, flag_or, number_or, text, whole, whole_or};
 
 /// Ling 3.0's linear layers: Kimi Delta Attention under `attention`, with
 /// full-rank `f_proj` (the decay input, one per key channel) and `g_proj`
@@ -28,44 +28,53 @@ pub(in crate::runtime::load::family) fn ling_kda(
     architecture: &mut Architecture,
     path: &Path,
 ) -> Result<()> {
-    if raw.get("no_kda_lora").and_then(Value::as_bool) == Some(false) || flag(raw, "use_kda_lora") {
-        bail!(
+    if !flag_or(raw, "no_kda_lora", true, path)? || flag(raw, "use_kda_lora", path)? {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["no_kda_lora", "use_kda_lora"],
             "{} factors its Kimi Delta Attention projections (no_kda_lora false or use_kda_lora); Ster implements Ling 3.0's full-rank f_proj and g_proj",
             path.display()
         );
     }
     for key in ["use_nGPT", "value_norm", "up_proj_norm", "use_mla_nope"] {
-        if flag(raw, key) {
-            bail!(
+        if flag(raw, key, path)? {
+            refused!(
+                Unimplemented,
+                in raw,
+                [key],
                 "{} declares {key}; Ster implements Ling 3.0 without it",
                 path.display()
             );
         }
     }
-    let Some(head_dim) = whole(raw, "head_dim") else {
-        bail!(
+    let Some(head_dim) = whole(raw, "head_dim", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["head_dim"],
             "{} declares a Ling 3.0 model without head_dim",
             path.display()
         );
     };
-    let Some(kernel) = whole(raw, "short_conv_kernel_size").filter(|kernel| *kernel > 0) else {
-        bail!(
+    let Some(kernel) = whole(raw, "short_conv_kernel_size", path)?.filter(|kernel| *kernel > 0) else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["short_conv_kernel_size"],
             "{} declares a Ling 3.0 model without short_conv_kernel_size",
             path.display()
         );
     };
-    let group = whole(raw, "layer_group_size").unwrap_or(1).max(1);
+    let group = whole_or(raw, "layer_group_size", 1, path)?.max(1);
     let whole_groups = layers / group * group;
     let linear = (0..layers)
         .filter(|layer| (layer + 1) % group != 0 && *layer < whole_groups)
         .fold(0u128, |set, layer| set | (1u128 << layer));
     let heads = llama.num_attention_heads;
-    let decay_floor = if raw
-        .get("kda_safe_gate")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
+    let decay_floor = if flag_or(raw, "kda_safe_gate", true, path)?
     {
-        Some(number(raw, "kda_lower_bound").unwrap_or(KDA_LOWER_BOUND))
+        Some(number_or(raw, "kda_lower_bound", KDA_LOWER_BOUND, path)?)
     } else {
         None
     };
@@ -81,14 +90,14 @@ pub(in crate::runtime::load::family) fn ling_kda(
         decay_floor,
         full_rank_gate: true,
     });
-    architecture.interleaved_rotary = raw
-        .get("rope_interleave")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    architecture.head_gate = match text(raw, "gated_attention_proj_granularity_type") {
+    architecture.interleaved_rotary = flag_or(raw, "rope_interleave", true, path)?;
+    architecture.head_gate = match text(raw, "gated_attention_proj_granularity_type", path)? {
         None => None,
         Some("head_wise") => Some(GateFunction::Sigmoid),
-        Some(other) => bail!(
+        Some(other) => refused!(
+            Unimplemented,
+            in raw,
+            ["gated_attention_proj_granularity_type"],
             "{} declares gated_attention_proj_granularity_type {other:?}; Ster implements Ling 3.0's head_wise gate",
             path.display()
         ),

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
@@ -13,7 +13,7 @@ use crate::model::{
 use crate::runtime::load::family::At;
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::{every_layer, fits, listed_layers};
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{flag, flag_or, list, number, text, whole, whole_or};
 use crate::runtime::load::family::rope::bases::layer_bases;
 use crate::runtime::load::family::state::mamba::structured;
 
@@ -34,12 +34,12 @@ pub(in crate::runtime::load::family) fn configure(
     match model_type {
         "granite" | "granitemoe" | "granitemoehybrid" | "granite_swa" | "granitemoe_swa"
         | "granitemoeshared" | "hyperclovax" => {
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.feed_forward_bias = flag(raw, "mlp_bias");
-            architecture.embedding_multiplier = number(raw, "embedding_multiplier");
-            architecture.residual_multiplier = number(raw, "residual_multiplier");
-            if let Some(multiplier) = number(raw, "attention_multiplier") {
+            architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
+            architecture.embedding_multiplier = number(raw, "embedding_multiplier", path)?;
+            architecture.residual_multiplier = number(raw, "residual_multiplier", path)?;
+            if let Some(multiplier) = number(raw, "attention_multiplier", path)? {
                 architecture.score_divisor = 1.0 / multiplier;
             }
             // HyperCLOVAX multiplies its logits by `logits_scaling` where
@@ -47,12 +47,12 @@ pub(in crate::runtime::load::family) fn configure(
             // stated off) normalises each sublayer's output (`post_norm1`,
             // `post_norm2`) before the scaled residual add.
             architecture.logits_multiplier = if model_type == "hyperclovax" {
-                number(raw, "logits_scaling")
+                number(raw, "logits_scaling", path)?
             } else {
-                number(raw, "logits_scaling").map(|scale| 1.0 / scale)
+                number(raw, "logits_scaling", path)?.map(|scale| 1.0 / scale)
             };
             if model_type == "hyperclovax"
-                && raw.get("use_post_norm").and_then(Value::as_bool) != Some(false)
+                && flag_or(raw, "use_post_norm", true, path)?
             {
                 architecture.output_norms = true;
                 architecture.names = Names::HYPERCLOVAX;
@@ -76,7 +76,7 @@ pub(in crate::runtime::load::family) fn configure(
                 // `shared_intermediate_size` wide, to every layer's experts
                 // when that width is above zero.
                 if model_type != "granitemoe" {
-                    routed.shared = whole(raw, "shared_intermediate_size")
+                    routed.shared = whole(raw, "shared_intermediate_size", path)?
                         .filter(|width| *width > 0)
                         .map(|intermediate| SharedExpert {
                             intermediate,
@@ -94,7 +94,12 @@ pub(in crate::runtime::load::family) fn configure(
                 granite_hybrid(raw, layers, architecture, path)?;
             }
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }
@@ -112,14 +117,20 @@ pub(in crate::runtime::load::family) fn granite_hybrid(
     path: &Path,
 ) -> Result<()> {
     fits(layers, path)?;
-    let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-        bail!(
+    let Some(types) = list(raw, "layer_types", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["layer_types"],
             "{} declares a Granite 4.0 model without layer_types",
             path.display()
         );
     };
     if types.len() != layers {
-        bail!(
+        refused!(
+            Contradictory,
+            in raw,
+            ["layer_types", "num_hidden_layers"],
             "{} lists {} layer_types for {layers} layers",
             path.display(),
             types.len()
@@ -130,24 +141,33 @@ pub(in crate::runtime::load::family) fn granite_hybrid(
         match kind.as_str() {
             Some("mamba") => mamba |= 1u128 << layer,
             Some("attention") => {}
-            other => bail!(
+            other => refused!(
+                Malformed,
+                in raw,
+                ["layer_types"],
                 "{} names layer {layer} {other:?}; a Granite 4.0 layer is mamba or attention",
                 path.display()
             ),
         }
     }
-    architecture.positions = match text(raw, "position_embedding_type") {
+    architecture.positions = match text(raw, "position_embedding_type", path)? {
         None | Some("rope") => Positions::Rotary,
         Some("nope") => Positions::None,
-        Some(other) => bail!(
+        Some(other) => refused!(
+            Unimplemented,
+            in raw,
+            ["position_embedding_type"],
             "{} declares position_embedding_type {other:?}; Granite 4.0 rotates (rope) or does not (nope)",
             path.display()
         ),
     };
     let heads = structured(raw, "mamba_n_heads", "mamba_d_head", "mamba_n_groups", path)?;
-    let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+    let (Some(state), Some(kernel)) = (whole(raw, "mamba_d_state", path)?, whole(raw, "mamba_d_conv", path)?)
     else {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["mamba_d_state", "mamba_d_conv"],
             "{} declares a Granite 4.0 model without mamba_d_state and mamba_d_conv",
             path.display()
         );
@@ -157,23 +177,23 @@ pub(in crate::runtime::load::family) fn granite_hybrid(
         state,
         kernel,
         step_rank: 0,
-        projection_bias: flag(raw, "mamba_proj_bias"),
-        convolution_bias: raw
-            .get("mamba_conv_bias")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
+        projection_bias: flag(raw, "mamba_proj_bias", path)?,
+        convolution_bias: flag_or(raw, "mamba_conv_bias", true, path)?,
         parameter_norm: ParameterNorm::None,
         layers: mamba,
         feed_forward: true,
         structured: Some(heads),
     });
-    let Some(shared) = whole(raw, "shared_intermediate_size") else {
-        bail!(
+    let Some(shared) = whole(raw, "shared_intermediate_size", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["shared_intermediate_size"],
             "{} declares a Granite 4.0 model without shared_intermediate_size",
             path.display()
         );
     };
-    if whole(raw, "num_local_experts").unwrap_or(0) == 0 {
+    if whole_or(raw, "num_local_experts", 0, path)? == 0 {
         architecture.names = Names::GRANITE_HYBRID;
         architecture.fused_feed_forward = true;
     } else {
@@ -215,8 +235,8 @@ pub(in crate::runtime::load::family) fn granite_windows(
     path: &Path,
 ) -> Result<()> {
     architecture.attention_sinks = every_layer(layers, path)?;
-    architecture.sliding_window = whole(raw, "sliding_window");
-    architecture.sliding_layers = match raw.get("layer_types").and_then(Value::as_array) {
+    architecture.sliding_window = whole(raw, "sliding_window", path)?;
+    architecture.sliding_layers = match list(raw, "layer_types", path)? {
         Some(types) => listed_layers(types, layers, path)?,
         None => {
             fits(layers, path)?;

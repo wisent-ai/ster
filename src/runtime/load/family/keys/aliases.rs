@@ -1,10 +1,13 @@
 //! The other spellings of Llama's keys, and the widths and head counts
 //! families leave Candle's parse to derive.
 
+use std::path::Path;
+
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::runtime::load::family::keys::{GPT_INNER_PER_HIDDEN, OLMO_NORM_EPS};
-use crate::runtime::load::family::read::flag;
+use crate::runtime::load::family::read::{flag, number, number_or, whole};
 
 /// Each Llama key and the spellings other families state it under, the
 /// first present of which is copied under Llama's name.
@@ -80,7 +83,11 @@ pub(in crate::runtime::load::family) fn copy_aliases(raw: &mut Value) {
 }
 
 /// The Llama keys a family's config leaves to be derived from others.
-pub(in crate::runtime::load::family) fn derive_keys(raw: &mut Value, model_type: &str) {
+pub(in crate::runtime::load::family) fn derive_keys(
+    raw: &mut Value,
+    model_type: &str,
+    path: &Path,
+) -> Result<()> {
     let missing = |raw: &Value, key: &str| raw.get(key).is_none_or(Value::is_null);
     let mut defaults: Vec<(&str, Value)> = Vec::new();
     // OLMo 1 and DBRX state no epsilon; their LayerNorms use PyTorch's.
@@ -92,17 +99,17 @@ pub(in crate::runtime::load::family) fn derive_keys(raw: &mut Value, model_type:
         "gptj" | "gpt2" | "gpt_bigcode" | "bloom" | "falcon"
     );
     if four_times && missing(raw, "intermediate_size") {
-        if let Some(hidden) = raw.get("hidden_size").and_then(Value::as_u64) {
+        if let Some(hidden) = whole(raw, "hidden_size", path)? {
             defaults.push((
                 "intermediate_size",
-                Value::from(GPT_INNER_PER_HIDDEN * hidden),
+                Value::from(GPT_INNER_PER_HIDDEN * hidden as u64),
             ));
         }
     }
     // MPT states its feed-forward as a multiple of the model width.
     if model_type == "mpt" && missing(raw, "intermediate_size") {
-        let width = raw.get("hidden_size").and_then(Value::as_u64);
-        let ratio = raw.get("expansion_ratio").and_then(Value::as_u64);
+        let width = whole(raw, "hidden_size", path)?;
+        let ratio = whole(raw, "expansion_ratio", path)?;
         if let (Some(width), Some(ratio)) = (width, ratio) {
             defaults.push(("intermediate_size", Value::from(width * ratio)));
         }
@@ -111,18 +118,15 @@ pub(in crate::runtime::load::family) fn derive_keys(raw: &mut Value, model_type:
     // shrinks to two thirds, scales by `block_ffn_dim_multiplier` and rounds
     // up to `block_multiple_of` when `block_auto_adjust_ff_dim` is set.
     if model_type == "lfm2" && missing(raw, "intermediate_size") {
-        if let Some(width) = raw.get("block_ff_dim").and_then(Value::as_f64) {
-            let width = if flag(raw, "block_auto_adjust_ff_dim") {
+        if let Some(width) = number(raw, "block_ff_dim", path)? {
+            let width = if flag(raw, "block_auto_adjust_ff_dim", path)? {
                 const SWIGLU_SHARE: f64 = 2.0 / 3.0;
                 let shrunk = (width * SWIGLU_SHARE).trunc();
-                let scaled = match raw.get("block_ffn_dim_multiplier").and_then(Value::as_f64) {
+                let scaled = match number(raw, "block_ffn_dim_multiplier", path)? {
                     Some(multiplier) => (shrunk * multiplier).trunc(),
                     None => shrunk,
                 };
-                let multiple = raw
-                    .get("block_multiple_of")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(1.0);
+                let multiple = number_or(raw, "block_multiple_of", 1.0, path)?;
                 (scaled / multiple).ceil() * multiple
             } else {
                 width
@@ -134,8 +138,8 @@ pub(in crate::runtime::load::family) fn derive_keys(raw: &mut Value, model_type:
     // leaves `intermediate_size` out.
     let state_space_only = matches!(model_type, "mamba" | "falcon_mamba" | "mamba2");
     if state_space_only && missing(raw, "intermediate_size") {
-        let width = raw.get("hidden_size").and_then(Value::as_u64);
-        let expand = raw.get("expand").and_then(Value::as_u64);
+        let width = whole(raw, "hidden_size", path)?;
+        let expand = whole(raw, "expand", path)?;
         if let (Some(width), Some(expand)) = (width, expand) {
             defaults.push(("intermediate_size", Value::from(width * expand)));
         }
@@ -150,17 +154,17 @@ pub(in crate::runtime::load::family) fn derive_keys(raw: &mut Value, model_type:
             defaults.push(("max_position_embeddings", Value::from(1u64)));
         }
     }
-    if model_type == "gpt_bigcode" && flag(raw, "multi_query") {
+    if model_type == "gpt_bigcode" && flag(raw, "multi_query", path)? {
         defaults.push(("num_key_value_heads", Value::from(1u64)));
     }
     // Falcon's new decoder architecture groups query heads under
     // `num_kv_heads`; the older multi-query models have one key-value head.
     if model_type == "falcon" {
-        if flag(raw, "new_decoder_architecture") {
+        if flag(raw, "new_decoder_architecture", path)? {
             if let Some(groups) = raw.get("num_kv_heads").cloned() {
                 defaults.push(("num_key_value_heads", groups));
             }
-        } else if flag(raw, "multi_query") {
+        } else if flag(raw, "multi_query", path)? {
             defaults.push(("num_key_value_heads", Value::from(1u64)));
         }
     }
@@ -169,4 +173,5 @@ pub(in crate::runtime::load::family) fn derive_keys(raw: &mut Value, model_type:
             object.insert(key.to_owned(), value);
         }
     }
+    Ok(())
 }

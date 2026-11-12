@@ -84,7 +84,7 @@ pub(crate) struct SftArgs {
 }
 
 impl InputCheck for SftArgs {
-    fn check(&self) -> std::result::Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         self.model.check()?;
         input::required_path(&self.examples, "tune/sft examples")?;
         input::required_path(&self.output, "tune/sft output")?;
@@ -120,26 +120,7 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<serde_json::Value> {
         layers: parse_adapter_layers(&layers)?,
         seed,
     };
-    // The adapters have to exist before the first forward pass, so
-    // the runtime is built from the spec rather than patched after
-    // loading; the returned VarMap owns every trainable tensor.
-    let (mut runtime, varmap) = Runtime::load_trainable_at(
-        &model.model,
-        model.revision.as_deref(),
-        device,
-        &spec,
-        precision,
-    )?;
-    let chat = runtime.set_chat_template(chat_template)?;
-    let example_set = ExampleSet::load(&examples)?;
-    let identity = tune::identity(
-        &model.model,
-        model.revision.as_deref(),
-        &[("examples", examples.as_path())],
-        json!(format!("{chat_template:?}")),
-        json!(format!("{precision:?}")),
-    )?;
-    let options = SftOptions {
+    let mut options = SftOptions {
         spec,
         epochs,
         learning_rate,
@@ -149,13 +130,35 @@ pub(in crate::cli::tune) fn sft(args: SftArgs) -> Result<serde_json::Value> {
         max_sequence,
         seed,
         durable: durable.durable(),
-        identity,
+        identity: Default::default(),
     };
+    // Every setting is refused before the examples or a weight are read,
+    // and the examples before a weight is mapped.
+    options.check()?;
+    let example_set = ExampleSet::load(&examples)?;
+    options.identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("examples", examples.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
+    // The adapters have to exist before the first forward pass, so
+    // the runtime is built from the spec rather than patched after
+    // loading; the returned VarMap owns every trainable tensor.
+    let (mut runtime, varmap) = Runtime::load_trainable_at(
+        &model.model,
+        model.revision.as_deref(),
+        device,
+        &options.spec,
+        precision,
+    )?;
+    let chat = runtime.set_chat_template(chat_template)?;
     let report = tune::sft(&runtime, &varmap, &example_set, &options)?;
     // The report is folded into the artifact so a trained adapter
     // always carries the run that produced it, and the encoding it was
     // produced in travels with it.
-    let mut report = serde_json::to_value(&report)?;
+    let mut report = ster::json::value(&report);
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
     let artifact = runtime.adapter_artifact(&options.spec, report)?;

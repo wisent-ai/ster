@@ -17,7 +17,7 @@ use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 
 use crate::model::{Cache, IndexerSpec, KeyPool, Mode, NormKind};
 
-use super::apply_rotary;
+use super::rope::apply_rotary;
 use crate::model::layer::norm::{Norm, NormSpec};
 
 /// The epsilon of the indexer's key norm, which it fixes rather than reading
@@ -31,7 +31,6 @@ pub(super) struct Indexer {
     key: Linear,
     key_norm: Norm,
     weights: Linear,
-    rotated: usize,
     spec: IndexerSpec,
     /// GLM-5-Next's pool weighting: `index_kpool_compress_gate` and
     /// `index_kpool_compress_ape` `[pool, head_dim]` in F32.
@@ -40,13 +39,11 @@ pub(super) struct Indexer {
 
 impl Indexer {
     /// `builder` is the attention block's; the indexer sits below it
-    /// (`self_attn.indexer`). `query_rank` is the latent query's width and
-    /// `rotated` the rotated share of each head.
+    /// (`self_attn.indexer`). `query_rank` is the latent query's width.
     pub(super) fn load(
         builder: &VarBuilder<'_>,
         hidden: usize,
         query_rank: usize,
-        rotated: usize,
         spec: IndexerSpec,
     ) -> candle_core::Result<Self> {
         let block = builder.pp("indexer");
@@ -61,7 +58,6 @@ impl Indexer {
             key: linear_no_bias(hidden, spec.head_dim, block.pp("wk"))?,
             key_norm: norm.load(spec.head_dim, block.pp("k_norm"))?,
             weights: linear_no_bias(hidden, spec.heads, block.pp("weights_proj"))?,
-            rotated,
             pool: match spec.pool {
                 Some(pool) => Some((
                     Linear::new(
@@ -103,37 +99,32 @@ impl Indexer {
             rotate_tail,
             ..
         } = self.spec;
+        // The indexer rotates as many of its components as the main
+        // attention's angles cover: the latent head's rotated part, which the
+        // config reading holds within the indexer's head (`sparse_index`).
         let rotate = |input: Tensor| -> candle_core::Result<Tensor> {
-            match angles {
-                Some((cos, sin)) => {
-                    let width = cos.dim(1)? * 2;
-                    if width != self.rotated {
-                        candle_core::bail!(
-                            "the indexer rotates {} components, and this layer's angles span {width}",
-                            self.rotated
-                        );
-                    }
-                    if !rotate_tail {
-                        return apply_rotary(&input, cos, sin, DType::F32, mode.pass, interleaved);
-                    }
-                    // The position-free components come first and the rotated
-                    // ones last, so the tail rotates and the head passes.
-                    let kept = head_dim - self.rotated;
-                    let rotated = apply_rotary(
-                        &input.narrow(3, kept, self.rotated)?,
-                        cos,
-                        sin,
-                        DType::F32,
-                        mode.pass,
-                        interleaved,
-                    )?;
-                    Tensor::cat(
-                        &[&input.narrow(3, 0, kept)?.to_dtype(DType::F32)?, &rotated],
-                        3,
-                    )
-                }
-                None => input.to_dtype(DType::F32),
+            let Some((cos, sin)) = angles else {
+                return input.to_dtype(DType::F32);
+            };
+            if !rotate_tail {
+                return apply_rotary(&input, cos, sin, DType::F32, mode.pass, interleaved);
             }
+            // The position-free components come first and the rotated ones
+            // last, so the tail rotates and the head passes.
+            let rotated = cos.dim(1)? * 2;
+            let kept = head_dim - rotated;
+            let rotated = apply_rotary(
+                &input.narrow(3, kept, rotated)?,
+                cos,
+                sin,
+                DType::F32,
+                mode.pass,
+                interleaved,
+            )?;
+            Tensor::cat(
+                &[&input.narrow(3, 0, kept)?.to_dtype(DType::F32)?, &rotated],
+                3,
+            )
         };
         let key = self
             .key_norm

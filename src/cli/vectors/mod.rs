@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ster::{
     ChatChoice, PairSet, Precision, SteeringArtifact, TrainingMethod, tune,
     workflow::{self, parse_layers},
@@ -189,9 +189,11 @@ pub(super) fn train(args: TrainArgs) -> Result<()> {
         precision,
     } = args;
     let pairs = resolve_pairs(pairs)?;
+    // The pair set is read before the weights, so a set that cannot be read
+    // is refused before the checkpoint is paid for.
+    let pair_set = PairSet::load(&pairs)?;
     let mut runtime = model.load_at(precision)?;
     let chat = runtime.set_chat_template(chat_template)?;
-    let pair_set = PairSet::load(&pairs)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
     let artifact = workflow::train(&runtime, &pair_set, &layers, method)?;
     artifact.save(&output)?;
@@ -211,9 +213,12 @@ pub(super) fn optimize(args: OptimizeArgs) -> Result<()> {
         holdout,
     } = args;
     let pairs = resolve_pairs(pairs)?;
+    // The pair set and the holdout read no model, so both are refused before
+    // the checkpoint is paid for.
+    let pair_set = PairSet::load(&pairs)?;
+    workflow::split_holdout(&pair_set, holdout)?;
     let mut runtime = model.load_at(precision)?;
     let chat = runtime.set_chat_template(chat_template)?;
-    let pair_set = PairSet::load(&pairs)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
     let selection = workflow::optimize(&runtime, &pair_set, &layers, holdout)?;
     selection.artifact.save(&output)?;
@@ -231,22 +236,29 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
         precision,
         strength,
     } = args;
+    let strength = strength.options()?;
     let pairs = resolve_pairs(pairs)?;
+    let pair_set = PairSet::load(&pairs)?;
     let mut runtime = model.load_at(precision)?;
     let chat = runtime.set_chat_template(chat_template)?;
-    let pair_set = PairSet::load(&pairs)?;
     let artifact = SteeringArtifact::load(&vector)?;
     // The artifact now records the precision and the format it was
     // fitted in, so the advice `--precision` has always given can
     // finally be checked. Same helper the tune half uses.
     tune::warn_on_provenance(&vector, "direction", &runtime);
     let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
-    let mut report = serde_json::to_value(report)?;
-    if let Some(selection) = strength.measure(&runtime, &pair_set, &artifact)? {
+    let mut report = ster::json::value(report);
+    if let Some(options) = strength {
+        let selection = tune::strengths(&runtime, &pair_set, &artifact, &options)?;
+        // `json::value(report)` of `#[derive(Serialize)] pub struct
+        // EvaluationReport`, a struct with named fields, is an object.
         report
             .as_object_mut()
-            .context("an evaluation report is a JSON object")?
-            .insert("strength".to_owned(), serde_json::to_value(selection)?);
+            .expect("an evaluation report is a struct with named fields")
+            .insert(
+                "strength".to_owned(),
+                ster::json::value(selection),
+            );
     }
     chat.annotate(&mut report)?;
     super::answer(&report)?;
@@ -254,8 +266,7 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
 }
 pub(super) fn inspect(args: InspectArgs) -> Result<()> {
     let InspectArgs { artifact } = args;
-    let artifact = SteeringArtifact::load(&artifact)
-        .with_context(|| format!("failed to inspect {}", artifact.display()))?;
+    let artifact = SteeringArtifact::load(&artifact)?;
     super::answer(&workflow::artifact_summary(&artifact))?;
     Ok(())
 }

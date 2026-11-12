@@ -1,12 +1,11 @@
 //! Gemma 1, 2 and 3, VaultGemma and Rnj-1.5.
 
-use anyhow::{Result, bail};
-use serde_json::Value;
+use anyhow::Result;
 
 use crate::model::{Activation, Architecture, Names, QueryKeyNorm};
 use crate::runtime::load::family::At;
 use crate::runtime::load::family::read::layers::{even_layers, fits};
-use crate::runtime::load::family::read::{number, whole};
+use crate::runtime::load::family::read::{list, number, whole};
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
 /// sends only their `model_type` values here.
@@ -32,12 +31,12 @@ pub(in crate::runtime::load::family) fn configure(
             if model_type != "gemma" {
                 architecture.output_norms = model_type != "vaultgemma";
                 architecture.names = Names::GEMMA2;
-                architecture.sliding_window = whole(raw, "sliding_window");
-                if let Some(scalar) = number(raw, "query_pre_attn_scalar") {
+                architecture.sliding_window = whole(raw, "sliding_window", path)?;
+                if let Some(scalar) = number(raw, "query_pre_attn_scalar", path)? {
                     architecture.score_divisor = scalar.sqrt();
                 }
-                architecture.attention_softcap = number(raw, "attn_logit_softcapping");
-                architecture.final_softcap = number(raw, "final_logit_softcapping");
+                architecture.attention_softcap = number(raw, "attn_logit_softcapping", path)?;
+                architecture.final_softcap = number(raw, "final_logit_softcapping", path)?;
             }
             if model_type == "gemma2" || model_type == "vaultgemma" {
                 architecture.sliding_layers = even_layers(layers, path)?;
@@ -45,13 +44,11 @@ pub(in crate::runtime::load::family) fn configure(
             if model_type == "gemma3_text" {
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
                 architecture.local_rope_theta =
-                    number(raw, "rope_local_base_freq").map(|theta| theta as f32);
+                    number(raw, "rope_local_base_freq", path)?.map(|theta| theta as f32);
                 // Rnj-1.5 lists `chunked_attention` layers: chunks of
                 // `sliding_window` positions, each query seeing its own
                 // chunk and the one before it.
-                let chunked = raw
-                    .get("layer_types")
-                    .and_then(Value::as_array)
+                let chunked = list(raw, "layer_types", path)?
                     .is_some_and(|kinds| {
                         kinds
                             .iter()
@@ -63,7 +60,7 @@ pub(in crate::runtime::load::family) fn configure(
                 // Older Gemma 3 configs state the pattern instead of
                 // `layer_types`: every `sliding_window_pattern`-th layer is
                 // global, the rest local.
-                if let Some(pattern) = whole(raw, "sliding_window_pattern").filter(|p| *p > 0) {
+                if let Some(pattern) = whole(raw, "sliding_window_pattern", path)?.filter(|p| *p > 0) {
                     fits(layers, path)?;
                     architecture.sliding_layers = (0..layers)
                         .filter(|layer| (layer + 1) % pattern != 0)
@@ -71,7 +68,12 @@ pub(in crate::runtime::load::family) fn configure(
                 }
             }
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in at.raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }

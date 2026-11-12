@@ -4,8 +4,12 @@
 //! decoder. Layer numbers, steering vectors and captures address the decoder
 //! stack of either, so a direction's layer means the same thing in both.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
+use crate::failures::{
+    model::t5::{CONTEXT_UNSTATED, PASS_CAUSAL_ONLY},
+    refuse,
+};
 use crate::lora::Adapters;
 
 use super::{SteeringLlama, t5};
@@ -50,9 +54,7 @@ impl Network {
             Self::Causal(model) => Ok(model.config().max_position_embeddings),
             Self::EncoderDecoder(model) => match model.config().context_length {
                 Some(length) => Ok(length),
-                None => bail!(
-                    "this T5 checkpoint's config.json states no n_positions, so Ster has no sequence length to bound its prompts by; add n_positions, the length the checkpoint was trained at, to its config.json"
-                ),
+                None => Err(refuse(&CONTEXT_UNSTATED, &[])),
             },
         }
     }
@@ -69,9 +71,7 @@ impl Network {
     pub fn causal(&self, command: &str) -> Result<&SteeringLlama> {
         match self {
             Self::Causal(model) => Ok(model),
-            Self::EncoderDecoder(_) => bail!(
-                "{command} cannot run this t5 checkpoint: it scores one token sequence from its first position, and a T5 model reads the prompt in its encoder and writes the answer in its decoder, a split that pass does not carry; run {command} on a causal-decoder checkpoint"
-            ),
+            Self::EncoderDecoder(_) => Err(refuse(&PASS_CAUSAL_ONLY, &[("command", command)])),
         }
     }
 }

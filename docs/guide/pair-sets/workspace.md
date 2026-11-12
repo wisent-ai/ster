@@ -31,8 +31,8 @@ This is the `digest` each entry of the workspace state records.
 | `rejected` | The document is invalid, the `--name` is not a valid id, or the file name gives no id |
 
 A `rejected` or `conflicting` report carries its refusal in `reason` and its
-declared cause in `cause` (`id`, `code`, `exit`, `usage`, `retryable`,
-`remedy`), and the command ends in that refusal: exit `2` for an invalid
+declared cause in `cause` (`functionality`, `id`, `docs`, `code`, `exit`,
+`usage`, `retryable`, `remedy`), and the command ends in that refusal: exit `2` for an invalid
 `--name` or a file name that gives no id, exit `1` otherwise.
 
 ## Selecting and removing a set

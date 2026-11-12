@@ -82,8 +82,9 @@ fn artifact_from_captured(
         let layer = captured
             .get(&layer_index)
             .expect("requested layer is captured");
-        let direction = train_direction(&layer.positive, &layer.negative, method)?;
-        let (accuracy, margin) = evaluate_direction(&layer.positive, &layer.negative, &direction)?;
+        let direction = train_direction(&layer.positive, &layer.negative, method, layer_index)?;
+        let (accuracy, margin) =
+            evaluate_direction(&layer.positive, &layer.negative, &direction, layer_index)?;
         vectors.push(LayerVector {
             layer: layer_index,
             values: direction,

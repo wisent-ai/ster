@@ -1,6 +1,7 @@
 //! The decision operations' requests: answering typed questions about a
 //! state, and fitting the temperature that makes those answers honest.
 
+use anyhow::Result;
 use serde::Deserialize;
 
 use ster::{ChatChoice, Precision, decide::Request};
@@ -17,8 +18,9 @@ pub(in crate::request) struct DecideRequest {
     #[serde(flatten)]
     pub(in crate::request) model: ModelRequest,
     /// The decision document itself — a state and its typed questions — as
-    /// the desktop composed it, rather than a path to one on disk.
-    pub(in crate::request) request: Option<Request>,
+    /// the desktop composed it, rather than a path to one on disk. A body
+    /// without one does not match the operation's schema.
+    pub(in crate::request) request: Request,
     /// A calibration artifact written by `ster calibrate` for this model.
     #[serde(default)]
     pub(in crate::request) calibration: Option<String>,
@@ -35,15 +37,9 @@ pub(in crate::request) struct DecideRequest {
 }
 
 impl Validate for DecideRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
         self.model.check("decide")?;
-        let Some(request) = &self.request else {
-            return Err(
-                "decide requires a request with a state and questions; the job carries none"
-                    .to_owned(),
-            );
-        };
-        request.validate().map_err(|error| format!("{error:#}"))
+        self.request.validate()
     }
 }
 
@@ -69,12 +65,22 @@ pub(in crate::request) struct CalibrateRequest {
 }
 
 impl Validate for CalibrateRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
         self.model.check("calibrate")?;
+        ster::decide::check_bins(self.ece_bins)?;
         require(
             &self.examples,
-            "calibrate requires an examples path".to_owned(),
+            "calibrate",
+            "examples",
+            "the path of a labelled example set",
+            "--examples",
         )?;
-        require(&self.output, "calibrate requires an output path".to_owned())
+        require(
+            &self.output,
+            "calibrate",
+            "output",
+            "the path the calibration artifact is written to",
+            "--output",
+        )
     }
 }

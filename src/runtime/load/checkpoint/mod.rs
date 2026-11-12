@@ -8,10 +8,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_transformers::models::llama::{Config, LlamaConfig, LlamaEosToks};
 
-use crate::{chat, model::Architecture};
+use crate::{
+    chat,
+    failures::{model::config as causes, refuse},
+    model::Architecture,
+};
 
 use super::{
     config,
@@ -67,7 +71,7 @@ impl Checkpoint {
         let (model_type, found) = supported(&raw, &self.config)?;
         let model_type = model_type.as_str();
         let scaling = take_rope_scaling(&mut raw, &self.config)?;
-        fill_llama_keys(&mut raw, model_type);
+        fill_llama_keys(&mut raw, model_type, &self.config)?;
         let mut llama: LlamaConfig = llama_config(&raw, model_type, &self.config)?;
         if found.tied_by_default() && llama.tie_word_embeddings.is_none() {
             // These families tie their word embeddings by default and their
@@ -112,34 +116,58 @@ fn supported(raw: &serde_json::Value, path: &Path) -> Result<(String, Family)> {
         .map(|family| family.model_type())
         .collect();
     let families = families.join(", ");
+    let shown = path.display().to_string();
     let model_type = match raw.get("model_type") {
         Some(serde_json::Value::String(stated)) => stated.clone(),
-        None | Some(serde_json::Value::Null) => match Family::of_architectures(raw) {
+        None | Some(serde_json::Value::Null) => match Family::of_architectures(raw, path)? {
             Some(found) => found.model_type().to_owned(),
-            None => bail!(
-                "{} names no model type: it states no model_type, and its architectures ({}) name no model class Ster reads in its place; use a Hugging Face checkpoint whose model_type is one of {families}",
-                path.display(),
-                match raw.get("architectures") {
+            None => {
+                let architectures = match raw.get("architectures") {
                     Some(architectures) => architectures.to_string(),
                     None => "absent".to_owned(),
-                }
-            ),
+                };
+                return Err(refuse(
+                    &causes::MODEL_TYPE_ABSENT,
+                    &[
+                        ("path", &shown),
+                        ("architectures", &architectures),
+                        ("families", &families),
+                    ],
+                ));
+            }
         },
-        Some(other) => bail!(
-            "{} states model_type as {other}, which is not a string; use a Hugging Face checkpoint whose model_type is one of {families}",
-            path.display()
-        ),
+        Some(other) => {
+            return Err(refuse(
+                &causes::MODEL_TYPE_NOT_TEXT,
+                &[
+                    ("path", &shown),
+                    ("value", &other.to_string()),
+                    ("families", &families),
+                ],
+            ));
+        }
     };
     let Some(found) = Family::of(&model_type) else {
-        bail!(
-            "model architecture {model_type:?} is unsupported by this Ster build; use a Hugging Face checkpoint whose model_type is one of {families}"
-        );
+        return Err(refuse(
+            &causes::FAMILY_UNKNOWN,
+            &[
+                ("path", &shown),
+                ("model_type", &model_type),
+                ("families", &families),
+            ],
+        ));
     };
-    if raw.get("quantization_config").is_some() {
-        bail!(
-            "{} is a quantized checkpoint (it declares quantization_config); Ster maps unquantized safetensors only, so use the checkpoint it was quantized from",
-            path.display()
-        );
+    if let Some(stated) = raw.get("quantization_config") {
+        return Err(refuse(
+            &causes::QUANTIZED,
+            &[
+                ("path", &shown),
+                (
+                    "value",
+                    &wisent_errors::trim_detail(&stated.to_string(), 120),
+                ),
+            ],
+        ));
     }
     Ok((model_type, found))
 }

@@ -18,16 +18,17 @@
 
 use std::{collections::HashMap, fs, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{Device, Tensor};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::{
-    lora,
-    runtime::{Checkpoint, Layout},
-    workflow,
+use super::fit::Fit;
+use super::merge::{copy, tensors_unwritable, unwritable};
+use crate::failures::tune::rewrite::{
+    FUSED_UNEXPORTABLE, GGUF_UNEXPORTABLE, REWARD_UNEXPORTABLE, TRANSPOSED_UNEXPORTABLE,
 };
+use crate::{lora, workflow};
 
 /// The prefix PEFT puts before every adapted module's checkpoint path.
 const PEFT_ROOT: &str = "base_model.model";
@@ -59,65 +60,41 @@ pub fn export_peft(
 ) -> Result<ExportReport> {
     let device = Device::Cpu;
     let artifact = lora::Artifact::load(adapter, &device)?;
-    if artifact.kind != lora::Kind::Adapter {
-        bail!(
-            "adapter artifact is a {} model, not a generation adapter; PEFT has no place for its head",
-            artifact.kind.name()
-        );
-    }
-    if artifact.model != model {
-        bail!(
-            "adapter was trained for model {:?}, current model is {:?}",
-            artifact.model,
-            model
-        );
-    }
-    let source = Checkpoint::resolve(model, revision)?;
-    if source.layout == Layout::Gguf {
-        bail!(
-            "{model} is a GGUF checkpoint; a PEFT adapter is named after the base model's safetensors release, so export against that release"
-        );
-    }
-    let (config, architecture, _) = source.decoder_config()?;
-    architecture.check_targets(&artifact.targets, &config)?;
-    artifact.validate_widths(lora::Widths::for_decoder(&config, &architecture))?;
+    let fit = Fit {
+        step: "exporting",
+        path: adapter,
+        model,
+    };
+    fit.adapter(&artifact, &REWARD_UNEXPORTABLE)?;
+    fit.trained_for(&artifact.model)?;
+    let source = fit.source(revision, &GGUF_UNEXPORTABLE)?;
+    let (config, architecture) = (&source.config, &source.architecture);
+    architecture.check_targets(&artifact.targets, config, model)?;
+    fit.width(artifact.hidden_size, config.hidden_size)?;
+    fit.layers(&artifact.layers, config.num_hidden_layers)?;
+    artifact.validate_widths(lora::Widths::for_decoder(config, architecture))?;
 
     let mut tensors: HashMap<String, Tensor> = HashMap::new();
     let mut modules: Vec<String> = Vec::new();
     for &layer in &artifact.layers {
         for &target in &artifact.targets {
-            let placement = architecture
-                .placement(target, layer, &config)
-                .with_context(|| {
-                    format!("this model has no {} projection to export", target.name())
-                })?;
-            if placement.blocks.is_some() || placement.transposed {
-                bail!(
-                    "this model stores the {} projection {} with others, so PEFT has no module of its own for it; merge the adapter (ster tune merge) instead",
-                    target.name(),
-                    if placement.transposed {
-                        "transposed"
-                    } else {
-                        "fused"
-                    }
-                );
-            }
-            let module = placement.tensor.strip_suffix(".weight").with_context(|| {
-                format!(
-                    "checkpoint tensor {} is not a projection weight",
-                    placement.tensor
-                )
-            })?;
+            let placement = fit.placement(&source, target, layer)?;
+            fit.whole(
+                &placement,
+                (target, layer),
+                &FUSED_UNEXPORTABLE,
+                Some(&TRANSPOSED_UNEXPORTABLE),
+            )?;
+            // Every projection tensor name ends in `.weight`; its module is
+            // the name without it.
+            let module = placement.tensor.trim_end_matches(".weight");
             let (a_name, b_name) = lora::Adapter::tensor_names(layer, target);
             for (factor, name) in [("lora_A", &a_name), ("lora_B", &b_name)] {
-                let tensor = artifact
-                    .tensors
-                    .get(name)
-                    .with_context(|| format!("adapter artifact is missing tensor {name}"))?;
-                tensors.insert(
-                    format!("{PEFT_ROOT}.{module}.{factor}.weight"),
-                    tensor.contiguous()?,
-                );
+                let tensor = fit.tensor(&artifact.tensors, "the adapter", name, target, layer)?;
+                let tensor = tensor
+                    .contiguous()
+                    .map_err(|error| fit.unfit(target, layer, name, tensor.dims(), error))?;
+                tensors.insert(format!("{PEFT_ROOT}.{module}.{factor}.weight"), tensor);
             }
             // The leaf is the last dotted part; a module with no dot is its own.
             let leaf = match module.rsplit_once('.') {
@@ -131,11 +108,12 @@ pub fn export_peft(
         }
     }
 
-    fs::create_dir_all(output).with_context(|| format!("failed to create {}", output.display()))?;
+    fs::create_dir_all(output).map_err(|error| unwritable(output, output, &error))?;
     let weights = output.join("adapter_model.safetensors");
     candle_core::safetensors::save(&tensors, &weights)
-        .with_context(|| format!("failed to write {}", weights.display()))?;
+        .map_err(|error| tensors_unwritable(output, &weights, &error))?;
     let model_revision = source
+        .checkpoint
         .revision
         .clone()
         .or_else(|| artifact.model_revision.clone());
@@ -152,18 +130,11 @@ pub fn export_peft(
         "inference_mode": true,
     });
     let config_path = output.join("adapter_config.json");
-    fs::write(&config_path, serde_json::to_vec_pretty(&adapter_config)?)
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let text = crate::json::pretty(&adapter_config).into_bytes();
+    fs::write(&config_path, text).map_err(|error| unwritable(output, &config_path, &error))?;
     // A served adapter is loaded beside the base's tokenizer; shipping the
     // base's own copy keeps the pair from drifting to another tokenizer.
-    let tokenizer = output.join("tokenizer.json");
-    fs::copy(&source.tokenizer, &tokenizer).with_context(|| {
-        format!(
-            "failed to copy {} to {}",
-            source.tokenizer.display(),
-            tokenizer.display()
-        )
-    })?;
+    copy(output, &source.checkpoint.tokenizer, &output.join("tokenizer.json"))?;
     let files = [
         "adapter_model.safetensors",
         "adapter_config.json",

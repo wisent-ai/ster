@@ -1,9 +1,10 @@
 pub mod artifact;
-pub mod brama;
 pub mod chat;
 pub mod decide;
 pub mod failures;
 pub mod fixture;
+pub mod inference;
+pub mod json;
 pub mod lora;
 pub mod model;
 pub mod pairs;

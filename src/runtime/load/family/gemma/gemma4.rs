@@ -1,7 +1,6 @@
 //! Gemma 4.
 
-use anyhow::{Result, bail};
-use serde_json::Value;
+use anyhow::Result;
 
 use crate::model::{
     Activation, Architecture, ExpertLayout, GlobalAttention, Names, PerLayerInputSpec, QueryKeyNorm,
@@ -9,7 +8,7 @@ use crate::model::{
 use crate::runtime::load::family::At;
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::listed_layers;
-use crate::runtime::load::family::read::{flag, number, whole};
+use crate::runtime::load::family::read::{flag, list, number, text, whole, whole_or};
 use crate::runtime::load::family::rope::scaling::rope_scaling;
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
@@ -38,38 +37,51 @@ pub(in crate::runtime::load::family) fn configure(
             // from the key projection, and rotate by the `full_attention`
             // rotation over that width; the sliding-window layers rotate by
             // their own base.
-            if raw
-                .get("use_bidirectional_attention")
-                .and_then(Value::as_str)
+            if text(raw, "use_bidirectional_attention", path)?
                 == Some("all")
             {
-                bail!(
+                refused!(
+                    Unimplemented,
+                    in raw,
+                    ["use_bidirectional_attention"],
                     "{} declares use_bidirectional_attention \"all\", so every token sees the whole sequence; Ster runs causal decoders only",
                     path.display()
                 );
             }
-            if flag(raw, "use_double_wide_mlp") {
-                bail!(
+            if flag(raw, "use_double_wide_mlp", path)? {
+                refused!(
+                    Unimplemented,
+                    in raw,
+                    ["use_double_wide_mlp"],
                     "{} declares use_double_wide_mlp, a doubled feed-forward on the key-value-sharing layers; Ster builds every Gemma 4 feed-forward intermediate_size wide",
                     path.display()
                 );
             }
-            let Some(global_head_dim) = whole(raw, "global_head_dim") else {
-                bail!(
+            let Some(global_head_dim) = whole(raw, "global_head_dim", path)? else {
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["global_head_dim"],
                     "{} declares a Gemma 4 model without global_head_dim",
                     path.display()
                 );
             };
-            let Some(types) = raw.get("layer_types").and_then(Value::as_array) else {
-                bail!(
+            let Some(types) = list(raw, "layer_types", path)? else {
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["layer_types"],
                     "{} declares a Gemma 4 model without layer_types",
                     path.display()
                 );
             };
             architecture.local_rope_theta =
-                number(raw, "rope_local_base_freq").map(|theta| theta as f32);
+                number(raw, "rope_local_base_freq", path)?.map(|theta| theta as f32);
             if architecture.local_rope_theta.is_none() {
-                bail!(
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["rope_local_base_freq", "rope_parameters"],
                     "{} declares a Gemma 4 model without a sliding_attention rotation base",
                     path.display()
                 );
@@ -82,26 +94,29 @@ pub(in crate::runtime::load::family) fn configure(
             architecture.value_norm = true;
             architecture.score_divisor = 1.0;
             architecture.layer_scalar = true;
-            architecture.final_softcap = number(raw, "final_logit_softcapping");
-            architecture.sliding_window = whole(raw, "sliding_window");
+            architecture.final_softcap = number(raw, "final_logit_softcapping", path)?;
+            architecture.sliding_window = whole(raw, "sliding_window", path)?;
             architecture.sliding_layers = listed_layers(types, layers, path)?;
-            let key_is_value = flag(raw, "attention_k_eq_v");
+            let key_is_value = flag(raw, "attention_k_eq_v", path)?;
             architecture.global_attention = Some(GlobalAttention {
                 heads: None,
                 head_dim: global_head_dim,
                 // Transformers gives the full-attention layers their own
                 // key-value head count only under `attention_k_eq_v`.
-                key_value_heads: whole(raw, "num_global_key_value_heads").filter(|_| key_is_value),
+                key_value_heads: whole(raw, "num_global_key_value_heads", path)?.filter(|_| key_is_value),
                 rotary_dim: global_head_dim,
                 key_is_value,
             });
             architecture.rope_scaling = rope_scaling(scaling, global_head_dim, raw, llama, path)?;
             // The last `num_kv_shared_layers` layers reuse the keys and
             // values of the last earlier layer of their kind.
-            let shared = whole(raw, "num_kv_shared_layers").unwrap_or(0);
+            let shared = whole_or(raw, "num_kv_shared_layers", 0, path)?;
             if shared > 0 {
                 if shared >= layers {
-                    bail!(
+                    refused!(
+                        Contradictory,
+                        in raw,
+                        ["num_kv_shared_layers", "num_hidden_layers"],
                         "{} shares keys and values on {shared} of {layers} layers, leaving none to produce them",
                         path.display()
                     );
@@ -111,21 +126,24 @@ pub(in crate::runtime::load::family) fn configure(
                 if let Some(layer) =
                     (first..layers).find(|layer| architecture.key_value_source(*layer).is_none())
                 {
-                    bail!(
+                    refused!(
+                        Contradictory,
+                        in raw,
+                        ["num_kv_shared_layers", "layer_types"],
                         "{} shares keys and values from layer {first} on, but layer {layer} has no earlier layer of its kind to share them from",
                         path.display()
                     );
                 }
             }
             if let Some(width) =
-                whole(raw, "hidden_size_per_layer_input").filter(|width| *width > 0)
+                whole(raw, "hidden_size_per_layer_input", path)?.filter(|width| *width > 0)
             {
                 architecture.per_layer_input = Some(PerLayerInputSpec {
                     width,
-                    vocab: whole(raw, "vocab_size_per_layer_input").unwrap_or(llama.vocab_size),
+                    vocab: whole_or(raw, "vocab_size_per_layer_input", llama.vocab_size, path)?,
                 });
             }
-            if flag(raw, "enable_moe_block") {
+            if flag(raw, "enable_moe_block", path)? {
                 architecture.side_experts = Some(experts(
                     raw,
                     "num_experts",
@@ -137,7 +155,12 @@ pub(in crate::runtime::load::family) fn configure(
                 )?);
             }
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }

@@ -6,10 +6,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::Result;
 use rand_distr::Normal;
 use serde::{Deserialize, Serialize};
-use tokenizers::Tokenizer;
+
+use crate::failures::{
+    fixture::{declaration as causes, json_refusal, read_refusal},
+    refuse,
+};
+
+use super::tokenizer;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -30,7 +36,7 @@ pub(super) enum TokenizerInput {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TokenizerDeclaration {
-    from: PathBuf,
+    pub(super) from: PathBuf,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -59,15 +65,35 @@ pub(super) struct Gaussian {
 }
 
 impl Gaussian {
-    pub fn distribution(&self, field: &str) -> Result<Normal<f32>> {
-        ensure!(
-            self.mean.is_finite() && self.scale.is_finite(),
-            "fixture {field} requires finite mean and scale; observed mean={}, scale={}",
-            self.mean,
-            self.scale
-        );
-        Normal::new(self.mean, self.scale)
-            .with_context(|| format!("construct fixture {field} normal distribution"))
+    /// The normal distribution `field` of the declaration at `path`
+    /// declares.
+    pub fn distribution(&self, field: &str, path: &Path) -> Result<Normal<f32>> {
+        let shown = path.display().to_string();
+        for (key, value) in [("mean", self.mean), ("scale", self.scale)] {
+            if !value.is_finite() {
+                return Err(refuse(
+                    &causes::NOT_FINITE,
+                    &[
+                        ("role", "declaration"),
+                        ("path", &shown),
+                        ("key", &format!("{field}.{key}")),
+                        ("value", &value.to_string()),
+                    ],
+                ));
+            }
+        }
+        Normal::new(self.mean, self.scale).map_err(|error| {
+            refuse(
+                &causes::SCALE_NEGATIVE,
+                &[
+                    ("field", field),
+                    ("mean", &self.mean.to_string()),
+                    ("scale", &self.scale.to_string()),
+                    ("error", &error.to_string()),
+                    ("path", &shown),
+                ],
+            )
+        })
     }
 }
 
@@ -103,6 +129,8 @@ pub(super) struct Dimensions {
 
 pub(super) struct Resolved {
     pub spec: Spec,
+    /// The declaration's path, resolved.
+    pub declaration: PathBuf,
     pub dimensions: Dimensions,
     pub config_bytes: Vec<u8>,
     pub tokenizer_bytes: Vec<u8>,
@@ -115,120 +143,40 @@ impl Resolved {
     pub fn read(path: &Path) -> Result<Self> {
         let path = path
             .canonicalize()
-            .with_context(|| format!("resolve fixture declaration {}", path.display()))?;
-        let bytes = fs::read(&path)
-            .with_context(|| format!("read fixture declaration {}", path.display()))?;
+            .map_err(|error| read_refusal("declaration", path, &error))?;
+        let bytes = fs::read(&path).map_err(|error| read_refusal("declaration", &path, &error))?;
         let spec: Spec = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse fixture declaration {}", path.display()))?;
-        let parent = path
-            .parent()
-            .context("fixture declaration has no parent directory")?;
+            .map_err(|error| json_refusal("declaration", &path, &error))?;
+        // A canonical path to a file always has a parent; the root itself is
+        // a directory, which reading it as a declaration refused above.
+        let parent = path.parent().map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
         let config_path = parent.join(&spec.config);
-        let config_bytes = fs::read(&config_path)
-            .with_context(|| format!("read fixture config {}", config_path.display()))?;
+        let config_bytes =
+            fs::read(&config_path).map_err(|error| read_refusal("config", &config_path, &error))?;
         let dimensions: Dimensions = serde_json::from_slice(&config_bytes)
-            .with_context(|| format!("parse fixture config {}", config_path.display()))?;
-        ensure!(
-            dimensions.model_type == "llama",
-            "fixture tensor layout requires model_type=llama; {} declares {:?}",
-            config_path.display(),
-            dimensions.model_type
-        );
-        ensure!(
-            !dimensions.mlp_bias,
-            "fixture config declares mlp_bias=true, but Ster's Llama consumer does not apply feed-forward biases; no checkpoint was written"
-        );
-        // Llama grouped-query attention requires whole groups of heads:
-        // https://huggingface.co/docs/transformers/model_doc/llama#transformers.LlamaConfig
-        ensure!(
-            dimensions.num_attention_heads.get() % dimensions.num_key_value_heads.get() == 0,
-            "fixture attention heads {} must be divisible by key/value heads {}",
-            dimensions.num_attention_heads,
-            dimensions.num_key_value_heads
-        );
-        ensure!(
-            dimensions.rms_norm_eps.is_finite() && dimensions.rope_theta.is_finite(),
-            "fixture config requires finite rms_norm_eps and rope_theta"
-        );
-        ensure!(
-            spec.initialization.normalization.is_finite(),
-            "fixture initialization.normalization must be finite; observed {}",
-            spec.initialization.normalization
-        );
-        if spec.initialization.bias.is_none() && dimensions.attention_bias {
-            bail!(
-                "fixture initialization.bias is required because config declares attention_bias=true"
-            );
-        }
-        ensure!(
-            !spec.verification.prompt.trim().is_empty(),
-            "fixture verification.prompt is required"
-        );
-        ensure!(
-            !spec.verification.layers.is_empty(),
-            "fixture verification.layers is required"
-        );
-        for layer in &spec.verification.layers {
-            ensure!(
-                *layer < dimensions.num_hidden_layers.get(),
-                "fixture verification layer {layer} lies outside {} declared layers",
-                dimensions.num_hidden_layers
-            );
-        }
-        let (tokenizer_bytes, tokenizer_verification) = match &spec.tokenizer {
-            TokenizerInput::File(source) => {
-                let source = parent.join(source);
-                let bytes = fs::read(&source)
-                    .with_context(|| format!("read fixture tokenizer {}", source.display()))?;
-                let tokenizer = Tokenizer::from_bytes(&bytes).map_err(|error| {
-                    anyhow::anyhow!("parse fixture tokenizer {}: {error}", source.display())
-                })?;
-                let vocab = tokenizer.get_vocab(true);
-                ensure!(
-                    !vocab.is_empty(),
-                    "fixture tokenizer {} has no vocabulary",
-                    source.display()
-                );
-                for (token, id) in vocab {
-                    ensure!(
-                        usize::try_from(id).context("token id does not fit this host")?
-                            < dimensions.vocab_size.get(),
-                        "fixture tokenizer token {token:?} has id {id}, outside config vocab_size {}",
-                        dimensions.vocab_size
-                    );
-                }
-                (bytes, None)
-            }
-            TokenizerInput::Declaration(source) => {
-                let source = parent.join(&source.from);
-                let compiled = crate::tokenizer::compile(&source).with_context(|| {
-                    format!("compile fixture tokenizer declaration {}", source.display())
-                })?;
-                // This producer assigns contiguous model ids by declared order
-                // and native added ids after them, so its measured unique count
-                // bounds every vocabulary id without parsing the same bytes twice.
-                ensure!(
-                    compiled.vocabulary_size <= dimensions.vocab_size.get(),
-                    "compiled fixture tokenizer {} has {} token identities, exceeding config vocab_size {}",
-                    source.display(),
-                    compiled.vocabulary_size,
-                    dimensions.vocab_size
-                );
-                (compiled.document.into_bytes(), Some(compiled.verification))
-            }
+            .map_err(|error| json_refusal("config", &config_path, &error))?;
+        check(&dimensions, &config_path, &spec, &path)?;
+        let (tokenizer_bytes, tokenizer_verification) =
+            tokenizer::resolve(&spec.tokenizer, &parent, &dimensions)?;
+        let width = |heads: NonZeroUsize, what: &str| {
+            dimensions.head_dim.get().checked_mul(heads.get()).ok_or_else(|| {
+                refuse(
+                    &causes::WIDTH_OVERFLOW,
+                    &[
+                        ("what", what),
+                        ("path", &config_path.display().to_string()),
+                        ("head_dim", &dimensions.head_dim.to_string()),
+                        ("heads", &heads.to_string()),
+                        ("bits", &usize::BITS.to_string()),
+                    ],
+                )
+            })
         };
-        let query_width = dimensions
-            .head_dim
-            .get()
-            .checked_mul(dimensions.num_attention_heads.get())
-            .context("fixture head_dim times num_attention_heads overflows this host")?;
-        let kv_width = dimensions
-            .head_dim
-            .get()
-            .checked_mul(dimensions.num_key_value_heads.get())
-            .context("fixture head_dim times num_key_value_heads overflows this host")?;
+        let query_width = width(dimensions.num_attention_heads, "query")?;
+        let kv_width = width(dimensions.num_key_value_heads, "key/value")?;
         Ok(Self {
             spec,
+            declaration: path,
             dimensions,
             config_bytes,
             tokenizer_bytes,
@@ -237,4 +185,81 @@ impl Resolved {
             kv_width,
         })
     }
+}
+
+/// Refuses what the config at `config` and the declaration at `path`
+/// declare that the fixture cannot write or verify.
+fn check(dimensions: &Dimensions, config: &Path, spec: &Spec, path: &Path) -> Result<()> {
+    let config_shown = config.display().to_string();
+    let shown = path.display().to_string();
+    if dimensions.model_type != "llama" {
+        let model_type = format!("{:?}", dimensions.model_type);
+        return Err(refuse(
+            &causes::MODEL_TYPE,
+            &[("path", &config_shown), ("model_type", &model_type)],
+        ));
+    }
+    if dimensions.mlp_bias {
+        return Err(refuse(&causes::MLP_BIAS, &[("path", &config_shown)]));
+    }
+    // Llama grouped-query attention requires whole groups of heads:
+    // https://huggingface.co/docs/transformers/model_doc/llama#transformers.LlamaConfig
+    let (heads, kv) = (dimensions.num_attention_heads.get(), dimensions.num_key_value_heads.get());
+    if heads % kv != 0 {
+        return Err(refuse(
+            &causes::HEADS_UNGROUPED,
+            &[
+                ("path", &config_shown),
+                ("heads", &heads.to_string()),
+                ("kv", &kv.to_string()),
+                ("remainder", &(heads % kv).to_string()),
+            ],
+        ));
+    }
+    let normalization = f64::from(spec.initialization.normalization);
+    let settings = [
+        ("config", &config_shown, "rms_norm_eps", dimensions.rms_norm_eps),
+        ("config", &config_shown, "rope_theta", dimensions.rope_theta),
+        ("declaration", &shown, "initialization.normalization", normalization),
+    ];
+    for (role, at, key, value) in settings {
+        if !value.is_finite() {
+            return Err(refuse(
+                &causes::NOT_FINITE,
+                &[("role", role), ("path", at.as_str()), ("key", key), ("value", &value.to_string())],
+            ));
+        }
+    }
+    if spec.initialization.bias.is_none() && dimensions.attention_bias {
+        return Err(refuse(&causes::BIAS_MISSING, &[("path", &shown), ("config", &config_shown)]));
+    }
+    let prompt = &spec.verification.prompt;
+    if prompt.trim().is_empty() {
+        return Err(refuse(
+            &causes::PROMPT_BLANK,
+            &[("path", &shown), ("prompt", &format!("{prompt:?}"))],
+        ));
+    }
+    let count = dimensions.num_hidden_layers.get();
+    let (count_shown, last) = (count.to_string(), (count - 1).to_string());
+    let layers = format!("{:?}", spec.verification.layers);
+    if spec.verification.layers.is_empty() {
+        return Err(refuse(
+            &causes::LAYERS_NONE,
+            &[("path", &shown), ("count", &count_shown), ("last", &last)],
+        ));
+    }
+    if let Some(layer) = spec.verification.layers.iter().find(|layer| **layer >= count) {
+        return Err(refuse(
+            &causes::LAYER_OUTSIDE,
+            &[
+                ("path", &shown),
+                ("layer", &layer.to_string()),
+                ("layers", &layers),
+                ("count", &count_shown),
+                ("last", &last),
+            ],
+        ));
+    }
+    Ok(())
 }

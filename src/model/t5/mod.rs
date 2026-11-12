@@ -1,9 +1,10 @@
 //! Native T5 encoder-decoder model. Layer selections and adapters address the
 //! decoder stack; source encoding and decoder cross-attention stay frozen.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use candle_nn::{Embedding, Linear, VarBuilder, embedding, linear_no_bias};
 
+use crate::failures::{amend, model::weights_unfit};
 use crate::{lora::Adapters, model::layer::norm::Norm};
 
 mod attention;
@@ -33,27 +34,40 @@ pub(crate) struct Model {
 }
 
 impl Model {
-    pub fn load(builder: VarBuilder<'_>, config: Config, adapters: Adapters) -> Result<Self> {
-        let embeddings = embedding(config.vocab, config.hidden, builder.pp("shared"))?;
+    /// The network `config` describes, its weights read through `builder`;
+    /// `model` names the checkpoint in a refusal of its weights.
+    pub fn load(
+        builder: VarBuilder<'_>,
+        config: Config,
+        adapters: Adapters,
+        model: &str,
+    ) -> Result<Self> {
+        let unfit = |error| weights_unfit(model, error);
+        let embeddings = embedding(config.vocab, config.hidden, builder.pp("shared")).map_err(unfit)?;
         let head = if config.tied_head {
             Linear::new(embeddings.embeddings().clone(), None)
         } else {
-            linear_no_bias(config.hidden, config.vocab, builder.pp("lm_head"))?
+            linear_no_bias(config.hidden, config.vocab, builder.pp("lm_head")).map_err(unfit)?
         };
         let bias = |stack: &str, bidirectional| -> Result<RelativeBias> {
             let weight = builder
                 .pp(stack)
                 .pp("block.0.layer.0.SelfAttention.relative_attention_bias")
-                .get((config.buckets, config.heads), "weight")?;
+                .get((config.buckets, config.heads), "weight")
+                .map_err(unfit)?;
             RelativeBias::new(weight, config.max_distance, bidirectional)
         };
         let encoder_bias = bias("encoder", true)?;
         let decoder_bias = bias("decoder", false)?;
         let norm = config.norm();
-        let encoder_norm = norm.load(config.hidden, builder.pp("encoder.final_layer_norm"))?;
-        let decoder_norm = norm.load(config.hidden, builder.pp("decoder.final_layer_norm"))?;
-        let encoder = load_stack(&builder, &config, false, &adapters)?;
-        let decoder = load_stack(&builder, &config, true, &adapters)?;
+        let encoder_norm = norm
+            .load(config.hidden, builder.pp("encoder.final_layer_norm"))
+            .map_err(unfit)?;
+        let decoder_norm = norm
+            .load(config.hidden, builder.pp("decoder.final_layer_norm"))
+            .map_err(unfit)?;
+        let encoder = load_stack(&builder, &config, false, &adapters, model)?;
+        let decoder = load_stack(&builder, &config, true, &adapters, model)?;
         Ok(Self {
             config,
             embeddings,
@@ -82,6 +96,7 @@ fn load_stack(
     config: &Config,
     decoder: bool,
     adapters: &Adapters,
+    model: &str,
 ) -> Result<Vec<Block>> {
     let (name, count) = if decoder {
         ("decoder", config.decoder_layers)
@@ -100,7 +115,7 @@ fn load_stack(
                 decoder,
                 adapters,
             )
-            .with_context(|| format!("failed to load T5 {name} block {index}"))
+            .map_err(|error| amend(weights_unfit(model, error), format!("T5 {name} block {index}")))
         })
         .collect()
 }

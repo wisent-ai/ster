@@ -18,19 +18,28 @@
 //! from being saved again. Once the new one is named, its predecessor is removed.
 
 pub(crate) mod optimizer;
+mod resume;
+mod save;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use blake2::{Blake2b512, Digest};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use optimizer::{AdamW, Tracked};
+use crate::failures::{
+    file, refuse,
+    tune::{
+        checkpoint::LATEST_INVALID,
+        resume::{EPOCH_LOSSLESS, POSITION_PAST_PASS, RUN_LOSSLESS, RUNNING_FOREIGN},
+        run::DATA_UNREADABLE,
+    },
+};
 
 /// What a checkpoint's state file says it is, so a directory of something
 /// else is refused rather than read.
@@ -58,6 +67,66 @@ pub struct Position {
     pub running: Value,
 }
 
+impl Position {
+    /// The refusal `cause` of a resumed `objective` run whose checkpoint
+    /// records this position, with `values` its sentence names beside the
+    /// objective and the position.
+    fn refusal(
+        &self,
+        cause: &'static wisent_errors::Cause,
+        objective: &str,
+        values: &[(&str, &str)],
+    ) -> anyhow::Error {
+        let position = format!(
+            "pass {}, step {}, {} steps into the pass",
+            self.pass, self.step, self.within
+        );
+        let mut all = vec![("objective", objective), ("position", position.as_str())];
+        all.extend_from_slice(values);
+        refuse(cause, &all)
+    }
+
+    /// The steps of this pass a resumed run still has to take, of `plans`.
+    pub(crate) fn remaining<'a, T>(&self, plans: &'a [T], objective: &str) -> Result<&'a [T]> {
+        plans.get(self.within..).ok_or_else(|| {
+            self.refusal(
+                &POSITION_PAST_PASS,
+                objective,
+                &[
+                    ("within", &self.within.to_string()),
+                    ("pass", &self.pass.to_string()),
+                    ("steps", &plans.len().to_string()),
+                ],
+            )
+        })
+    }
+
+    /// The running report `objective` keeps, as the checkpoint carries it.
+    pub(crate) fn running<T: DeserializeOwned>(&self, objective: &str) -> Result<T> {
+        serde_json::from_value(self.running.clone()).map_err(|error| {
+            self.refusal(&RUNNING_FOREIGN, objective, &[("error", &error.to_string())])
+        })
+    }
+
+    /// The refusal of a resumed run at the end of `epoch` whose running
+    /// report records no step of it, which only a checkpoint can bring about.
+    pub(crate) fn epoch_lossless(&self, objective: &str, epoch: usize) -> anyhow::Error {
+        self.refusal(&EPOCH_LOSSLESS, objective, &[("epoch", &epoch.to_string())])
+    }
+
+    /// The refusal of a run that ends with no loss to report, which only a
+    /// resumed run can: one that was not resumed takes a step in every pass,
+    /// because `Preflight::check` refuses `self.epochs == 0`, the encoders
+    /// refuse `if encoded.is_empty()` (src/tune/encode.rs) and `batch::plan`
+    /// cuts a non-empty order with `order.chunks(batch * accumulation)`,
+    /// which yields at least one step and never an empty one.
+    pub(crate) fn unreported(resumed: Option<&Self>, objective: &str) -> anyhow::Error {
+        resumed
+            .expect("a run that was not resumed takes a step in every pass")
+            .refusal(&RUN_LOSSLESS, objective, &[])
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct State {
     kind: String,
@@ -69,10 +138,15 @@ struct State {
 
 /// A digest of a data file a run trains on, for its fingerprint.
 pub fn digest(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| {
-        format!(
-            "{} could not be read to fingerprint the run",
-            path.display()
+    let bytes = fs::read(path).map_err(|error| {
+        refuse(
+            &DATA_UNREADABLE,
+            &[
+                ("path", &path.display().to_string()),
+                ("state", &crate::failures::file::state(path)),
+                ("kind", &format!("{:?}", error.kind())),
+                ("error", &error.to_string()),
+            ],
         )
     })?;
     Ok(Blake2b512::digest(&bytes)
@@ -104,30 +178,38 @@ pub fn identity(
     Ok(identity)
 }
 
-/// One fingerprint field as a refusal names it.
-fn described(value: Option<&Value>) -> String {
-    match value {
-        Some(value) => value.to_string(),
-        None => "not recorded".to_owned(),
-    }
-}
-
-/// `latest` names one checkpoint beside it, never a path outside the run's
-/// output. The same check protects both restoration and predecessor removal.
-fn checkpoint_path(directory: &Path, name: &str) -> Result<PathBuf> {
+/// The step directory `directory`'s `latest` names, or `None` when nothing
+/// is there to read. `latest` names one checkpoint beside it, never a path
+/// outside the run's output; the same check protects both restoration and
+/// predecessor removal.
+fn latest(directory: &Path) -> Result<Option<PathBuf>> {
+    let pointer = directory.join(LATEST);
+    let shown = pointer.display().to_string();
+    let name = match fs::read_to_string(&pointer) {
+        Ok(name) => name,
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(file::read::refusal("the latest pointer", &pointer, &error));
+        }
+    };
     let name = name.trim();
     let mut components = Path::new(name).components();
     if !name.starts_with("step-")
         || !matches!(components.next(), Some(std::path::Component::Normal(_)))
         || components.next().is_some()
     {
-        bail!(
-            "{} names invalid checkpoint {name:?}; expected one step directory inside {}",
-            directory.join(LATEST).display(),
-            directory.display()
-        );
+        return Err(refuse(
+            &LATEST_INVALID,
+            &[
+                ("pointer", &shown),
+                ("name", &format!("{name:?}")),
+                ("directory", &directory.display().to_string()),
+            ],
+        ));
     }
-    Ok(directory.join(name))
+    Ok(Some(directory.join(name)))
 }
 
 impl Durable {
@@ -136,175 +218,5 @@ impl Durable {
         self.checkpoint
             .as_ref()
             .is_some_and(|(_, every)| step.is_multiple_of(every.get()))
-    }
-
-    /// Write the checkpoint of `optimizer` at `position`.
-    pub(crate) fn save(
-        &self,
-        optimizer: &AdamW,
-        fingerprint: &BTreeMap<String, Value>,
-        position: &Position,
-    ) -> Result<()> {
-        let Some((directory, _)) = &self.checkpoint else {
-            bail!("no --checkpoint directory was given, so no checkpoint can be written");
-        };
-        fs::create_dir_all(directory).with_context(|| {
-            format!(
-                "the checkpoint directory {} could not be created",
-                directory.display()
-            )
-        })?;
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .context("the operating system clock cannot name this checkpoint attempt")?
-            .as_nanos();
-        let name = format!("step-{}-{}-{nonce}", position.step, std::process::id());
-        let partial = directory.join(format!(".{name}.partial"));
-        fs::create_dir(&partial)
-            .with_context(|| format!("{} could not be created", partial.display()))?;
-        let mut tensors = HashMap::new();
-        for (tensor, Tracked { var, first, second }) in &optimizer.tracked {
-            tensors.insert(format!("var/{tensor}"), var.as_tensor().clone());
-            tensors.insert(format!("first/{tensor}"), first.as_tensor().clone());
-            tensors.insert(format!("second/{tensor}"), second.as_tensor().clone());
-        }
-        candle_core::safetensors::save(&tensors, partial.join(TENSORS))
-            .with_context(|| format!("the tensors of checkpoint {name} could not be written"))?;
-        let state = State {
-            kind: KIND.to_owned(),
-            written_by: format!("ster {}", env!("CARGO_PKG_VERSION")),
-            fingerprint: fingerprint.clone(),
-            position: position.clone(),
-            rates: optimizer.rates.clone(),
-        };
-        fs::write(partial.join(STATE), serde_json::to_vec_pretty(&state)?)
-            .with_context(|| format!("the state of checkpoint {name} could not be written"))?;
-        let finished = directory.join(&name);
-        fs::rename(&partial, &finished).with_context(|| {
-            format!(
-                "checkpoint {name} could not be moved into {}",
-                finished.display()
-            )
-        })?;
-        let latest = directory.join(LATEST);
-        let previous = match fs::read_to_string(&latest) {
-            Ok(previous) => Some(checkpoint_path(directory, &previous)?),
-            Err(error) if error.kind() == ErrorKind::NotFound => None,
-            Err(error) => bail!(
-                "{} could not be read to replace it: {error}",
-                latest.display()
-            ),
-        };
-        let pointer = directory.join(format!(".{name}.{LATEST}.partial"));
-        fs::write(&pointer, &name)
-            .with_context(|| format!("{} could not be written", pointer.display()))?;
-        fs::rename(&pointer, &latest)
-            .with_context(|| format!("{} could not name checkpoint {name}", latest.display()))?;
-        if let Some(previous) = previous.filter(|previous| *previous != finished) {
-            fs::remove_dir_all(&previous).with_context(|| {
-                format!(
-                    "the replaced checkpoint {} could not be removed",
-                    previous.display()
-                )
-            })?;
-        }
-        crate::workflow::progress(format!(
-            "checkpoint {} written at step {}",
-            finished.display(),
-            position.step
-        ));
-        Ok(())
-    }
-
-    /// Read the checkpoint `--resume` names into `optimizer` and answer where
-    /// the run stands, refusing a checkpoint of another run.
-    pub(crate) fn load(
-        &self,
-        optimizer: &mut AdamW,
-        fingerprint: &BTreeMap<String, Value>,
-    ) -> Result<Option<Position>> {
-        let Some(directory) = &self.resume else {
-            return Ok(None);
-        };
-        let pointer = directory.join(LATEST);
-        let name = fs::read_to_string(&pointer).with_context(|| {
-            format!(
-                "--resume {} holds no checkpoint: {} could not be read",
-                directory.display(),
-                pointer.display()
-            )
-        })?;
-        let checkpoint = checkpoint_path(directory, &name)?;
-        let state_path = checkpoint.join(STATE);
-        let state: State = serde_json::from_slice(
-            &fs::read(&state_path)
-                .with_context(|| format!("{} could not be read", state_path.display()))?,
-        )
-        .with_context(|| format!("{} is not a Ster checkpoint state", state_path.display()))?;
-        if state.kind != KIND {
-            bail!(
-                "{} says it is {:?}, not a {KIND}",
-                state_path.display(),
-                state.kind
-            );
-        }
-        let fields: BTreeSet<&String> =
-            fingerprint.keys().chain(state.fingerprint.keys()).collect();
-        let differing: Vec<String> = fields
-            .into_iter()
-            .filter(|field| fingerprint.get(*field) != state.fingerprint.get(*field))
-            .map(|field| {
-                format!(
-                    "{field} was {} and is {}",
-                    described(state.fingerprint.get(field)),
-                    described(fingerprint.get(field))
-                )
-            })
-            .collect();
-        if !differing.is_empty() {
-            bail!(
-                "checkpoint {} belongs to another run, so continuing it would train an adapter no single run produced: {}",
-                checkpoint.display(),
-                differing.join("; ")
-            );
-        }
-        let tensors_path = checkpoint.join(TENSORS);
-        let Some(device) = optimizer
-            .tracked
-            .values()
-            .next()
-            .map(|tracked| tracked.var.device().clone())
-        else {
-            bail!("this run trains no tensor, so no checkpoint can be read into it");
-        };
-        let mut stored = candle_core::safetensors::load(&tensors_path, &device)
-            .with_context(|| format!("{} could not be read", tensors_path.display()))?;
-        for (tensor, Tracked { var, first, second }) in &optimizer.tracked {
-            for (part, target) in [("var", var), ("first", first), ("second", second)] {
-                let key = format!("{part}/{tensor}");
-                let Some(value) = stored.remove(&key) else {
-                    bail!(
-                        "{} holds no {key}, which this run trains",
-                        tensors_path.display()
-                    );
-                };
-                target.set(&value).with_context(|| {
-                    format!("{key} of {} does not fit this run", tensors_path.display())
-                })?;
-            }
-        }
-        if let Some(extra) = stored.keys().next() {
-            bail!(
-                "{} holds {extra}, which this run does not train",
-                tensors_path.display()
-            );
-        }
-        optimizer.rates = state.rates;
-        crate::workflow::progress(format!(
-            "resuming from {} at step {}",
-            checkpoint.display(),
-            state.position.step
-        ));
-        Ok(Some(state.position))
     }
 }

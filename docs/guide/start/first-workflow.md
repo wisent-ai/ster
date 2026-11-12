@@ -17,7 +17,12 @@ copy under `$XDG_DATA_HOME/ster` (or `~/.local/share/ster`), and makes it the
 active set. Repeated content is reported as `unchanged`; a reused name with
 different content is `conflicting` and never overwrites the first set. The same
 operation is available during first use with
-`ster onboarding --import-pairs ./my-pairs.json`.
+`ster onboarding --import-pairs ./my-pairs.json`. `ster onboarding` keeps its
+progress in `$XDG_STATE_HOME/ster/onboarding.json` (or
+`~/.local/state/ster/onboarding.json`); a progress file of another journey or
+release, or one standing at a screen this journey does not hold, is refused
+with the field it found, and `ster onboarding --reset` starts the walkthrough
+anew ([refusals](../errors/onboarding.md)).
 
 If you do not have an existing set, create `pairs.json`:
 

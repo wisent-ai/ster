@@ -1,9 +1,14 @@
 use std::{borrow::Cow, collections::BTreeMap};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::Module;
 
+use crate::failures::{
+    model::t5::{self as t5, CONTEXT_EXCEEDED, inconsistent, overflow},
+    refuse,
+    tensor::computing,
+};
 use crate::model::{ForwardOutput, Mode, Pass, Readout, Route, SteeringPlan, input::Inputs};
 
 use super::{Cache, Model, attention::mask, cache::EncoderState};
@@ -20,83 +25,119 @@ impl Model {
     ) -> Result<ForwardOutput> {
         let start = cache.position()?;
         if index_position != start {
-            bail!(
-                "T5 decoder was given position {index_position}, but its cache holds {start} positions"
-            );
+            return Err(inconsistent(
+                &t5::POSITION_MISMATCH,
+                "decoder",
+                &format!("given position {index_position}; its cache holds {start} positions"),
+            ));
         }
         let (batch, queries) =
             self.rows(inputs.decoder, inputs.decoder_lengths, "decoder", start)?;
         if let Some(layers) = &cache.decoder {
             if layers.len() != self.decoder.len() {
-                bail!(
-                    "T5 decoder cache holds {} layer slots for {} blocks",
-                    layers.len(),
-                    self.decoder.len()
-                );
+                return Err(inconsistent(
+                    &t5::CACHE_LAYERS_MISMATCH,
+                    "decoder",
+                    &format!(
+                        "the cache holds {} layer slots for {} blocks",
+                        layers.len(),
+                        self.decoder.len()
+                    ),
+                ));
             }
             if inputs.decoder_lengths.is_some() || mode.pass == Pass::Differentiable {
-                bail!(
-                    "T5 batched training and scoring require a pass without a decoder key-value cache; this call keeps one"
-                );
+                return Err(inconsistent(
+                    &t5::CACHE_UNSUPPORTED,
+                    "decoder",
+                    &format!(
+                        "a key-value cache with padded rows or a differentiable pass ({:?}); batched training and scoring run without one",
+                        mode.pass
+                    ),
+                ));
             }
         }
         if inputs.decoder_lengths.is_some() && mode.readout == Readout::LastPosition {
-            bail!(
-                "a padded T5 batch cannot read one common last position, because its rows end at different positions"
-            );
+            return Err(inconsistent(
+                &t5::LAST_POSITION_PADDED,
+                "decoder",
+                "a padded batch asked for one common last position",
+            ));
         }
         // A capture is one sequence's final-token state, never a padded batch slab.
         // https://ster.wisent.com/docs/concept-activation
         if !captures.is_empty() && (batch != 1 || inputs.decoder_lengths.is_some()) {
-            bail!(
-                "T5 activation capture requires one unpadded decoder sequence; this batch has {batch} rows{}",
-                if inputs.decoder_lengths.is_some() {
-                    " and padding"
-                } else {
-                    ""
-                }
-            );
+            return Err(inconsistent(
+                &t5::CAPTURE_BATCHED,
+                "decoder",
+                &format!(
+                    "captures {captures:?} asked of {batch} rows (padded: {}); a capture reads one unpadded sequence",
+                    inputs.decoder_lengths.is_some()
+                ),
+            ));
         }
         if let Some(layer) = captures.iter().find(|layer| **layer >= self.decoder.len()) {
-            bail!(
-                "T5 capture layer {layer} is outside its {} decoder blocks",
-                self.decoder.len()
-            );
+            return Err(inconsistent(
+                &t5::CAPTURE_OUTSIDE,
+                "decoder",
+                &format!(
+                    "capture layer {layer} of {} decoder blocks",
+                    self.decoder.len()
+                ),
+            ));
         }
-        if steering.is_some_and(|plan| plan.hidden_size != self.config.hidden) {
-            bail!(
-                "T5 steering width does not match decoder hidden width {}",
-                self.config.hidden
-            );
+        if let Some(plan) = steering.filter(|plan| plan.hidden_size != self.config.hidden) {
+            return Err(inconsistent(
+                &t5::STEERING_WIDTH,
+                "decoder",
+                &format!(
+                    "steering {} wide on a decoder {} wide",
+                    plan.hidden_size, self.config.hidden
+                ),
+            ));
         }
         if inputs.encoder.is_none() && inputs.encoder_lengths.is_some() {
-            bail!(
-                "T5 encoder lengths were supplied without encoder token rows; pass the encoder tokens with their lengths"
-            );
+            return Err(inconsistent(
+                &t5::LENGTHS_WITHOUT_TOKENS,
+                "encoder",
+                "lengths given without encoder token rows",
+            ));
         }
         if let Some(tokens) = inputs.encoder {
             if cache.encoder.is_some() {
-                bail!(
-                    "T5 cache already contains encoder memory; start a new pass before replacing its source"
-                );
+                return Err(inconsistent(
+                    &t5::MEMORY_HELD,
+                    "encoder",
+                    "a source given to a cache that already holds encoder memory",
+                ));
             }
             cache.encoder = Some(self.encode(tokens, inputs.encoder_lengths)?);
         }
-        let encoder = cache
-            .encoder
-            .as_ref()
-            .context("T5 decoder requires source tokens or previously encoded source memory")?;
+        let Some(encoder) = cache.encoder.as_ref() else {
+            return Err(inconsistent(
+                &t5::MEMORY_MISSING,
+                "decoder",
+                "no source tokens and no encoder memory in the cache",
+            ));
+        };
         // Encoder and decoder batch axes must describe the same examples.
         // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
-        if encoder.hidden.dim(0)? != batch {
-            bail!(
-                "T5 encoder and decoder batch sizes differ: {} and {batch}",
-                encoder.hidden.dim(0)?
-            );
+        let encoded = encoder
+            .hidden
+            .dim(0)
+            .map_err(|error| computing("reading the T5 encoder memory's rows", error))?;
+        if encoded != batch {
+            return Err(inconsistent(
+                &t5::ROWS_MISMATCH,
+                "decoder",
+                &format!("{encoded} encoded rows for {batch} decoder rows"),
+            ));
         }
-        let keys = start
-            .checked_add(queries)
-            .context("T5 decoder position overflow")?;
+        let Some(keys) = start.checked_add(queries) else {
+            return Err(overflow(
+                "the decoder's keys",
+                &format!("position {start} plus {queries} queries"),
+            ));
+        };
         let bias = self.decoder_bias.forward(queries, keys, start)?;
         let causal = mask::causal(
             inputs.decoder_lengths,
@@ -124,7 +165,7 @@ impl Model {
                     slot,
                     mode,
                 )
-                .with_context(|| format!("failed in T5 decoder block {index}"))?;
+                .map_err(|error| computing(&format!("running T5 decoder block {index}"), error))?;
             if captures.binary_search(&index).is_ok() {
                 // Ster captures the last position after the block, before its intervention.
                 // https://ster.wisent.com/docs/concept-activation
@@ -136,11 +177,10 @@ impl Model {
             }
             if let Some(plan) = steering {
                 if let Some(vector) = plan.vector(index) {
+                    let step = format!("adding the steering vector at T5 decoder block {index}");
                     hidden = hidden
                         .broadcast_add(&(vector * plan.strength)?)
-                        .with_context(|| {
-                            format!("failed to apply T5 decoder steering at layer {index}")
-                        })?;
+                        .map_err(|error| computing(&step, error))?;
                 }
             }
         }
@@ -184,7 +224,7 @@ impl Model {
         for (index, block) in self.encoder.iter().enumerate() {
             hidden = block
                 .forward(&hidden, &bias, mask.as_ref(), None, None, mode)
-                .with_context(|| format!("failed in T5 encoder block {index}"))?;
+                .map_err(|error| computing(&format!("running T5 encoder block {index}"), error))?;
         }
         let hidden = self.encoder_norm.forward(&hidden, Pass::Inference)?;
         let cross_attention = self
@@ -192,8 +232,11 @@ impl Model {
             .iter()
             .enumerate()
             .map(|(index, block)| {
-                block.cross_memory(&hidden).with_context(|| {
-                    format!("failed to project T5 encoder memory for decoder block {index}")
+                block.cross_memory(&hidden).map_err(|error| {
+                    computing(
+                        &format!("projecting the T5 encoder memory for decoder block {index}"),
+                        error,
+                    )
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -225,26 +268,45 @@ impl Model {
         stack: &str,
         start: usize,
     ) -> Result<(usize, usize)> {
-        let (batch, sequence) = tokens
-            .dims2()
-            .with_context(|| format!("T5 {stack} tokens must have batch and sequence axes"))?;
+        let (batch, sequence) = tokens.dims2().map_err(|error| {
+            computing(
+                &format!("reading the T5 {stack} tokens' batch and sequence axes"),
+                error,
+            )
+        })?;
         // Attention requires both a real example and at least one visible token.
         // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/modeling_t5.py
         if batch == 0 || sequence == 0 {
-            bail!("T5 {stack} input requires nonempty token rows");
+            return Err(inconsistent(
+                &t5::ROWS_EMPTY,
+                stack,
+                &format!(
+                    "{batch} token rows of {sequence} tokens; a pass reads at least one token"
+                ),
+            ));
         }
-        if lengths.is_some_and(|lengths| lengths.len() != batch) {
-            bail!("T5 {stack} lengths do not describe its {batch} token rows");
+        if let Some(lengths) = lengths.filter(|lengths| lengths.len() != batch) {
+            return Err(inconsistent(
+                &t5::LENGTHS_COUNT,
+                stack,
+                &format!("{} lengths for {batch} token rows", lengths.len()),
+            ));
         }
-        let end = start
-            .checked_add(sequence)
-            .context("T5 sequence position overflow")?;
-        if let Some(limit) = self.config.context_length {
-            if end > limit {
-                bail!(
-                    "T5 {stack} sequence reaches position {end}, beyond its declared n_positions={limit}"
-                );
-            }
+        let Some(end) = start.checked_add(sequence) else {
+            return Err(overflow(
+                &format!("the {stack}'s positions"),
+                &format!("position {start} plus {sequence} tokens"),
+            ));
+        };
+        if let Some(limit) = self.config.context_length.filter(|limit| end > *limit) {
+            return Err(refuse(
+                &CONTEXT_EXCEEDED,
+                &[
+                    ("stack", stack),
+                    ("end", &end.to_string()),
+                    ("limit", &limit.to_string()),
+                ],
+            ));
         }
         Ok((batch, sequence))
     }

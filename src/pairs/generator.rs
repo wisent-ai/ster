@@ -12,7 +12,7 @@ use super::synthesis::SynthesisOptions;
 #[derive(Clone, Copy)]
 pub enum Generator<'a> {
     Local(&'a Runtime),
-    Gateway(&'a crate::brama::Gateway),
+    Inference(&'a crate::inference::Inference),
 }
 
 impl Generator<'_> {
@@ -20,7 +20,7 @@ impl Generator<'_> {
     pub fn label(&self) -> String {
         match self {
             Self::Local(runtime) => format!("local:{}", runtime.model_id),
-            Self::Gateway(gateway) => format!("{}:{}", gateway.provider(), gateway.model()),
+            Self::Inference(writer) => format!("{}:{}", writer.provider(), writer.model()),
         }
     }
 
@@ -34,11 +34,11 @@ impl Generator<'_> {
     /// index makes each call an independent draw while keeping the whole run
     /// reproducible from the one seed the caller supplied.
     ///
-    /// Gateway: neither the seed nor `top_p` travels. Brama's chat request
-    /// carries `max_tokens` and `temperature` and has no field for either, and
-    /// the provider behind the route owns its own sampler — so a hosted run is
-    /// not reproducible from `--seed`, and the running dedupe is what keeps
-    /// repeated draws out of the set.
+    /// Inference: neither the seed nor `top_p` travels. The chat request
+    /// Stado's alternatives take carries `max_tokens` and `temperature` and
+    /// has no field for either, and the alternative behind the route owns its
+    /// own sampler — so a hosted run is not reproducible from `--seed`, and
+    /// the running dedupe is what keeps repeated draws out of the set.
     pub(super) fn generate(
         &self,
         prompt: &str,
@@ -51,9 +51,9 @@ impl Generator<'_> {
                     seed: options.generation.seed.wrapping_add(call),
                     ..options.generation
                 };
-                runtime.generate(prompt, None, generation)?
+                runtime.generate(prompt, generation)?
             }
-            Self::Gateway(gateway) => gateway.complete(
+            Self::Inference(writer) => writer.complete(
                 prompt,
                 options.generation.max_new_tokens,
                 options.generation.temperature,

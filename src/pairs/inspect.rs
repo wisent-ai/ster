@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::{
     artifact::PairSet,
+    failures::{pairs::inspect::RATIO_INVALID, refuse},
     pairs::quality::dedupe::{self, DedupeOptions, Duplicate},
     pairs::quality::diversity,
 };
@@ -24,6 +25,22 @@ pub struct InspectOptions {
     /// a direction trained on consistently longer positives encodes length,
     /// not the trait.
     pub unbalanced_ratio: f64,
+}
+
+impl InspectOptions {
+    /// The caller's settings, checked before any set is read: the
+    /// near-duplicate settings, and a ratio of 1 or more, since a pair's
+    /// longer side over its shorter one is never below 1.
+    pub fn validate(&self) -> Result<()> {
+        self.dedupe.validate()?;
+        if self.unbalanced_ratio.is_nan() || self.unbalanced_ratio < 1.0 {
+            return Err(refuse(
+                &RATIO_INVALID,
+                &[("ratio", &self.unbalanced_ratio.to_string())],
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +71,7 @@ pub struct SetReport {
 /// Audit a pair set without loading a model. Every judgement here is textual,
 /// which is why the desktop app can show it the moment a file is opened.
 pub fn inspect(pairs: &PairSet, options: &InspectOptions) -> Result<SetReport> {
+    options.validate()?;
     // The set inspected is the set `PairSet::load` admits: at least one pair,
     // and no side blank after trimming, so every side has a character and
     // `length_ratio` never divides by zero.

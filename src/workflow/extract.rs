@@ -3,15 +3,23 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::failures::{file, workflow::prompts as causes};
 use crate::runtime::Runtime;
 
 use super::progress;
 
-pub fn extract(runtime: &Runtime, input: &Path, output: &Path, layers: &[usize]) -> Result<()> {
-    let prompts = PromptSet::load(input)?;
+/// What the written file is, for the `ster.file` refusals that name it.
+const OUTPUT: &str = "the activations ster extract writes";
+
+pub fn extract(
+    runtime: &Runtime,
+    prompts: &PromptSet,
+    output: &Path,
+    layers: &[usize],
+) -> Result<()> {
     let mut records = Vec::with_capacity(prompts.prompts.len());
     for (index, prompt) in prompts.prompts.iter().enumerate() {
         progress(format!(
@@ -20,6 +28,27 @@ pub fn extract(runtime: &Runtime, input: &Path, output: &Path, layers: &[usize])
             prompts.prompts.len()
         ));
         let activations = runtime.activations(prompt, layers)?;
+        for (layer, values) in &activations {
+            if let Some((position, value)) = values
+                .iter()
+                .enumerate()
+                .find(|(_, value)| !value.is_finite())
+            {
+                return Err(crate::failures::refuse(
+                    &causes::STATES_NOT_FINITE,
+                    &[
+                        ("index", &index.to_string()),
+                        ("prompts", &prompts.prompts.len().to_string()),
+                        ("layer", &layer.to_string()),
+                        ("position", &position.to_string()),
+                        ("width", &values.len().to_string()),
+                        ("value", &value.to_string()),
+                        ("precision", runtime.precision().name()),
+                        ("output", &output.display().to_string()),
+                    ],
+                ));
+            }
+        }
         records.push(ActivationRecord {
             prompt: prompt.clone(),
             layers: activations.into_iter().collect(),
@@ -33,11 +62,20 @@ pub fn extract(runtime: &Runtime, input: &Path, output: &Path, layers: &[usize])
         hidden_size: runtime.hidden_size(),
         records,
     };
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)?;
+    let left = format!(
+        "nothing was written; the {} prompts were read and are not kept",
+        prompts.prompts.len()
+    );
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            file::write::refusal("creating the directory of", OUTPUT, output, &left, &error)
+        })?;
     }
-    fs::write(output, serde_json::to_vec(&artifact)?)
-        .with_context(|| format!("failed to write {}", output.display()))
+    fs::write(output, crate::json::compact(&artifact).into_bytes())
+        .map_err(|error| file::write::refusal("writing", OUTPUT, output, &left, &error))
 }
 
 /// A bare list of prompts: `{"prompts": ["…"]}`.
@@ -53,11 +91,19 @@ pub struct PromptSet {
 
 impl PromptSet {
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let role = "the prompt set";
+        let bytes = fs::read(path)
+            .map_err(|error| file::read::refusal_or(&causes::MISSING, role, path, &error))?;
         let value: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid prompt JSON in {}", path.display()))?;
+            .map_err(|error| file::json::refusal(role, causes::FORM, path, &error))?;
         if value.prompts.is_empty() {
-            bail!("prompt set {} contains no prompts", path.display());
+            return Err(crate::failures::refuse(
+                &causes::NONE,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("state", &file::state(path)),
+                ],
+            ));
         }
         Ok(value)
     }

@@ -2,11 +2,18 @@
 //! and its adapters, the optimizer over exactly what the run created, and the
 //! sentences an operator sees when a request cannot be trained.
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{Device, Tensor, Var};
 use candle_nn::VarMap;
+use wisent_errors::Cause;
 
-use crate::{artifact::PairSet, lora, runtime::Runtime, workflow};
+use crate::failures::{
+    refuse,
+    tune::settings::{
+        ACCUMULATION_NONE, BATCH_NONE, LEARNING_RATE_UNUSABLE, PASSES_NONE, SEQUENCE_SHORT,
+    },
+};
+use crate::{lora, runtime::Runtime, workflow};
 
 // MARK: - Shared trainer setup
 
@@ -60,40 +67,46 @@ pub(crate) struct Trainable {
 }
 
 impl Preflight<'_> {
+    /// Refuses the numbers no run can train with, before any model, data or
+    /// checkpoint is read; [`Self::open`] checks them again for a caller
+    /// that went straight to the trainer.
+    pub(crate) fn check(&self) -> Result<()> {
+        let refused = |cause: &'static Cause, value: &str| -> Result<()> {
+            Err(refuse(
+                cause,
+                &[
+                    ("subject", self.subject),
+                    ("pass", self.pass),
+                    ("unit", self.unit),
+                    ("value", value),
+                ],
+            ))
+        };
+        if self.epochs == 0 {
+            return refused(&PASSES_NONE, "0");
+        }
+        if self.accumulation == 0 {
+            return refused(&ACCUMULATION_NONE, "0");
+        }
+        if self.batch == Some(0) {
+            return refused(&BATCH_NONE, "0");
+        }
+        if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
+            return refused(&LEARNING_RATE_UNUSABLE, &self.learning_rate.to_string());
+        }
+        if self.max_sequence < 2 {
+            return refused(&SEQUENCE_SHORT, &self.max_sequence.to_string());
+        }
+        Ok(())
+    }
+
     pub(crate) fn open(
         &self,
         runtime: &Runtime,
         varmap: &VarMap,
         spec: &lora::Spec,
     ) -> Result<Trainable> {
-        if self.epochs == 0 {
-            bail!("{} requires at least one {}", self.subject, self.pass);
-        }
-        if self.accumulation == 0 {
-            bail!(
-                "{} requires an accumulation of at least one {}",
-                self.subject,
-                self.unit
-            );
-        }
-        if self.batch == Some(0) {
-            bail!(
-                "{} requires a batch of at least one {}",
-                self.subject,
-                self.unit
-            );
-        }
-        if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
-            bail!(
-                "{} requires a finite learning rate above zero",
-                self.subject
-            );
-        }
-        if self.max_sequence < 2 {
-            bail!(
-                "max_sequence must be at least two tokens, so that one token can predict another"
-            );
-        }
+        self.check()?;
         let layer_count = runtime.layer_count();
         spec.validate(layer_count)?;
         let spec = spec.resolved(layer_count);
@@ -102,10 +115,13 @@ impl Preflight<'_> {
         // and never registered, so the map holds the adapters and, on a reward
         // run, the scalar head. Handing the whole map to AdamW is therefore the
         // same statement as "train only what this run created".
+        // `Runtime::load_trainable` refuses a spec without targets and layers,
+        // so the map it returns always holds adapters.
         let vars = varmap.all_vars();
-        if vars.is_empty() {
-            bail!("this run has no trainable adapters; load the model with load_trainable");
-        }
+        assert!(
+            !vars.is_empty(),
+            "a trainer is handed the VarMap Runtime::load_trainable filled"
+        );
         let tensors = vars.len();
         let parameters: usize = vars.iter().map(|var| var.elem_count()).sum();
         workflow::progress(format!(
@@ -145,25 +161,20 @@ pub(crate) fn token_logprobs(
     start: usize,
     device: &Device,
 ) -> Result<Tensor> {
-    if start == 0 {
-        bail!(
-            "a scored sequence must begin with at least one context token; it starts scoring at 0"
-        );
-    }
-    let scored = ids.len().saturating_sub(start);
-    if scored == 0 {
-        bail!(
-            "a scored sequence must end with at least one predicted token; all {} tokens are context",
-            ids.len()
-        );
-    }
+    // Every caller encodes a context token before the scored window and at
+    // least one token in it, and refuses an input that encodes without
+    // either before its first forward pass.
+    assert!(
+        start > 0 && start < ids.len(),
+        "a scored sequence holds a context token and a predicted token"
+    );
+    let scored = ids.len() - start;
     let (_, positions, vocab) = logits.dims3()?;
-    if positions != ids.len() {
-        bail!(
-            "the forward pass returned {positions} positions for {} tokens",
-            ids.len()
-        );
-    }
+    assert_eq!(
+        positions,
+        ids.len(),
+        "the forward pass answers one position per token"
+    );
     // The window is promoted to F32 before the log-softmax whatever the base
     // weights were mapped at. A log-softmax is a max, an exponential, a sum
     // across the whole vocabulary and a logarithm; in half precision the sum
@@ -199,75 +210,4 @@ pub(crate) fn sequence_logprob(
 pub(crate) fn softplus(x: &Tensor) -> Result<Tensor> {
     let tail = ((x.abs()?.neg()?.exp()? + 1.0)?).log()?;
     Ok((x.relu()? + tail)?)
-}
-
-/// One preference pair, tokenized.
-pub(crate) struct EncodedPair {
-    /// The pair's index in the original set, so a refusal names the entry the
-    /// operator wrote rather than a position in a filtered list.
-    pub index: usize,
-    pub chosen: Vec<u32>,
-    pub rejected: Vec<u32>,
-}
-
-/// Tokenizes both sides of every pair, dropping the ones that do not fit.
-///
-/// Over-long pairs are skipped rather than truncated for the reason supervised
-/// fine-tuning skips over-long examples: a cut sequence is a different
-/// sequence, and preferring a truncation of the chosen side over a truncation
-/// of the rejected side is not the preference the operator stated. Both sides
-/// go or neither does — half a pair states no preference at all.
-///
-/// Each side goes through `Runtime::encode_response` rather than the raw
-/// encoder, so a run that asked for the model's chat template compares two
-/// assistant turns wearing the markers inference will put around them, and a
-/// run that did not gets byte-identical ids to every release before this one.
-///
-/// Tokenizing up front rather than per epoch is what makes the skip report
-/// complete before the first gradient is taken.
-pub(crate) fn encode_pairs(
-    runtime: &Runtime,
-    pairs: &PairSet,
-    limit: usize,
-) -> Result<Vec<EncodedPair>> {
-    let mut encoded = Vec::with_capacity(pairs.pairs.len());
-    for (index, pair) in pairs.pairs.iter().enumerate() {
-        let chosen = runtime
-            .encode_response(&pair.positive)
-            .with_context(|| format!("pair {index} chosen side could not be encoded"))?;
-        let rejected = runtime
-            .encode_response(&pair.negative)
-            .with_context(|| format!("pair {index} rejected side could not be encoded"))?;
-        for (side, ids) in [("chosen", &chosen), ("rejected", &rejected)] {
-            if ids.len() < 2 {
-                bail!(
-                    "pair {index} {side} side encodes to one token, so there is nothing to predict"
-                );
-            }
-        }
-        let longest = chosen.len().max(rejected.len());
-        if longest > limit {
-            workflow::progress(format!(
-                "skipping pair {index}: {longest} tokens exceed the {limit} token limit"
-            ));
-            continue;
-        }
-        encoded.push(EncodedPair {
-            index,
-            chosen,
-            rejected,
-        });
-    }
-    if encoded.is_empty() {
-        bail!("every pair is longer than the sequence limit, so there is nothing to train on");
-    }
-    Ok(encoded)
-}
-
-/// How a pair set names itself in a refusal when it carries no trait name.
-pub(crate) fn pair_set_label(pairs: &PairSet) -> String {
-    match pairs.trait_name.trim() {
-        "" => "(unnamed)".to_owned(),
-        name => name.to_owned(),
-    }
 }

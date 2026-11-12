@@ -66,10 +66,14 @@ error. Added-token records require every native flag, unique nonempty content
 and no extra fields; supplying an ID is refused rather than silently discarded.
 The producer checks both the native admission count and stored identities, so
 duplicate or conflicting metadata cannot disappear into native deduplication.
-Diagnostics retain the failed operation, actual path or token and the
-native cause. Failed creation removes only its owned output file; a cleanup
-failure names that operation as well. Created parent directories are not
-claimed to be rolled back.
+Each refusal names the failed step, the actual path, token and position,
+and the native cause; every one is declared on
+[errors/tokenizer.md](../errors/tokenizer.md) (`ster errors show
+ster.tokenizer.declaration` and `ster.tokenizer.create`). An output path
+that is not UTF-8 is a usage refusal (exit 2) checked before the
+declaration is read. Failed creation removes only its owned output file and
+says so; a cleanup failure names what stands at the path and the `rm` that
+removes it. Created parent directories are not claimed to be rolled back.
 
 ## Compose it inside a checkpoint
 

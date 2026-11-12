@@ -28,7 +28,7 @@ REPORT="$ROOT/report.txt"
 SRC="$ROOT/source"
 WS="$ROOT/data/ster"
 export HOME="$ROOT/home" XDG_DATA_HOME="$ROOT/data" XDG_STATE_HOME="$ROOT/state"
-echo "revision: $(git rev-parse HEAD)$(git diff --quiet || echo ' (dirty)')" >"$REPORT"
+echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-locks diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 trap 'chmod -R u+w "$ROOT" 2>/dev/null || true' EXIT
 
@@ -75,7 +75,7 @@ a_workspace_without_a_home_is_refused() {
   PREFIX="env -u HOME -u XDG_DATA_HOME"
   run 1 workspace show
   PREFIX=
-  said "locating the Ster workspace: neither XDG_DATA_HOME nor HOME is set; observed: XDG_DATA_HOME and HOME are unset or empty; fix: set XDG_DATA_HOME, or HOME, to the directory the workspace lives under"
+  said "locating the Ster workspace: neither XDG_DATA_HOME nor HOME is set; observed: XDG_DATA_HOME is unset; HOME is unset; fix: set XDG_DATA_HOME, or HOME, to the directory the workspace lives under"
   [ ! -e "$WS" ] || fail "a refused run wrote $WS"
   passed a_workspace_without_a_home_is_refused
 }
@@ -84,8 +84,7 @@ an_unreadable_workspace_is_refused() {
   fresh
   mkdir -p "$WS/workspace.json"
   run 1 workspace show
-  said "reading the Ster workspace $WS/workspace.json: the file cannot be read: "
-  said "observed: path: $WS/workspace.json; fix: make $WS/workspace.json a file this account can read"
+  said "reading the Ster workspace $WS/workspace.json: $WS/workspace.json is a directory, and the Ster workspace is one file; observed: path: $WS/workspace.json (a directory, "
   passed an_unreadable_workspace_is_refused
 }
 
@@ -94,7 +93,8 @@ a_workspace_that_is_not_its_document_is_refused() {
   mkdir -p "$WS"
   printf '{' >"$WS/workspace.json"
   run 1 workspace show
-  said "reading the Ster workspace $WS/workspace.json: it is not a Ster workspace document; observed: invalid Ster workspace JSON in $WS/workspace.json: EOF while parsing an object at line 1 column 1; fix: restore $WS/workspace.json from a copy, or move it aside and import the pair sets again with \`ster workspace import\`"
+  said "reading the Ster workspace $WS/workspace.json: it ends before its JSON value closes: it was cut short while it was written (a full disk, a process stopped midway); observed: path: $WS/workspace.json (a file, 1 bytes, "
+  said "; fix: write the Ster workspace again; it is the record Ster writes itself (restore it from a copy, or move it aside and import the pair sets again with \`ster workspace import\`)"
   check "the document is left as it was" "$(cat "$WS/workspace.json")" "{"
   passed a_workspace_that_is_not_its_document_is_refused
 }
@@ -114,8 +114,9 @@ a_workspace_under_a_file_is_refused() {
   PREFIX="env XDG_DATA_HOME=$ROOT/afile"
   run 1 workspace import "$SRC/calm.json"
   PREFIX=
-  said "creating the Ster workspace directory $ROOT/afile/ster/pairs: "
-  said "observed: the workspace lives under $ROOT/afile/ster; fix: point XDG_DATA_HOME, or HOME, at a directory this account can write"
+  said "creating the Ster workspace directory $ROOT/afile/ster/pairs: the path runs through a file: $ROOT/afile is not a directory, so nothing can be created below it; observed: path: $ROOT/afile/ster/pairs; $ROOT/afile: a file, 0 bytes, "
+  said "; nothing was written under $ROOT/afile/ster; the system answered: "
+  said "; fix: name a path that runs through directories only, or move $ROOT/afile out of the way"
   passed a_workspace_under_a_file_is_refused
 }
 
@@ -127,8 +128,10 @@ a_read_only_workspace_is_refused_and_the_import_undone() {
   run 1 workspace import "$SRC/other.json" --name second
   chmod 755 "$WS"
   said "importing $SRC/other.json as second was undone: $WS/pairs/second.json was removed"
-  said "writing the Ster workspace $WS/workspace.json: creating $WS/workspace.json."
-  said "observed: nothing was written; fix: make $WS writable for this account and run the command again"
+  said "creating the draft of the Ster workspace $WS/workspace.json."
+  said ".tmp: this account may not change $WS or $WS/workspace.json."
+  said "; nothing was written; $WS/workspace.json is unchanged; the system answered: "
+  said "; fix: give this account write access to $WS (\`chmod u+w $WS\` as its owner), or name a path in a directory it may write"
   [ ! -e "$WS/pairs/second.json" ] || fail "the undone import left $WS/pairs/second.json"
   check "the workspace document is unchanged" "$(cat "$WS/workspace.json")" "$before"
   passed a_read_only_workspace_is_refused_and_the_import_undone
@@ -176,6 +179,9 @@ a_taken_name_is_refused_and_the_first_set_kept() {
   STDIN=
   check "the request's result carries the cause" "$(echo "$out" | jq -sr 'last | .json.cause.id')" "name-conflict"
   check "the cause names the CLI's exit status" "$(echo "$out" | jq -sr 'last | .json.cause.exit')" "1"
+  check "the cause names the functionality that declares it" "$(echo "$out" | jq -sr 'last | .json.cause.functionality')" "ster.workspace.import"
+  check "the cause links its line on the workspace page" "$(echo "$out" | jq -sr 'last | .json.cause.docs')" \
+    "https://github.com/wisent-ai/ster/blob/main/docs/guide/errors/workspace.md#ster-workspace-import-name-conflict"
   check "the first set keeps its pairs" "$(jq '.pairs | length' "$WS/pairs/calm.json")" "8"
   check "the workspace document is unchanged" "$(cat "$WS/workspace.json")" "$before"
   passed a_taken_name_is_refused_and_the_first_set_kept
@@ -225,8 +231,9 @@ a_copy_that_cannot_be_deleted_keeps_the_set() {
   chmod 555 "$WS/pairs"
   run 1 workspace remove calm
   chmod 755 "$WS/pairs"
-  said "removing pair set calm: its copy $WS/pairs/calm.json cannot be deleted: "
-  said "observed: the workspace still holds calm; nothing was changed; fix: make $WS/pairs writable for this account and run \`ster workspace remove calm\` again"
+  said "removing the copy of pair set calm $WS/pairs/calm.json: this account may not change $WS/pairs or $WS/pairs/calm.json: their permission bits or owner keep this account out; observed: path: $WS/pairs/calm.json (a file, "
+  said "; the workspace still holds calm; nothing was changed; the system answered: "
+  said "; fix: give this account write access to $WS/pairs (\`chmod u+w $WS/pairs\` as its owner), or name a path in a directory it may write"
   check "the workspace still holds calm" "$(jq -r '.pair_sets[].id' "$WS/workspace.json")" "calm"
   check "calm is still active" "$(jq -r .active_pair_set "$WS/workspace.json")" "calm"
   [ -f "$WS/pairs/calm.json" ] || fail "the kept set lost its copy"

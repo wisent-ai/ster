@@ -19,12 +19,18 @@ use std::{
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, PoisonError},
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use candle_core::{DType, Device, Shape, Tensor, quantized::gguf_file};
 use candle_nn::{Init, var_builder::SimpleBackend};
+
+use crate::failures::{
+    file,
+    model::weights::{GGUF_TENSOR_UNREADABLE, GGUF_TRUNCATED, GGUF_UNREADABLE},
+    refuse, refuse_candle,
+};
 
 /// One GGUF file, its header read once, its tensors read on demand.
 pub struct GgufWeights {
@@ -35,11 +41,24 @@ pub struct GgufWeights {
 
 impl GgufWeights {
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("failed to open GGUF weights {}", path.display()))?;
-        let mut reader = BufReader::new(file);
-        let content = gguf_file::Content::read(&mut reader)
-            .with_context(|| format!("{} is not a GGUF file Ster can read", path.display()))?;
+        let opened = File::open(path)
+            .map_err(|error| file::read::refusal("the GGUF weights", path, &error))?;
+        let mut reader = BufReader::new(opened);
+        let content = gguf_file::Content::read(&mut reader).map_err(|error| {
+            let cause = match file::tensors::io(&error) {
+                Some(io) if io.kind() == std::io::ErrorKind::UnexpectedEof => &GGUF_TRUNCATED,
+                Some(io) => return file::read::refusal("the GGUF weights", path, io),
+                None => &GGUF_UNREADABLE,
+            };
+            refuse(
+                cause,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("state", &file::state(path)),
+                    ("error", &error.to_string()),
+                ],
+            )
+        })?;
         Ok(Self {
             path: path.to_owned(),
             content,
@@ -47,23 +66,32 @@ impl GgufWeights {
         })
     }
 
-    /// The tensor the decoder names `name`, dequantized on `device`.
+    /// The tensor the decoder names `name`, dequantized on `device`. One the
+    /// file does not list is Candle's `CannotFindTensor`, which the load
+    /// refuses as weights that do not fit, naming it; one it lists and
+    /// cannot read is the file unreadable.
     fn load(&self, name: &str, device: &Device) -> candle_core::Result<Tensor> {
         let stored = stored_name(name);
-        let Ok(mut reader) = self.reader.lock() else {
-            candle_core::bail!(
-                "the reader of {} was left broken by an earlier failed read",
-                self.path.display()
-            );
-        };
+        if !self.content.tensor_infos.contains_key(&stored) {
+            return Err(candle_core::Error::CannotFindTensor { path: stored }.bt());
+        }
+        // A read seeks to the tensor's own offset before it reads, so a
+        // reader another thread left mid-read by panicking is whole again.
+        let mut reader = self.reader.lock().unwrap_or_else(PoisonError::into_inner);
         let quantized = self
             .content
             .tensor(&mut *reader, &stored, device)
             .map_err(|error| {
-                candle_core::Error::Msg(format!(
-                    "{} holds no {stored} (asked for as {name}): {error}",
-                    self.path.display()
-                ))
+                refuse_candle(
+                    &GGUF_TENSOR_UNREADABLE,
+                    &[
+                        ("path", &self.path.display().to_string()),
+                        ("state", &file::state(&self.path)),
+                        ("tensor", &stored),
+                        ("name", name),
+                        ("error", &error.to_string()),
+                    ],
+                )
             })?;
         quantized.dequantize(device)
     }
@@ -80,13 +108,7 @@ impl SimpleBackend for GgufWeights {
     ) -> candle_core::Result<Tensor> {
         let tensor = self.load(name, device)?;
         if tensor.shape() != &shape {
-            candle_core::bail!(
-                "{} stores {} with shape {:?}; the decoder's config expects {:?}",
-                self.path.display(),
-                stored_name(name),
-                tensor.shape(),
-                shape
-            );
+            return Err(crate::model::misshapen(&stored_name(name), shape, tensor.shape()));
         }
         tensor.to_dtype(dtype)
     }

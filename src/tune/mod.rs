@@ -36,6 +36,7 @@
 mod artifact;
 mod batch;
 mod checkpoint;
+mod encode;
 mod examples;
 mod objective;
 mod preflight;

@@ -19,16 +19,19 @@
 use std::num::NonZeroUsize;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
+mod blocks;
+
 use crate::model::{
-    Architecture, BlockIndexSpec, ExpertLayout, QueryKeyNorm, Scoring, SharedExpert, SharedForm,
+    Architecture, DenseClamp, ExpertLayout, QueryKeyNorm, Scoring, SharedExpert, SharedForm,
     SwigluLimit,
 };
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::{every_layer, flagged_layers};
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{flag, flag_or, number, text, whole};
+use blocks::{block_index, index_fits};
 
 /// Where [`fill_keys`] keeps the `hidden_act` the config states, which it
 /// replaces with the pointwise `silu` Transformers' `MiniMaxM3VLTextConfig`
@@ -39,70 +42,88 @@ const STATED_ACTIVATION: &str = "minimax_m3_hidden_act";
 /// The Llama keys of a MiniMax-M3 config: its `intermediate_size` is each
 /// routed expert's width and `dense_intermediate_size` its dense layers',
 /// which becomes the Llama key.
-pub(in crate::runtime::load::family) fn fill_keys(raw: &mut Value) {
+pub(in crate::runtime::load::family) fn fill_keys(raw: &mut Value, path: &Path) -> Result<()> {
     let experts = raw.get("intermediate_size").cloned();
-    let dense = raw
-        .get("dense_intermediate_size")
-        .filter(|width| !width.is_null())
-        .cloned();
+    let dense = whole(raw, "dense_intermediate_size", path)?;
     let activation = raw.get("hidden_act").cloned();
     let Some(object) = raw.as_object_mut() else {
-        return;
+        return Ok(());
     };
     if let Some(experts) = experts {
         object.entry("moe_intermediate_size").or_insert(experts);
     }
     if let Some(dense) = dense {
-        object.insert("intermediate_size".to_owned(), dense);
+        object.insert("intermediate_size".to_owned(), Value::from(dense));
     }
     if let Some(activation) = activation {
         object.insert(STATED_ACTIVATION.to_owned(), activation);
         object.insert("hidden_act".to_owned(), Value::from("silu"));
     }
+    Ok(())
 }
 
+/// `query_heads` is the Llama reading's `num_attention_heads`.
 pub(in crate::runtime::load::family) fn family(
     raw: &Value,
     layers: usize,
+    query_heads: usize,
     architecture: &mut Architecture,
     path: &Path,
 ) -> Result<()> {
-    match text(raw, STATED_ACTIVATION) {
+    match text(raw, STATED_ACTIVATION, path)? {
         Some("swigluoai") => {}
-        other => bail!(
+        other => refused!(
+            Unimplemented,
+            in raw,
+            [STATED_ACTIVATION],
             "{} declares hidden_act {other:?}; MiniMax-M3's feed-forwards are swigluoai",
             path.display()
         ),
     }
-    if flag(raw, "attention_output_gate") {
-        bail!(
+    if flag(raw, "attention_output_gate", path)? {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["attention_output_gate"],
             "{} declares attention_output_gate; Ster implements MiniMax-M3 without the attention output gate, as vLLM and Transformers do",
             path.display()
         );
     }
-    if raw.get("use_gemma_norm").and_then(Value::as_bool) == Some(false) {
-        bail!(
+    if !flag_or(raw, "use_gemma_norm", true, path)? {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["use_gemma_norm"],
             "{} declares use_gemma_norm false; MiniMax-M3's norms scale by their weight plus one",
             path.display()
         );
     }
     architecture.norm_offset = true;
-    if raw.get("use_qk_norm").and_then(Value::as_bool) == Some(false) {
-        bail!(
+    if !flag_or(raw, "use_qk_norm", true, path)? {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["use_qk_norm"],
             "{} declares use_qk_norm false; MiniMax-M3 norms every query and key head",
             path.display()
         );
     }
-    match text(raw, "qk_norm_type") {
+    match text(raw, "qk_norm_type", path)? {
         None | Some("per_head") => architecture.query_key_norm = QueryKeyNorm::PerHead,
-        Some(other) => bail!(
+        Some(other) => refused!(
+            Unimplemented,
+            in raw,
+            ["qk_norm_type"],
             "{} declares qk_norm_type {other:?}; MiniMax-M3 norms per head",
             path.display()
         ),
     }
-    let (Some(limit), Some(alpha)) = (number(raw, "swiglu_limit"), number(raw, "swiglu_alpha"))
+    let (Some(limit), Some(alpha)) = (number(raw, "swiglu_limit", path)?, number(raw, "swiglu_alpha", path)?)
     else {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["swiglu_limit", "swiglu_alpha"],
             "{} declares swigluoai without swiglu_limit and swiglu_alpha",
             path.display()
         );
@@ -110,16 +131,19 @@ pub(in crate::runtime::load::family) fn family(
     let clamp = SwigluLimit::Oai { limit, alpha };
     let every = every_layer(layers, path)?;
     let routed_layers = match raw.get("moe_layer_freq") {
+        None | Some(Value::Null) => every,
         Some(_) => flagged_layers(raw, "moe_layer_freq", layers, path)?,
-        None => every,
     };
-    if routed_layers != every && whole(raw, "dense_intermediate_size").is_none() {
-        bail!(
+    if routed_layers != every && whole(raw, "dense_intermediate_size", path)?.is_none() {
+        refused!(
+            Incomplete,
+            in raw,
+            ["moe_layer_freq", "dense_intermediate_size"],
             "{} marks dense layers in moe_layer_freq without dense_intermediate_size",
             path.display()
         );
     }
-    architecture.dense_swiglu_limit = Some(clamp.clone());
+    architecture.dense_swiglu_limit = Some(DenseClamp::Oai { limit, alpha });
     let mut routed = experts(
         raw,
         "num_local_experts",
@@ -129,22 +153,28 @@ pub(in crate::runtime::load::family) fn family(
         every & !routed_layers,
         path,
     )?;
-    routed.scoring = match text(raw, "scoring_func") {
+    routed.scoring = match text(raw, "scoring_func", path)? {
         None | Some("sigmoid") => Scoring::Sigmoid,
         Some("softmax") => Scoring::Softmax,
-        Some(other) => bail!(
+        Some(other) => refused!(
+            Unimplemented,
+            in raw,
+            ["scoring_func"],
             "{} declares scoring_func {other:?}; Ster implements softmax and sigmoid expert scores",
             path.display()
         ),
     };
-    routed.selection_bias = (raw.get("use_routing_bias").and_then(Value::as_bool) != Some(false))
+    routed.selection_bias = flag_or(raw, "use_routing_bias", true, path)?
         .then_some("block_sparse_moe.e_score_correction_bias");
-    routed.routed_scale = number(raw, "routed_scaling_factor");
+    routed.routed_scale = number(raw, "routed_scaling_factor", path)?;
     routed.swiglu_limit = Some(clamp);
-    routed.shared = match whole(raw, "n_shared_experts").and_then(NonZeroUsize::new) {
+    routed.shared = match whole(raw, "n_shared_experts", path)?.and_then(NonZeroUsize::new) {
         Some(shared) => {
-            let Some(width) = whole(raw, "shared_intermediate_size") else {
-                bail!(
+            let Some(width) = whole(raw, "shared_intermediate_size", path)? else {
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["n_shared_experts", "shared_intermediate_size"],
                     "{} declares n_shared_experts without shared_intermediate_size",
                     path.display()
                 );
@@ -160,87 +190,8 @@ pub(in crate::runtime::load::family) fn family(
     };
     architecture.experts = Some(routed);
     architecture.block_index = block_index(raw, layers, path)?;
+    if let Some(index) = architecture.block_index {
+        index_fits(raw, index, query_heads, architecture.rotary_dim, path)?;
+    }
     Ok(())
-}
-
-/// MiniMax Sparse Attention's block indexer from `sparse_attention_config`,
-/// or `None` when the config runs every layer densely.
-fn block_index(raw: &Value, layers: usize, path: &Path) -> Result<Option<BlockIndexSpec>> {
-    let Some(sparse) = raw
-        .get("sparse_attention_config")
-        .filter(|sparse| sparse.is_object())
-    else {
-        return Ok(None);
-    };
-    if sparse.get("use_sparse_attention").and_then(Value::as_bool) == Some(false) {
-        return Ok(None);
-    }
-    let indexed = flagged_layers(sparse, "sparse_attention_freq", layers, path)?;
-    match text(sparse, "sparse_score_type") {
-        None | Some("max") => {}
-        Some(other) => bail!(
-            "{} declares sparse_score_type {other:?}; Ster scores a key block by its best key (max)",
-            path.display()
-        ),
-    }
-    if whole(sparse, "sparse_init_block")
-        .and_then(NonZeroUsize::new)
-        .is_some()
-    {
-        bail!(
-            "{} keeps sparse_init_block leading blocks always visible; Ster implements the local blocks Transformers' MiniMax-M3 indexer keeps, not leading ones",
-            path.display()
-        );
-    }
-    // Every sparse layer of MiniMax-M3 disables the indexer's own value and
-    // output branch; neither vLLM nor Transformers implements it.
-    if sparse.get("sparse_disable_index_value").is_some() {
-        let disabled = flagged_layers(sparse, "sparse_disable_index_value", layers, path)?;
-        if indexed & disabled != indexed {
-            bail!(
-                "{} enables the indexer's value branch on a sparse layer (sparse_disable_index_value); Ster implements MiniMax-M3's indexer without it",
-                path.display()
-            );
-        }
-    }
-    let size = |key: &str| -> Result<usize> {
-        match whole(sparse, key) {
-            Some(size) => Ok(size),
-            None => bail!(
-                "{} declares sparse_attention_config without {key}",
-                path.display()
-            ),
-        }
-    };
-    let heads = size("sparse_num_index_heads")?;
-    if Some(heads) != whole(raw, "num_key_value_heads") {
-        bail!(
-            "{} declares {heads} index heads (sparse_num_index_heads) and a different num_key_value_heads; MiniMax-M3 chooses one block selection per key-value head",
-            path.display()
-        );
-    }
-    let (Some(block), Some(top_blocks)) = (
-        NonZeroUsize::new(size("sparse_block_size")?),
-        NonZeroUsize::new(size("sparse_topk_blocks")?),
-    ) else {
-        bail!(
-            "{} declares an empty sparse_block_size or sparse_topk_blocks",
-            path.display()
-        );
-    };
-    let local_blocks = size("sparse_local_block")?;
-    if local_blocks > top_blocks.get() {
-        bail!(
-            "{} keeps {local_blocks} local key blocks (sparse_local_block) among only {top_blocks} kept ones (sparse_topk_blocks)",
-            path.display()
-        );
-    }
-    Ok(Some(BlockIndexSpec {
-        heads,
-        head_dim: size("sparse_index_dim")?,
-        block,
-        top_blocks: top_blocks.get(),
-        local_blocks,
-        layers: indexed,
-    }))
 }

@@ -8,8 +8,11 @@
 //! exact answer form, not by a list of phrasings: a refusal worded any other
 //! way, or in another language, is still a refusal.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
+use serde_json::error::Category;
+
+use crate::failures::{pairs::synthesize::{VERDICT_MALFORMED, VERDICT_SHAPE}, refuse};
 
 /// The judgement the generator is asked for: one JSON object, nothing else.
 pub(crate) fn judgement_prompt(question: &str, personality: &str, answer: &str) -> String {
@@ -26,11 +29,24 @@ struct Verdict {
 }
 
 /// The generator's verdict, read from `text`; any answer that is not exactly
-/// `{"refuses": <bool>}` is refused, naming the generator and its text.
+/// `{"refuses": <bool>}` is refused, naming the generator and its text: not
+/// JSON, or JSON of another form.
 pub(crate) fn verdict(generator: &str, text: &str) -> Result<bool> {
-    let verdict: Verdict = serde_json::from_str(text.trim()).with_context(|| {
-        format!(
-            "{generator} answered the refusal judgement with {text:?}, which is not exactly {{\"refuses\": true}} or {{\"refuses\": false}}"
+    let trimmed = text.trim();
+    let verdict: Verdict = serde_json::from_str(trimmed).map_err(|error| {
+        let cause = match error.classify() {
+            Category::Data => &VERDICT_SHAPE,
+            Category::Syntax | Category::Eof | Category::Io => &VERDICT_MALFORMED,
+        };
+        refuse(
+            cause,
+            &[
+                ("generator", generator),
+                ("text", &format!("{text:?}")),
+                ("length", &trimmed.chars().count().to_string()),
+                ("column", &error.column().to_string()),
+                ("error", &error.to_string()),
+            ],
         )
     })?;
     Ok(verdict.refuses)

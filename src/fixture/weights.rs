@@ -2,12 +2,34 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
 use candle_core::{Device, Tensor};
 use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
 
+use crate::failures::{
+    fixture::{
+        declaration::BIAS_MISSING,
+        output::{SAMPLE_NOT_FINITE, TENSOR_UNBUILT},
+    },
+    refuse,
+};
+
 use super::spec::Resolved;
+
+/// The refusal of tensor `name` of `shape` and `count` values this host
+/// cannot build, the allocator's answer `error`.
+fn unbuilt(name: &str, shape: &str, count: &str, error: &dyn std::fmt::Display) -> anyhow::Error {
+    refuse(
+        &TENSOR_UNBUILT,
+        &[
+            ("name", name),
+            ("shape", shape),
+            ("count", count),
+            ("error", &error.to_string()),
+        ],
+    )
+}
 
 struct Tensors {
     values: HashMap<String, Tensor>,
@@ -15,6 +37,32 @@ struct Tensors {
 }
 
 impl Tensors {
+    /// `count` values drawn from `normal` for tensor `name` of `shape`.
+    fn drawn(&mut self, name: &str, shape: &str, count: usize, normal: &Normal<f32>) -> Result<Vec<f32>> {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|error| unbuilt(name, shape, &count.to_string(), &error))?;
+        for (index, value) in std::iter::repeat_with(|| normal.sample(&mut self.rng))
+            .take(count)
+            .enumerate()
+        {
+            if !value.is_finite() {
+                return Err(refuse(
+                    &SAMPLE_NOT_FINITE,
+                    &[
+                        ("name", name),
+                        ("shape", shape),
+                        ("index", &index.to_string()),
+                        ("value", &value.to_string()),
+                    ],
+                ));
+            }
+            values.push(value);
+        }
+        Ok(values)
+    }
+
     fn random(
         &mut self,
         name: String,
@@ -22,53 +70,30 @@ impl Tensors {
         columns: usize,
         normal: &Normal<f32>,
     ) -> Result<()> {
-        let count = rows.checked_mul(columns).with_context(|| {
-            format!("fixture tensor {name} shape [{rows}, {columns}] overflows this host")
-        })?;
-        let mut values = Vec::new();
-        values.try_reserve_exact(count).with_context(|| {
-            format!("allocate fixture tensor {name} with {count} float elements")
-        })?;
-        for (index, value) in std::iter::repeat_with(|| normal.sample(&mut self.rng))
-            .take(count)
-            .enumerate()
-        {
-            ensure!(
-                value.is_finite(),
-                "fixture tensor {name} sampled non-finite value {value} at element {index}"
-            );
-            values.push(value);
-        }
+        let shape = format!("[{rows}, {columns}]");
+        let Some(count) = rows.checked_mul(columns) else {
+            let count = format!("{rows} × {columns}, past {}", usize::MAX);
+            return Err(unbuilt(&name, &shape, &count, &"the count overflows this host's sizes"));
+        };
+        let values = self.drawn(&name, &shape, count, normal)?;
         let tensor = Tensor::from_vec(values, (rows, columns), &Device::Cpu)
-            .with_context(|| format!("construct fixture tensor {name}"))?;
+            .map_err(|error| unbuilt(&name, &shape, &count.to_string(), &error))?;
         self.values.insert(name, tensor);
         Ok(())
     }
 
     fn vector(&mut self, name: String, width: usize, normal: &Normal<f32>) -> Result<()> {
-        let mut values = Vec::new();
-        values.try_reserve_exact(width).with_context(|| {
-            format!("allocate fixture tensor {name} with {width} float elements")
-        })?;
-        for (index, value) in std::iter::repeat_with(|| normal.sample(&mut self.rng))
-            .take(width)
-            .enumerate()
-        {
-            ensure!(
-                value.is_finite(),
-                "fixture tensor {name} sampled non-finite value {value} at element {index}"
-            );
-            values.push(value);
-        }
+        let shape = format!("[{width}]");
+        let values = self.drawn(&name, &shape, width, normal)?;
         let tensor = Tensor::from_vec(values, (width,), &Device::Cpu)
-            .with_context(|| format!("construct fixture tensor {name}"))?;
+            .map_err(|error| unbuilt(&name, &shape, &width.to_string(), &error))?;
         self.values.insert(name, tensor);
         Ok(())
     }
 
     fn normalization(&mut self, name: String, width: usize, value: f32) -> Result<()> {
         let tensor = Tensor::full(value, (width,), &Device::Cpu)
-            .with_context(|| format!("construct fixture normalization tensor {name}"))?;
+            .map_err(|error| unbuilt(&name, &format!("[{width}]"), &width.to_string(), &error))?;
         self.values.insert(name, tensor);
         Ok(())
     }
@@ -77,16 +102,17 @@ impl Tensors {
 pub(super) fn build(input: &Resolved) -> Result<HashMap<String, Tensor>> {
     let config = &input.dimensions;
     let initialization = &input.spec.initialization;
+    let path = input.declaration.as_path();
     let embedding = initialization
         .embedding
-        .distribution("initialization.embedding")?;
+        .distribution("initialization.embedding", path)?;
     let projection = initialization
         .projection
-        .distribution("initialization.projection")?;
+        .distribution("initialization.projection", path)?;
     let bias = initialization
         .bias
         .as_ref()
-        .map(|value| value.distribution("initialization.bias"))
+        .map(|value| value.distribution("initialization.bias", path))
         .transpose()?;
     let hidden = config.hidden_size.get();
     let intermediate = config.intermediate_size.get();
@@ -165,11 +191,16 @@ pub(super) fn build(input: &Resolved) -> Result<HashMap<String, Tensor>> {
                 columns,
                 &projection,
             )?;
-            if with_bias {
-                let normal = bias
-                    .as_ref()
-                    .context("fixture biased projection has no declared initialization.bias")?;
-                tensors.vector(format!("{prefix}.{part}.bias"), rows, normal)?;
+            match (with_bias, bias.as_ref()) {
+                (true, Some(normal)) => {
+                    tensors.vector(format!("{prefix}.{part}.bias"), rows, normal)?;
+                }
+                (true, None) => {
+                    let shown = path.display().to_string();
+                    let config = format!("the config of {shown} (writing {prefix}.{part}.bias)");
+                    return Err(refuse(&BIAS_MISSING, &[("path", &shown), ("config", &config)]));
+                }
+                (false, _) => {}
             }
         }
     }

@@ -237,7 +237,7 @@ Started through: `ster workspace remove`, `ster request workspace/remove`. Uses:
 
 name the active imported pair set's copy for a command run without --pairs
 
-Started through: `ster pairs inspect`, `ster vector train`, `ster vector optimize`, `ster vector evaluate`, `ster vector curve`, `ster vector project`, `ster tune dpo`, `ster tune bipo`, `ster tune reward`. Uses: `ster.workspace.store`. Failure catalogue `ster.workspace.active`: 3 declared cause(s) of its own.
+Started through: `ster vector train`, `ster vector optimize`, `ster vector evaluate`, `ster vector curve`, `ster vector project`, `ster tune dpo`, `ster tune bipo`, `ster tune reward`. Uses: `ster.workspace.store`. Failure catalogue `ster.workspace.active`: 3 declared cause(s) of its own.
 
 <a id="ster-workspace-active-no-active-set"></a>
 

@@ -1,13 +1,14 @@
 //! `ster pairs`: authoring and auditing contrastive pair sets from the
 //! terminal. Each arm does the work and prints one pretty JSON document.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::Subcommand;
 use serde_json::json;
 use ster::{
     ContrastivePair, PairSet,
+    failures::{pairs::author, refuse},
     pairs::{self, InspectOptions, quality::dedupe::DedupeOptions},
 };
 
@@ -88,12 +89,15 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
             dedupe_bands,
             unbalanced_ratio,
         } => {
-            let file = resolve_pairs(pairs)?;
-            let pair_set = PairSet::load(&file)?;
+            // The settings are the caller's and are checked before the
+            // workspace or the set is read.
             let options = InspectOptions {
                 dedupe: DedupeOptions::new(dedupe_bits, dedupe_bands),
                 unbalanced_ratio,
             };
+            options.validate()?;
+            let file = resolve_pairs(pairs)?;
+            let pair_set = PairSet::load(&file)?;
             let report = pairs::inspect(&pair_set, &options)?;
             super::answer(&report)?;
         }
@@ -105,6 +109,8 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
             negative,
             trait_name,
         } => {
+            side("positive", &positive, &file)?;
+            side("negative", &negative, &file)?;
             // `PairSet::load` refuses a set with no pairs, so the first `add`
             // to a path that does not exist yet builds the set in memory
             // rather than loading one.
@@ -130,13 +136,7 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
         }
         PairsCommand::Remove { pairs: file, index } => {
             let mut pair_set = PairSet::load(&file)?;
-            if index >= pair_set.pairs.len() {
-                bail!(
-                    "pair index {index} is outside the set: {} holds {} pair(s), indexed from 0",
-                    file.display(),
-                    pair_set.pairs.len()
-                );
-            }
+            outside(index, pair_set.pairs.len(), &file)?;
             let removed = pair_set.pairs.remove(index);
             // Removing the last pair leaves a set no loader would accept, so
             // `save` refuses and the file on disk is left as it was.
@@ -161,4 +161,37 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
         PairsCommand::Synthesize(args) => synthesize::run(args)?,
     }
     Ok(())
+}
+
+/// The refusal a side given as empty text meets, before any set is read:
+/// every pair needs text on both sides.
+fn side(name: &str, value: &str, file: &Path) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(refuse(
+            &author::SIDE_EMPTY,
+            &[
+                ("side", name),
+                ("value", value),
+                ("path", &file.display().to_string()),
+            ],
+        ));
+    }
+    Ok(())
+}
+
+/// The refusal an index past the end of a set of `count` pairs meets.
+/// `count` is at least one: `PairSet::load` refuses a set without pairs.
+fn outside(index: usize, count: usize, file: &Path) -> Result<()> {
+    if index < count {
+        return Ok(());
+    }
+    Err(refuse(
+        &author::INDEX_OUTSIDE,
+        &[
+            ("index", &index.to_string()),
+            ("count", &count.to_string()),
+            ("last", &count.saturating_sub(1).to_string()),
+            ("path", &file.display().to_string()),
+        ],
+    ))
 }

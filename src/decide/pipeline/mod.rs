@@ -4,14 +4,17 @@
 //! Training a decision model is four steps, each a command and each a
 //! function here: get labelled decisions (`fetch` from a Hugging Face
 //! classification dataset, `import` from a JSONL file, or `synthesize`
-//! through Brama), `split` them into a training and a held-out set, train
-//! (`ster tune decide`), and `benchmark` the base model and the adapter on
+//! through Stado's inference alternatives), `split` them into a training and
+//! a held-out set, train (`ster tune decide`), and `benchmark` the base model
+//! and the adapter on
 //! the held-out set. Every step reads and writes the one labelled-decision
 //! document `ster calibrate` already reads, so nothing is converted twice.
 
+use anyhow::Result;
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
-use super::request::ExampleSet;
+use super::examples::ExampleSet;
+use crate::failures::{decide::pipeline as causes, refuse};
 
 mod benchmark;
 mod fetch;
@@ -22,6 +25,33 @@ pub use benchmark::{Benchmark, BenchmarkOptions, Latency, TypeMetrics, benchmark
 pub use fetch::{FetchOptions, FetchReport, fetch};
 pub use import::{ImportReport, import_jsonl};
 pub use synthesize::{Schema, SynthesizeOptions, SynthesizeReport, synthesize};
+
+/// Refuses the one question a `source` ("fetched", "imported") set asks
+/// when its id or its instructions are blank; checked before any row is read.
+pub fn check_question(source: &str, id: &str, instructions: &str) -> Result<()> {
+    if id.trim().is_empty() {
+        return Err(refuse(
+            &causes::QUESTION_ID_BLANK,
+            &[("source", source), ("value", &format!("{id:?}"))],
+        ));
+    }
+    if instructions.trim().is_empty() {
+        return Err(refuse(
+            &causes::INSTRUCTIONS_BLANK,
+            &[("source", source), ("value", &format!("{instructions:?}"))],
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses a held-out fraction that parts no example from the rest; checked
+/// before the set is read.
+pub fn check_holdout(holdout: f64) -> Result<()> {
+    if holdout > 0.0 && holdout < 1.0 {
+        return Ok(());
+    }
+    Err(refuse(&causes::HOLDOUT_OUTSIDE, &[("holdout", &holdout.to_string())]))
+}
 
 /// Splits `set` into a training and a held-out set, `holdout` being the
 /// fraction held out, after a shuffle seeded by `seed`.

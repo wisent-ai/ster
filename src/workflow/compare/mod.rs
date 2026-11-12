@@ -3,18 +3,20 @@
 //! other direction explains, and which of them group together. The only
 //! choice is the caller's: how many groups to cut the artifacts into.
 
-use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::artifact::SteeringArtifact;
+use crate::failures::{refuse, workflow::compare as causes};
 
 mod geometry;
+mod layers;
 mod linkage;
 
 use geometry::{chord, dot, outside_span, unit};
+use layers::compared_layers;
 
 /// What the caller decides about one comparison.
 pub struct CompareOptions {
@@ -71,6 +73,26 @@ pub struct ComparisonReport {
     pub most_different: Pair,
 }
 
+/// Refuses fewer than two artifacts and more groups than artifacts, from
+/// the names given (paths, or trait names once read), before any is read.
+pub fn check_counts(named: &[String], clusters: NonZeroUsize) -> Result<()> {
+    let count = named.len().to_string();
+    let labels = named.join(", ");
+    let asked = clusters.to_string();
+    let values = [
+        ("count", count.as_str()),
+        ("labels", labels.as_str()),
+        ("clusters", asked.as_str()),
+    ];
+    if named.len() < 2 {
+        return Err(refuse(&causes::ARTIFACTS_FEW, &values));
+    }
+    if clusters.get() > named.len() {
+        return Err(refuse(&causes::CLUSTERS_PAST, &values));
+    }
+    Ok(())
+}
+
 /// Compare `artifacts`, labelled by their trait names. They must come from
 /// one model at one width: a direction is a point in one model's residual
 /// stream, and two models' streams share no basis to compare in.
@@ -78,37 +100,31 @@ pub fn compare(
     artifacts: &[SteeringArtifact],
     options: &CompareOptions,
 ) -> Result<ComparisonReport> {
-    let [first, _second, ..] = artifacts else {
-        bail!(
-            "vector compare needs at least two artifacts and got {}",
-            artifacts.len()
-        );
-    };
-    for artifact in artifacts {
-        if artifact.model != first.model || artifact.hidden_size != first.hidden_size {
-            bail!(
-                "vector compare compares directions of one model: {} is {} at width {}, {} is {} at width {}",
-                first.trait_name,
-                first.model,
-                first.hidden_size,
-                artifact.trait_name,
-                artifact.model,
-                artifact.hidden_size
-            );
-        }
-    }
-    if options.clusters.get() > artifacts.len() {
-        bail!(
-            "--clusters {} cannot group {} artifacts: at most one group per artifact",
-            options.clusters,
-            artifacts.len()
-        );
-    }
     let labels: Vec<String> = artifacts
         .iter()
         .map(|artifact| artifact.trait_name.clone())
         .collect();
-    let layers = compared_layers(artifacts, options.layers.as_deref())?;
+    check_counts(&labels, options.clusters)?;
+    let first = &artifacts[0];
+    for artifact in artifacts {
+        if artifact.model != first.model || artifact.hidden_size != first.hidden_size {
+            let (first_width, other_width) =
+                (first.hidden_size.to_string(), artifact.hidden_size.to_string());
+            return Err(refuse(
+                &causes::MODELS_DIFFER,
+                &[
+                    ("labels", &labels.join(", ")),
+                    ("first", &first.trait_name),
+                    ("first_model", &first.model),
+                    ("first_width", &first_width),
+                    ("other", &artifact.trait_name),
+                    ("other_model", &artifact.model),
+                    ("other_width", &other_width),
+                ],
+            ));
+        }
+    }
+    let layers = compared_layers(artifacts, &labels, options.layers.as_deref())?;
 
     let stacks: Vec<Vec<Vec<f64>>> = layers
         .iter()
@@ -121,10 +137,11 @@ pub fn compare(
         .collect();
     let mut per_layer = Vec::with_capacity(layers.len());
     let mut chords = Vec::with_capacity(layers.len());
+    let named = labels.join(", ");
     for (&layer, stack) in layers.iter().zip(&stacks) {
         let mut units = Vec::with_capacity(stack.len());
         for (vector, label) in stack.iter().zip(&labels) {
-            units.push(unit(vector, label, layer)?);
+            units.push(unit(vector, label, layer, &named)?);
         }
         let similarity = units
             .iter()
@@ -186,51 +203,6 @@ pub fn compare(
         most_similar,
         most_different,
     })
-}
-
-/// The layers asked for, each carried by every artifact, or every layer all
-/// of them carry when none were named.
-fn compared_layers(artifacts: &[SteeringArtifact], named: Option<&[usize]>) -> Result<Vec<usize>> {
-    let carried: Vec<BTreeSet<usize>> = artifacts
-        .iter()
-        .map(|artifact| artifact.vectors.iter().map(|vector| vector.layer).collect())
-        .collect();
-    if let Some(named) = named {
-        for &layer in named {
-            for (artifact, layers) in artifacts.iter().zip(&carried) {
-                if !layers.contains(&layer) {
-                    bail!(
-                        "layer {layer} is not in {}'s artifact, which carries layers {:?}",
-                        artifact.trait_name,
-                        layers
-                    );
-                }
-            }
-        }
-        return Ok(named.to_vec());
-    }
-    let common = carried
-        .iter()
-        .fold(None::<BTreeSet<usize>>, |common, layers| {
-            Some(match common {
-                None => layers.clone(),
-                Some(common) => common.intersection(layers).copied().collect(),
-            })
-        });
-    match common {
-        Some(common) if !common.is_empty() => Ok(common.into_iter().collect()),
-        _ => {
-            let listed: Vec<String> = artifacts
-                .iter()
-                .zip(&carried)
-                .map(|(artifact, layers)| format!("{} {:?}", artifact.trait_name, layers))
-                .collect();
-            bail!(
-                "the artifacts share no layer to compare at: {}",
-                listed.join(", ")
-            )
-        }
-    }
 }
 
 fn direction(artifact: &SteeringArtifact, layer: usize) -> Vec<f64> {

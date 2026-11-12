@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeMap, time::Instant};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::{
@@ -77,12 +77,7 @@ pub fn benchmark(
     set: &ExampleSet,
     options: &BenchmarkOptions,
 ) -> Result<Benchmark> {
-    if options.ece_bins == 0 {
-        bail!(
-            "the expected calibration error needs at least one bin; got {}",
-            options.ece_bins
-        );
-    }
+    super::super::check_bins(options.ece_bins)?;
     set.validate()?;
     let count = set.examples.len();
     let mut labelled: Vec<(String, Labelled)> = Vec::new();

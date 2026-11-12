@@ -21,10 +21,34 @@ pub static NAME_UNDERIVABLE: Cause = Cause {
     usage: true,
     exit: None,
     failed: "deriving a pair-set id from {source}",
-    cause: "{source} {why}, so no pair-set id can be derived from it",
+    cause: "{source} has no ASCII letter or digit in its file name, so no pair-set id can be derived from it",
     observed: "file name: {file}",
-    remedy: "name the set with --name",
+    remedy: "name the set with --name, such as --name my-pairs",
     test: "tests/workspace/failures.sh::a_file_name_without_letters_needs_a_name",
+};
+
+pub static NAME_FILELESS: Cause = Cause {
+    id: "name-fileless",
+    code: Code::Config,
+    usage: true,
+    exit: None,
+    failed: "deriving a pair-set id from {source}",
+    cause: "{source} ends in no file name (it is a root or ends in ..), so no pair-set id can be derived from it",
+    observed: "file name: {file}",
+    remedy: "name the pair-set file itself, or name the set with --name",
+    test: "tests/workspace/failures.sh::a_source_without_a_file_name_needs_a_name",
+};
+
+pub static NAME_NOT_UTF8: Cause = Cause {
+    id: "name-not-utf8",
+    code: Code::Config,
+    usage: true,
+    exit: None,
+    failed: "deriving a pair-set id from {source}",
+    cause: "{source} has a file name that is not UTF-8, and a pair-set id is text",
+    observed: "file name, its bytes that are not UTF-8 replaced: {file}",
+    remedy: "name the set with --name, or rename the file to a UTF-8 name",
+    test: "tests/workspace/failures.sh::a_file_name_that_is_not_utf8_needs_a_name",
 };
 
 pub static NAME_CONFLICT: Cause = Cause {
@@ -75,26 +99,14 @@ pub static STAGING_LEFT: Cause = Cause {
     test: "tests/workspace/failures.sh::a_leftover_staging_file_is_refused",
 };
 
-pub static COMMIT_FAILED: Cause = Cause {
-    id: "commit-failed",
+pub static LINK_UNSUPPORTED: Cause = Cause {
+    id: "link-unsupported",
     code: Code::Config,
     usage: false,
     exit: None,
     failed: "committing the import of {source} as {id}",
-    cause: "linking {staging} to {path} failed: {error}",
-    observed: "{left}",
-    remedy: "keep the workspace on a filesystem that supports hard links, writable for this account, then import again",
+    cause: "the file system holding {directory} does not make hard links, and an import is committed by linking its staged copy into place so no reader sees half of it",
+    observed: "{path}: not created; {left}; the system answered: {error}",
+    remedy: "keep the workspace on a file system that makes hard links (point XDG_DATA_HOME at one), then import again",
     test: "tests/workspace/failures.sh::a_commit_the_filesystem_refuses_is_rolled_back",
-};
-
-pub static STAGING_UNREMOVABLE: Cause = Cause {
-    id: "staging-unremovable",
-    code: Code::Config,
-    usage: false,
-    exit: None,
-    failed: "finishing the import of {source} as {id}",
-    cause: "the staging file {staging} cannot be removed: {error}",
-    observed: "{left}",
-    remedy: "remove {staging} and import again",
-    test: "tests/workspace/failures.sh::a_staging_file_that_cannot_be_removed_is_rolled_back",
 };

@@ -11,7 +11,7 @@ use crate::failures::{
     workspace::{manage as causes, store},
 };
 
-use super::state::{WorkspaceState, load_state, save_state, state_path, workspace_root};
+use super::state::{WorkspaceState, load_state, save_state, state_path};
 use super::{WorkspaceSummary, held, summary};
 
 /// Where in the workspace's list `id` is, or the refusal naming the ids it
@@ -60,18 +60,13 @@ pub fn remove_pair_set(id: &str) -> Result<WorkspaceSummary> {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            let directory = entry
-                .path
-                .parent()
-                .map_or_else(workspace_root, |parent| Ok(parent.to_path_buf()))?;
-            return Err(refuse(
-                &causes::COPY_UNDELETABLE,
-                &[
-                    ("id", id),
-                    ("path", &entry.path.display().to_string()),
-                    ("directory", &directory.display().to_string()),
-                    ("error", &error.to_string()),
-                ],
+            let left = format!("the workspace still holds {id}; nothing was changed");
+            return Err(crate::failures::file::write::refusal(
+                "removing",
+                &format!("the copy of pair set {id}"),
+                &entry.path,
+                &left,
+                &error,
             ));
         }
     }

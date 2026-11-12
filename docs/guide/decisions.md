@@ -187,33 +187,42 @@ which is the honest result for a model that has not read the message.
 
 ## Refusals
 
-All of these are decided before the checkpoint loads and exit `1` with
-`Error:` and the sentence. `ster request decide` refuses the request-document
-sentences with a single result event of status `2`, before anything loads;
-a path or calibration refusal ends it with the sentence as its last log event
-and a status-`1` result.
+Every refusal is a declared cause listed with its fix and its test on
+[errors/decide.md](errors/decide.md) and
+[errors/decide-calibration.md](errors/decide-calibration.md). The request
+document is refused before the checkpoint loads and exits `1` with `Error:`
+and the sentence; `ster request decide` refuses the same document with a
+single result event of status `2`, before anything loads.
 
-- `a decide request has an empty state`
-- `a decide request needs at least one question`
-- `a decide request has a question with an empty id`
-- `question '<id>' has empty instructions`
-- `choice question '<id>' needs at least two options`
-- `choice question '<id>' has <n> options; Ster labels at most 26`
-- `choice question '<id>' has an option with an empty name "<name>"`
-- `score question '<id>' needs at least two levels`
-- `score question '<id>' has <n> levels; Ster labels at most 26`
-- `score question '<id>' has an empty description at level <i>`
-- `failed to read <path>`, `invalid decide request <path>` or
-  `invalid decide request on standard input`, with the reader's own cause
-  beneath.
-- `calibration <path> was fitted for model '<fitted>', not '<loaded>'`, and
-  the other artifact refusals on the [calibration page](decisions/calibration.md).
+- `checking the decision request: its state is empty, …` (`state-empty`),
+  `… it asks no question` (`questions-none`), `… a question's id is empty, …`
+  (`question-id-empty`)
+- `checking question '<id>': its instructions are empty, …`
+  (`instructions-empty`)
+- `checking choice question '<id>': it offers <n> options, and a decision
+  needs at least two to choose between` (`options-too-few`; `score question`
+  and `levels` for a score)
+- `checking choice question '<id>': it offers <n> options, and each is
+  answered under one of the 26 letters A to Z read at one token position`
+  (`options-too-many`)
+- `… one of its options has an empty name, …` (`option-name-empty`) and
+  `checking score question '<id>': its level <i> has an empty description, …`
+  (`level-empty`)
+- `reading decision request <path>: no file is there: …` (`request-missing`);
+  a file this account may not read, a directory, bytes that are not JSON or
+  JSON of another form are the [file layer's](errors/file.md) refusals,
+  `reading the decision request <path>: …`, with `/dev/stdin` as the path for
+  `--request -`
+- `reading calibration <path>: …` and `applying calibration <path>: it was
+  fitted for model <fitted>, …`, on the [calibration page](decisions/calibration.md)
 
-After the load, a question whose rendering does not fit the model's context is
-refused as `question '<id>' renders to <n> tokens, past the <max> this model
-was built for`, and a tokenizer that has no single token for an answer letter
-as `this tokenizer has no single token for the answer label "<label>", so it
-cannot be read from one position`.
+After the load, a question whose prompt does not fit the model's context is
+refused as `rendering question '<id>': its prompt is <n> tokens, and this
+model reads at most <max> at once`; a tokenizer with no single token for an
+answer letter as `finding the token of answer label "<label>": …`; one that
+spells a letter with a token the weights do not score as `reading the answer
+under letter <letter>: …` (`letter-outside`); and an `--output` that cannot
+be written as `writing the decision to <path>: …`.
 
 ## Training a decision model
 
@@ -229,10 +238,19 @@ and writing the one labelled-decision document `ster calibrate` already reads:
   page without `rows`, or a label column without string class names is
   refused by name.
 - `ster decisions import` reads a JSONL file of `context`, `options` and
-  `label` rows; the question's id and wording are the caller's.
+  `label` rows; the question's id and wording are the caller's. A line that
+  cannot become a labelled decision is listed under `report.rejected` with
+  its `line`, its `reason` (the declared refusal, with what the line held)
+  and its `cause` of `ster.decisions.import.rows`: a line that is not JSON
+  or not an object, a missing field, a context, options or label of another
+  type, a blank context, fewer than two or more than 26 options, a blank or
+  repeated option, or a label past the options. An export whose every line
+  is refused is refused with its first refused line's cause and fix, and how
+  many lines were refused under each cause.
 - `ster decisions synthesize` writes labelled decisions with a hosted model
-  through Brama from a schema — a domain and the questions — one label per
-  state by construction. `--per-option`, `--retry-multiplier`,
+  through Stado's inference alternatives from a schema — a domain and the
+  questions — one label per state by construction. `--per-option`,
+  `--retry-multiplier`,
   `--temperature` and `--max-tokens` are required; the report records the
   temperature and token budget the states were written with.
 - `ster decisions split` holds out a seeded fraction of examples, both

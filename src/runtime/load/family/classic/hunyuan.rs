@@ -1,6 +1,6 @@
 //! ERNIE 4.5, HunYuan, HY V3 and GPT-OSS.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::model::{
@@ -9,7 +9,7 @@ use crate::model::{
 use crate::runtime::load::family::At;
 use crate::runtime::load::family::experts::{experts, qwen_dense_layers};
 use crate::runtime::load::family::read::layers::{every_layer, fits};
-use crate::runtime::load::family::read::{flag, number, uniform, whole};
+use crate::runtime::load::family::read::{flag, flag_or, number, signed, uniform, whole, whole_or};
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
 /// sends only their `model_type` values here.
@@ -35,20 +35,17 @@ pub(in crate::runtime::load::family) fn configure(
             // `router_scaling_factor`, beside `num_shared_experts` shared
             // experts in `mlp.shared_mlp`.
             architecture.query_key_norm = QueryKeyNorm::PerHead;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
             fits(layers, path)?;
             let dense = if raw.get("mlp_layer_types").is_some_and(Value::is_array) {
                 qwen_dense_layers(raw, layers, path)?
             } else {
-                let first = whole(raw, "first_k_dense_replace").unwrap_or(0).min(layers);
+                let first = whole_or(raw, "first_k_dense_replace", 0, path)?.min(layers);
                 (0..first).fold(0u128, |set, layer| set | (1u128 << layer))
             };
-            let normalize = raw
-                .get("route_norm")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
+            let normalize = flag_or(raw, "route_norm", true, path)?;
             let mut routed = experts(
                 raw,
                 "num_experts",
@@ -60,8 +57,8 @@ pub(in crate::runtime::load::family) fn configure(
             )?;
             routed.scoring = Scoring::Sigmoid;
             routed.selection_bias = Some("mlp.expert_bias");
-            routed.routed_scale = number(raw, "router_scaling_factor");
-            routed.shared = whole(raw, "num_shared_experts")
+            routed.routed_scale = number(raw, "router_scaling_factor", path)?;
+            routed.shared = whole(raw, "num_shared_experts", path)?
                 .filter(|shared| *shared > 0)
                 .map(|shared| SharedExpert {
                     intermediate: shared * routed.intermediate,
@@ -72,7 +69,7 @@ pub(in crate::runtime::load::family) fn configure(
             architecture.experts = Some(routed);
         }
         "ernie4_5" | "ernie4_5_moe" => {
-            let bias = flag(raw, "use_bias");
+            let bias = flag(raw, "use_bias", path)?;
             architecture.query_key_value_bias = bias;
             architecture.output_bias = bias;
             architecture.feed_forward_bias = bias;
@@ -85,13 +82,11 @@ pub(in crate::runtime::load::family) fn configure(
                 // added and renormalised, beside `moe_num_shared_experts`
                 // shared experts.
                 fits(layers, path)?;
-                let start = whole(raw, "moe_layer_start_index").unwrap_or(0);
-                let end = raw
-                    .get("moe_layer_end_index")
-                    .and_then(Value::as_i64)
+                let start = whole_or(raw, "moe_layer_start_index", 0, path)?;
+                let end = signed(raw, "moe_layer_end_index", path)?
                     .filter(|end| *end >= 0)
                     .map_or(layers.saturating_sub(1), |end| end as usize);
-                let interval = whole(raw, "moe_layer_interval").unwrap_or(1).max(1);
+                let interval = whole_or(raw, "moe_layer_interval", 1, path)?.max(1);
                 let dense = (0..layers)
                     .filter(|layer| {
                         *layer < start || *layer > end || (layer - start) % interval != 0
@@ -106,7 +101,7 @@ pub(in crate::runtime::load::family) fn configure(
                     dense,
                     path,
                 )?;
-                routed.shared = whole(raw, "moe_num_shared_experts")
+                routed.shared = whole(raw, "moe_num_shared_experts", path)?
                     .filter(|shared| *shared > 0)
                     .map(|shared| SharedExpert {
                         intermediate: shared * routed.intermediate,
@@ -127,7 +122,7 @@ pub(in crate::runtime::load::family) fn configure(
             architecture.query_key_value_bias = true;
             architecture.output_bias = true;
             architecture.attention_sinks = every_layer(layers, path)?;
-            architecture.sliding_window = whole(raw, "sliding_window");
+            architecture.sliding_window = whole(raw, "sliding_window", path)?;
             let mut routed = experts(
                 raw,
                 "num_local_experts",
@@ -137,23 +132,26 @@ pub(in crate::runtime::load::family) fn configure(
                 0,
                 path,
             )?;
-            routed.swiglu_limit = number(raw, "swiglu_limit").map(SwigluLimit::GptOss);
+            routed.swiglu_limit = number(raw, "swiglu_limit", path)?.map(SwigluLimit::GptOss);
             architecture.experts = Some(routed);
         }
         "hunyuan_v1_dense" | "hunyuan_v1_moe" => {
             // HunYuan: per-head query and key norms named `query_layernorm`
             // and `key_layernorm`, applied after the rotation.
             architecture.names = Names::HUNYUAN;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.feed_forward_bias = flag(raw, "mlp_bias");
-            if flag(raw, "use_qk_norm") {
+            architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
+            if flag(raw, "use_qk_norm", path)? {
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
                 architecture.norm_after_rotary = true;
             }
             if model_type == "hunyuan_v1_moe" {
-                if flag(raw, "use_cla") || flag(raw, "use_mla") {
-                    bail!(
+                if flag(raw, "use_cla", path)? || flag(raw, "use_mla", path)? {
+                    refused!(
+                        Unimplemented,
+                        in raw,
+                        ["use_cla", "use_mla"],
                         "{} shares attention across layers (use_cla) or compresses it (use_mla); Ster implements HunYuan's own attention on every layer",
                         path.display()
                     );
@@ -169,7 +167,7 @@ pub(in crate::runtime::load::family) fn configure(
                     "intermediate_size"
                 };
                 fits(layers, path)?;
-                let skipped = whole(raw, "moe_layer_num_skipped").unwrap_or(0).min(layers);
+                let skipped = whole_or(raw, "moe_layer_num_skipped", 0, path)?.min(layers);
                 let dense = (0..skipped).fold(0u128, |set, layer| set | (1u128 << layer));
                 let mut routed = experts(
                     raw,
@@ -180,8 +178,12 @@ pub(in crate::runtime::load::family) fn configure(
                     dense,
                     path,
                 )?;
-                if raw.get("use_mixed_mlp_moe").and_then(Value::as_bool) != Some(false) {
-                    let shared = uniform(raw, "num_shared_expert", path)?.unwrap_or(1);
+                if flag_or(raw, "use_mixed_mlp_moe", true, path)? {
+                    // One shared expert when the config states no count.
+                    let shared = match uniform(raw, "num_shared_expert", path)? {
+                        Some(shared) => shared,
+                        None => 1,
+                    };
                     routed.shared = (shared > 0).then_some(SharedExpert {
                         intermediate: shared * llama.intermediate_size,
                         module: "mlp.shared_mlp",
@@ -192,7 +194,12 @@ pub(in crate::runtime::load::family) fn configure(
                 architecture.experts = Some(routed);
             }
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }

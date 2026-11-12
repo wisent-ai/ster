@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
@@ -15,7 +15,9 @@ use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::experts::step::step_limits;
 use crate::runtime::load::family::linear::kda::ling_kda;
 use crate::runtime::load::family::read::layers::fits;
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{
+    flag, flag_or, list, number, number_or, text, whole, whole_or,
+};
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
 /// sends only their `model_type` values here.
@@ -47,28 +49,34 @@ pub(in crate::runtime::load::family) fn configure(
             // to choose (`moe_router_enable_expert_bias`) within its best
             // `topk_group` of `n_group` groups, always renormalises and
             // scales by `routed_scaling_factor`.
-            if flag(raw, "norm_head") || flag(raw, "norm_softmax") {
-                bail!(
+            if flag(raw, "norm_head", path)? || flag(raw, "norm_softmax", path)? {
+                refused!(
+                    Unimplemented,
+                    in raw,
+                    ["norm_head", "norm_softmax"],
                     "{} normalises its output head (norm_head) or its softmax (norm_softmax); Ster implements Ling's plain lm_head",
                     path.display()
                 );
             }
             architecture.names = Names::BAILING;
             architecture.qkv_layout = QkvLayout::Stacked;
-            architecture.query_key_value_bias = flag(raw, "use_qkv_bias");
-            architecture.output_bias = flag(raw, "use_bias");
+            architecture.query_key_value_bias = flag(raw, "use_qkv_bias", path)?;
+            architecture.output_bias = flag(raw, "use_bias", path)?;
             if model_type == "bailing_hybrid" {
                 bailing_hybrid(raw, layers, llama, architecture, path)?;
-            } else if flag(raw, "use_qk_norm") {
+            } else if flag(raw, "use_qk_norm", path)? {
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
             }
             fits(layers, path)?;
-            let first_dense = whole(raw, "first_k_dense_replace").unwrap_or(0).min(layers);
+            let first_dense = whole_or(raw, "first_k_dense_replace", 0, path)?.min(layers);
             let dense = (0..first_dense).fold(0u128, |set, layer| set | (1u128 << layer));
-            let sigmoid = match text(raw, "score_function") {
+            let sigmoid = match text(raw, "score_function", path)? {
                 None | Some("softmax") => false,
                 Some("sigmoid") => true,
-                Some(other) => bail!(
+                Some(other) => refused!(
+                    Unimplemented,
+                    in raw,
+                    ["score_function"],
                     "{} declares score_function {other:?}; Ster implements softmax and sigmoid expert scores",
                     path.display()
                 ),
@@ -82,8 +90,8 @@ pub(in crate::runtime::load::family) fn configure(
                 dense,
                 path,
             )?;
-            routed.normalize = (sigmoid || flag(raw, "norm_topk_prob")) && routed.top_k > 1;
-            routed.shared = whole(raw, "num_shared_experts")
+            routed.normalize = (sigmoid || flag(raw, "norm_topk_prob", path)?) && routed.top_k > 1;
+            routed.shared = whole(raw, "num_shared_experts", path)?
                 .filter(|shared| *shared > 0)
                 .map(|shared| SharedExpert {
                     intermediate: shared * routed.intermediate,
@@ -93,13 +101,16 @@ pub(in crate::runtime::load::family) fn configure(
                 });
             if sigmoid {
                 routed.scoring = Scoring::Sigmoid;
-                routed.routed_scale = number(raw, "routed_scaling_factor");
+                routed.routed_scale = number(raw, "routed_scaling_factor", path)?;
                 routed.selection_bias =
-                    flag(raw, "moe_router_enable_expert_bias").then_some("mlp.gate.expert_bias");
-                routed.groups = match (whole(raw, "n_group"), whole(raw, "topk_group")) {
+                    flag(raw, "moe_router_enable_expert_bias", path)?.then_some("mlp.gate.expert_bias");
+                routed.groups = match (whole(raw, "n_group", path)?, whole(raw, "topk_group", path)?) {
                     (Some(groups), Some(chosen_groups)) => {
                         if groups == 0 || routed.count % groups != 0 || chosen_groups > groups {
-                            bail!(
+                            refused!(
+                                Contradictory,
+                                in raw,
+                                ["num_experts", "n_group", "topk_group"],
                                 "{} splits {} experts into {groups} groups and keeps {chosen_groups}; the groups must divide the experts evenly and at least as many must exist as are kept",
                                 path.display(),
                                 routed.count
@@ -125,7 +136,12 @@ pub(in crate::runtime::load::family) fn configure(
             }
             architecture.experts = Some(routed);
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }
@@ -146,15 +162,16 @@ pub(in crate::runtime::load::family) fn bailing_hybrid(
 ) -> Result<()> {
     fits(layers, path)?;
     let Some(latent) = architecture.latent else {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["kv_lora_rank"],
             "{} declares a Ling hybrid model without kv_lora_rank",
             path.display()
         );
     };
     let ling3 = raw.get("short_conv_kernel_size").is_some()
-        || raw
-            .get("architectures")
-            .and_then(Value::as_array)
+        || list(raw, "architectures", path)?
             .is_some_and(|names| {
                 names
                     .iter()
@@ -163,52 +180,61 @@ pub(in crate::runtime::load::family) fn bailing_hybrid(
     if ling3 {
         return ling_kda(raw, layers, llama, architecture, path);
     }
-    let group = whole(raw, "layer_group_size").unwrap_or(1).max(1);
+    let group = whole_or(raw, "layer_group_size", 1, path)?.max(1);
     let linear = (0..layers)
         .filter(|layer| (layer + 1) % group != 0)
         .fold(0u128, |set, layer| set | (1u128 << layer));
-    let Some(head_dim) = whole(raw, "head_dim") else {
-        bail!(
+    let Some(head_dim) = whole(raw, "head_dim", path)? else {
+        refused!(
+            Incomplete,
+            in raw,
+            ["head_dim"],
             "{} declares a Ling hybrid model without head_dim",
             path.display()
         );
     };
     let heads = llama.num_attention_heads;
-    if whole(raw, "num_kv_heads_for_linear_attn").is_some_and(|stated| stated != heads) {
-        bail!(
+    if whole(raw, "num_kv_heads_for_linear_attn", path)?.is_some_and(|stated| stated != heads) {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["num_kv_heads_for_linear_attn", "num_attention_heads"],
             "{} gives its lightning attention a key-value head count other than its {heads} heads; Ster runs it with one key and value per head",
             path.display()
         );
     }
-    let share = number(raw, "partial_rotary_factor").unwrap_or(1.0);
+    let share = number_or(raw, "partial_rotary_factor", 1.0, path)?;
     let rotated = (head_dim as f64 * share) as usize;
     if rotated != latent.rotated {
-        bail!(
+        refused!(
+            Unimplemented,
+            in raw,
+            ["partial_rotary_factor", "head_dim", "qk_rope_head_dim"],
             "{} rotates {rotated} components of each lightning head and {} of each latent one; Ster rotates both by one table",
             path.display(),
             latent.rotated
         );
     }
-    let groups = whole(raw, "group_norm_size").unwrap_or(1).max(1);
+    let groups = whole_or(raw, "group_norm_size", 1, path)?.max(1);
     if (heads * head_dim) % groups != 0 {
-        bail!(
+        refused!(
+            Contradictory,
+            in raw,
+            ["group_norm_size", "num_attention_heads", "head_dim"],
             "{} splits its {} lightning channels into {groups} norm groups unevenly",
             path.display(),
             heads * head_dim
         );
     }
-    architecture.interleaved_rotary = raw
-        .get("rope_interleave")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    architecture.interleaved_rotary = flag_or(raw, "rope_interleave", true, path)?;
     architecture.lightning = Some(LightningSpec {
         heads,
         head_dim,
         layers: linear,
         form: LightningForm::Bailing {
             groups,
-            silu: flag(raw, "linear_silu") || flag(raw, "use_linear_silu"),
-            qk_norm: flag(raw, "use_qk_norm"),
+            silu: flag(raw, "linear_silu", path)? || flag(raw, "use_linear_silu", path)?,
+            qk_norm: flag(raw, "use_qk_norm", path)?,
         },
     });
     Ok(())

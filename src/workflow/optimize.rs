@@ -1,11 +1,12 @@
 //! Choosing a layer and a method on pairs the candidate was not fitted on,
 //! and publishing every score the choice was made from.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::{
     artifact::{LayerVector, PairSet, SteeringArtifact},
+    failures::{refuse, workflow::holdout as causes},
     representation::{TrainingMethod, evaluate_direction, train_direction},
     runtime::Runtime,
 };
@@ -112,7 +113,7 @@ pub fn optimize(
     layers: &[usize],
     holdout: f64,
 ) -> Result<Selection> {
-    let holdout = split_holdout(pairs.pairs.len(), holdout)?;
+    let holdout = split_holdout(pairs, holdout)?;
     let captured = capture_pairs(runtime, pairs, layers)?;
     let split = holdout.fit_pairs;
     progress(format!(
@@ -136,12 +137,17 @@ pub fn optimize(
             .get(&layer_index)
             .expect("requested layer is captured");
         for method in methods {
-            let direction =
-                train_direction(&layer.positive[..split], &layer.negative[..split], method)?;
+            let direction = train_direction(
+                &layer.positive[..split],
+                &layer.negative[..split],
+                method,
+                layer_index,
+            )?;
             let (accuracy, margin) = evaluate_direction(
                 &layer.positive[split..],
                 &layer.negative[split..],
                 &direction,
+                layer_index,
             )?;
             candidates.push(Candidate {
                 layer: layer_index,
@@ -175,9 +181,13 @@ pub fn optimize(
     let selected = captured
         .get(&layer_index)
         .expect("selected layer is captured");
-    let direction = train_direction(&selected.positive, &selected.negative, method)?;
-    let (accuracy, margin) =
-        evaluate_direction(&selected.positive, &selected.negative, &direction)?;
+    let direction = train_direction(&selected.positive, &selected.negative, method, layer_index)?;
+    let (accuracy, margin) = evaluate_direction(
+        &selected.positive,
+        &selected.negative,
+        &direction,
+        layer_index,
+    )?;
     let mut artifact = SteeringArtifact::new(
         runtime.model_id.clone(),
         runtime.revision.clone(),
@@ -209,23 +219,42 @@ pub fn optimize(
     })
 }
 
-/// The last `holdout` fraction of `total` pairs in file order, rounded to
-/// whole pairs, held out to rank on and the rest to fit on. Ster assumes no
-/// fraction; one that leaves either side without a pair is refused.
-pub(super) fn split_holdout(total: usize, holdout: f64) -> Result<Holdout> {
+/// The last `holdout` fraction of `pairs` in file order, rounded to whole
+/// pairs, held out to rank on and the rest to fit on. Ster assumes no
+/// fraction; one that leaves either side without a pair is refused. It
+/// reads no model, so a command checks it before loading one.
+pub fn split_holdout(pairs: &PairSet, holdout: f64) -> Result<Holdout> {
+    let total = pairs.pairs.len();
+    let held = (total as f64 * holdout).round() as usize;
+    let fit = total.saturating_sub(held);
+    let shown = [
+        ("holdout", holdout.to_string()),
+        ("total", total.to_string()),
+        ("trait", pairs.trait_name.clone()),
+        ("held", held.to_string()),
+        ("fit", fit.to_string()),
+        (
+            "example",
+            if total >= 2 {
+                "0.5".to_owned()
+            } else {
+                "0.5 once the set holds two pairs or more".to_owned()
+            },
+        ),
+    ];
+    let values: Vec<(&str, &str)> = shown
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
     if !(holdout > 0.0 && holdout < 1.0) {
-        bail!("the held-out fraction must be above zero and below one; got {holdout}");
+        return Err(refuse(&causes::FRACTION_OUTSIDE, &values));
     }
-    let holdout_pairs = (total as f64 * holdout).round() as usize;
-    if holdout_pairs == 0 || holdout_pairs >= total {
-        bail!(
-            "a held-out fraction of {holdout} over {total} contrastive pairs leaves {} pairs to fit and {holdout_pairs} to rank on; both need at least one",
-            total.saturating_sub(holdout_pairs)
-        );
+    if held == 0 || held >= total {
+        return Err(refuse(&causes::SIDE_EMPTY, &values));
     }
     Ok(Holdout {
         fraction: holdout,
-        fit_pairs: total - holdout_pairs,
-        holdout_pairs,
+        fit_pairs: fit,
+        holdout_pairs: held,
     })
 }

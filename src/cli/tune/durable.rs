@@ -4,7 +4,7 @@
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use ster::tune;
+use ster::{failures::request::unpaired, tune};
 
 use crate::cli::input::{self, InputCheck};
 
@@ -27,16 +27,17 @@ pub(crate) struct DurableArgs {
 }
 
 impl InputCheck for DurableArgs {
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         if let Some(path) = &self.checkpoint {
             input::required_path(path, "checkpoint")?;
         }
         if let Some(path) = &self.resume {
             input::required_path(path, "resume")?;
         }
+        let shown = |path: &std::path::Path| path.display().to_string();
         match (&self.checkpoint, &self.checkpoint_every) {
-            (Some(_), None) => Err("checkpoint requires checkpointEvery".to_owned()),
-            (None, Some(_)) => Err("checkpointEvery requires checkpoint".to_owned()),
+            (Some(path), None) => Err(unpaired("tune", "checkpoint", &shown(path), "checkpointEvery")),
+            (None, Some(every)) => Err(unpaired("tune", "checkpointEvery", &every.to_string(), "checkpoint")),
             _ => Ok(()),
         }
     }

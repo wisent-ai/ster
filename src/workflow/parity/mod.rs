@@ -16,41 +16,22 @@
 //! positions is refused. A reference computed at a narrower precision than
 //! Ster's sets the floor these can reach.
 
-use std::{
-    fs,
-    num::FpCategory,
-    path::{Path, PathBuf},
-};
+use std::{num::FpCategory, path::Path};
 
-use anyhow::{Context, Result, bail};
-use candle_core::{DType, Device, Tensor};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use candle_core::{DType, Device};
+use serde::Serialize;
 
+use crate::failures::{file, refuse, workflow::parity as causes};
 use crate::runtime::Runtime;
 
 use super::progress;
 
+mod inputs;
+
 /// The tensor a reference file holds its states under when the record names
 /// none, as Transformers' `output_hidden_states` captures name them.
 const DEFAULT_TENSOR: &str = "hidden_states";
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ParitySet {
-    records: Vec<ParityInput>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ParityInput {
-    #[serde(default)]
-    token_ids: Option<Vec<u32>>,
-    #[serde(default)]
-    token_ids_file: Option<String>,
-    hidden: String,
-    #[serde(default)]
-    tensor: Option<String>,
-}
 
 /// How far Ster's states lie from one record's reference states, or from
 /// every record's together. The cosines are `None` when no compared position
@@ -85,58 +66,55 @@ pub struct ParityReport {
 }
 
 pub fn parity(runtime: &Runtime, input: &Path) -> Result<ParityReport> {
-    let set: ParitySet = serde_json::from_slice(
-        &fs::read(input).with_context(|| format!("failed to read {}", input.display()))?,
-    )
-    .with_context(|| format!("invalid parity JSON in {}", input.display()))?;
-    if set.records.is_empty() {
-        bail!("{} lists no records to compare", input.display());
-    }
-    let base = input
-        .parent()
-        .with_context(|| format!("{} is not a file inside a directory", input.display()))?
-        .to_path_buf();
+    let set = inputs::read_set(input)?;
+    // Every path a record names is read relative to the parity file's
+    // directory, as the system resolves the file's own name.
+    let base = file::parent(input);
     let vocabulary = runtime.vocab_size();
     let mut records = Vec::with_capacity(set.records.len());
     let mut totals = Totals::default();
     for (index, record) in set.records.iter().enumerate() {
         progress(format!("comparing record {index} ({})", record.hidden));
-        let ids = token_ids(record, &base, index)?;
-        if let Some(id) = ids.iter().find(|id| **id as usize >= vocabulary) {
-            bail!("record {index} holds token id {id}, past the model's {vocabulary} tokens");
-        }
+        let ids = inputs::token_ids(record, &base, index, input, vocabulary)?;
         // The record names its tensor, or the documented Transformers name.
         let tensor = match record.tensor.as_deref() {
             Some(named) => named,
             None => DEFAULT_TENSOR,
         };
-        let reference = reference_states(&base.join(&record.hidden), tensor)?;
+        let path = base.join(&record.hidden);
+        let reference = inputs::reference_states(&path, tensor, index, input)?;
         let (positions, width) = reference.dims2()?;
+        let ours_width = runtime.hidden_size();
+        let (shown_index, shown_input, shown_path) =
+            (index.to_string(), input.display().to_string(), path.display().to_string());
+        let (shown_positions, shown_width, tokens) =
+            (positions.to_string(), width.to_string(), ids.len().to_string());
+        let ours = ours_width.to_string();
+        let values = [
+            ("index", shown_index.as_str()),
+            ("input", shown_input.as_str()),
+            ("path", shown_path.as_str()),
+            ("positions", shown_positions.as_str()),
+            ("width", shown_width.as_str()),
+            ("tokens", tokens.as_str()),
+            ("ours", ours.as_str()),
+            ("model", runtime.model_id.as_str()),
+        ];
+        // Both are known before the forward pass, so neither pays for one.
         if positions > ids.len() {
-            bail!(
-                "record {index}'s reference holds {positions} positions for {} tokens",
-                ids.len()
-            );
+            return Err(refuse(&causes::POSITIONS_PAST, &values));
+        }
+        if width != ours_width {
+            return Err(refuse(&causes::WIDTH_OTHER, &values));
         }
         let ours = runtime.forward_hidden_scored(&ids)?;
         let (_, tokens, ours_width) = ours.dims3()?;
-        if ours_width != width {
-            bail!(
-                "record {index}'s reference states are {width} wide and this model's {ours_width}"
-            );
-        }
         let ours = ours
             .reshape((tokens, ours_width))?
             .to_dtype(DType::F32)?
             .to_device(&Device::Cpu)?
             .to_vec2::<f32>()?;
         let theirs = reference.to_vec2::<f32>()?;
-        if theirs.is_empty() {
-            bail!(
-                "record {index}'s {tensor:?} in {} holds no positions to compare",
-                record.hidden
-            );
-        }
         let mut record_totals = Totals::default();
         for (mine, reference) in ours.iter().zip(&theirs) {
             record_totals.add(mine, reference);
@@ -154,53 +132,6 @@ pub fn parity(runtime: &Runtime, input: &Path) -> Result<ParityReport> {
         records,
         overall: totals.measure(),
     })
-}
-
-fn token_ids(record: &ParityInput, base: &Path, index: usize) -> Result<Vec<u32>> {
-    let ids = match (&record.token_ids, &record.token_ids_file) {
-        (Some(ids), None) => ids.clone(),
-        (None, Some(file)) => {
-            let path: PathBuf = base.join(file);
-            serde_json::from_slice(
-                &fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?,
-            )
-            .with_context(|| format!("{} is not a JSON list of token ids", path.display()))?
-        }
-        (Some(_), Some(_)) => {
-            bail!("record {index} names both tokenIds and tokenIdsFile; give one")
-        }
-        (None, None) => bail!("record {index} names neither tokenIds nor tokenIdsFile"),
-    };
-    if ids.is_empty() {
-        bail!("record {index} holds no token ids");
-    }
-    Ok(ids)
-}
-
-/// The reference states, `[positions, hidden]` in F32. A three-dimensional
-/// tensor is accepted only when its leading batch holds a single sequence.
-fn reference_states(path: &Path, tensor: &str) -> Result<Tensor> {
-    let tensors = candle_core::safetensors::load(path, &Device::Cpu)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    let Some(states) = tensors.get(tensor) else {
-        let mut names: Vec<&String> = tensors.keys().collect();
-        names.sort();
-        bail!(
-            "{} holds no tensor {tensor:?}; it holds {names:?}",
-            path.display()
-        );
-    };
-    let states = states.to_dtype(DType::F32)?;
-    match *states.dims() {
-        [_, _] => Ok(states),
-        [_, positions, width] if states.elem_count() == positions * width => {
-            Ok(states.reshape((positions, width))?)
-        }
-        ref other => bail!(
-            "{}'s {tensor:?} is {other:?}; Ster compares [positions, hidden] states",
-            path.display()
-        ),
-    }
 }
 
 #[derive(Debug, Default)]

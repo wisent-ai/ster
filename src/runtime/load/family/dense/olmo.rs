@@ -1,7 +1,7 @@
 //! OLMo 1, 2 and 3, OLMoE, FlexOlmo, OLMo Hybrid, SmolLM3, DBRX, EXAONE 4 and Apertus.
 
-use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{
     Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertLayout, FeedForwardKind, Names, NormKind,
@@ -10,7 +10,7 @@ use crate::model::{
 use crate::runtime::load::family::At;
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::{every_layer, fits, unrotated};
-use crate::runtime::load::family::read::{flag, number, whole};
+use crate::runtime::load::family::read::{flag, flag_or, list, number, whole};
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
 /// sends only their `model_type` values here.
@@ -27,15 +27,15 @@ pub(in crate::runtime::load::family) fn configure(
     } = *at;
     match model_type {
         "olmoe" => {
-            architecture.clip_qkv = number(raw, "clip_qkv");
+            architecture.clip_qkv = number(raw, "clip_qkv", path)?;
             architecture.query_key_norm = QueryKeyNorm::Full;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.experts = Some(experts(
                 raw,
                 "num_experts",
                 "intermediate_size",
-                flag(raw, "norm_topk_prob"),
+                flag(raw, "norm_topk_prob", path)?,
                 ExpertLayout::Qwen,
                 0,
                 path,
@@ -50,10 +50,13 @@ pub(in crate::runtime::load::family) fn configure(
             // with whole-projection query and key norms on the rest, rotated
             // only when `rope_parameters` states a `rope_theta`.
             fits(layers, path)?;
-            let linear = match raw.get("layer_types").and_then(Value::as_array) {
+            let linear = match list(raw, "layer_types", path)? {
                 Some(types) => {
                     if types.len() != layers {
-                        bail!(
+                        refused!(
+                            Contradictory,
+                            in raw,
+                            ["layer_types", "num_hidden_layers"],
                             "{} lists {} layer_types for {layers} layers",
                             path.display(),
                             types.len()
@@ -64,7 +67,10 @@ pub(in crate::runtime::load::family) fn configure(
                         match kind.as_str() {
                             Some("linear_attention") => linear |= 1u128 << layer,
                             Some("full_attention") => {}
-                            other => bail!(
+                            other => refused!(
+                                Malformed,
+                                in raw,
+                                ["layer_types"],
                                 "{} names layer {layer} {other:?}; an OLMo Hybrid layer is linear_attention or full_attention",
                                 path.display()
                             ),
@@ -85,7 +91,7 @@ pub(in crate::runtime::load::family) fn configure(
                 }
             };
             let size = |key: &str| -> Result<usize> {
-                whole(raw, key).filter(|size| *size > 0).with_context(|| {
+                whole(raw, key, path)?.filter(|size| *size > 0).or_refuse(raw, &[key], || {
                     format!(
                         "{} declares an OLMo Hybrid model without {key}",
                         path.display()
@@ -93,42 +99,46 @@ pub(in crate::runtime::load::family) fn configure(
                 })
             };
             architecture.query_key_norm = QueryKeyNorm::Full;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.pre_norms = false;
             architecture.output_norms = true;
+            let key_heads = size("linear_num_key_heads")?;
+            let value_heads = size("linear_num_value_heads")?;
+            if value_heads % key_heads != 0 {
+                refused!(
+                    Contradictory,
+                    in raw,
+                    ["linear_num_key_heads", "linear_num_value_heads"],
+                    "{} shares {value_heads} value heads among {key_heads} key heads; each key head of the linear attention leads an equal group of value heads",
+                    path.display()
+                );
+            }
             architecture.delta_rule = Some(DeltaRuleSpec {
-                key_heads: size("linear_num_key_heads")?,
-                value_heads: size("linear_num_value_heads")?,
+                key_heads,
+                value_heads,
                 key_dim: size("linear_key_head_dim")?,
                 value_dim: size("linear_value_head_dim")?,
                 kernel: size("linear_conv_kernel_dim")?,
                 layers: linear,
                 form: DeltaRuleForm::OlmoHybrid,
-                negative_eigenvalues: raw
-                    .get("linear_allow_neg_eigval")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                negative_eigenvalues: flag_or(raw, "linear_allow_neg_eigval", true, path)?,
                 decay_floor: None,
                 full_rank_gate: false,
             });
-            let stated_theta = |object: Option<&Value>| {
-                object
-                    .and_then(|value| value.get("rope_theta"))
-                    .is_some_and(Value::is_number)
-            };
-            if !stated_theta(raw.get("rope_parameters")) && !stated_theta(Some(raw)) {
+            let theta = number(raw, "rope_parameters.rope_theta", path)?;
+            if theta.is_none() && number(raw, "rope_theta", path)?.is_none() {
                 architecture.positions = Positions::None;
             }
         }
         "olmo2" | "olmo3" | "flex_olmo" => {
             architecture.query_key_norm = QueryKeyNorm::Full;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
             architecture.pre_norms = false;
             architecture.output_norms = true;
             if model_type == "olmo3" {
-                architecture.sliding_window = whole(raw, "sliding_window");
+                architecture.sliding_window = whole(raw, "sliding_window", path)?;
             }
             // FlexOlmo: OLMo 2's block with OLMoE's experts as its
             // feed-forward.
@@ -137,7 +147,7 @@ pub(in crate::runtime::load::family) fn configure(
                     raw,
                     "num_experts",
                     "intermediate_size",
-                    flag(raw, "norm_topk_prob"),
+                    flag(raw, "norm_topk_prob", path)?,
                     ExpertLayout::Qwen,
                     0,
                     path,
@@ -145,22 +155,22 @@ pub(in crate::runtime::load::family) fn configure(
             }
         }
         "smollm3" => {
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            if let Some(flags) = raw.get("no_rope_layers").and_then(Value::as_array) {
+            if let Some(flags) = list(raw, "no_rope_layers", path)? {
                 architecture.unrotated_layers = unrotated(flags, layers, path)?;
             }
-            if flag(raw, "use_sliding_window") {
-                architecture.sliding_window = whole(raw, "sliding_window");
+            if flag(raw, "use_sliding_window", path)? {
+                architecture.sliding_window = whole(raw, "sliding_window", path)?;
                 architecture.sliding_layers = every_layer(layers, path)?;
             }
         }
         "olmo" => {
             // OLMo 1's LayerNorm stores neither a scale nor a bias.
             architecture.norm = NormKind::Bare;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.clip_qkv = number(raw, "clip_qkv");
+            architecture.clip_qkv = number(raw, "clip_qkv", path)?;
         }
         "dbrx" => {
             // DBRX: LayerNorms without bias, one `Wqkv` clipped to
@@ -170,7 +180,10 @@ pub(in crate::runtime::load::family) fn configure(
             let normalize = match raw.get("moe_normalize_expert_weights") {
                 None | Some(Value::Null) => false,
                 Some(power) if power.as_f64() == Some(1.0) => true,
-                Some(other) => bail!(
+                Some(other) => refused!(
+                    Unimplemented,
+                    in raw,
+                    ["moe_normalize_expert_weights"],
                     "{} normalises expert weights by their {other}-norm; Ster implements the 1-norm (moe_normalize_expert_weights 1) or none",
                     path.display()
                 ),
@@ -178,7 +191,7 @@ pub(in crate::runtime::load::family) fn configure(
             architecture.names = Names::DBRX;
             architecture.norm = NormKind::Layer { bias: false };
             architecture.qkv_layout = QkvLayout::Stacked;
-            architecture.clip_qkv = number(raw, "clip_qkv");
+            architecture.clip_qkv = number(raw, "clip_qkv", path)?;
             architecture.experts = Some(experts(
                 raw,
                 "moe_num_experts",
@@ -194,8 +207,8 @@ pub(in crate::runtime::load::family) fn configure(
             architecture.query_key_norm = QueryKeyNorm::PerHead;
             architecture.pre_norms = false;
             architecture.output_norms = true;
-            architecture.sliding_window = whole(raw, "sliding_window");
-            if let Some(pattern) = whole(raw, "sliding_window_pattern").filter(|p| *p > 0) {
+            architecture.sliding_window = whole(raw, "sliding_window", path)?;
+            if let Some(pattern) = whole(raw, "sliding_window_pattern", path)?.filter(|p| *p > 0) {
                 fits(layers, path)?;
                 architecture.sliding_layers = (0..layers)
                     .filter(|layer| (layer + 1) % pattern != 0)
@@ -207,13 +220,18 @@ pub(in crate::runtime::load::family) fn configure(
             // and `feedforward_layernorm`, and a plain up-activation-down
             // feed-forward whose xIELU keeps its parameters in `mlp.act_fn`.
             architecture.query_key_norm = QueryKeyNorm::PerHead;
-            architecture.query_key_value_bias = flag(raw, "attention_bias");
+            architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
             architecture.output_bias = architecture.query_key_value_bias;
-            architecture.feed_forward_bias = flag(raw, "mlp_bias");
+            architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
             architecture.feed_forward = FeedForwardKind::Plain;
             architecture.names = Names::APERTUS;
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }

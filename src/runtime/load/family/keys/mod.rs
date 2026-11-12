@@ -4,12 +4,15 @@ pub(in crate::runtime::load::family) mod aliases;
 pub(in crate::runtime::load::family) mod glm;
 pub(in crate::runtime::load::family) mod step;
 
+use std::path::Path;
+
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::runtime::load::family::classic::loops::deci_intermediate;
 use crate::runtime::load::family::keys::glm::{chatglm_keys, nemotron_puzzle_keys};
 use crate::runtime::load::family::keys::step::step3p5_keys;
-use crate::runtime::load::family::read::whole;
+use crate::runtime::load::family::read::{list, stated, whole, whole_or};
 
 /// OLMo 1's and DBRX's configs state no norm epsilon; their LayerNorms use
 /// PyTorch's default, which this is.
@@ -28,21 +31,23 @@ pub(in crate::runtime::load::family) const GPT_INNER_PER_HIDDEN: u64 = 4;
 /// a key Llama's name already holds is left alone. OLMo 1, which states no
 /// epsilon, gets the one its norm is defined with; the GPT families without
 /// an inner width get four times the residual; GPT-BigCode's `multi_query`
-/// becomes one key-value head.
-pub(in crate::runtime::load) fn fill_llama_keys(raw: &mut Value, model_type: &str) {
+/// becomes one key-value head. A key it reads to decide what to copy is
+/// read through [`stated`], so a mistyped one is refused by name.
+pub(in crate::runtime::load) fn fill_llama_keys(
+    raw: &mut Value,
+    model_type: &str,
+    path: &Path,
+) -> Result<()> {
     // DBRX keeps its attention and feed-forward settings in `attn_config` and
     // `ffn_config`; they are lifted beside the rest before any key is read,
     // never over a key the top level already states.
     if model_type == "dbrx" {
-        let nested: Vec<(String, Value)> = ["attn_config", "ffn_config"]
-            .iter()
-            .filter_map(|section| raw.get(*section).and_then(Value::as_object))
-            .flat_map(|section| {
-                section
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-            })
-            .collect();
+        let mut nested: Vec<(String, Value)> = Vec::new();
+        for section in ["attn_config", "ffn_config"] {
+            if let Some(section) = stated::<&serde_json::Map<String, Value>>(raw, section, path)? {
+                nested.extend(section.iter().map(|(key, value)| (key.clone(), value.clone())));
+            }
+        }
         if let Some(object) = raw.as_object_mut() {
             for (key, value) in nested {
                 object.entry(key).or_insert(value);
@@ -51,13 +56,10 @@ pub(in crate::runtime::load) fn fill_llama_keys(raw: &mut Value, model_type: &st
     }
     // Granite 4.0 without experts runs its `shared_mlp` as the feed-forward,
     // `shared_intermediate_size` wide; `intermediate_size` is then unused.
-    if model_type == "granitemoehybrid" && whole(raw, "num_local_experts").unwrap_or(0) == 0 {
-        let shared = raw
-            .get("shared_intermediate_size")
-            .filter(|width| width.is_u64())
-            .cloned();
+    if model_type == "granitemoehybrid" && whole_or(raw, "num_local_experts", 0, path)? == 0 {
+        let shared = whole(raw, "shared_intermediate_size", path)?;
         if let (Some(width), Some(object)) = (shared, raw.as_object_mut()) {
-            object.insert("intermediate_size".to_owned(), width);
+            object.insert("intermediate_size".to_owned(), Value::from(width));
         }
     }
     // Zamba2 ties its head to the embeddings whatever `tie_word_embeddings`
@@ -72,19 +74,16 @@ pub(in crate::runtime::load) fn fill_llama_keys(raw: &mut Value, model_type: &st
     // `intermediate_size` null; the widest stands in for the Llama key,
     // which no DeciLM layer reads.
     if model_type == "nemotron-nas" && raw.get("intermediate_size").is_none_or(Value::is_null) {
-        let hidden = whole(raw, "hidden_size").unwrap_or(0);
-        let widest = raw
-            .get("block_configs")
-            .and_then(Value::as_array)
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|block| block.get("ffn"))
-                    .filter_map(|ffn| deci_intermediate(ffn, hidden))
-                    .max()
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
+        let hidden = whole_or(raw, "hidden_size", 0, path)?;
+        let mut widest = 0;
+        for (layer, block) in list(raw, "block_configs", path)?.into_iter().flatten().enumerate() {
+            if let Some(ffn) = block.get("ffn") {
+                let name = format!("block_configs[{layer}].ffn");
+                if let Some(width) = deci_intermediate(ffn, &name, hidden, path)? {
+                    widest = widest.max(width);
+                }
+            }
+        }
         if let Some(object) = raw.as_object_mut() {
             object.insert("intermediate_size".to_owned(), Value::from(widest));
         }
@@ -105,12 +104,12 @@ pub(in crate::runtime::load) fn fill_llama_keys(raw: &mut Value, model_type: &st
         }
     }
     if model_type == "step3p5" {
-        step3p5_keys(raw);
+        step3p5_keys(raw, path)?;
     }
     // LongCat-Flash's `num_layers` stored layers each hold two attention and
     // feed-forward pairs, which Ster runs as two layers.
     if model_type == "longcat_flash" || model_type == "longcat_flash_ngram" {
-        let stored = whole(raw, "num_layers");
+        let stored = whole(raw, "num_layers", path)?;
         if let (Some(stored), Some(object)) = (stored, raw.as_object_mut()) {
             object.insert("num_hidden_layers".to_owned(), Value::from(2 * stored));
         }
@@ -157,7 +156,7 @@ pub(in crate::runtime::load) fn fill_llama_keys(raw: &mut Value, model_type: &st
         }
     }
     if model_type == "minimax_m3_vl_text" {
-        crate::runtime::load::family::custom::minimax_m3::fill_keys(raw);
+        crate::runtime::load::family::custom::minimax_m3::fill_keys(raw, path)?;
     }
     // DeepSeek-V4 states only `moe_intermediate_size`, which Transformers
     // reads as `intermediate_size` too (`DeepseekV4Config.attribute_map`):
@@ -169,24 +168,21 @@ pub(in crate::runtime::load) fn fill_llama_keys(raw: &mut Value, model_type: &st
         }
     }
     if model_type == "nemotron_h_puzzle" {
-        nemotron_puzzle_keys(raw);
+        nemotron_puzzle_keys(raw, path)?;
     }
     if model_type == "chatglm" {
-        chatglm_keys(raw);
+        chatglm_keys(raw, path)?;
     }
     // Gemma 3n states its feed-forward width per layer; a list of one width
     // is that width, and a list of several is left for the reading to
     // refuse by its key.
     if model_type == "gemma3n_text" {
-        let uniform = raw
-            .get("intermediate_size")
-            .and_then(Value::as_array)
-            .and_then(|widths| {
-                widths
-                    .first()
-                    .filter(|first| widths.iter().all(|width| width == *first))
-                    .cloned()
-            });
+        let uniform = list(raw, "intermediate_size", path)?.and_then(|widths| {
+            widths
+                .first()
+                .filter(|first| widths.iter().all(|width| width == *first))
+                .cloned()
+        });
         if let (Some(width), Some(object)) = (uniform, raw.as_object_mut()) {
             object.insert("intermediate_size".to_owned(), width);
         }
@@ -196,19 +192,15 @@ pub(in crate::runtime::load) fn fill_llama_keys(raw: &mut Value, model_type: &st
     // layers', read from `num_attention_heads_per_layer`, and the reading
     // gives the full-attention layers theirs.
     if model_type == "laguna" {
-        let windowed = raw
-            .get("layer_types")
-            .and_then(Value::as_array)
-            .and_then(|kinds| {
-                kinds
-                    .iter()
-                    .position(|kind| kind.as_str() == Some("sliding_attention"))
-            })
-            .and_then(|layer| {
-                raw.get("num_attention_heads_per_layer")
-                    .and_then(|counts| counts.get(layer))
-                    .cloned()
-            });
+        let first_sliding = list(raw, "layer_types", path)?.and_then(|kinds| {
+            kinds
+                .iter()
+                .position(|kind| kind.as_str() == Some("sliding_attention"))
+        });
+        let windowed = match (first_sliding, list(raw, "num_attention_heads_per_layer", path)?) {
+            (Some(layer), Some(counts)) => counts.get(layer).cloned(),
+            _ => None,
+        };
         if let (Some(heads), Some(object)) = (windowed, raw.as_object_mut()) {
             object.insert("num_attention_heads".to_owned(), heads);
         }
@@ -225,5 +217,5 @@ pub(in crate::runtime::load) fn fill_llama_keys(raw: &mut Value, model_type: &st
         }
     }
     aliases::copy_aliases(raw);
-    aliases::derive_keys(raw, model_type);
+    aliases::derive_keys(raw, model_type, path)
 }

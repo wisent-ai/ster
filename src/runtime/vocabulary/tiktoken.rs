@@ -1,15 +1,26 @@
 //! Tiktoken vocabularies: GLM-4's `tokenizer.model` and Kimi's
 //! `tiktoken.model`, built as a byte-level BPE.
 
-use std::{fs, path::Path};
+use std::path::Path;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Result;
 use serde_json::Value;
 use tokenizers::{
     AddedToken, Tokenizer, pre_tokenizers::sequence::Sequence as PreTokenizerSequence,
 };
 
-use super::{isolate, prefixed};
+use crate::failures::{
+    model::tokenizer::{
+        ADDED_CONTENT_ABSENT, ADDED_KEY_NOT_ID, ADDED_NOT_OBJECT, MODEL_UNBUILT, RANK_NOT_ID,
+        ROW_SPACELESS, SPECIAL_OUTSIDE, TOKEN_NOT_BASE64,
+    },
+    refuse,
+};
+
+use super::{
+    pieces::{class_split, prefixed},
+    row_refusal, vocabulary_text,
+};
 
 /// GLM-4's split of text into pieces before byte-pair merging
 /// (`ChatGLM4Tokenizer.pat_str` in
@@ -41,16 +52,17 @@ pub(super) const KIMI_RESERVED_SPECIAL_TOKENS: usize = 256;
 /// `TikTokenConverter` recovers them — with the special tokens after it:
 /// `added_tokens_decoder`'s, at least `reserved` of them, unnamed ones
 /// spelled `<|reserved_token_{id}|>`; and `prefix` before every sequence.
+/// `config` is where `settings` were read, as a refusal names it.
 pub(super) fn tiktoken(
     path: &Path,
-    settings: &Value,
-    pattern: &str,
+    (settings, config): (&Value, &str),
+    pattern: &'static str,
     reserved: usize,
     prefix: &[&str],
 ) -> Result<Tokenizer> {
     use base64::Engine;
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    const FORM: &str = "`base64 rank`";
+    let text = vocabulary_text(path, FORM)?;
     let mut ranks: std::collections::HashMap<Vec<u8>, u32> = std::collections::HashMap::new();
     for (line_number, line) in text
         .lines()
@@ -58,24 +70,25 @@ pub(super) fn tiktoken(
         .enumerate()
     {
         let line_number = line_number + 1;
+        let row = (path, line_number, FORM);
         let Some((token, rank)) = line.split_once(' ') else {
-            bail!(
-                "{} line {line_number} is {line:?}, not a `base64 rank` pair; restore the checkpoint's tiktoken vocabulary",
-                path.display()
-            );
+            let characters = line.chars().count().to_string();
+            return Err(row_refusal(&ROW_SPACELESS, row, line, &[("characters", &characters)]));
         };
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(token)
-            .with_context(|| {
-                format!(
-                    "{} line {line_number} spells its token as {token:?}, which is not base64; restore the checkpoint's tiktoken vocabulary",
-                    path.display()
-                )
+            .map_err(|error| {
+                let (token, error) = (format!("{token:?}"), error.to_string());
+                row_refusal(&TOKEN_NOT_BASE64, row, line, &[("token", &token), ("error", &error)])
             })?;
-        let rank = rank.trim().parse::<u32>().with_context(|| {
-            format!(
-                "{} line {line_number} ranks its token {rank:?}, which is not a token id; restore the checkpoint's tiktoken vocabulary",
-                path.display()
+        let rank = rank.trim().parse::<u32>().map_err(|error| {
+            let (rank, error) = (format!("{rank:?}"), error.to_string());
+            let largest = u32::MAX.to_string();
+            row_refusal(
+                &RANK_NOT_ID,
+                row,
+                line,
+                &[("rank", &rank), ("largest", &largest), ("error", &error)],
             )
         })?;
         ranks.insert(bytes, rank);
@@ -104,6 +117,7 @@ pub(super) fn tiktoken(
         );
     }
     merges.sort_by_key(|(rank, _, _)| *rank);
+    let merge_count = merges.len();
     let vocabulary: tokenizers::models::bpe::Vocab = ranks
         .iter()
         .map(|(bytes, rank)| (spelled(bytes), *rank))
@@ -118,25 +132,46 @@ pub(super) fn tiktoken(
         )
         .ignore_merges(true)
         .build()
-        .map_err(|error| anyhow!("{} is not a byte-pair vocabulary: {error}", path.display()))?;
+        // tokenizers 0.22's `BpeBuilder::build` errs only on a merge whose
+        // halves or join its vocabulary lacks, and each merge above joins
+        // two ranked halves into a ranked token; a library that reads them
+        // otherwise is refused by name.
+        .map_err(|error| {
+            refuse(
+                &MODEL_UNBUILT,
+                &[
+                    ("model", "byte-level BPE"),
+                    ("path", &path.display().to_string()),
+                    ("rows", &ranks.len().to_string()),
+                    ("built", &format!("merges recovered from the ranks: {merge_count}")),
+                    ("error", &error.to_string()),
+                ],
+            )
+        })?;
     let mut tokenizer = Tokenizer::new(model);
     let byte_level = tokenizers::pre_tokenizers::byte_level::ByteLevel::new(false, true, false);
     tokenizer.with_pre_tokenizer(Some(PreTokenizerSequence::new(vec![
-        isolate(pattern)?,
+        class_split(pattern, path, ranks.len())?,
         byte_level.clone().into(),
     ])));
     tokenizer.with_decoder(Some(byte_level));
-    let given = added_tokens(path, settings)?;
+    let given = added_tokens(path, (settings, config))?;
     let base = ranks.len() as u64;
     let count = (reserved as u64).max(given.len() as u64);
     if let Some((id, _)) = given
         .iter()
         .find(|(id, _)| !(base..base + count).contains(*id))
     {
-        bail!(
-            "{} numbers a special token {id}, outside the {count} ids after its {base} ranks; Ster adds them in order",
-            path.display()
-        );
+        return Err(refuse(
+            &SPECIAL_OUTSIDE,
+            &[
+                ("path", &path.display().to_string()),
+                ("id", &id.to_string()),
+                ("count", &count.to_string()),
+                ("base", &base.to_string()),
+                ("end", &(base + count).to_string()),
+            ],
+        ));
     }
     let mut added = Vec::new();
     for id in base..base + count {
@@ -160,28 +195,33 @@ pub(super) fn tiktoken(
 /// from an `added_tokens_decoder` the config holds
 /// (`PreTrainedTokenizerBase._from_pretrained` in
 /// https://github.com/huggingface/transformers/blob/main/src/transformers/tokenization_utils_base.py).
-fn added_tokens(path: &Path, settings: &Value) -> Result<std::collections::BTreeMap<u64, String>> {
+fn added_tokens(
+    path: &Path,
+    (settings, config): (&Value, &str),
+) -> Result<std::collections::BTreeMap<u64, String>> {
+    let refused = |cause: &'static wisent_errors::Cause, key: &str, value: &Value| {
+        refuse(
+            cause,
+            &[
+                ("path", &path.display().to_string()),
+                ("config", config),
+                ("key", &format!("{key:?}")),
+                ("value", &value.to_string()),
+            ],
+        )
+    };
     let mut given = std::collections::BTreeMap::new();
     let added = match settings.get("added_tokens_decoder") {
         None => return Ok(given),
         Some(Value::Object(added)) => added,
-        Some(other) => bail!(
-            "the tokenizer config of {} has added_tokens_decoder {other}, not an object of id to token; restore the checkpoint's tokenizer_config.json",
-            path.display()
-        ),
+        Some(other) => return Err(refused(&ADDED_NOT_OBJECT, "added_tokens_decoder", other)),
     };
     for (id, token) in added {
-        let number = id.parse::<u64>().with_context(|| {
-            format!(
-                "the tokenizer config of {} keys an added_tokens_decoder entry {id:?}, which is not a token id; restore the checkpoint's tokenizer_config.json",
-                path.display()
-            )
-        })?;
+        let Ok(number) = id.parse::<u64>() else {
+            return Err(refused(&ADDED_KEY_NOT_ID, id, token));
+        };
         let Some(content) = token.get("content").and_then(Value::as_str) else {
-            bail!(
-                "the tokenizer config of {} has added_tokens_decoder entry {id} {token}, which has no `content` string; restore the checkpoint's tokenizer_config.json",
-                path.display()
-            );
+            return Err(refused(&ADDED_CONTENT_ABSENT, id, token));
         };
         given.insert(number, content.to_owned());
     }
@@ -202,6 +242,8 @@ fn byte_spelling() -> Vec<char> {
                 char::from(byte)
             } else {
                 moved += 1;
+                // `moved` counts the bytes `printable` leaves out, at most
+                // 256, so `u8::MAX + moved` is below 512, never a surrogate.
                 char::from_u32(u32::from(u8::MAX) + moved)
                     .expect("a code point below 512 is a char")
             }

@@ -10,7 +10,13 @@ use std::{
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::failures::{refuse, workspace::store};
+use crate::failures::{file, refuse, workspace::store};
+
+/// What the workspace document is called in a refusal of its file.
+const RECORD: &str = "the Ster workspace";
+
+/// What the file a workspace change is first written to is called.
+const TEMPORARY: &str = "the draft of the Ster workspace";
 
 pub(super) const WORKSPACE_SCHEMA: &str = "ster.workspace.v1";
 
@@ -46,7 +52,6 @@ impl Default for WorkspaceState {
 
 pub(super) fn load_state() -> Result<WorkspaceState> {
     let path = state_path()?;
-    let shown = path.display().to_string();
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         // Nothing there yet, or a part of the path is a file: the first write
@@ -59,24 +64,15 @@ pub(super) fn load_state() -> Result<WorkspaceState> {
         {
             return Ok(WorkspaceState::default());
         }
-        Err(error) => {
-            return Err(refuse(
-                &store::UNREADABLE,
-                &[("path", &shown), ("error", &error.to_string())],
-            ));
-        }
+        Err(error) => return Err(file::read::refusal(RECORD, &path, &error)),
     };
-    let state: WorkspaceState = serde_json::from_slice(&bytes).map_err(|error| {
-        refuse(
-            &store::MALFORMED,
-            &[("path", &shown), ("error", &error.to_string())],
-        )
-    })?;
+    let state: WorkspaceState = serde_json::from_slice(&bytes)
+        .map_err(|error| file::json::refusal(RECORD, store::FORM, &path, &error))?;
     if state.schema != WORKSPACE_SCHEMA {
         return Err(refuse(
             &store::SCHEMA,
             &[
-                ("path", &shown),
+                ("path", &path.display().to_string()),
                 ("found", &state.schema),
                 ("expected", WORKSPACE_SCHEMA),
             ],
@@ -88,55 +84,38 @@ pub(super) fn load_state() -> Result<WorkspaceState> {
 pub(super) fn save_state(state: &WorkspaceState) -> Result<()> {
     let root = workspace_root()?;
     create_directory(&root, &root)?;
-    let mut bytes = serde_json::to_vec_pretty(state)?;
+    let mut bytes = crate::json::pretty(state).into_bytes();
     bytes.push(b'\n');
-    atomic_write(&root, &root.join(STATE_FILE), &bytes)
+    atomic_write(&root.join(STATE_FILE), &bytes)
 }
 
-/// Create `directory` of the workspace under `root`, or refuse naming both.
+/// Create `directory` of the workspace under `root`, or refuse naming it.
 pub(super) fn create_directory(root: &Path, directory: &Path) -> Result<()> {
     fs::create_dir_all(directory).map_err(|error| {
-        refuse(
-            &store::DIRECTORY,
-            &[
-                ("directory", &directory.display().to_string()),
-                ("root", &root.display().to_string()),
-                ("error", &error.to_string()),
-            ],
-        )
+        let left = format!("nothing was written under {}", root.display());
+        file::write::refusal("creating", "the Ster workspace directory", directory, &left, &error)
     })
 }
 
-fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let refused = |step: &str, error: std::io::Error, left: String| {
-        refuse(
-            &store::WRITE,
-            &[
-                ("path", &path.display().to_string()),
-                ("directory", &root.display().to_string()),
-                ("step", step),
-                ("error", &error.to_string()),
-                ("left", &left),
-            ],
-        )
-    };
-    let mut file = OpenOptions::new()
+    let mut handle = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&temporary)
         .map_err(|error| {
-            let step = format!("creating {}", temporary.display());
-            refused(&step, error, "nothing was written".to_owned())
+            let left = format!("nothing was written; {} is unchanged", path.display());
+            file::write::refusal("creating", TEMPORARY, &temporary, &left, &error)
         })?;
-    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-        let step = format!("writing {}", temporary.display());
-        return Err(refused(&step, error, discard(&temporary)));
+    if let Err(error) = handle.write_all(bytes).and_then(|_| handle.sync_all()) {
+        let left = discard(&temporary);
+        return Err(file::write::refusal("writing", TEMPORARY, &temporary, &left, &error));
     }
-    drop(file);
+    drop(handle);
     if let Err(error) = fs::rename(&temporary, path) {
-        let step = format!("replacing {} with {}", path.display(), temporary.display());
-        return Err(refused(&step, error, discard(&temporary)));
+        let left = discard(&temporary);
+        let action = format!("renaming {} into place as", temporary.display());
+        return Err(file::write::refusal(&action, RECORD, path, &left, &error));
     }
     Ok(())
 }
@@ -149,7 +128,11 @@ fn discard(temporary: &Path) -> String {
             "{} was removed; the workspace document is unchanged",
             temporary.display()
         ),
-        Err(error) => format!("{} was left behind: {error}", temporary.display()),
+        Err(error) => format!(
+            "{} was left behind ({}: {error}); the workspace document is unchanged",
+            temporary.display(),
+            file::kind(&error)
+        ),
     }
 }
 
@@ -162,9 +145,13 @@ pub(super) fn workspace_root() -> Result<PathBuf> {
     if let Some(root) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(root).join("ster"));
     }
-    let home = std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| refuse(&store::HOME_UNSET, &[]))?;
+    let home = std::env::var_os("HOME").filter(|value| !value.is_empty()).ok_or_else(|| {
+        let said = |name: &str| match std::env::var_os(name) {
+            None => "unset".to_owned(),
+            Some(_) => "set but empty".to_owned(),
+        };
+        refuse(&store::HOME_UNSET, &[("xdg", &said("XDG_DATA_HOME")), ("home", &said("HOME"))])
+    })?;
     Ok(PathBuf::from(home).join(".local/share/ster"))
 }
 

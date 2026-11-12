@@ -2,30 +2,47 @@
 
 use std::path::Path;
 
-use ster::{ChatChoice, DeviceChoice, Precision};
+use anyhow::Result;
+use ster::{ChatChoice, DeviceChoice, Precision, failures::request::require};
 
 use super::ModelArgs;
 
 pub(crate) trait InputCheck {
-    fn check(&self) -> Result<(), String>;
+    fn check(&self) -> Result<()>;
 }
 
-pub(super) fn required_text(value: &str, field: &str) -> Result<(), String> {
-    if value.trim().is_empty() {
-        return Err(format!("{field} requires a nonempty value, got {value:?}"));
+/// The operation, request field and CLI flag a check's `label` names:
+/// `"tune/sft examples"` is field `examples` of `tune/sft`, read by
+/// `--examples`; a bare `"model"` is a field every tuning operation shares.
+fn named(label: &str) -> (&str, &str, String) {
+    let (operation, field) = match label.rsplit_once(' ') {
+        Some(parts) => parts,
+        None => ("tune", label),
+    };
+    let mut flag = String::from("--");
+    for character in field.chars() {
+        if character.is_ascii_uppercase() {
+            flag.push('-');
+            flag.push(character.to_ascii_lowercase());
+        } else {
+            flag.push(character);
+        }
     }
-    Ok(())
+    (operation, field, flag)
 }
 
-pub(super) fn required_path(value: &Path, field: &str) -> Result<(), String> {
-    if value.as_os_str().is_empty() || value.to_str().is_some_and(|text| text.trim().is_empty()) {
-        return Err(format!("{field} requires a nonempty path, got {value:?}"));
-    }
-    Ok(())
+pub(super) fn required_text(value: &str, label: &str) -> Result<()> {
+    let (operation, field, flag) = named(label);
+    require(value, operation, field, "a nonempty value", &flag)
+}
+
+pub(super) fn required_path(value: &Path, label: &str) -> Result<()> {
+    let (operation, field, flag) = named(label);
+    require(&value.to_string_lossy(), operation, field, "a nonempty path", &flag)
 }
 
 impl InputCheck for ModelArgs {
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> Result<()> {
         required_text(&self.model, "model")?;
         if let Some(revision) = &self.revision {
             required_text(revision, "revision")?;

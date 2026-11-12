@@ -6,9 +6,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
+use crate::failures::model::{Unrunnable, config::KEY_ABSENT, settings, stated as state_of};
+use crate::failures::refuse;
+use crate::model::keys::{Kind, flag_or, mistyped, number_or, stated, whole, whole_or};
 use crate::model::{Activation, NormKind, layer::norm::NormSpec};
 
 /// `T5Config.relative_attention_num_buckets` when a config leaves it out:
@@ -68,85 +71,62 @@ pub(crate) struct Config {
 impl Config {
     /// Reads `raw`, the `config.json` at `path`, with the feed-forward its
     /// `feed_forward_proj` names, which the loader resolves through the
-    /// activation names every family shares.
+    /// activation names every family shares. Every key goes through the
+    /// shared reader, so one stated with another type is
+    /// `ster.model.config.key-mistyped` and one left out that has no default
+    /// is `key-absent`.
     pub(crate) fn read(raw: &Value, feed_forward: FeedForward, path: &Path) -> Result<Self> {
-        // A key left out or written `null` is absent; one of another type is
-        // refused, never read as absent.
-        let stated = |key: &str| -> Result<Option<u64>> {
-            match raw.get(key) {
-                None | Some(Value::Null) => Ok(None),
-                Some(value) => match value.as_u64() {
-                    Some(number) => Ok(Some(number)),
-                    None => bail!(
-                        "{} sets {key} to {value}, not a whole number; correct it in the checkpoint's config.json",
-                        path.display()
-                    ),
-                },
-            }
-        };
-        let count = |key: &str| -> Result<Option<usize>> {
-            match stated(key)? {
-                Some(number) => Ok(Some(usize::try_from(number).with_context(|| {
-                    format!(
-                        "{} sets {key} to {number}, past this platform's sizes",
-                        path.display()
-                    )
-                })?)),
-                None => Ok(None),
-            }
+        let absent = |key: &str, kind: &str| {
+            refuse(
+                &KEY_ABSENT,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("key", key),
+                    ("spellings", ""),
+                    ("model_type", "t5"),
+                    ("kind", kind),
+                ],
+            )
         };
         let size = |key: &str| -> Result<usize> {
-            match count(key)? {
+            match whole(raw, key, path)? {
                 Some(size) if size > 0 => Ok(size),
-                Some(size) => bail!(
-                    "{} sets {key} to {size}; a T5 model needs it above zero",
-                    path.display()
-                ),
-                None => bail!("{} declares a T5 model without {key}", path.display()),
+                Some(_) => Err(settings(
+                    Unrunnable::OutOfRange,
+                    format!("{} sets {key} to 0; a T5 model needs it above zero", path.display()),
+                    state_of(raw, &[key]),
+                )),
+                None => Err(absent(key, "a whole number above zero")),
             }
-        };
-        let id = |key: &str, number: u64| -> Result<u32> {
-            u32::try_from(number).with_context(|| {
-                format!(
-                    "{} sets {key} to {number}, past the u32 token ids",
-                    path.display()
-                )
-            })
         };
         let token = |key: &str| -> Result<u32> {
-            match stated(key)? {
-                Some(number) => id(key, number),
-                None => bail!("{} declares a T5 model without {key}", path.display()),
-            }
+            stated::<u32>(raw, key, path)?.ok_or_else(|| absent(key, "a token id"))
         };
         let (hidden, heads, head_width) = (size("d_model")?, size("num_heads")?, size("d_kv")?);
         let encoder_layers = size("num_layers")?;
-        let tied_head = match raw.get("tie_word_embeddings") {
-            None | Some(Value::Null) => DEFAULT_TIED_HEAD,
-            Some(Value::Bool(tied)) => *tied,
-            Some(other) => bail!(
-                "{} sets tie_word_embeddings to {other}, not true or false; correct it in the checkpoint's config.json",
-                path.display()
-            ),
-        };
+        let tied_head = flag_or(raw, "tie_word_embeddings", DEFAULT_TIED_HEAD, path)?;
         let eos = match raw.get("eos_token_id") {
             Some(Value::Array(ids)) => {
                 let mut eos = Vec::with_capacity(ids.len());
-                for listed in ids {
-                    let Some(number) = listed.as_u64() else {
-                        bail!(
-                            "{} lists an eos_token_id {listed}, not a token id; correct it in the checkpoint's config.json",
-                            path.display()
-                        );
+                for (index, listed) in ids.iter().enumerate() {
+                    let shown = format!("eos_token_id[{index}]");
+                    let Some(id) = u32::read(listed) else {
+                        return Err(mistyped(&shown, listed, "a token id", path));
                     };
-                    eos.push(id("eos_token_id", number)?);
+                    eos.push(id);
                 }
                 eos
             }
+            // One id, or none: `token` reads the key as one id and refuses
+            // another type or its absence.
             _ => vec![token("eos_token_id")?],
         };
         if eos.is_empty() {
-            bail!("{} lists no eos_token_id", path.display());
+            return Err(settings(
+                Unrunnable::Incomplete,
+                format!("{} lists no eos_token_id; the decoder stops at one", path.display()),
+                state_of(raw, &["eos_token_id"]),
+            ));
         }
         Ok(Self {
             vocab: size("vocab_size")?,
@@ -159,32 +139,14 @@ impl Config {
             // `T5Config` sets `num_decoder_layers` to `num_layers` when it is
             // left out:
             // https://github.com/huggingface/transformers/blob/v4.23.1/src/transformers/models/t5/configuration_t5.py
-            decoder_layers: match count("num_decoder_layers")? {
-                Some(layers) => layers,
-                None => encoder_layers,
-            },
-            buckets: match count("relative_attention_num_buckets")? {
-                Some(buckets) => buckets,
-                None => DEFAULT_BUCKETS,
-            },
-            max_distance: match count("relative_attention_max_distance")? {
-                Some(distance) => distance,
-                None => DEFAULT_MAX_DISTANCE,
-            },
-            norm_eps: match raw.get("layer_norm_epsilon") {
-                None | Some(Value::Null) => DEFAULT_NORM_EPS,
-                Some(value) => match value.as_f64() {
-                    Some(eps) => eps,
-                    None => bail!(
-                        "{} sets layer_norm_epsilon to {value}, not a number; correct it in the checkpoint's config.json",
-                        path.display()
-                    ),
-                },
-            },
+            decoder_layers: whole_or(raw, "num_decoder_layers", encoder_layers, path)?,
+            buckets: whole_or(raw, "relative_attention_num_buckets", DEFAULT_BUCKETS, path)?,
+            max_distance: whole_or(raw, "relative_attention_max_distance", DEFAULT_MAX_DISTANCE, path)?,
+            norm_eps: number_or(raw, "layer_norm_epsilon", DEFAULT_NORM_EPS, path)?,
             feed_forward,
             tied_head,
             scale_decoder_outputs: tied_head,
-            context_length: count("n_positions")?,
+            context_length: whole(raw, "n_positions", path)?,
             decoder_start: token("decoder_start_token_id")?,
             pad: token("pad_token_id")?,
             eos,

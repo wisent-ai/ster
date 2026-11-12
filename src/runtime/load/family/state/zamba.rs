@@ -1,14 +1,13 @@
 //! Zamba2.
 
-use anyhow::{Result, bail};
-use serde_json::Value;
+use anyhow::Result;
 
 use crate::model::{
     Architecture, Names, ParameterNorm, Positions, SharedBlocksSpec, StateSpaceSpec,
 };
 use crate::runtime::load::family::At;
 use crate::runtime::load::family::read::layers::{every_layer, fits};
-use crate::runtime::load::family::read::{flag, number, whole};
+use crate::runtime::load::family::read::{flag, flag_or, list, number_or, whole, whole_or};
 use crate::runtime::load::family::state::mamba::structured;
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
@@ -35,14 +34,20 @@ pub(in crate::runtime::load::family) fn configure(
             // its scores by `sqrt(attention_head_dim / 2)` and rotates only
             // under `use_mem_rope`.
             fits(layers, path)?;
-            let Some(kinds) = raw.get("layers_block_type").and_then(Value::as_array) else {
-                bail!(
+            let Some(kinds) = list(raw, "layers_block_type", path)? else {
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["layers_block_type"],
                     "{} declares a Zamba2 model without layers_block_type",
                     path.display()
                 );
             };
             if kinds.len() != layers {
-                bail!(
+                refused!(
+                    Contradictory,
+                    in raw,
+                    ["layers_block_type", "num_hidden_layers"],
                     "{} lists {} layers_block_type entries for {layers} layers",
                     path.display(),
                     kinds.len()
@@ -53,7 +58,10 @@ pub(in crate::runtime::load::family) fn configure(
                 match kind.as_str() {
                     Some("hybrid") => hybrid |= 1u128 << layer,
                     Some("mamba") => {}
-                    other => bail!(
+                    other => refused!(
+                        Malformed,
+                        in raw,
+                        ["layers_block_type"],
                         "{} names layer {layer} {other:?}; a Zamba2 layer is mamba or hybrid",
                         path.display()
                     ),
@@ -63,19 +71,25 @@ pub(in crate::runtime::load::family) fn configure(
                 structured(raw, "n_mamba_heads", "mamba_headdim", "mamba_ngroups", path)?;
             // Transformers' `Zamba2MambaMixer` clamps the step to
             // `(time_step_min, inf)`.
-            heads.step_limit = (number(raw, "time_step_min").unwrap_or(0.0), f64::INFINITY);
+            heads.step_limit = (number_or(raw, "time_step_min", 0.0, path)?, f64::INFINITY);
             let (Some(state), Some(kernel)) =
-                (whole(raw, "mamba_d_state"), whole(raw, "mamba_d_conv"))
+                (whole(raw, "mamba_d_state", path)?, whole(raw, "mamba_d_conv", path)?)
             else {
-                bail!(
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["mamba_d_state", "mamba_d_conv"],
                     "{} declares a Zamba2 model without mamba_d_state and mamba_d_conv",
                     path.display()
                 );
             };
             let inner =
-                (number(raw, "mamba_expand").unwrap_or(2.0) * llama.hidden_size as f64) as usize;
+                (number_or(raw, "mamba_expand", 2.0, path)? * llama.hidden_size as f64) as usize;
             if inner != heads.heads * heads.head_dim {
-                bail!(
+                refused!(
+                    Contradictory,
+                    in raw,
+                    ["mamba_expand", "n_mamba_heads", "mamba_headdim"],
                     "{} sizes its Mamba-2 mixer at mamba_expand times the width, {inner}, but {} heads of {} make {}",
                     path.display(),
                     heads.heads,
@@ -83,31 +97,36 @@ pub(in crate::runtime::load::family) fn configure(
                     heads.heads * heads.head_dim
                 );
             }
-            let Some(blocks) = whole(raw, "num_mem_blocks").filter(|blocks| *blocks > 0) else {
-                bail!(
+            let Some(blocks) = whole(raw, "num_mem_blocks", path)?.filter(|blocks| *blocks > 0) else {
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["num_mem_blocks"],
                     "{} declares a Zamba2 model without num_mem_blocks",
                     path.display()
                 );
             };
-            let attention_adapters = flag(raw, "use_shared_attention_adapter");
-            let feed_forward_adapters = flag(raw, "use_shared_mlp_adapter");
-            let rank = whole(raw, "adapter_rank").unwrap_or(0);
+            let attention_adapters = flag(raw, "use_shared_attention_adapter", path)?;
+            let feed_forward_adapters = flag(raw, "use_shared_mlp_adapter", path)?;
+            let rank = whole_or(raw, "adapter_rank", 0, path)?;
             if (attention_adapters || feed_forward_adapters) && rank == 0 {
-                bail!(
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["use_shared_attention_adapter", "use_shared_mlp_adapter", "adapter_rank"],
                     "{} turns on Zamba2's shared adapters without an adapter_rank",
                     path.display()
                 );
             }
             architecture.names = Names::JAMBA;
             architecture.score_divisor = (architecture.head_dim as f64 / 2.0).sqrt();
-            if !flag(raw, "use_mem_rope") {
+            if !flag(raw, "use_mem_rope", path)? {
                 architecture.positions = Positions::None;
             }
             architecture.shared_blocks = Some(SharedBlocksSpec {
                 hybrid_layers: hybrid,
                 blocks,
-                attention_input: whole(raw, "attention_hidden_size")
-                    .unwrap_or(2 * llama.hidden_size),
+                attention_input: whole_or(raw, "attention_hidden_size", 2 * llama.hidden_size, path)?,
                 intermediate: llama.intermediate_size,
                 rank,
                 attention_adapters,
@@ -118,18 +137,20 @@ pub(in crate::runtime::load::family) fn configure(
                 state,
                 kernel,
                 step_rank: 0,
-                projection_bias: flag(raw, "add_bias_linear"),
-                convolution_bias: raw
-                    .get("use_conv_bias")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                projection_bias: flag(raw, "add_bias_linear", path)?,
+                convolution_bias: flag_or(raw, "use_conv_bias", true, path)?,
                 parameter_norm: ParameterNorm::None,
                 layers: every_layer(layers, path)? & !hybrid,
                 feed_forward: false,
                 structured: Some(heads),
             });
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }

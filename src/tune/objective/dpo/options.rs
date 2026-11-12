@@ -3,13 +3,20 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::super::super::checkpoint::Durable;
+use super::super::super::{checkpoint::Durable, preflight::Preflight};
 use super::scoring::Summary;
+use crate::failures::{
+    refuse,
+    tune::objectives::{BETA_UNUSABLE, LOSS_UNKNOWN},
+};
 use crate::lora;
+
+/// How direct preference optimization names itself in what it says.
+pub(super) const SUBJECT: &str = "direct preference optimization";
 
 /// Which preference objective the log-ratio margin is fed into.
 ///
@@ -27,7 +34,7 @@ impl DpoLoss {
         match value.trim().to_ascii_lowercase().as_str() {
             "dpo" => Ok(Self::Dpo),
             "ipo" => Ok(Self::Ipo),
-            _ => bail!("unknown preference loss {value:?}; expected dpo or ipo"),
+            _ => Err(refuse(&LOSS_UNKNOWN, &[("value", &format!("{value:?}"))])),
         }
     }
 
@@ -78,6 +85,38 @@ pub struct DpoOptions {
 }
 
 impl DpoOptions {
+    /// Refuses the settings no preference run can train with, before any
+    /// model or data is read. DPO's loss is `-log σ(β · margin)`; at β = 0
+    /// every pair's loss is the constant `log 2` and no gradient reaches the
+    /// policy, so β must be a finite number above zero (Rafailov et al.,
+    /// eq. 7): https://arxiv.org/abs/2305.18290
+    pub fn check(&self) -> Result<()> {
+        self.spec.check()?;
+        self.preflight().check()?;
+        if !(self.beta.is_finite() && self.beta > 0.0) {
+            return Err(refuse(
+                &BETA_UNUSABLE,
+                &[("subject", SUBJECT), ("value", &self.beta.to_string())],
+            ));
+        }
+        Ok(())
+    }
+
+    /// The shared checks, in direct preference optimization's words.
+    pub(super) fn preflight(&self) -> Preflight<'static> {
+        Preflight {
+            subject: SUBJECT,
+            unit: "pair",
+            pass: "epoch",
+            noun: "adapter tensors",
+            epochs: self.epochs,
+            accumulation: self.accumulation,
+            batch: Some(self.batch),
+            learning_rate: self.learning_rate,
+            max_sequence: self.max_sequence,
+        }
+    }
+
     /// Everything a resumed run must share with the run that wrote the
     /// checkpoint.
     pub(super) fn fingerprint(&self) -> BTreeMap<String, Value> {

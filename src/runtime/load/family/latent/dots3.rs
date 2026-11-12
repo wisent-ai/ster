@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{Architecture, GateFunction, LatentAttention, RopeScaling, WindowLatent};
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{first, flag, number, text, whole};
 
 /// Dots3-Note (`dots3_note`, vLLM's `Dots3NoteForCausalLM`): DeepSeek-V3.2's
 /// block whose `full_attention` layers keep the sparse-attention indexer and
@@ -26,7 +26,7 @@ pub(in crate::runtime::load::family) fn dots3_note(
     path: &Path,
 ) -> Result<()> {
     let part = |key: &str| -> Result<usize> {
-        whole(raw, key).with_context(|| {
+        whole(raw, key, path)?.or_refuse(raw, &[key], || {
             format!(
                 "{} declares a Dots3-Note model without {key}",
                 path.display()
@@ -37,7 +37,10 @@ pub(in crate::runtime::load::family) fn dots3_note(
         .latent
         .filter(|latent| latent.query_rank.is_some())
     else {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["q_lora_rank"],
             "{} declares Dots3-Note attention without q_lora_rank; its latent attention always has a query bottleneck",
             path.display()
         );
@@ -50,7 +53,10 @@ pub(in crate::runtime::load::family) fn dots3_note(
         value: part("swa_v_head_dim")?,
     };
     if window.rotated != full.rotated {
-        bail!(
+        refused!(
+            Unimplemented,
+            in raw,
+            ["swa_qk_rope_head_dim", "qk_rope_head_dim"],
             "{} rotates {} components per sliding-window head and {} per full-attention head; Ster builds both rotations at one width",
             path.display(),
             window.rotated,
@@ -58,9 +64,12 @@ pub(in crate::runtime::load::family) fn dots3_note(
         );
     }
     for key in ["attention_gate_type", "swa_attention_gate_type"] {
-        match text(raw, key) {
+        match text(raw, key, path)? {
             Some("headwise") => {}
-            other => bail!(
+            other => refused!(
+                Unimplemented,
+                in raw,
+                [key],
                 "{} declares {key} {other:?}; Ster implements Dots3-Note's headwise gate",
                 path.display()
             ),
@@ -69,7 +78,7 @@ pub(in crate::runtime::load::family) fn dots3_note(
     architecture.head_gate = Some(GateFunction::Sigmoid);
     architecture.rotated_key_norm = true;
     let hidden = llama.hidden_size as f64;
-    let rescale = flag(raw, "apply_mla_qkv_lora_rescale");
+    let rescale = flag(raw, "apply_mla_qkv_lora_rescale", path)?;
     let scales = |latent: LatentAttention| {
         latent.query_rank.filter(|_| rescale).map(|rank| {
             (
@@ -84,9 +93,8 @@ pub(in crate::runtime::load::family) fn dots3_note(
         latent: window,
         scales: scales(window),
     });
-    architecture.sliding_window =
-        whole(raw, "sliding_window_size").or_else(|| whole(raw, "sliding_window"));
-    architecture.local_rope_theta = number(raw, "swa_rope_theta")
+    architecture.sliding_window = first(raw, &["sliding_window_size", "sliding_window"], path)?;
+    architecture.local_rope_theta = number(raw, "swa_rope_theta", path)?
         .filter(|base| *base != f64::from(llama.rope_theta))
         .map(|base| base as f32);
     architecture.rope_scaling = RopeScaling::None;

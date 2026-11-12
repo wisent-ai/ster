@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::model::{
@@ -11,7 +11,9 @@ use crate::model::{
 };
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::every_layer;
-use crate::runtime::load::family::read::{flag, number, whole};
+use crate::runtime::load::family::read::{
+    describe, flag, flag_or, list, mistyped, number, number_or, stated, whole, whole_or, within,
+};
 
 /// How often Llama 4 skips the rotation when its config lists no
 /// `no_rope_layers`: every fourth layer, counting from one (Transformers'
@@ -37,14 +39,21 @@ pub(in crate::runtime::load::family) fn llama4_temperature(
     layers: usize,
     path: &Path,
 ) -> Result<Option<QueryTemperature>> {
-    let stated = |key: &str| {
-        raw.get("llama_4_scaling")
-            .and_then(|block| block.get(key))
-            .or_else(|| scaling.and_then(|scaling| scaling.get(key)))
-            .and_then(Value::as_f64)
+    stated::<&serde_json::Map<String, Value>>(raw, "llama_4_scaling", path)?;
+    let read = |key: &str| -> Result<Option<f64>> {
+        if let Some(value) = number(raw, &format!("llama_4_scaling.{key}"), path)? {
+            return Ok(Some(value));
+        }
+        match scaling {
+            Some(scaling) => within(scaling, "rope_scaling", key, path),
+            None => Ok(None),
+        }
     };
-    let beta = stated("llama_4_scaling_beta").or_else(|| stated("beta"));
-    let original = stated("original_max_position_embeddings").map(|original| original as usize);
+    let beta = match read("llama_4_scaling_beta")? {
+        Some(beta) => Some(beta),
+        None => read("beta")?,
+    };
+    let original = read("original_max_position_embeddings")?.map(|original| original as usize);
     Ok(match (beta, original) {
         (Some(beta), Some(interval)) if interval > 0 => Some(QueryTemperature {
             beta,
@@ -52,7 +61,12 @@ pub(in crate::runtime::load::family) fn llama4_temperature(
             shift: 0,
             layers: every_layer(layers, path)?,
         }),
-        (Some(_), _) => bail!(
+        (Some(_), _) => refused!(
+            Incomplete,
+            [
+                "llama_4_scaling" => describe(raw.get("llama_4_scaling")),
+                "rope_scaling" => describe(scaling),
+            ],
             "{} states llama_4_scaling_beta without original_max_position_embeddings to count positions by",
             path.display()
         ),
@@ -79,62 +93,65 @@ pub(in crate::runtime::load::family) fn llama4(
 ) -> Result<()> {
     let every = every_layer(layers, path)?;
     architecture.names = Names::LLAMA4;
-    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
     architecture.output_bias = architecture.query_key_value_bias;
-    let rotating = match raw
-        .get("no_rope_layers")
-        .and_then(Value::as_array)
-        .filter(|flags| !flags.is_empty())
-    {
+    let rotating = match list(raw, "no_rope_layers", path)?.filter(|flags| !flags.is_empty()) {
         Some(flags) => {
             if flags.len() != layers {
-                bail!(
+                refused!(
+                    Contradictory,
+                    ["no_rope_layers" => format!("{} entries", flags.len()), "num_hidden_layers" => layers],
                     "{} lists {} no_rope_layers entries for {layers} layers",
                     path.display(),
                     flags.len()
                 );
             }
-            flags
-                .iter()
-                .enumerate()
-                .filter(|(_, flag)| flag.as_u64() == Some(1) || flag.as_bool() == Some(true))
-                .fold(0u128, |set, (layer, _)| set | (1u128 << layer))
+            let mut rotating = 0u128;
+            for (layer, flag) in flags.iter().enumerate() {
+                match (flag.as_u64(), flag.as_bool()) {
+                    (Some(1), _) | (_, Some(true)) => rotating |= 1u128 << layer,
+                    (Some(0), _) | (_, Some(false)) => {}
+                    _ => {
+                        let key = format!("no_rope_layers[{layer}]");
+                        return Err(mistyped(&key, flag, "1, 0, true or false", path));
+                    }
+                }
+            }
+            rotating
         }
         None => (0..layers)
             .filter(|layer| (layer + 1) % LLAMA4_NOPE_INTERVAL != 0)
             .fold(0u128, |set, layer| set | (1u128 << layer)),
     };
     architecture.unrotated_layers = every & !rotating;
-    if let Some(chunk) = whole(raw, "attention_chunk_size").filter(|chunk| *chunk > 0) {
+    if let Some(chunk) = whole(raw, "attention_chunk_size", path)?.filter(|chunk| *chunk > 0) {
         architecture.sliding_window = Some(chunk);
         architecture.sliding_layers = rotating;
         architecture.chunk_lookback = Some(0);
     }
-    if flag(raw, "use_qk_norm") {
+    if flag(raw, "use_qk_norm", path)? {
         architecture.query_key_norm = QueryKeyNorm::Unscaled;
         architecture.norm_after_rotary = true;
     }
-    if raw
-        .get("attn_temperature_tuning")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
+    if flag_or(raw, "attn_temperature_tuning", true, path)? {
         architecture.query_temperature = Some(QueryTemperature {
-            beta: number(raw, "attn_scale").unwrap_or(LLAMA4_ATTENTION_SCALE),
-            interval: whole(raw, "floor_scale")
-                .unwrap_or(LLAMA4_FLOOR_SCALE)
+            beta: number_or(raw, "attn_scale", LLAMA4_ATTENTION_SCALE, path)?,
+            interval: whole_or(raw, "floor_scale", LLAMA4_FLOOR_SCALE, path)?
                 .max(1),
             shift: 1,
             layers: every & !rotating,
         });
     }
-    let routed_layers = match raw.get("moe_layers").and_then(Value::as_array) {
+    let routed_layers = match list(raw, "moe_layers", path)? {
         Some(listed) => {
             let mut set = 0u128;
             for entry in listed {
                 match entry.as_u64().map(|layer| layer as usize) {
                     Some(layer) if layer < layers => set |= 1u128 << layer,
-                    _ => bail!(
+                    _ => refused!(
+                        OutOfRange,
+                        in raw,
+                        ["moe_layers"],
                         "{} lists moe_layers entry {entry}, which names no layer below {layers}",
                         path.display()
                     ),
@@ -143,7 +160,7 @@ pub(in crate::runtime::load::family) fn llama4(
             set
         }
         None => {
-            let step = whole(raw, "interleave_moe_layer_step").unwrap_or(1).max(1);
+            let step = whole_or(raw, "interleave_moe_layer_step", 1, path)?.max(1);
             (step - 1..layers)
                 .step_by(step)
                 .fold(0u128, |set, layer| set | (1u128 << layer))

@@ -1,9 +1,32 @@
 //! Where a run computes and in what precision: the two operator words, and
 //! what each resolves to on this machine.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_core::{DType, Device};
 use serde::Deserialize;
+
+use crate::failures::{
+    refuse,
+    runtime::device::{BF16_ON_CPU, DEVICE_UNKNOWN, PRECISION_UNKNOWN},
+};
+
+/// The refusal of `device`, which this binary was built without.
+#[cfg(any(not(feature = "metal"), not(feature = "cuda")))]
+fn unbuilt(device: &str) -> anyhow::Error {
+    refuse(
+        &crate::failures::runtime::device::DEVICE_UNBUILT,
+        &[("device", device)],
+    )
+}
+
+/// The refusal of `device`, which this binary carries and could not open.
+#[cfg(any(feature = "metal", feature = "cuda"))]
+fn unopened(device: &str, error: candle_core::Error) -> anyhow::Error {
+    refuse(
+        &crate::failures::runtime::device::DEVICE_UNOPENED,
+        &[("device", device), ("error", &error.to_string())],
+    )
+}
 
 /// A request body names it as the same word `--device` takes; an unknown one
 /// is refused while the body is read, with the sentence `parse` writes.
@@ -21,7 +44,7 @@ impl DeviceChoice {
             "cpu" => Ok(Self::Cpu),
             "metal" => Ok(Self::Metal),
             "cuda" => Ok(Self::Cuda),
-            _ => bail!("unknown device {value:?}; expected cpu, metal, or cuda"),
+            _ => Err(refuse(&DEVICE_UNKNOWN, &[("value", &format!("{value:?}"))])),
         }
     }
 
@@ -31,31 +54,21 @@ impl DeviceChoice {
             Self::Metal => {
                 #[cfg(feature = "metal")]
                 {
-                    anyhow::Context::context(
-                        Device::new_metal(0),
-                        "failed to initialize Metal device",
-                    )
+                    Device::new_metal(0).map_err(|error| unopened("metal", error))
                 }
                 #[cfg(not(feature = "metal"))]
                 {
-                    bail!(
-                        "this Ster binary was built without the metal feature; rebuild it with --features metal"
-                    )
+                    Err(unbuilt("metal"))
                 }
             }
             Self::Cuda => {
                 #[cfg(feature = "cuda")]
                 {
-                    anyhow::Context::context(
-                        Device::new_cuda(0),
-                        "failed to initialize CUDA device",
-                    )
+                    Device::new_cuda(0).map_err(|error| unopened("cuda", error))
                 }
                 #[cfg(not(feature = "cuda"))]
                 {
-                    bail!(
-                        "this Ster binary was built without the cuda feature; rebuild it with --features cuda"
-                    )
+                    Err(unbuilt("cuda"))
                 }
             }
         }
@@ -90,7 +103,10 @@ impl Precision {
             "f32" => Ok(Self::F32),
             "f16" => Ok(Self::F16),
             "bf16" => Ok(Self::Bf16),
-            _ => bail!("unknown precision {value:?}; expected f32, f16, or bf16"),
+            _ => Err(refuse(
+                &PRECISION_UNKNOWN,
+                &[("value", &format!("{value:?}"))],
+            )),
         }
     }
 
@@ -102,8 +118,8 @@ impl Precision {
         }
     }
 
-    /// The Candle dtype, or a refusal naming the combination that has no
-    /// kernel.
+    /// The Candle dtype for `model`'s weights, or a refusal naming the
+    /// combination that has no kernel.
     ///
     /// The one refusal here is bf16 on the CPU, and it is a fact about this
     /// Candle build rather than a policy: `cpu_backend`'s matmul accepts F16,
@@ -115,13 +131,11 @@ impl Precision {
     /// CPU is real half arithmetic on this class of machine: `gemm` selects a
     /// native `neonfp16` microkernel on aarch64 when the hardware reports the
     /// `fp16` feature.
-    pub(super) fn dtype(self, device: &Device) -> Result<DType> {
+    pub(super) fn dtype(self, device: &Device, model: &str) -> Result<DType> {
         match (self, device) {
             (Self::F32, _) => Ok(DType::F32),
             (Self::F16, _) => Ok(DType::F16),
-            (Self::Bf16, Device::Cpu) => bail!(
-                "bf16 has no CPU matmul kernel in this Candle build; use --precision f16 for half precision on cpu, or --device metal for bf16"
-            ),
+            (Self::Bf16, Device::Cpu) => Err(refuse(&BF16_ON_CPU, &[("model", model)])),
             (Self::Bf16, _) => Ok(DType::BF16),
         }
     }

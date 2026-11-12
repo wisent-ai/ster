@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
 
@@ -22,7 +22,7 @@ use crate::runtime::load::family::latent::sarvam::sarvam_mla;
 use crate::runtime::load::family::latent::v4::deepseek_v4;
 use crate::runtime::load::family::read::activation::activation;
 use crate::runtime::load::family::read::layers::{every_layer, windowed_layers};
-use crate::runtime::load::family::read::number;
+use crate::runtime::load::family::read::{list, number};
 use crate::runtime::load::family::rope::head::head;
 use crate::runtime::load::family::sparse::afmoe::afmoe;
 use crate::runtime::load::family::sparse::cohere2_moe::cohere2_moe;
@@ -35,7 +35,7 @@ use crate::runtime::load::family::step::step3p5::step3p5;
 mod experts;
 mod keys;
 mod kind;
-mod read;
+pub(super) mod read;
 mod rope;
 mod dense {
     pub(in crate::runtime::load::family) mod granite;
@@ -182,12 +182,18 @@ pub(super) fn family(
         "longcat_flash" => longcat_flash(raw, llama, &mut architecture, path)?,
         "longcat_flash_ngram" => {
             longcat_flash(raw, llama, &mut architecture, path)?;
-            architecture.ngram = Some(longcat_ngram(raw, path)?);
+            architecture.ngram = Some(longcat_ngram(raw, llama.hidden_size, path)?);
         }
         "sarvam_mla" => sarvam_mla(raw, layers, &mut architecture, path)?,
         "cohere2_moe" => cohere2_moe(raw, layers, &mut architecture, path)?,
         "llama4_text" => llama4(raw, layers, &mut architecture, path)?,
-        "minimax_m3_vl_text" => custom::minimax_m3::family(raw, layers, &mut architecture, path)?,
+        "minimax_m3_vl_text" => custom::minimax_m3::family(
+            raw,
+            layers,
+            llama.num_attention_heads,
+            &mut architecture,
+            path,
+        )?,
         "afmoe" => afmoe(raw, layers, llama, &mut architecture, path)?,
         "laguna" => laguna(raw, scaling, layers, llama, &mut architecture, path)?,
         "muse_glimmer_text" => muse_glimmer(raw, layers, llama, &mut architecture, path)?,
@@ -213,7 +219,12 @@ pub(super) fn family(
         "mimo_v2_flash" | "mimo_v2" => {
             mimo_v2(raw, model_type, layers, llama, &mut architecture, path)?
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     // A rotation stated per layer kind (Transformers 5's `rope_parameters`
     // by layer type) gives sliding-window layers their own base, whatever
@@ -221,7 +232,7 @@ pub(super) fn family(
     // YaRN) never reaches them.
     if architecture.local_rope_theta.is_none() && architecture.sliding_window.is_some() {
         architecture.local_rope_theta =
-            number(raw, "rope_local_base_freq").map(|theta| theta as f32);
+            number(raw, "rope_local_base_freq", path)?.map(|theta| theta as f32);
     }
     // A family with recurrent mixers (LFM2's convolutions, Qwen3-Next's,
     // Kimi-Linear's and OLMo Hybrid's delta rule, MiniMax's lightning
@@ -235,13 +246,11 @@ pub(super) fn family(
         || architecture.state_space.is_some()
         || architecture.inkling.is_some()
         || architecture.compressed.is_some();
-    let windows = raw
-        .get("layer_types")
-        .and_then(Value::as_array)
-        .filter(|_| !mixers_listed);
-    if let Some(types) = windows {
-        architecture.sliding_layers =
-            windowed_layers(types, layers, architecture.chunk_lookback.is_some(), path)?;
+    if !mixers_listed {
+        if let Some(types) = list(raw, "layer_types", path)? {
+            architecture.sliding_layers =
+                windowed_layers(types, layers, architecture.chunk_lookback.is_some(), path)?;
+        }
     }
     // Cohere 2's global layers apply no rotary embedding; so do EXAONE 4's
     // when the model mixes local and global layers at all.
@@ -251,7 +260,10 @@ pub(super) fn family(
         architecture.unrotated_layers = every_layer(layers, path)? & !architecture.sliding_layers;
     }
     if architecture.sliding_layers != 0 && architecture.sliding_window.is_none() {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["sliding_window", "layer_types"],
             "{} makes some layers sliding-window but declares no sliding_window",
             path.display()
         );

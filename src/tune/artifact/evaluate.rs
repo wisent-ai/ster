@@ -26,11 +26,16 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
-use super::super::{batch, examples::ExampleSet, preflight::sequence_logprob};
-use crate::{model::Route, runtime::Runtime, workflow};
+use super::super::{
+    batch,
+    encode::encode_examples,
+    examples::ExampleSet,
+    preflight::{Preflight, sequence_logprob},
+};
+use crate::{failures::tune::run::score_failed, model::Route, runtime::Runtime, workflow};
 
 mod provenance;
 
@@ -104,6 +109,28 @@ pub struct EvaluateOptions {
     pub batch: usize,
 }
 
+impl EvaluateOptions {
+    /// Refuses a sequence limit below two tokens and a batch of zero before
+    /// any model or example is read. Every trainer refuses them through
+    /// `Preflight`, and so does scoring: a batch of zero used to be
+    /// rewritten to one by `batch::plan`, which answered a question the
+    /// operator did not ask.
+    pub fn check(&self) -> Result<()> {
+        Preflight {
+            subject: "evaluation",
+            unit: "example",
+            pass: "epoch",
+            noun: "adapter tensors",
+            epochs: 1,
+            accumulation: 1,
+            batch: Some(self.batch),
+            learning_rate: 1.0,
+            max_sequence: self.max_sequence,
+        }
+        .check()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct EvaluatedExample {
     pub index: usize,
@@ -153,18 +180,7 @@ pub fn evaluate(
     adapter: Option<&Path>,
     options: &EvaluateOptions,
 ) -> Result<EvaluateReport> {
-    if options.max_sequence < 2 {
-        bail!("max_sequence must be at least two tokens, so that one token can predict another");
-    }
-    // Every trainer refuses a zero batch through `Preflight`, which scoring
-    // does not run: there is no optimizer here, so there was nothing to hang
-    // the check on and the argument was silently rewritten to one by
-    // `batch::plan`. An operator who asked for a batch of zero asked for
-    // something impossible, and being handed a full set of scores instead is
-    // the wrong answer to that question.
-    if options.batch == 0 {
-        bail!("evaluation requires a batch of at least one example; batch is 0");
-    }
+    options.check()?;
     examples.validate(&examples.label())?;
     if let Some(adapter) = adapter {
         warn_on_provenance(adapter, "adapter", runtime);
@@ -173,31 +189,13 @@ pub fn evaluate(
     let limit = options.max_sequence.min(runtime.context_length()?);
     let device = runtime.device();
     let mut entries = Vec::with_capacity(examples.examples.len());
-    let mut skipped_long = 0usize;
     let mut total_tokens = 0usize;
     let mut total_negative_log_likelihood = 0f64;
 
     // Encoded up front, so every skip is reported before the first score and
     // so the batch planner can see how long each example is.
-    let mut encoded: Vec<(usize, Vec<u32>, usize)> = Vec::with_capacity(examples.examples.len());
-    for (index, example) in examples.examples.iter().enumerate() {
-        let (ids, boundary) = runtime
-            .encode_example(
-                example.system.as_deref(),
-                &example.prompt,
-                &example.completion,
-            )
-            .with_context(|| format!("example {index} could not be encoded"))?;
-        if ids.len() > limit {
-            skipped_long += 1;
-            workflow::progress(format!(
-                "skipping example {index}: {} tokens exceed the {limit} token limit",
-                ids.len()
-            ));
-            continue;
-        }
-        encoded.push((index, ids, boundary));
-    }
+    let encoded = encode_examples(runtime, examples, limit, "evaluate")?;
+    let skipped_long = examples.examples.len() - encoded.len();
 
     let lengths: Vec<usize> = encoded.iter().map(|(_, ids, _)| ids.len()).collect();
     let order: Vec<usize> = (0..encoded.len()).collect();
@@ -220,12 +218,13 @@ pub fn evaluate(
             // has none and this is the base model's own score.
             let read = batch::read_rows(&rows, options.batch, 1, |pass| {
                 runtime.forward_scored_rows(pass, Route::Adapted)
-            })?;
+            })
+            .map_err(|error| score_failed("the examples", error))?;
             for (position, &slot) in forward.iter().enumerate() {
                 let (index, ids, boundary) = &encoded[slot];
                 let log_likelihood = sequence_logprob(&read[position], ids, *boundary, device)
-                    .with_context(|| format!("example {index} produced no usable score"))?
-                    .to_scalar::<f32>()? as f64;
+                    .and_then(|total| Ok(total.to_scalar::<f32>()? as f64))
+                    .map_err(|error| score_failed(&format!("example {index}"), error))?;
                 let tokens = ids.len() - boundary;
                 let loss = -log_likelihood / tokens as f64;
                 workflow::progress(format!(
@@ -259,10 +258,8 @@ pub fn evaluate(
         total_negative_log_likelihood += negative_log_likelihood;
     }
 
-    if entries.is_empty() {
-        bail!("every example is longer than the sequence limit, so there is nothing to evaluate");
-    }
-
+    // `encode_examples` refuses a set nothing of which fits, so at least one
+    // example was scored.
     let loss = total_negative_log_likelihood / total_tokens as f64;
     let mean_example_loss =
         entries.iter().map(|entry| entry.loss).sum::<f64>() / entries.len() as f64;

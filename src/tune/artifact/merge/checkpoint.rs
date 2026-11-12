@@ -7,9 +7,10 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{Device, Tensor};
 
+use crate::failures::{file, refuse, tune::rewrite::TENSOR_TWICE};
 use crate::{runtime::Checkpoint, workflow};
 
 /// Every tensor of `source`'s weight files, by name; a name stored in two
@@ -24,15 +25,20 @@ pub(crate) fn read_tensors(
         source.weights.len()
     ));
     let mut tensors: BTreeMap<String, Tensor> = BTreeMap::new();
-    for file in &source.weights {
-        let loaded = candle_core::safetensors::load(file, device)
-            .with_context(|| format!("failed to read model weights {}", file.display()))?;
+    for shard in &source.weights {
+        let path = shard.display().to_string();
+        let loaded = candle_core::safetensors::load(shard, device).map_err(|error| {
+            file::tensors::read_refusal(&format!("a weight file of {model}"), shard, &error)
+        })?;
         for (name, tensor) in loaded {
             if tensors.insert(name.clone(), tensor).is_some() {
                 // Sharded checkpoints partition the tensors; the same name in
                 // two shards means the shards disagree, and silently keeping
                 // the last one merges half a model.
-                bail!("model weight {name} appears in more than one weight file");
+                return Err(refuse(
+                    &TENSOR_TWICE,
+                    &[("model", model), ("name", &name), ("path", &path)],
+                ));
             }
         }
     }
@@ -46,6 +52,40 @@ pub(crate) struct Written {
     pub(crate) total: usize,
 }
 
+/// What a write that failed under `output` left there.
+fn left(output: &Path) -> String {
+    format!(
+        "{} holds only the files written before this one, so it is no checkpoint yet",
+        output.display()
+    )
+}
+
+/// The refusal of creating `output` or writing `path` under it.
+pub(crate) fn unwritable(output: &Path, path: &Path, error: &std::io::Error) -> anyhow::Error {
+    if path == output {
+        file::write::refusal("creating", "the output directory", path, &left(output), error)
+    } else {
+        file::write::refusal("writing", "the output file", path, &left(output), error)
+    }
+}
+
+/// The refusal of writing the tensors file `path` under `output`.
+pub(crate) fn tensors_unwritable(
+    output: &Path,
+    path: &Path,
+    error: &candle_core::Error,
+) -> anyhow::Error {
+    file::tensors::write_refusal("the output weights", path, &left(output), error)
+}
+
+/// Copies the source's `from` to `to` under `output`: read whole, then
+/// written, so a refusal says which of the two failed.
+pub(crate) fn copy(output: &Path, from: &Path, to: &Path) -> Result<()> {
+    let bytes = fs::read(from)
+        .map_err(|error| file::read::refusal("the source checkpoint's file", from, &error))?;
+    fs::write(to, bytes).map_err(|error| unwritable(output, to, &error))
+}
+
 /// `tensors` written as an ordinary checkpoint directory at `output`, beside
 /// copies of `source`'s own config, tokenizer and chat template.
 pub(crate) fn write_checkpoint(
@@ -53,7 +93,7 @@ pub(crate) fn write_checkpoint(
     output: &Path,
     tensors: &BTreeMap<String, Tensor>,
 ) -> Result<Written> {
-    fs::create_dir_all(output).with_context(|| format!("failed to create {}", output.display()))?;
+    fs::create_dir_all(output).map_err(|error| unwritable(output, output, &error))?;
     let weights_file = source.layout.merged_weights();
     let weights_path = output.join(weights_file);
     let flat: HashMap<String, Tensor> = tensors
@@ -63,7 +103,7 @@ pub(crate) fn write_checkpoint(
     let parameters: usize = tensors.values().map(|tensor| tensor.elem_count()).sum();
     let total = tensors.len();
     candle_core::safetensors::save(&flat, &weights_path)
-        .with_context(|| format!("failed to write {}", weights_path.display()))?;
+        .map_err(|error| tensors_unwritable(output, &weights_path, &error))?;
 
     // Copied rather than regenerated. The tokenizer and the config are the
     // source's own, and a rewritten checkpoint that tokenized differently from
@@ -83,16 +123,16 @@ pub(crate) fn write_checkpoint(
         (source.tokenizer_config.as_deref(), "tokenizer_config.json"),
         (source.chat_template.as_deref(), "chat_template.jinja"),
     ];
+    // `Checkpoint::resolve`, the one place a `Checkpoint` is built, sets
+    // `tokenizer` to `local.join(tokenizer_file(..)?)` or to the Hub's
+    // `remote.get(file)` of that same `tokenizer_file(..)?`, a snapshot path
+    // ending in the file's name; `tokenizer_file` answers one of the ASCII
+    // names in `TOKENIZER_FILES`.
     let tokenizer_leaf = source
         .tokenizer
         .file_name()
         .and_then(|name| name.to_str())
-        .with_context(|| {
-            format!(
-                "tokenizer path {} has no file name",
-                source.tokenizer.display()
-            )
-        })?;
+        .expect("a checkpoint's tokenizer is a named file");
     let required = [
         (&source.config, source.layout.config_file()),
         (&source.tokenizer, tokenizer_leaf),
@@ -106,9 +146,7 @@ pub(crate) fn write_checkpoint(
                 .filter_map(|(from, leaf)| from.map(|from| (from, leaf))),
         )
     {
-        let to = output.join(leaf);
-        fs::copy(from, &to)
-            .with_context(|| format!("failed to copy {} to {}", from.display(), to.display()))?;
+        copy(output, from, &output.join(leaf))?;
         files.push(leaf.to_owned());
     }
     workflow::progress(format!(

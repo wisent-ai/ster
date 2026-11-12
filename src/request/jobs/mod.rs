@@ -1,7 +1,7 @@
 //! Non-tuning native operations. Tuning runs the actual typed CLI operation
 //! through `request::tuning`; it has no mirrored job implementation here.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{Value, json};
 
 use std::path::Path;
@@ -33,9 +33,9 @@ pub(super) use pairs::{
 /// Every job mirrors its CLI arm in main.rs: same loads, same workflow call,
 /// and the returned document is the same payload the CLI prints.
 pub(in crate::request) fn train_job(request: TrainRequest) -> Result<Value> {
+    let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let mut runtime = request.model.load_runtime_at(request.precision)?;
     let chat = runtime.set_chat_template(request.chat_template)?;
-    let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let artifact = workflow::train(&runtime, &pair_set, &layers, request.method)?;
     artifact.save(Path::new(&request.output))?;
@@ -45,9 +45,10 @@ pub(in crate::request) fn train_job(request: TrainRequest) -> Result<Value> {
 }
 
 pub(in crate::request) fn optimize_job(request: OptimizeRequest) -> Result<Value> {
+    let pair_set = PairSet::load(Path::new(&request.pairs))?;
+    workflow::split_holdout(&pair_set, request.holdout)?;
     let mut runtime = request.model.load_runtime_at(request.precision)?;
     let chat = runtime.set_chat_template(request.chat_template)?;
-    let pair_set = PairSet::load(Path::new(&request.pairs))?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
     let selection = workflow::optimize(&runtime, &pair_set, &layers, request.holdout)?;
     selection.artifact.save(Path::new(&request.output))?;
@@ -57,28 +58,38 @@ pub(in crate::request) fn optimize_job(request: OptimizeRequest) -> Result<Value
 }
 
 pub(in crate::request) fn evaluate_job(request: EvaluateRequest) -> Result<Value> {
-    let mut runtime = request.model.load_runtime_at(request.precision)?;
-    let chat = runtime.set_chat_template(request.chat_template)?;
-    let pair_set = PairSet::load(Path::new(&request.pairs))?;
-    let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
-    tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
-    let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
-    let mut report = serde_json::to_value(&report)?;
-    if let (false, Some(batch), Some(max_sequence)) = (
+    // `EvaluateRequest::validate` refused strengths given without batchSize
+    // or maxSequence before this job ran; strengths come with both.
+    let strength = match (
         request.strengths.is_empty(),
         request.batch_size,
         request.max_sequence,
     ) {
-        let options = tune_lib::StrengthOptions {
+        (false, Some(batch), Some(max_sequence)) => Some(tune_lib::StrengthOptions {
             strengths: request.strengths,
             batch,
             max_sequence,
-        };
+        }),
+        _ => None,
+    };
+    if let Some(options) = &strength {
+        options.check()?;
+    }
+    let pair_set = PairSet::load(Path::new(&request.pairs))?;
+    let mut runtime = request.model.load_runtime_at(request.precision)?;
+    let chat = runtime.set_chat_template(request.chat_template)?;
+    let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
+    tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
+    let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
+    let mut report = ster::json::value(&report);
+    if let Some(options) = strength {
         let selection = tune_lib::strengths(&runtime, &pair_set, &artifact, &options)?;
+        // `json::value(&report)` of `#[derive(Serialize)] pub struct
+        // EvaluationReport`, a struct with named fields, is an object.
         report
             .as_object_mut()
-            .context("an evaluation report is a JSON object")?
-            .insert("strength".to_owned(), serde_json::to_value(selection)?);
+            .expect("an evaluation report is a struct with named fields")
+            .insert("strength".to_owned(), ster::json::value(selection));
     }
     chat.annotate(&mut report)?;
     Ok(report)
@@ -124,7 +135,6 @@ pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value
         &request.prompt,
         &parts,
         GenerationOptions {
-            strength: None,
             max_new_tokens: request.max_new_tokens,
             temperature: request.temperature,
             top_p: request.top_p,
@@ -135,47 +145,41 @@ pub(in crate::request) fn generate_job(request: GenerateRequest) -> Result<Value
 }
 
 pub(in crate::request) fn extract_job(request: ExtractRequest) -> Result<Value> {
+    let prompts = workflow::PromptSet::load(Path::new(&request.input))?;
     let mut runtime = request.model.load_runtime_at(request.precision)?;
     runtime.set_chat_template(request.chat_template)?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
-    let input = Path::new(&request.input);
-    let output = Path::new(&request.output);
-    workflow::extract(&runtime, input, output, &layers)?;
+    workflow::extract(&runtime, &prompts, Path::new(&request.output), &layers)?;
     Ok(json!({"path": request.output}))
 }
 
 pub(in crate::request) fn parity_job(request: ParityRequest) -> Result<Value> {
     let runtime = request.model.load_runtime_at(request.precision)?;
-    Ok(serde_json::to_value(workflow::parity(
+    Ok(ster::json::value(workflow::parity(
         &runtime,
         Path::new(&request.input),
-    )?)?)
+    )?))
 }
 
 pub(in crate::request) fn inspect_job(request: InspectRequest) -> Result<Value> {
-    let artifact = SteeringArtifact::load(Path::new(&request.artifact))
-        .with_context(|| format!("failed to inspect {}", request.artifact))?;
+    let artifact = SteeringArtifact::load(Path::new(&request.artifact))?;
     Ok(workflow::artifact_summary(&artifact))
 }
 
 /// Mirrors `ster vector compare`: the artifacts are read as the CLI reads
 /// them, and the report is the document it prints.
 pub(in crate::request) fn compare_job(request: CompareRequest) -> Result<Value> {
+    workflow::check_counts(&request.artifacts, request.clusters)?;
     let artifacts = request
         .artifacts
         .iter()
-        .map(|path| {
-            SteeringArtifact::load(Path::new(path))
-                .with_context(|| format!("failed to compare {path}"))
-        })
+        .map(|path| SteeringArtifact::load(Path::new(path)))
         .collect::<Result<Vec<_>>>()?;
     let options = workflow::CompareOptions {
         layers: request.layers,
         clusters: request.clusters,
     };
-    Ok(serde_json::to_value(workflow::compare(
-        &artifacts, &options,
-    )?)?)
+    Ok(ster::json::value(workflow::compare(&artifacts, &options)?))
 }
 
 /// Mirrors `ster vector project`: the same reads, the same projection, and
@@ -192,7 +196,7 @@ pub(in crate::request) fn project_job(request: ProjectRequest) -> Result<Value> 
         components: request.components,
     };
     let mut report =
-        serde_json::to_value(workflow::project(&runtime, &pair_set, &artifact, &options)?)?;
+        ster::json::value(workflow::project(&runtime, &pair_set, &artifact, &options)?);
     chat.annotate(&mut report)?;
     Ok(report)
 }
@@ -200,16 +204,17 @@ pub(in crate::request) fn project_job(request: ProjectRequest) -> Result<Value> 
 /// Mirrors `ster vector score`: the same read, the same projection, and the
 /// document the CLI prints.
 pub(in crate::request) fn score_job(request: ScoreRequest) -> Result<Value> {
+    workflow::check_text(&request.text, "the request's text")?;
     let artifact = SteeringArtifact::load(Path::new(&request.vector))?;
     let mut runtime = request.model.load_runtime_at(request.precision)?;
     let chat = runtime.set_chat_template(request.chat_template)?;
     tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
-    let mut report = serde_json::to_value(workflow::score(
+    let mut report = ster::json::value(workflow::score(
         &runtime,
         &artifact,
         &request.text,
         request.layer,
-    )?)?;
+    )?);
     chat.annotate(&mut report)?;
     Ok(report)
 }
@@ -218,6 +223,7 @@ pub(in crate::request) fn score_job(request: ScoreRequest) -> Result<Value> {
 /// document the CLI prints.
 pub(in crate::request) fn curve_job(request: CurveRequest) -> Result<Value> {
     let pair_set = PairSet::load(Path::new(&request.pairs))?;
+    workflow::check_sizes(&pair_set, request.holdout, &request.sizes, request.method)?;
     let mut runtime = request.model.load_runtime_at(request.precision)?;
     let chat = runtime.set_chat_template(request.chat_template)?;
     let layers = parse_layers(&request.layers, runtime.layer_count())?;
@@ -229,7 +235,7 @@ pub(in crate::request) fn curve_job(request: CurveRequest) -> Result<Value> {
         request.holdout,
         &request.sizes,
     )?;
-    let mut report = serde_json::to_value(report)?;
+    let mut report = ster::json::value(report);
     chat.annotate(&mut report)?;
     Ok(report)
 }
@@ -244,5 +250,5 @@ pub(in crate::request) fn ablate_job(request: AblateRequest) -> Result<Value> {
         request.strength,
         Path::new(&request.output),
     )?;
-    Ok(serde_json::to_value(report)?)
+    Ok(ster::json::value(report))
 }

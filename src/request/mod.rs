@@ -31,45 +31,95 @@
 //!   event. `json` is `{"error": "<sentence>"}`, or a rejected/conflicting
 //!   workspace import's complete domain report with its actual refusal.
 //!   When a declared cause refused it (`ster errors list`), `json.cause`
-//!   carries its `id`, `code`, `exit` (the status the same CLI command exits
-//!   with), `usage`, `retryable` and `remedy`.
+//!   carries the `functionality` that declares it, its `id`, `docs` (its
+//!   line on the area page), `code`, `exit` (the status the same CLI command
+//!   exits with), `usage`, `retryable` and `remedy`.
 //! - two: the request was refused before anything ran: an unknown operation,
-//!   a body that does not parse, or a field the operation's validation
-//!   rejects. No log event precedes it, and `json` is
-//!   `{"error": "<sentence>"}`.
+//!   a body that cannot be read (a directory as stdin, a broken stream) or
+//!   does not parse, or a field the operation's validation rejects. No log
+//!   event precedes it, and `json` is `{"error": "<sentence>", "cause":
+//!   {...}}`, the cause `ster.request`'s or the operation's own. A standard
+//!   output that reaches no reader (closed, or the null device) is refused
+//!   before stdin is read, on stderr, with the same status 2.
 
-use std::io::{self, Read, Write};
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use ster::workflow;
 
+mod events;
 mod jobs;
 mod requests;
+mod streams;
 mod tuning;
 
+use events::{COMPLETED, emit, emit_log, emit_result, failed, refuse};
 use jobs::*;
 use requests::*;
 
-/// Completed request, as declared by the published NDJSON wire contract:
-/// https://ster.wisent.com/docs/request-api#events-and-exit-status
-const COMPLETED: i32 = 0;
-/// Operational failure, as declared by the published NDJSON wire contract:
-/// https://ster.wisent.com/docs/request-api#events-and-exit-status
-const FAILED: i32 = 1;
-/// Invalid request, as declared by the published NDJSON wire contract:
-/// https://ster.wisent.com/docs/request-api#events-and-exit-status
-const REFUSED: i32 = 2;
+/// Every operation `ster request` serves, as [`dispatch`] matches them; an
+/// unknown one is refused naming these.
+const SERVED: &[&str] = &[
+    "model/fixture/create",
+    "model/tokenizer/create",
+    "workspace/import",
+    "workspace/show",
+    "workspace/select",
+    "workspace/remove",
+    "vector/train",
+    "vector/optimize",
+    "vector/curve",
+    "vector/ablate",
+    "vector/evaluate",
+    "vector/inspect",
+    "vector/compare",
+    "vector/project",
+    "vector/score",
+    "generate",
+    "extract",
+    "parity",
+    "decide",
+    "calibrate",
+    "pairs/import",
+    "pairs/inspect",
+    "pairs/merge",
+    "pairs/save",
+    "pairs/synthesize",
+    "star/status",
+    "star/dismiss",
+    "star/reset",
+    "telemetry/status",
+    "telemetry/set",
+    "telemetry/show",
+    "telemetry/flush",
+    "telemetry/events",
+    "doctor",
+    "support/report",
+    "support/status",
+    "errors/list",
+    "errors/show",
+    "tune/sft",
+    "tune/dpo",
+    "tune/bipo",
+    "tune/reward",
+    "tune/grpo",
+    "tune/decide",
+    "tune/merge",
+    "tune/export",
+    "tune/evaluate",
+    "tune/inspect",
+];
 
-/// Run one request: read its body from stdin, run `operation`, print its
-/// events on stdout, and return the status the process exits with.
+/// Run one request: refuse it on stderr when its standard output reaches no
+/// reader, read its body from stdin, run `operation`, print its events on
+/// stdout, and return the status the process exits with.
 pub fn run(operation: &str) -> Result<i32> {
-    let mut body = Vec::new();
-    io::stdin()
-        .read_to_end(&mut body)
-        .context("failed to read the request body from stdin")?;
+    streams::answerable(operation)?;
+    let body = match streams::body(operation) {
+        Ok(body) => body,
+        Err(refusal) => return Ok(refuse(&refusal)),
+    };
     // Progress lines become log events, so the desktop's live log shows each
     // one when the workflow writes it rather than after the run.
     workflow::set_progress_sink(Some(Box::new(|line: &str| {
@@ -118,12 +168,24 @@ fn star_request_event() {
 }
 
 fn dispatch(operation: &str, body: &[u8]) -> i32 {
+    if !SERVED.contains(&operation) {
+        return unknown(operation);
+    }
     let counts = counted(operation);
-    let job = Job { body, counts };
+    let job = Job {
+        operation,
+        body,
+        counts,
+    };
     if let Some(word) = operation.strip_prefix("tune/") {
-        let request = tuning::decode(word, request_document(body))
-            .map_err(|error| format!("{operation}: {error}"));
-        return run_decoded_job(request, counts, crate::cli::tune::execute);
+        let request = tuning::decode(word, request_document(body));
+        return run_decoded_job(
+            operation,
+            body.len(),
+            request,
+            counts,
+            crate::cli::tune::execute,
+        );
     }
     match operation {
         "model/fixture/create" => job.run(fixture_create_job),
@@ -153,63 +215,39 @@ fn dispatch(operation: &str, body: &[u8]) -> i32 {
         "pairs/synthesize" => job.run(pairs_synthesize_job),
         "star/status" | "star/dismiss" | "star/reset" => {
             let verb = operation.trim_start_matches("star/");
-            match crate::cli::star::status_document(verb) {
-                Ok(document) => {
-                    emit_result(COMPLETED, document);
-                    COMPLETED
-                }
-                Err(error) => {
-                    emit_log(&format!("error: {error}\n"));
-                    emit_result(FAILED, json!({"error": error}));
-                    FAILED
-                }
-            }
+            job.run(|_: NoFieldsRequest| crate::cli::star::status_document(verb))
         }
-        "telemetry/status" | "telemetry/set" | "telemetry/show" | "telemetry/flush"
-        | "telemetry/events" => {
+        "telemetry/set" => job.run(|request: TelemetrySetRequest| {
+            crate::cli::telemetry::request_document("set", Some(&request.level))
+        }),
+        "telemetry/status" | "telemetry/show" | "telemetry/flush" | "telemetry/events" => {
             let verb = operation.trim_start_matches("telemetry/");
-            let body = match serde_json::from_slice::<Value>(request_document(body)) {
-                Ok(body) => body,
-                Err(error) => return refuse(&format!("{operation} body is not JSON: {error}")),
-            };
-            match crate::cli::telemetry::request_document(verb, &body) {
-                Ok(document) => {
-                    emit_result(COMPLETED, document);
-                    COMPLETED
-                }
-                Err(error) => {
-                    emit_log(&format!("error: {error}\n"));
-                    emit_result(FAILED, json!({"error": error}));
-                    FAILED
-                }
-            }
+            job.run(|_: NoFieldsRequest| crate::cli::telemetry::request_document(verb, None))
         }
-        "support/report" | "support/status" => {
-            let verb = operation.trim_start_matches("support/");
-            let body = match serde_json::from_slice::<Value>(request_document(body)) {
-                Ok(body) => body,
-                Err(error) => return refuse(&format!("{operation} body is not JSON: {error}")),
-            };
-            match crate::cli::support::request_document(verb, &body) {
-                Ok(document) => {
-                    emit_result(COMPLETED, document);
-                    COMPLETED
-                }
-                Err(error) => {
-                    emit_log(&format!("error: {error}\n"));
-                    emit_result(FAILED, json!({"error": error}));
-                    FAILED
-                }
-            }
-        }
-        "doctor" => {
-            emit_result(COMPLETED, crate::cli::doctor::document());
-            COMPLETED
-        }
+        // Completes with the findings even when a functionality fails, so the
+        // desktop's Diagnosis screen shows every finding.
+        "doctor" => job.run(|_: NoFieldsRequest| Ok(crate::cli::doctor::document())),
+        "support/report" => job.run(|request: SupportReportRequest| {
+            crate::cli::support::report_document(&wisent_errors::telemetry::Report {
+                subject: request.subject.as_deref(),
+                description: &request.description,
+                email: request.email.as_deref(),
+                with_failure: request.with_failure,
+            })
+        }),
+        "support/status" => job.run(|_: NoFieldsRequest| crate::cli::support::status_document()),
         "errors/list" => job.run(errors_list_job),
         "errors/show" => job.run(errors_show_job),
-        _ => refuse(&format!("unknown operation: {operation}")),
+        _ => unknown(operation),
     }
+}
+
+/// The refusal of an operation `ster request` does not serve.
+fn unknown(operation: &str) -> i32 {
+    refuse(&ster::failures::refuse(
+        &ster::failures::request::OPERATION_UNKNOWN,
+        &[("operation", operation), ("served", &SERVED.join(", "))],
+    ))
 }
 
 /// A completed job may carry a failed domain report. Keep that report while
@@ -231,6 +269,7 @@ impl From<Value> for JobOutcome {
 /// One request's body, and whether its completion counts toward the GitHub
 /// star request.
 struct Job<'a> {
+    operation: &'a str,
     body: &'a [u8],
     counts: bool,
 }
@@ -247,6 +286,8 @@ impl Job<'_> {
         O: Into<JobOutcome>,
     {
         run_decoded_job(
+            self.operation,
+            self.body.len(),
             serde_json::from_slice::<R>(request_document(self.body)),
             self.counts,
             run,
@@ -262,23 +303,28 @@ fn request_document(body: &[u8]) -> &[u8] {
     }
 }
 
-fn run_decoded_job<R, F, O, E>(request: std::result::Result<R, E>, counts: bool, run: F) -> i32
+fn run_decoded_job<R, F, O>(
+    operation: &str,
+    size: usize,
+    request: std::result::Result<R, serde_json::Error>,
+    counts: bool,
+    run: F,
+) -> i32
 where
     R: Validate,
     F: FnOnce(R) -> Result<O>,
     O: Into<JobOutcome>,
-    E: std::fmt::Display,
 {
     let request = match request {
         Ok(request) => request,
         Err(error) => {
-            return refuse(&format!(
-                "request body does not match the operation schema: {error}"
+            return refuse(&ster::failures::request::body_refusal(
+                operation, size, &error,
             ));
         }
     };
-    if let Err(message) = request.validate() {
-        return refuse(&message);
+    if let Err(refusal) = request.validate() {
+        return refuse(&refusal);
     }
     match run(request).map(Into::into) {
         Ok(JobOutcome::Completed(document)) => {
@@ -289,48 +335,9 @@ where
             COMPLETED
         }
         Ok(JobOutcome::Failed { document, refusal }) => failed(document, &refusal),
-        Err(error) => failed(json!({"error": format!("{error:#}")}), &error),
-    }
-}
-
-/// A job that failed while it ran: its refusal on a log event, and `document`
-/// as the failed result, carrying the declared cause when one refused it.
-fn failed(mut document: Value, error: &anyhow::Error) -> i32 {
-    emit_log(&format!("error: {error:#}\n"));
-    if let (Some(declared), Some(fields)) =
-        (ster::failures::declared(error), document.as_object_mut())
-    {
-        fields.insert("cause".to_owned(), declared.summary());
-    }
-    emit_result(FAILED, document);
-    FAILED
-}
-
-fn refuse(message: &str) -> i32 {
-    emit_result(REFUSED, json!({"error": message}));
-    REFUSED
-}
-
-fn emit_log(chunk: &str) {
-    emit(&json!({"type": "log", "stream": "stderr", "chunk": chunk}));
-}
-
-fn emit_result(status: i32, document: Value) {
-    emit(&json!({"type": "result", "status": status, "json": document}));
-}
-
-/// One event per line, flushed when it is written. A reader that has gone
-/// away ends the request: nobody is left to receive its result, and an
-/// operation such as a training run would otherwise keep the machine busy
-/// for a window that has already closed.
-fn emit(event: &Value) {
-    let mut out = io::stdout().lock();
-    if let Err(error) = writeln!(out, "{event}") {
-        eprintln!("Ster request cannot write its stdout event: {error}");
-        std::process::exit(FAILED);
-    }
-    if let Err(error) = out.flush() {
-        eprintln!("Ster request cannot flush its stdout event: {error}");
-        std::process::exit(FAILED);
+        Err(error) => {
+            let error = ster::failures::tensor::settle(error, &format!("ster request {operation}"));
+            failed(json!({"error": format!("{error:#}")}), &error)
+        }
     }
 }

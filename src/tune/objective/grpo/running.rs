@@ -9,12 +9,23 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::group::Totals;
+use super::super::super::preflight::Preflight;
+use super::totals::Totals;
 use super::{GrpoIteration, GrpoOptions};
+use crate::failures::{
+    refuse,
+    tune::objectives::{
+        GROUP_TOO_SMALL, NEW_TOKENS_NONE, POLICY_BETA_NEGATIVE, TEMPERATURE_UNUSABLE, TURNS_NONE,
+        USER_MISSING, USER_UNNEEDED,
+    },
+};
+
+/// How group-relative policy optimization names itself in what it says.
+pub(super) const SUBJECT: &str = "group-relative policy optimization";
 
 /// The fewest completions a group can hold: the baseline is the group's own
 /// mean and spread, which one completion does not have. TRL's `GRPOConfig`
@@ -79,53 +90,86 @@ impl From<&Kept> for Totals {
 }
 
 impl GrpoOptions {
-    /// The options no run can train with, refused by name. `simulated_user`
-    /// says whether a model was given to write the user's turns.
-    pub(super) fn refusals(&self, simulated_user: bool) -> Result<()> {
+    /// Refuses the options no run can train with, by name, before any model
+    /// or prompt is read. `user_model` names the model given to write the
+    /// user's turns, if one was.
+    pub fn check(&self, user_model: Option<&str>) -> Result<()> {
+        self.spec.check()?;
+        self.preflight().check()?;
         if self.group < MIN_GROUP {
-            bail!(
-                "group-relative policy optimization requires a group of at least two completions, because the group is the baseline"
-            );
+            return Err(refuse(
+                &GROUP_TOO_SMALL,
+                &[("group", &self.group.to_string())],
+            ));
         }
         let turns = self.turns;
         if turns == 0 {
-            bail!(
-                "group-relative policy optimization requires at least one assistant turn; turns is 0"
-            );
+            return Err(refuse(
+                &TURNS_NONE,
+                &[
+                    ("turns", &turns.to_string()),
+                    ("group", &self.group.to_string()),
+                ],
+            ));
         }
         // A simulated user writes the turns between assistant turns, one
         // fewer than there are assistant turns.
-        let between = turns.saturating_sub(1);
-        match (between > 0, simulated_user) {
-            (false, true) => bail!(
-                "a simulated user writes turns between assistant turns, so it needs turns above one; this run asked for one"
-            ),
-            (true, false) => bail!(
-                "a conversation of {turns} assistant turns needs a simulated user model to write the turns in between"
-            ),
+        match (turns > 1, user_model) {
+            (false, Some(model)) => {
+                return Err(refuse(&USER_UNNEEDED, &[("user_model", model)]));
+            }
+            (true, None) => {
+                return Err(refuse(&USER_MISSING, &[("turns", &turns.to_string())]));
+            }
             _ => {}
         }
         // TRL's `GRPOConfig` documents `beta = 0.0` as the KL term switched
         // off, so zero is a valid beta and only a negative one is refused:
         // https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_config.py
         if !(self.beta.is_finite() && self.beta >= 0.0) {
-            bail!(
-                "group-relative policy optimization requires a finite beta of zero or more; got {}",
-                self.beta
-            );
+            return Err(refuse(
+                &POLICY_BETA_NEGATIVE,
+                &[("value", &self.beta.to_string())],
+            ));
         }
         // Sampling divides the logits by the temperature, which Transformers'
         // `TemperatureLogitsWarper` refuses unless strictly positive:
         // https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py
-        if !(self.generation.temperature > 0.0) {
-            bail!(
-                "group-relative policy optimization requires a temperature above zero; argmax sampling would draw one identical completion per group"
-            );
+        let temperature = self.generation.temperature;
+        if !(temperature > 0.0) {
+            return Err(refuse(
+                &TEMPERATURE_UNUSABLE,
+                &[("value", &temperature.to_string())],
+            ));
         }
         if self.generation.max_new_tokens == 0 {
-            bail!("max_new_tokens must be greater than zero");
+            return Err(refuse(
+                &NEW_TOKENS_NONE,
+                &[
+                    ("tokens", &self.generation.max_new_tokens.to_string()),
+                    ("max_sequence", &self.max_sequence.to_string()),
+                ],
+            ));
         }
         Ok(())
+    }
+
+    /// The shared checks, in policy optimization's words.
+    pub(super) fn preflight(&self) -> Preflight<'static> {
+        Preflight {
+            subject: SUBJECT,
+            unit: "prompt",
+            pass: "iteration",
+            noun: "adapter tensors",
+            epochs: self.iterations,
+            accumulation: self.accumulation,
+            // No batch: this objective's cost is autoregressive sampling, and
+            // it samples and scores one completion at a time; `--group` is
+            // already the word for how many completions share a prompt.
+            batch: None,
+            learning_rate: self.learning_rate,
+            max_sequence: self.max_sequence,
+        }
     }
 
     /// Everything a resumed run must share with the run that wrote the

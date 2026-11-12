@@ -7,13 +7,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::failures::{file, fixture::output as causes, refuse};
 use crate::{DeviceChoice, Runtime};
 
 mod spec;
+mod tokenizer;
+mod verify;
 mod weights;
 
 #[derive(Debug, Serialize)]
@@ -42,88 +45,92 @@ pub struct FixtureReport {
 /// Failed writes or verification remove only this invocation's output files;
 /// failed cleanup is reported alongside the original operation's cause.
 pub fn create(declaration: &Path, output: &Path) -> Result<FixtureReport> {
-    let output_text = output.to_str().with_context(|| {
-        format!(
-            "fixture output {} cannot be passed to Ster's UTF-8 checkpoint loader",
-            output.display()
-        )
-    })?;
-    ensure!(
-        !output
-            .try_exists()
-            .with_context(|| format!("inspect fixture output {}", output.display()))?,
-        "fixture output {} already exists; choose a new directory; existing files were not changed",
-        output.display()
-    );
+    let shown = output.display().to_string();
+    let parent = output.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+    let parent_shown = parent.display().to_string();
+    let Some(output_text) = output.to_str() else {
+        return Err(refuse(&causes::OUTPUT_NOT_UTF8, &[("path", &shown)]));
+    };
+    match output.try_exists() {
+        Ok(false) => {}
+        // A file standing where a parent directory should be: creating the
+        // output below it is refused with what stands there.
+        Err(error) if error.kind() == ErrorKind::NotADirectory => {}
+        Ok(true) => {
+            let state = file::state(output);
+            return Err(refuse(&causes::OUTPUT_EXISTS, &[("path", &shown), ("state", &state)]));
+        }
+        Err(error) => {
+            return Err(refuse(
+                &causes::OUTPUT_UNINSPECTABLE,
+                &[
+                    ("path", &shown),
+                    ("parent", &parent_shown),
+                    ("parent_state", &file::state(&parent)),
+                    ("kind", &file::kind(&error)),
+                    ("error", &error.to_string()),
+                ],
+            ));
+        }
+    }
     let input = spec::Resolved::read(declaration)?;
     let tensors = weights::build(&input)?;
     let tensor_count = tensors.len();
-    let configuration = serde_json::to_value(&input.dimensions)
-        .context("serialize the declared fixture configuration")?;
-    let declaration = serde_json::to_value(&input.spec)
-        .context("serialize the accepted fixture declaration and its source annotations")?;
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create fixture output parent {}", parent.display()))?;
+    let configuration = crate::json::value(&input.dimensions);
+    let declaration = crate::json::value(&input.spec);
+    let uncreated = |what: &str, path: &Path, error: std::io::Error| {
+        let above = path.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        let cause = if error.kind() == ErrorKind::PermissionDenied {
+            &causes::OUTPUT_DENIED
+        } else {
+            &causes::OUTPUT_UNCREATABLE
+        };
+        refuse(
+            cause,
+            &[
+                ("what", what),
+                ("path", &path.display().to_string()),
+                ("parent", &above.display().to_string()),
+                ("parent_state", &file::state(&above)),
+                ("kind", &file::kind(&error)),
+                ("error", &error.to_string()),
+            ],
+        )
+    };
+    if !parent.as_os_str().is_empty() {
+        fs::create_dir_all(&parent).map_err(|error| uncreated("output parent", &parent, error))?;
     }
-    fs::create_dir(output)
-        .with_context(|| format!("create new fixture output {}", output.display()))?;
+    fs::create_dir(output).map_err(|error| uncreated("output directory", output, error))?;
     let mut owned_files = Vec::new();
     let result = (|| -> Result<FixtureReport> {
+        let write = |what: &str, path: &Path, bytes: &[u8]| {
+            fs::write(path, bytes).map_err(|error| unwritten(what, path, bytes.len(), &error))
+        };
         // Native checkpoint filenames, retained as external wire identities:
         // https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.save_pretrained
         let config = output.join("config.json");
         owned_files.push(config.clone());
-        fs::write(&config, &input.config_bytes)
-            .with_context(|| format!("write fixture config {}", config.display()))?;
+        write("config", &config, &input.config_bytes)?;
         let tokenizer = output.join("tokenizer.json");
         owned_files.push(tokenizer.clone());
-        fs::write(&tokenizer, &input.tokenizer_bytes)
-            .with_context(|| format!("write fixture tokenizer {}", tokenizer.display()))?;
+        write("tokenizer", &tokenizer, &input.tokenizer_bytes)?;
         let checkpoint = output.join("model.safetensors");
         owned_files.push(checkpoint.clone());
-        candle_core::safetensors::save(&tensors, &checkpoint).with_context(|| {
-            format!(
-                "serialize native fixture tensors to {}",
-                checkpoint.display()
-            )
+        let bytes: usize = tensors.values().map(|tensor| tensor.elem_count() * 4).sum();
+        candle_core::safetensors::save(&tensors, &checkpoint).map_err(|error| {
+            // The system's own answer when the write itself failed, so its
+            // kind (a full disk, a refused directory) reaches the refusal.
+            match crate::failures::file::tensors::io(&error) {
+                Some(io) => unwritten("weights", &checkpoint, bytes, io),
+                None => unwritten("weights", &checkpoint, bytes, &std::io::Error::other(error.to_string())),
+            }
         })?;
         // The real consumer maps the saved checkpoint; release the producer's
         // tensor buffers before loading it instead of retaining both copies.
         drop(tensors);
-        let runtime = Runtime::load(output_text, None, DeviceChoice::Cpu)
-            .with_context(|| format!("load emitted fixture {} through Ster", output.display()))?;
-        let activations = runtime
-            .activations(
-                &input.spec.verification.prompt,
-                &input.spec.verification.layers,
-            )
-            .with_context(|| {
-                format!(
-                    "forward fixture verification prompt through {} at layers {:?}",
-                    output.display(),
-                    input.spec.verification.layers
-                )
-            })?;
-        let mut verification = Vec::with_capacity(activations.len());
-        for (layer, values) in activations {
-            ensure!(
-                values.len() == runtime.hidden_size(),
-                "fixture verification layer {layer} returned width {}; Ster loaded hidden size {}",
-                values.len(),
-                runtime.hidden_size()
-            );
-            for (index, value) in values.iter().enumerate() {
-                ensure!(
-                    value.is_finite(),
-                    "fixture verification layer {layer} returned non-finite activation {value} at element {index}"
-                );
-            }
-            verification.push(ActivationReport {
-                layer,
-                width: values.len(),
-            });
-        }
+        // Loading and forwarding declare their own refusals; they pass through.
+        let runtime = Runtime::load(output_text, None, DeviceChoice::Cpu)?;
+        let verification = verify::activations(&runtime, &input.spec.verification, &shown)?;
         Ok(FixtureReport {
             path: output.to_owned(),
             configuration,
@@ -141,28 +148,51 @@ pub fn create(declaration: &Path, output: &Path) -> Result<FixtureReport> {
                 match fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(cause) if cause.kind() == ErrorKind::NotFound => {}
-                    Err(cause) => {
-                        failures.push(format!("remove fixture file {}: {cause}", path.display()))
-                    }
+                    Err(cause) => failures.push(format!(
+                        "removing the fixture file {} also failed ({}: {cause}; it is {})",
+                        path.display(),
+                        crate::failures::file::kind(&cause),
+                        crate::failures::file::state(&path)
+                    )),
                 }
             }
             if let Err(cause) = fs::remove_dir(output) {
                 failures.push(format!(
-                    "remove fixture output directory {}: {cause}",
-                    output.display()
+                    "removing the output directory {} also failed ({}: {cause}; it is {})",
+                    output.display(),
+                    crate::failures::file::kind(&cause),
+                    crate::failures::file::state(output)
                 ));
             }
             if failures.is_empty() {
-                Err(error.context(format!(
-                    "fixture creation failed; this invocation's output {} was removed",
-                    output.display()
-                )))
+                Err(crate::failures::amend(
+                    error,
+                    format!("the output {} this run created was removed", output.display()),
+                ))
             } else {
-                Err(error.context(format!(
-                    "fixture creation failed and output cleanup also failed: {}",
-                    failures.join("; ")
-                )))
+                Err(crate::failures::amend(
+                    error,
+                    format!(
+                        "{}; `rm -r {}` removes what is left",
+                        failures.join("; "),
+                        output.display()
+                    ),
+                ))
             }
         }
     }
+}
+
+/// The refusal of writing `bytes` bytes of the fixture's `what` to `path`.
+fn unwritten(what: &str, path: &Path, bytes: usize, error: &std::io::Error) -> anyhow::Error {
+    refuse(
+        &causes::FILE_UNWRITTEN,
+        &[
+            ("what", what),
+            ("path", &path.display().to_string()),
+            ("bytes", &bytes.to_string()),
+            ("kind", &file::kind(error)),
+            ("error", &error.to_string()),
+        ],
+    )
 }

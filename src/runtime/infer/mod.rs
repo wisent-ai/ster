@@ -1,7 +1,7 @@
 //! Running the model: one forward pass per shape a caller needs, and the
 //! hidden states a steering direction is read from.
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::Tensor;
 
 use crate::model::{Cache, ForwardOutput, Mode, Network, Route, SteeringLlama, SteeringPlan};
@@ -11,6 +11,8 @@ use super::{Runtime, requested_activations, validate_layers};
 mod encoder_decoder;
 mod generate;
 mod positions;
+mod rows;
+mod steer;
 
 pub use generate::{Completion, GenerationOptions};
 
@@ -82,76 +84,6 @@ impl Runtime {
             .hidden)
     }
 
-    /// One differentiable forward over several sequences at once, returning
-    /// logits `[batch, width, vocab]` where `width` is the longest row.
-    ///
-    /// Row `r`'s real logits are its first `rows[r].len()` positions: the
-    /// padding is on the right, so every row is sliced from the front to its
-    /// own length, which is the same offset convention a single-sequence
-    /// forward already hands back.
-    pub fn forward_train_rows(&self, rows: &[&[u32]]) -> Result<Tensor> {
-        self.row_logits(
-            rows,
-            Mode::TRAIN,
-            "a training forward pass needs at least one token",
-        )
-    }
-
-    /// The same differentiable batched pass with `steering` added to the
-    /// residual stream, so a loss over the logits reaches a steering vector
-    /// the plan was built over (`SteeringPlan::from_tensors`).
-    pub fn forward_steered_rows(&self, rows: &[&[u32]], steering: &SteeringPlan) -> Result<Tensor> {
-        self.forward_rows(
-            rows,
-            Some(steering),
-            Mode::TRAIN,
-            "a training forward pass needs at least one token",
-        )?
-        .logits
-        .context("this forward pass was asked for no vocabulary projection")
-    }
-
-    /// The same batched pass with no autograd tape, routed through the policy
-    /// or the frozen reference exactly as `forward_scored` routes one.
-    pub fn forward_scored_rows(&self, rows: &[&[u32]], route: Route) -> Result<Tensor> {
-        self.row_logits(
-            rows,
-            Mode::score(route),
-            "a scoring forward pass needs at least one token",
-        )
-    }
-
-    /// The batched scoring pass with `steering` added to the residual stream
-    /// of the frozen model and no autograd tape: how far a fixed artifact
-    /// moves the model's log-probabilities, read without training anything.
-    pub fn forward_steered_scored_rows(
-        &self,
-        rows: &[&[u32]],
-        steering: &SteeringPlan,
-    ) -> Result<Tensor> {
-        self.forward_rows(
-            rows,
-            Some(steering),
-            Mode::score(Route::Base),
-            "a scoring forward pass needs at least one token",
-        )?
-        .logits
-        .context("this forward pass was asked for no vocabulary projection")
-    }
-
-    /// The batched residual stream a reward head reads, `[batch, width,
-    /// hidden]`, with no vocabulary projection.
-    pub fn forward_hidden_rows(&self, rows: &[&[u32]]) -> Result<Tensor> {
-        Ok(self
-            .forward_rows(
-                rows,
-                None,
-                Mode::REWARD,
-                "a reward forward pass needs at least one token",
-            )?
-            .hidden)
-    }
-
     /// The next-token distribution after each of several continuations of
     /// one shared prefix: `suffixes.len()` vectors of `vocab` F32 logits.
     ///
@@ -173,14 +105,11 @@ impl Runtime {
         prefix: &[u32],
         suffixes: &[&[u32]],
     ) -> Result<Vec<Vec<f32>>> {
+        // Every caller encodes each suffix through a path that refuses a
+        // text the tokenizer turns into no tokens.
         if suffixes.is_empty() || suffixes.iter().any(|suffix| suffix.is_empty()) {
-            bail!(
-                "a decision forward pass needs at least one token in every suffix; got suffix lengths {:?}",
-                suffixes
-                    .iter()
-                    .map(|suffix| suffix.len())
-                    .collect::<Vec<_>>()
-            );
+            let lengths: Vec<usize> = suffixes.iter().map(|suffix| suffix.len()).collect();
+            return Err(empty_rows("a decision forward pass", &lengths));
         }
         let model = match &self.model {
             Network::Causal(model) => model,
@@ -200,8 +129,7 @@ impl Runtime {
                 let input = Tensor::new(*suffix, &self.device)?.unsqueeze(0)?;
                 let logits = model
                     .forward(&input, prefix.len(), &mut cache, None, &[])?
-                    .logits
-                    .context("this forward pass was asked for no vocabulary projection")?;
+                    .into_logits(Mode::DECODE.readout)?;
                 Ok(logits.squeeze(0)?.to_vec1::<f32>()?)
             })
             .collect()
@@ -226,15 +154,7 @@ impl Runtime {
     /// A forward that must produce logits, unwrapped.
     fn logits(&self, ids: &[u32], mode: Mode, empty: &str) -> Result<Tensor> {
         self.forward_once(ids, mode, empty)?
-            .logits
-            .context("this forward pass was asked for no vocabulary projection")
-    }
-
-    /// The batched equivalent, which must produce logits too.
-    fn row_logits(&self, rows: &[&[u32]], mode: Mode, empty: &str) -> Result<Tensor> {
-        self.forward_rows(rows, None, mode, empty)?
-            .logits
-            .context("this forward pass was asked for no vocabulary projection")
+            .into_logits(mode.readout)
     }
 
     /// The body every whole-sequence forward shares: one sequence, no KV cache.
@@ -245,48 +165,15 @@ impl Runtime {
     /// backward pass would then walk tensors that no longer correspond to the
     /// input being scored.
     fn forward_once(&self, ids: &[u32], mode: Mode, empty: &str) -> Result<ForwardOutput> {
+        // Every caller hands ids an encode produced, and encoding refuses a
+        // text the tokenizer turns into no tokens.
         if ids.is_empty() {
-            bail!("{empty}");
+            return Err(empty_rows(empty, &[0]));
         }
         let model = self.model.causal(WHOLE_SEQUENCE)?;
         let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
         let mut cache = self.cache(model, false)?;
         Ok(model.forward_pass(&input, 0, &mut cache, None, &[], mode)?)
-    }
-
-    /// The body every batched forward shares: many right-padded sequences, no
-    /// KV cache.
-    ///
-    /// The cache is off for the reason it is off in `forward_once`, and here
-    /// it is also structural: one cache cannot hold rows that end in different
-    /// places. Filler is token zero, which is never read — `forward_batch`
-    /// masks every padded key out of every real query — and is chosen only
-    /// because it is the one id every vocabulary has.
-    fn forward_rows(
-        &self,
-        rows: &[&[u32]],
-        steering: Option<&SteeringPlan>,
-        mode: Mode,
-        empty: &str,
-    ) -> Result<ForwardOutput> {
-        let model = self.model.causal(WHOLE_SEQUENCE)?;
-        let lengths: Vec<usize> = rows.iter().map(|row| row.len()).collect();
-        let Some(width) = lengths
-            .iter()
-            .copied()
-            .max()
-            .filter(|_| !lengths.contains(&0))
-        else {
-            bail!("{empty}");
-        };
-        let mut flat = Vec::with_capacity(rows.len() * width);
-        for row in rows {
-            flat.extend_from_slice(row);
-            flat.resize(flat.len() + width - row.len(), 0);
-        }
-        let input = Tensor::from_vec(flat, (rows.len(), width), &self.device)?;
-        let mut cache = self.cache(model, false)?;
-        Ok(model.forward_batch(&input, &lengths, &mut cache, steering, mode)?)
     }
 
     /// The hidden states one prompt produces at the requested layers.
@@ -339,4 +226,13 @@ impl Runtime {
             None => self.encode(prompt),
         }
     }
+}
+
+/// The refusal of `pass` handed rows of `lengths`, one of them empty or none
+/// at all, which no encode produces.
+fn empty_rows(pass: &str, lengths: &[usize]) -> anyhow::Error {
+    crate::failures::refuse(
+        &crate::failures::model::decoder::ROWS_EMPTY,
+        &[("pass", pass), ("lengths", &format!("{lengths:?}"))],
+    )
 }

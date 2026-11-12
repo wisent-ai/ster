@@ -2,13 +2,15 @@
 //! them, and the set a forward pass looks them up in.
 
 use std::collections::BTreeMap;
+use std::sync::PoisonError;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Init, VarMap};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use super::{Spec, Target, Widths, artifact::Artifact};
+use crate::failures::tune::run::unallocatable;
 
 /// `count` draws from a normal distribution with mean zero and the given
 /// standard deviation, taken from `rng` so the sequence is the seed's.
@@ -127,16 +129,14 @@ impl Adapters {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
-        if spec.layers.is_empty() {
-            bail!(
-                "adapter spec names no layers; resolve it against the model before building adapters"
-            );
-        }
-        if spec.targets.is_empty() {
-            bail!(
-                "adapter spec names no targets; choose at least one of query, key, value, output, gate, up, down"
-            );
-        }
+        // Its one caller, `Runtime::load_trainable_at`, runs
+        // `spec.validate(base.config.num_hidden_layers)?`, which refuses
+        // `self.targets.is_empty()` and `layer_count == 0`, then hands it
+        // `spec.resolved(..)`, whose empty `layers` became `0..layer_count`.
+        assert!(
+            !spec.layers.is_empty() && !spec.targets.is_empty(),
+            "a resolved, validated spec names layers and targets"
+        );
         // Candle's initialisers draw from the device's generator, and the CPU
         // device refuses `set_seed` outright, so a run could not reproduce its
         // own adapter. The draw is done here instead, from an RNG this crate
@@ -161,19 +161,24 @@ impl Adapters {
                         dtype,
                         device,
                     )
-                    .with_context(|| format!("failed to create adapter tensor {a_name}"))?;
+                    .map_err(|error| unallocatable(&a_name, &[spec.rank, inputs], error))?;
                 let draw = normal_draw(&mut rng, spec.rank * inputs, 1.0 / spec.rank as f64);
-                let seeded = Tensor::from_vec(draw, (spec.rank, inputs), device)
+                Tensor::from_vec(draw, (spec.rank, inputs), device)
                     .and_then(|tensor| tensor.to_dtype(dtype))
-                    .with_context(|| format!("failed to draw adapter tensor {a_name}"))?;
-                varmap
-                    .data()
-                    .lock()
-                    .expect("adapter variable map lock")
-                    .get(&a_name)
-                    .with_context(|| format!("adapter tensor {a_name} was not registered"))?
-                    .set(&seeded)
-                    .with_context(|| format!("failed to initialise adapter tensor {a_name}"))?;
+                    .and_then(|seeded| {
+                        // `varmap.get((spec.rank, inputs), &a_name, ...)` above
+                        // answered `Ok`, and Candle's `VarMap::get` answers only
+                        // a variable it holds under that name, inserting one it
+                        // creates (`tensor_data.insert(path.to_string(), var)`).
+                        varmap
+                            .data()
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .get(&a_name)
+                            .expect("VarMap::get registered the tensor it returned")
+                            .set(&seeded)
+                    })
+                    .map_err(|error| unallocatable(&a_name, &[spec.rank, inputs], error))?;
                 let b = varmap
                     .get(
                         (outputs, spec.rank),
@@ -182,7 +187,7 @@ impl Adapters {
                         dtype,
                         device,
                     )
-                    .with_context(|| format!("failed to create adapter tensor {b_name}"))?;
+                    .map_err(|error| unallocatable(&b_name, &[outputs, spec.rank], error))?;
                 entries.insert((layer, *target), Adapter { a, b, scale });
             }
         }
@@ -200,18 +205,21 @@ impl Adapters {
         for layer in &artifact.layers {
             for target in &artifact.targets {
                 let (a_name, b_name) = Adapter::tensor_names(*layer, *target);
-                let a = artifact
-                    .tensors
-                    .get(&a_name)
-                    .with_context(|| format!("adapter artifact is missing tensor {a_name}"))?
-                    .to_device(device)?
-                    .to_dtype(dtype)?;
-                let b = artifact
-                    .tensors
-                    .get(&b_name)
-                    .with_context(|| format!("adapter artifact is missing tensor {b_name}"))?
-                    .to_device(device)?
-                    .to_dtype(dtype)?;
+                // `artifact.validate()?` above runs `let a =
+                // self.tensor(&a_name)?; let b = self.tensor(&b_name)?;` for
+                // every layer and target, refusing a missing one as
+                // TENSOR_ABSENT.
+                let placed = |name: &str| {
+                    let tensor = artifact
+                        .tensors
+                        .get(name)
+                        .expect("a validated artifact holds every factor it names");
+                    tensor
+                        .to_device(device)
+                        .and_then(|tensor| tensor.to_dtype(dtype))
+                        .map_err(|error| unallocatable(name, tensor.dims(), error))
+                };
+                let (a, b) = (placed(&a_name)?, placed(&b_name)?);
                 entries.insert((*layer, *target), Adapter { a, b, scale });
             }
         }

@@ -105,16 +105,19 @@ impl Explanation {
             .orders
             .iter()
             .zip(logits.per_order())
-            .map(|(order, probabilities)| Order {
-                letters: (0..order.len())
-                    .map(|option| {
-                        LABELS[order
-                            .iter()
-                            .position(|&shown| shown == option)
-                            .expect("every option is shown once")]
-                    })
-                    .collect(),
-                probabilities,
+            .map(|(order, probabilities)| {
+                // Letter `position` showed option `order[position]`; each
+                // option takes the letter it wore.
+                let mut letters = vec![""; order.len()];
+                for (&option, label) in order.iter().zip(LABELS) {
+                    if let Some(slot) = letters.get_mut(option) {
+                        *slot = label;
+                    }
+                }
+                Order {
+                    letters,
+                    probabilities,
+                }
             })
             .collect();
         Self { options, orders }

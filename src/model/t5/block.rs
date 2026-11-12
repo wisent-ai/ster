@@ -73,9 +73,11 @@ impl Block {
 
     pub fn cross_memory(&self, encoder: &Tensor) -> candle_core::Result<KeyValue> {
         let Some((attention, _)) = &self.cross else {
-            candle_core::bail!(
-                "a T5 encoder block has no cross-attention memory; only decoder blocks carry cross attention"
-            );
+            return Err(crate::failures::model::t5::inconsistent_candle(
+                &crate::failures::model::t5::CROSS_MISPLACED,
+                "encoder",
+                "cross-attention memory asked of an encoder block, which holds no cross-attention",
+            ));
         };
         attention.key_value(encoder, Route::Base)
     }
@@ -102,14 +104,18 @@ impl Block {
             }
             (None, None) => {}
             (Some(_), None) => {
-                candle_core::bail!(
-                    "T5 decoder cross-attention requires encoder memory; this call gives none"
-                );
+                return Err(crate::failures::model::t5::inconsistent_candle(
+                    &crate::failures::model::t5::MEMORY_MISSING,
+                    "decoder",
+                    "a decoder block run without the encoder memory its cross-attention reads",
+                ));
             }
             (None, Some(_)) => {
-                candle_core::bail!(
-                    "T5 encoder self-attention cannot consume decoder cross-memory; this call gives some"
-                );
+                return Err(crate::failures::model::t5::inconsistent_candle(
+                    &crate::failures::model::t5::CROSS_MISPLACED,
+                    "encoder",
+                    "an encoder block handed decoder cross-attention memory",
+                ));
             }
         }
         let forwarded = self.feed_forward.forward(&hidden, mode)?;

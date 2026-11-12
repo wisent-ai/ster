@@ -21,24 +21,34 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
-use crate::{Runtime, workflow};
+use crate::{
+    Runtime,
+    failures::{decide::BINS_NONE, refuse},
+    workflow,
+};
 
 mod answer;
 mod calibration;
+mod examples;
 mod pipeline;
 mod prompt;
 mod request;
+mod rows;
 
 pub use answer::{Answer, Explanation, Order, QuestionLogits, Response, Usage};
 pub use calibration::{Calibration, Labelled, Metrics, RAW_TEMPERATURE};
+pub use examples::{Example, ExampleSet};
 pub use pipeline::{
     Benchmark, BenchmarkOptions, FetchOptions, FetchReport, ImportReport, Latency, Schema,
-    SynthesizeOptions, SynthesizeReport, TypeMetrics, benchmark, fetch, import_jsonl, split,
-    synthesize,
+    SynthesizeOptions, SynthesizeReport, TypeMetrics, benchmark, check_holdout, check_question,
+    fetch, import_jsonl, split, synthesize,
 };
-pub use request::{Example, ExampleSet, MAX_OPTIONS, NoulCriteria, Question, Request};
+pub use request::{MAX_OPTIONS, NoulCriteria, Question, ROLE as REQUEST_ROLE, Request};
+pub use rows::{Row, render_rows};
+
+use rows::question_logits;
 
 /// How a decision run reads the model.
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +106,14 @@ pub fn decide(
     })
 }
 
+/// Refuses a confidence-bin count that measures nothing, before a model loads.
+pub fn check_bins(ece_bins: usize) -> Result<()> {
+    if ece_bins == 0 {
+        return Err(refuse(&BINS_NONE, &[("bins", &ece_bins.to_string())]));
+    }
+    Ok(())
+}
+
 /// Fit a temperature on `examples` and report how the probabilities matched
 /// the labels before and after.
 ///
@@ -113,9 +131,7 @@ pub fn calibrate(
     options: Options,
     ece_bins: usize,
 ) -> Result<Calibration> {
-    if ece_bins == 0 {
-        bail!("the expected calibration error needs at least one bin; got {ece_bins}");
-    }
+    check_bins(ece_bins)?;
     examples.validate()?;
     let count = examples.examples.len();
     let mut labelled = Vec::new();
@@ -198,7 +214,9 @@ fn labelled_logits(
         .zip(logits)
         .filter_map(|((id, question), logits)| {
             let answer = example.answers.get(id)?;
-            let truth = question.truth_index(answer).expect("validated label");
+            // `examples.validate()` in `calibrate`, the one caller, refused
+            // every label that names no option, so none is skipped here.
+            let truth = question.truth_index(answer)?;
             Some(Labelled { logits, truth })
         })
         .collect())
@@ -227,118 +245,4 @@ pub fn control_state<'a>(set: &'a ExampleSet, index: usize, id: &str) -> &'a ser
         None => &set.examples[(index + 1) % count],
     };
     &other.request.state
-}
-
-/// One sequence the model reads: which question, which option order, and the
-/// tokens.
-pub struct Row {
-    pub question: usize,
-    pub order: Vec<usize>,
-    pub ids: Vec<u32>,
-}
-
-/// Every rendering of every question in `request`, tokenized, plus the token
-/// ids each answer letter position may be spelled with. This is the one
-/// place a decision prompt is turned into tokens, for reading and for
-/// training alike, so the two cannot drift apart.
-pub fn render_rows(
-    runtime: &Runtime,
-    request: &Request,
-    permutations: usize,
-) -> Result<(Vec<Row>, BTreeMap<usize, Vec<u32>>)> {
-    let mut rows = Vec::new();
-    let mut labels: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
-    for (index, (id, question)) in request.questions.iter().enumerate() {
-        let texts = question.options();
-        for position in 0..texts.len() {
-            if let std::collections::btree_map::Entry::Vacant(slot) = labels.entry(position) {
-                slot.insert(runtime.label_tokens(prompt::LABELS[position])?);
-            }
-        }
-        for order in prompt::orders(texts.len(), permutations) {
-            let text = prompt::render(request, question, &texts, &order);
-            let ids = runtime.encode_prompt(&text)?;
-            let context_length = runtime.context_length()?;
-            if ids.len() > context_length {
-                bail!(
-                    "question '{id}' renders to {} tokens, past the {} this model was built for",
-                    ids.len(),
-                    context_length
-                );
-            }
-            rows.push(Row {
-                question: index,
-                order,
-                ids,
-            });
-        }
-    }
-    Ok((rows, labels))
-}
-
-/// The answer-letter logits of every question in `request`, in canonical
-/// option order, plus what it cost.
-///
-/// The rows all begin with the same text — the header and the state — so the
-/// longest run of tokens they share goes through the model once, and each row
-/// then costs only what comes after it: its question, its options, and the
-/// answer prompt. The shared run is found on the tokens rather than the text,
-/// because a tokenizer may merge across the point where the texts diverge
-/// and a prefix cut by characters could then end mid-token.
-fn question_logits(
-    runtime: &Runtime,
-    request: &Request,
-    options: Options,
-) -> Result<(Vec<QuestionLogits>, Usage)> {
-    if !(options.temperature.is_finite() && options.temperature > 0.0) {
-        bail!(
-            "temperature must be a positive number; got {}",
-            options.temperature
-        );
-    }
-    let (rows, labels) = render_rows(runtime, request, options.permutations)?;
-    let shared = shared_prefix(&rows);
-    let suffixes: Vec<&[u32]> = rows.iter().map(|row| &row.ids[shared..]).collect();
-    let mut usage = Usage::for_passes(usize::from(shared > 0) + rows.len());
-    usage.input_tokens = shared + suffixes.iter().map(|suffix| suffix.len()).sum::<usize>();
-    workflow::progress(format!(
-        "reading the state once ({shared} tokens), then {} question renderings ({} tokens between them)",
-        rows.len(),
-        usage.input_tokens - shared
-    ));
-    let distributions = runtime.next_token_logits_after(&rows[0].ids[..shared], &suffixes)?;
-    let mut logits: Vec<QuestionLogits> = request
-        .questions
-        .iter()
-        .map(|_| QuestionLogits::default())
-        .collect();
-    for (row, vocabulary) in rows.iter().zip(distributions) {
-        let mut canonical = vec![0f32; row.order.len()];
-        for (position, &option) in row.order.iter().enumerate() {
-            canonical[option] =
-                answer::log_sum_exp(labels[&position].iter().map(|&id| vocabulary[id as usize]));
-        }
-        logits[row.question].rows.push(canonical);
-        logits[row.question].orders.push(row.order.clone());
-    }
-    Ok((logits, usage))
-}
-
-/// How many leading tokens every row has in common, short of any row's whole
-/// length: each row must keep at least one token of its own, because the
-/// position read is the last one and it has to be the row's, not the
-/// prefix's.
-fn shared_prefix(rows: &[Row]) -> usize {
-    let first = &rows[0].ids;
-    let mut shared = first.len().saturating_sub(1);
-    for row in rows {
-        let common = row
-            .ids
-            .iter()
-            .zip(first)
-            .take_while(|(a, b)| a == b)
-            .count();
-        shared = shared.min(common).min(row.ids.len().saturating_sub(1));
-    }
-    shared
 }

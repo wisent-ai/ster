@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::model::{
@@ -10,7 +10,7 @@ use crate::model::{
 };
 use crate::runtime::load::family::experts::{experts, qwen_dense_layers};
 use crate::runtime::load::family::read::layers::{every_layer, fits, flagged_layers};
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{flag, number, or, text, whole, whole_or};
 
 /// DeepSeek's mixture of experts: `n_routed_experts` routed and
 /// `n_shared_experts` shared experts of `moe_intermediate_size` each, dense
@@ -27,8 +27,8 @@ pub(in crate::runtime::load::family) fn deepseek_experts(
     path: &Path,
 ) -> Result<MixtureOfExperts> {
     fits(layers, path)?;
-    let first_dense = whole(raw, "first_k_dense_replace").unwrap_or(0);
-    let frequency = whole(raw, "moe_layer_freq").unwrap_or(1).max(1);
+    let first_dense = whole_or(raw, "first_k_dense_replace", 0, path)?;
+    let frequency = whole_or(raw, "moe_layer_freq", 1, path)?.max(1);
     let dense_layers = if raw.get("mlp_layer_types").is_some_and(Value::is_array) {
         qwen_dense_layers(raw, layers, path)?
     } else if raw.get("moe_layer_freq").is_some_and(Value::is_array) {
@@ -40,7 +40,7 @@ pub(in crate::runtime::load::family) fn deepseek_experts(
             .filter(|layer| *layer < first_dense || layer % frequency != 0)
             .fold(0, |set, layer| set | (1u128 << layer))
     };
-    let normalize = flag(raw, "norm_topk_prob");
+    let normalize = flag(raw, "norm_topk_prob", path)?;
     let mut routed = experts(
         raw,
         // K-EXAONE spells the counts `num_experts` and `num_shared_experts`.
@@ -55,14 +55,11 @@ pub(in crate::runtime::load::family) fn deepseek_experts(
         dense_layers,
         path,
     )?;
-    routed.shared = whole(
-        raw,
-        if model_type == "exaone_moe" {
-            "num_shared_experts"
-        } else {
-            "n_shared_experts"
-        },
-    )
+    routed.shared = whole(raw, if model_type == "exaone_moe" {
+        "num_shared_experts"
+    } else {
+        "n_shared_experts"
+    }, path)?
     .filter(|shared| *shared > 0)
     .map(|shared| SharedExpert {
         intermediate: shared * routed.intermediate,
@@ -81,16 +78,20 @@ pub(in crate::runtime::load::family) fn deepseek_experts(
             model_type,
             "deepseek_v3" | "deepseek_v32" | "axk1" | "pangu_ultra_moe" | "dots3_note"
         );
-    routed.scoring = match text(raw, "scoring_func") {
+    routed.scoring = match text(raw, "scoring_func", path)? {
         None if v3_default => Scoring::Sigmoid,
         None | Some("softmax") => Scoring::Softmax,
         Some("sigmoid") => Scoring::Sigmoid,
-        Some(other) => bail!(
+        Some(other) => refused!(
+            Unimplemented,
+            in raw,
+            ["scoring_func"],
             "{} declares scoring_func {other:?}; Ster implements softmax and sigmoid expert scores",
             path.display()
         ),
     };
-    let method = text(raw, "topk_method").unwrap_or(if v3_default { "noaux_tc" } else { "greedy" });
+    let default_method = if v3_default { "noaux_tc" } else { "greedy" };
+    let method = or(raw, "topk_method", default_method, path)?;
     // A.X-K1's `topk_method` `none` is vLLM's grouped top-k with no
     // selection bias, which ranks each group by its best expert: DeepSeek-V2's
     // `group_limited_greedy`.
@@ -107,22 +108,28 @@ pub(in crate::runtime::load::family) fn deepseek_experts(
         // the selection bias.
         "noaux_tc"
             if model_type == "dots3_note"
-                && whole(raw, "n_group").is_none()
-                && whole(raw, "topk_group").is_none() =>
+                && whole(raw, "n_group", path)?.is_none()
+                && whole(raw, "topk_group", path)?.is_none() =>
         {
             None
         }
         "group_limited_greedy" | "noaux_tc" => {
             let (Some(groups), Some(chosen_groups)) =
-                (whole(raw, "n_group"), whole(raw, "topk_group"))
+                (whole(raw, "n_group", path)?, whole(raw, "topk_group", path)?)
             else {
-                bail!(
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["topk_method", "n_group", "topk_group"],
                     "{} routes by {method} without n_group and topk_group",
                     path.display()
                 );
             };
             if groups == 0 || routed.count % groups != 0 || chosen_groups > groups {
-                bail!(
+                refused!(
+                    Contradictory,
+                    in raw,
+                    ["n_routed_experts", "n_group", "topk_group"],
                     "{} splits {} experts into {groups} groups and keeps {chosen_groups}; the groups must divide the experts evenly and at least as many must exist as are kept",
                     path.display(),
                     routed.count
@@ -134,7 +141,10 @@ pub(in crate::runtime::load::family) fn deepseek_experts(
                 rank_by_top_two: method == "noaux_tc",
             })
         }
-        other => bail!(
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["topk_method"],
             "{} declares topk_method {other:?}; Ster implements greedy, group_limited_greedy and noaux_tc",
             path.display()
         ),
@@ -146,7 +156,7 @@ pub(in crate::runtime::load::family) fn deepseek_experts(
         "mlp.gate.e_score_correction_bias"
     };
     routed.selection_bias = (method == "noaux_tc").then_some(bias);
-    let scale = number(raw, "routed_scaling_factor");
+    let scale = number(raw, "routed_scaling_factor", path)?;
     routed.routed_scale = if v3_router || !(normalize && routed.top_k > 1) {
         scale
     } else {

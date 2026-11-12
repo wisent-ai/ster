@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::Architecture;
+use crate::runtime::load::family::read::list;
 
 /// `layer_rope_theta`, a base per layer where zero means no rotation
 /// (GraniteSWA, MuseGlimmer). Ster rotates full-attention layers by
@@ -19,20 +20,24 @@ pub(in crate::runtime::load::family) fn layer_bases(
     architecture: &mut Architecture,
     path: &Path,
 ) -> Result<()> {
-    let Some(thetas) = raw.get("layer_rope_theta").filter(|value| !value.is_null()) else {
+    let Some(thetas) = list(raw, "layer_rope_theta", path)? else {
         return Ok(());
     };
     let thetas: Vec<f64> = thetas
-        .as_array()
-        .and_then(|list| list.iter().map(Value::as_f64).collect())
-        .with_context(|| {
+        .iter()
+        .map(Value::as_f64)
+        .collect::<Option<Vec<f64>>>()
+        .or_malformed(raw, &["layer_rope_theta"], || {
             format!(
                 "{} declares layer_rope_theta that is not a list of numbers",
                 path.display()
             )
         })?;
     if thetas.len() != layers {
-        bail!(
+        refused!(
+            Contradictory,
+            in raw,
+            ["layer_rope_theta", "num_hidden_layers"],
             "{} lists {} layer_rope_theta values for {layers} layers",
             path.display(),
             thetas.len()
@@ -44,13 +49,19 @@ pub(in crate::runtime::load::family) fn layer_bases(
         if theta == 0.0 {
             architecture.unrotated_layers |= 1u128 << layer;
         } else if !sliding && theta != f64::from(llama.rope_theta) {
-            bail!(
+            refused!(
+                Unimplemented,
+                in raw,
+                ["layer_rope_theta", "rope_theta"],
                 "{} rotates full-attention layer {layer} by base {theta}, not rope_theta {}; Ster rotates every full-attention layer by rope_theta",
                 path.display(),
                 llama.rope_theta
             );
         } else if sliding && local.is_some_and(|base| base != theta) {
-            bail!(
+            refused!(
+                Unimplemented,
+                in raw,
+                ["layer_rope_theta"],
                 "{} rotates sliding-window layers by more than one base in layer_rope_theta; Ster rotates them all by one",
                 path.display()
             );

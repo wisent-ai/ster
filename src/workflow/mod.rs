@@ -7,11 +7,13 @@
 //! share — the progress channel, the artifact summary every command prints,
 //! and the layer-selection parser.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+use wisent_errors::Cause;
 
 use crate::artifact::SteeringArtifact;
+use crate::failures::{refuse, workflow::layers as causes};
 
 mod compare;
 mod curve;
@@ -23,13 +25,13 @@ mod project;
 mod train;
 
 pub use compare::{CompareOptions, ComparisonReport, compare};
-pub use curve::{CurvePoint, CurveReport, Enough, curve};
+pub use curve::{CurvePoint, CurveReport, Enough, check_sizes, curve};
 pub use evaluate::{EvaluationReport, LayerEvaluation, evaluate};
 pub use extract::{PromptSet, extract};
-pub use optimize::{Candidate, Holdout, Selection, optimize};
+pub use optimize::{Candidate, Holdout, Selection, optimize, split_holdout};
 pub use parity::{ParityReport, parity};
 pub use project::{
-    ProjectOptions, ProjectionReport, ScoreReport, Side, TokenScore, project, score,
+    ProjectOptions, ProjectionReport, ScoreReport, Side, TokenScore, check_text, project, score,
 };
 pub use train::train;
 
@@ -37,14 +39,22 @@ pub use train::train;
 /// unset and every line goes to stderr; `ster request` installs a sink so the
 /// same lines reach the desktop app as NDJSON log events. One process runs
 /// one request, so one global sink is enough.
-static PROGRESS_SINK: Mutex<Option<Box<dyn Fn(&str) + Send>>> = Mutex::new(None);
+static PROGRESS_SINK: Mutex<Sink> = Mutex::new(None);
 
-pub fn set_progress_sink(sink: Option<Box<dyn Fn(&str) + Send>>) {
-    *PROGRESS_SINK.lock().expect("progress sink lock") = sink;
+/// The sink, also after a sink that panicked while it wrote: it holds no
+/// state a half-written line could leave wrong.
+type Sink = Option<Box<dyn Fn(&str) + Send>>;
+
+fn sink() -> MutexGuard<'static, Sink> {
+    PROGRESS_SINK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub fn set_progress_sink(sink_now: Sink) {
+    *sink() = sink_now;
 }
 
 pub fn progress(message: String) {
-    let guard = PROGRESS_SINK.lock().expect("progress sink lock");
+    let guard = sink();
     match guard.as_ref() {
         Some(sink) => sink(&message),
         None => eprintln!("{message}"),
@@ -93,49 +103,109 @@ fn norm(values: &[f32]) -> f64 {
         .sqrt()
 }
 
+/// `value`, a `--layers` selection, as the layers of a model of `count`
+/// layers. `count` is `usize::MAX` where the layers are counted only once
+/// the weights are mapped (`ster tune`), so nothing is refused as past them
+/// here and `all` is expanded by the caller.
 pub fn parse_layers(value: &str, count: usize) -> Result<Vec<usize>> {
+    let counted = count != usize::MAX;
+    let model_layers = if counted {
+        format!(
+            "the model has {count} layers, 0 to {}",
+            count.saturating_sub(1)
+        )
+    } else {
+        "the model's layers are counted once its weights are mapped".to_owned()
+    };
+    let example = if counted {
+        format!("0..{count}")
+    } else {
+        "8..16".to_owned()
+    };
+    let refused = |cause: &'static Cause, extra: &[(&str, &str)]| {
+        let mut values = vec![
+            ("selection", value),
+            ("model_layers", model_layers.as_str()),
+            ("example", example.as_str()),
+        ];
+        values.extend_from_slice(extra);
+        refuse(cause, &values)
+    };
     if count == 0 {
-        bail!("the model has no layers, so layers {value:?} select nothing");
+        return Err(refused(&causes::MODEL_LAYERLESS, &[]));
     }
     if value == "all" {
-        let mut every = Vec::with_capacity(count);
-        for layer in 0..count {
-            every.push(layer);
-        }
-        return Ok(every);
+        return Ok((0..count).collect());
     }
     let mut layers = Vec::new();
+    // Every layer named past the model, a range's part as one entry, so the
+    // refusal names all of them rather than the first.
+    let mut past: Vec<String> = Vec::new();
+    let mut first_past = None;
     for segment in value
         .split(',')
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
     {
         if let Some((start, end)) = segment.split_once("..") {
-            let start: usize = start
-                .parse()
-                .with_context(|| format!("invalid layer range {segment:?}"))?;
-            let end: usize = end
-                .parse()
-                .with_context(|| format!("invalid layer range {segment:?}"))?;
+            let bound = |text: &str| {
+                text.trim().parse::<usize>().map_err(|error| {
+                    refused(
+                        &causes::RANGE_BOUND_UNPARSED,
+                        &[
+                            ("segment", segment),
+                            ("bound", text),
+                            ("error", &error.to_string()),
+                        ],
+                    )
+                })
+            };
+            let (start, end) = (bound(start)?, bound(end)?);
             if start >= end {
-                bail!("layer range {segment:?} must have start < end");
+                return Err(refused(
+                    &causes::RANGE_EMPTY,
+                    &[
+                        ("segment", segment),
+                        ("start", &start.to_string()),
+                        ("end", &end.to_string()),
+                        ("after", &(start + 1).to_string()),
+                    ],
+                ));
             }
-            layers.extend(start..end);
+            if end > count {
+                first_past = first_past.or(Some(start.max(count)));
+                past.push(format!("{}..{end}", start.max(count)));
+            }
+            layers.extend(start..end.min(count));
         } else {
-            layers.push(
-                segment
-                    .parse()
-                    .with_context(|| format!("invalid layer {segment:?}"))?,
-            );
+            let layer = segment.parse::<usize>().map_err(|error| {
+                refused(
+                    &causes::LAYER_UNPARSED,
+                    &[("segment", segment), ("error", &error.to_string())],
+                )
+            })?;
+            if layer >= count {
+                first_past = first_past.or(Some(layer));
+                past.push(layer.to_string());
+            }
+            layers.push(layer);
         }
+    }
+    if let Some(layer) = first_past {
+        return Err(refused(
+            &causes::LAYER_PAST,
+            &[
+                ("layer", &layer.to_string()),
+                ("count", &count.to_string()),
+                ("last", &(count - 1).to_string()),
+                ("past", &past.join(", ")),
+            ],
+        ));
     }
     layers.sort_unstable();
     layers.dedup();
     if layers.is_empty() {
-        bail!("no layers selected: {value:?} names none of the model's {count} layers");
-    }
-    if let Some(layer) = layers.iter().copied().find(|layer| *layer >= count) {
-        bail!("layer {layer} is outside the model's {count} layers, counted from the first");
+        return Err(refused(&causes::SELECTION_EMPTY, &[]));
     }
     Ok(layers)
 }

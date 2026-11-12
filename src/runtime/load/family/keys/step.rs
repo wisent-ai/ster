@@ -1,8 +1,11 @@
 //! Step-3.5's keys under Llama's names.
 
+use std::path::Path;
+
+use anyhow::Result;
 use serde_json::Value;
 
-use crate::runtime::load::family::read::whole;
+use crate::runtime::load::family::read::{list, stated, text, whole_or};
 
 /// Step 3.5's config, put in the shape the rest of the reading expects. Its
 /// per-layer lists also cover the multi-token-prediction layers past
@@ -12,10 +15,28 @@ use crate::runtime::load::family::read::whole;
 /// sliding-window layers' head counts in `attention_other_setting` become
 /// the base counts, the full-attention ones moving to
 /// `num_global_attention_heads` and `num_global_key_value_heads`.
-pub(in crate::runtime::load::family) fn step3p5_keys(raw: &mut Value) {
-    let layers = whole(raw, "num_hidden_layers").unwrap_or(0);
+pub(in crate::runtime::load::family) fn step3p5_keys(raw: &mut Value, path: &Path) -> Result<()> {
+    // Candle's parse refuses an absent layer count by name after this.
+    let layers = whole_or(raw, "num_hidden_layers", 0, path)?;
+    let mut first_full = 0;
+    for (layer, kind) in list(raw, "layer_types", path)?.into_iter().flatten().enumerate() {
+        if kind.as_str() == Some("full_attention") {
+            first_full = layer;
+            break;
+        }
+    }
+    let sliding_other = match stated::<&serde_json::Map<String, Value>>(
+        raw,
+        "attention_other_setting",
+        path,
+    )? {
+        Some(_) => {
+            text(raw, "attention_other_setting.attention_type", path)? == Some("sliding_attention")
+        }
+        None => false,
+    };
     let Some(object) = raw.as_object_mut() else {
-        return;
+        return Ok(());
     };
     let per_layer = [
         "layer_types",
@@ -31,28 +52,16 @@ pub(in crate::runtime::load::family) fn step3p5_keys(raw: &mut Value) {
         }
     }
     if let Some(Value::Array(bases)) = object.get("rope_theta").cloned() {
-        let first_full = object
-            .get("layer_types")
-            .and_then(Value::as_array)
-            .and_then(|kinds| {
-                kinds
-                    .iter()
-                    .position(|kind| kind.as_str() == Some("full_attention"))
-            })
-            .unwrap_or(0);
         if let Some(base) = bases.get(first_full).cloned() {
             object.insert("rope_theta".to_owned(), base);
         }
         object.insert("layer_rope_theta".to_owned(), Value::Array(bases));
     }
-    let Some(other) = object
-        .get("attention_other_setting")
-        .filter(|setting| {
-            setting.get("attention_type").and_then(Value::as_str) == Some("sliding_attention")
-        })
-        .cloned()
-    else {
-        return;
+    if !sliding_other {
+        return Ok(());
+    }
+    let Some(other) = object.get("attention_other_setting").cloned() else {
+        return Ok(());
     };
     let full_heads = object.get("num_attention_heads").cloned();
     let full_groups = object
@@ -69,4 +78,5 @@ pub(in crate::runtime::load::family) fn step3p5_keys(raw: &mut Value) {
         object.insert("num_attention_heads".to_owned(), own_heads);
         object.insert("num_key_value_heads".to_owned(), own_groups);
     }
+    Ok(())
 }

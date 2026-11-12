@@ -13,17 +13,23 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use serde::Serialize;
 
 use crate::{
     artifact::SteeringArtifact,
-    lora,
-    runtime::{Checkpoint, Layout},
-    workflow,
+    failures::{
+        refuse,
+        tune::{
+            ablate::{ABLATION_STRENGTH, DIRECTION_EMPTY, WRITE_WIDTH},
+            rewrite::{FUSED_UNABLATABLE, GGUF_UNABLATABLE},
+        },
+    },
+    lora, workflow,
 };
 
+use super::fit::Fit;
 use super::merge::{read_tensors, write_checkpoint};
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,48 +61,37 @@ pub fn ablate(
     strength: f64,
     output: &Path,
 ) -> Result<AblationReport> {
+    let shown = artifact_path.display().to_string();
     if !strength.is_normal() {
-        bail!(
-            "ablation strength {strength} changes nothing or nothing sensible; state a finite, non-zero strength"
-        );
+        return Err(refuse(
+            &ABLATION_STRENGTH,
+            &[
+                ("path", &shown),
+                ("model", model),
+                ("strength", &strength.to_string()),
+            ],
+        ));
     }
     // Nothing is computed that an accelerator would help with at this size,
     // and the result goes straight to disk.
     let device = Device::Cpu;
     let artifact = SteeringArtifact::load(artifact_path)?;
-    if artifact.model != model {
-        bail!(
-            "artifact was trained for model {:?}, current model is {:?}",
-            artifact.model,
-            model
-        );
-    }
-    let source = Checkpoint::resolve(model, revision)?;
-    if source.layout == Layout::Gguf {
-        bail!("{model} is a GGUF checkpoint; a direction is written into safetensors weights only");
-    }
-    let (config, architecture, _) = source.decoder_config()?;
-    if artifact.hidden_size != config.hidden_size {
-        bail!(
-            "artifact width {} does not match model width {}",
-            artifact.hidden_size,
-            config.hidden_size
-        );
-    }
-    if let Some(layer) = artifact
-        .vectors
-        .iter()
-        .map(|vector| vector.layer)
-        .find(|layer| *layer >= config.num_hidden_layers)
-    {
-        bail!(
-            "layer {layer} is outside a model of {} layers",
-            config.num_hidden_layers
-        );
-    }
-    let mut tensors = read_tensors(&source, model, &device)?;
+    let fit = Fit {
+        step: "ablating",
+        path: artifact_path,
+        model,
+    };
+    fit.trained_for(&artifact.model)?;
+    let source = fit.source(revision, &GGUF_UNABLATABLE)?;
+    let config = &source.config;
+    fit.width(artifact.hidden_size, config.hidden_size)?;
+    let layers: Vec<usize> = artifact.vectors.iter().map(|vector| vector.layer).collect();
+    fit.layers(&layers, config.num_hidden_layers)?;
+    let base = &source.checkpoint;
+    let mut tensors = read_tensors(base, model, &device)?;
     let mut rewritten = Vec::new();
     for vector in &artifact.vectors {
+        let layer = vector.layer;
         let length = vector
             .values
             .iter()
@@ -104,10 +99,14 @@ pub fn ablate(
             .sum::<f64>()
             .sqrt();
         if !length.is_normal() {
-            bail!(
-                "the direction at layer {} has length {length}, so there is nothing to remove",
-                vector.layer
-            );
+            return Err(refuse(
+                &DIRECTION_EMPTY,
+                &[
+                    ("path", &shown),
+                    ("layer", &layer.to_string()),
+                    ("length", &length.to_string()),
+                ],
+            ));
         }
         let unit: Vec<f64> = vector
             .values
@@ -115,62 +114,55 @@ pub fn ablate(
             .map(|&value| f64::from(value) / length)
             .collect();
         for target in [lora::Target::Output, lora::Target::Down] {
-            let placement = architecture
-                .placement(target, vector.layer, &config)
-                .with_context(|| {
-                    format!(
-                        "this model has no {} projection at layer {} to rewrite",
-                        target.name(),
-                        vector.layer
-                    )
-                })?;
-            if placement.blocks.is_some() {
-                bail!(
-                    "layer {} {} is stored fused with another projection; rewriting one part of a fused write is not supported",
-                    vector.layer,
-                    target.name()
-                );
-            }
-            let stored = source.layout.stored_name(&placement.tensor);
+            let placement = fit.placement(&source, target, layer)?;
+            fit.whole(&placement, (target, layer), &FUSED_UNABLATABLE, None)?;
+            let stored = base.layout.stored_name(&placement.tensor);
             let name = match placement.without_root() {
                 Some(rootless) if !tensors.contains_key(&stored) => {
-                    source.layout.stored_name(&rootless)
+                    base.layout.stored_name(&rootless)
                 }
                 _ => stored,
             };
-            let base = tensors
-                .get(&name)
-                .with_context(|| format!("checkpoint has no tensor {name} to rewrite"))?;
-            let original = base.dtype();
-            let widened = base.to_dtype(DType::F32)?;
+            let weight = fit.tensor(&tensors, "the checkpoint", &name, target, layer)?;
+            let unfit = |error| fit.unfit(target, layer, &name, weight.dims(), error);
+            let original = weight.dtype();
+            let widened = weight.to_dtype(DType::F32).map_err(unfit)?;
             // `[outputs, inputs]`, outputs being the residual stream; GPT-2's
             // `Conv1D` stores the other way round and is turned to match.
             let write = if placement.transposed {
-                widened.t()?
+                widened.t().map_err(unfit)?
             } else {
                 widened
             };
-            let rows: Vec<Vec<f32>> = write.to_vec2::<f32>()?;
+            let rows: Vec<Vec<f32>> = write.to_vec2::<f32>().map_err(unfit)?;
             if rows.len() != unit.len() {
-                bail!(
-                    "{name} writes {} outputs where the residual stream is {} wide",
-                    rows.len(),
-                    unit.len()
-                );
+                return Err(refuse(
+                    &WRITE_WIDTH,
+                    &[
+                        ("path", &shown),
+                        ("layer", &layer.to_string()),
+                        ("name", &name),
+                        ("outputs", &rows.len().to_string()),
+                        ("width", &unit.len().to_string()),
+                    ],
+                ));
             }
             let updated = remove_direction(&rows, &unit, strength);
-            let inputs = updated
-                .first()
-                .map(Vec::len)
-                .context("a projection has rows")?;
+            // A projection of the residual stream has as many rows as the
+            // stream is wide, checked above, and the stream is never empty.
+            let inputs = updated.first().map_or(0, Vec::len);
             let flat: Vec<f32> = updated.into_iter().flatten().collect();
-            let updated = Tensor::from_vec(flat, (unit.len(), inputs), &device)?;
-            let updated = if placement.transposed {
-                updated.t()?.contiguous()?
-            } else {
-                updated
-            };
-            tensors.insert(name.clone(), updated.to_dtype(original)?);
+            let updated = Tensor::from_vec(flat, (unit.len(), inputs), &device)
+                .and_then(|updated| {
+                    if placement.transposed {
+                        updated.t()?.contiguous()
+                    } else {
+                        Ok(updated)
+                    }
+                })
+                .and_then(|updated| updated.to_dtype(original))
+                .map_err(unfit)?;
+            tensors.insert(name.clone(), updated);
             rewritten.push(name);
         }
     }
@@ -178,10 +170,10 @@ pub fn ablate(
         "rewrote {} residual-stream writes at strength {strength}",
         rewritten.len()
     ));
-    let written = write_checkpoint(&source, output, &tensors)?;
+    let written = write_checkpoint(base, output, &tensors)?;
     Ok(AblationReport {
         model: model.to_owned(),
-        model_revision: source
+        model_revision: base
             .revision
             .clone()
             .or_else(|| artifact.model_revision.clone()),

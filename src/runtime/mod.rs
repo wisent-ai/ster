@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_core::{DType, Device};
 use tokenizers::Tokenizer;
 
@@ -19,7 +19,7 @@ mod device;
 mod infer;
 mod load;
 mod text;
-mod vocabulary;
+pub(crate) mod vocabulary;
 
 pub use device::{DeviceChoice, Precision};
 pub use infer::{Completion, GenerationOptions};
@@ -52,26 +52,11 @@ pub struct Runtime {
     /// same checkpoint in two different shapes. It starts `Off`, so every
     /// path that never asks — steering, extraction, synthesis — encodes
     /// exactly the text it encoded before this existed.
-    chat: std::result::Result<Option<chat::Template>, String>,
+    chat: std::result::Result<Option<chat::Template>, anyhow::Error>,
     chat_status: chat::Status,
 }
 
 impl Runtime {
-    /// The projection widths an adapter has to match: the residual width,
-    /// the attention width, one key or value projection, and the feed
-    /// forward. Grouped-query attention makes the key and value width smaller
-    /// than the attention width, and a stated `head_dim` can make the
-    /// attention width differ from the residual one, which is why none of
-    /// them can be derived from `hidden_size`. A T5 checkpoint has none:
-    /// Ster attaches no adapter to it.
-    pub fn config_dims(&self) -> Result<crate::lora::Widths> {
-        let model = self.model.causal("sizing a LoRA adapter")?;
-        Ok(crate::lora::Widths::for_decoder(
-            model.config(),
-            model.architecture(),
-        ))
-    }
-
     pub fn device(&self) -> &Device {
         &self.device
     }
@@ -101,7 +86,8 @@ impl Runtime {
         self.model.hidden_size()
     }
 
-    /// The layers steering and capture address: a T5 model's decoder blocks.
+    /// The layers steering, capture and adapters address: a T5 model's
+    /// decoder blocks.
     pub fn layer_count(&self) -> usize {
         self.model.layer_count()
     }
@@ -120,42 +106,47 @@ impl Runtime {
     }
 }
 
+/// Refuses the first of `layers` a model of `count` layers lacks.
 pub(super) fn validate_layers(layers: &[usize], count: usize) -> Result<()> {
-    if layers.is_empty() {
-        bail!("at least one layer is required; none of the model's {count} layers was selected");
-    }
     if let Some(layer) = layers.iter().copied().find(|layer| *layer >= count) {
-        bail!(
-            "layer {layer} is outside the model's 0..{} range",
-            count.saturating_sub(1)
-        );
+        let named: Vec<String> = layers.iter().map(usize::to_string).collect();
+        return Err(crate::failures::refuse(
+            &crate::failures::runtime::steer::LAYER_OUTSIDE,
+            &[
+                ("layer", &layer.to_string()),
+                ("count", &count.to_string()),
+                ("layers", &named.join(", ")),
+                ("last", &count.saturating_sub(1).to_string()),
+            ],
+        ));
     }
     Ok(())
 }
 
-/// The activations one forward pass returned, checked against the layers it
-/// was asked for: exactly one non-empty vector per requested layer. A read
-/// that came back with fewer layers, a layer nobody asked for, or an empty
-/// vector is refused with the counts, so a run that would otherwise fit or
-/// export on fewer activations than prompts fails where the shortfall
-/// happened instead of producing a quieter artifact.
+/// The activations one forward pass returned, in layer order. The decoder
+/// keeps the last position's state at exactly the layers it is asked for,
+/// so a read that came back with another set, or an empty one, is refused
+/// as a defect of the decoder, not of anything a run was given.
 pub(super) fn requested_activations(
     read: std::collections::BTreeMap<usize, Vec<f32>>,
     layers: &[usize],
 ) -> Result<Vec<(usize, Vec<f32>)>> {
     let requested: BTreeSet<usize> = layers.iter().copied().collect();
     let returned: BTreeSet<usize> = read.keys().copied().collect();
-    if requested != returned {
-        let missing: Vec<usize> = requested.difference(&returned).copied().collect();
-        let unasked: Vec<usize> = returned.difference(&requested).copied().collect();
-        bail!(
-            "the forward pass returned activations at {} of {} requested layers (missing {missing:?}, not requested {unasked:?})",
-            requested.intersection(&returned).count(),
-            requested.len()
-        );
-    }
-    if let Some((layer, _)) = read.iter().find(|(_, values)| values.is_empty()) {
-        bail!("the forward pass returned an empty activation vector at layer {layer}");
+    let empty: Vec<usize> = read
+        .iter()
+        .filter(|(_, values)| values.is_empty())
+        .map(|(layer, _)| *layer)
+        .collect();
+    if requested != returned || !empty.is_empty() {
+        return Err(crate::failures::refuse(
+            &crate::failures::model::decoder::ACTIVATIONS_UNREQUESTED,
+            &[
+                ("requested", &format!("{requested:?}")),
+                ("returned", &format!("{returned:?}")),
+                ("empty", &format!("{empty:?}")),
+            ],
+        ));
     }
     Ok(read.into_iter().collect())
 }

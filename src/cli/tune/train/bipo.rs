@@ -81,7 +81,7 @@ pub(crate) struct BipoArgs {
 }
 
 impl InputCheck for BipoArgs {
-    fn check(&self) -> std::result::Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         self.model.check()?;
         if let Some(pairs) = &self.pairs {
             input::required_path(pairs, "tune/bipo pairs")?;
@@ -111,25 +111,7 @@ pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<serde_json::Value> {
         seed,
         durable,
     } = args;
-    let pairs = resolve_pairs(pairs)?;
-    let mut runtime = Runtime::load_at(
-        &model.model,
-        model.revision.as_deref(),
-        model.device,
-        precision,
-    )?;
-    let chat = runtime.set_chat_template(chat_template)?;
-    let pair_set = PairSet::load(&pairs)?;
-    // The pair file is fingerprinted by its contents, so the active
-    // imported set and the same file named with --pairs resume each other.
-    let identity = tune::identity(
-        &model.model,
-        model.revision.as_deref(),
-        &[("pairs", pairs.as_path())],
-        json!(format!("{chat_template:?}")),
-        json!(format!("{precision:?}")),
-    )?;
-    let options = BipoOptions {
+    let mut options = BipoOptions {
         layer,
         strength,
         loss: DpoLoss::parse(&loss)?,
@@ -142,10 +124,31 @@ pub(in crate::cli::tune) fn bipo(args: BipoArgs) -> Result<serde_json::Value> {
         max_sequence,
         seed,
         durable: durable.durable(),
-        identity,
+        identity: Default::default(),
     };
+    // Every setting but the layer, which only the model can answer, is
+    // refused before the workspace, the pairs or a weight are read.
+    options.check()?;
+    let pairs = resolve_pairs(pairs)?;
+    let pair_set = PairSet::load(&pairs)?;
+    // The pair file is fingerprinted by its contents, so the active
+    // imported set and the same file named with --pairs resume each other.
+    options.identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("pairs", pairs.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
+    let mut runtime = Runtime::load_at(
+        &model.model,
+        model.revision.as_deref(),
+        model.device,
+        precision,
+    )?;
+    let chat = runtime.set_chat_template(chat_template)?;
     let (artifact, report) = tune::bipo(&runtime, &pair_set, &options)?;
-    let mut report = serde_json::to_value(&report)?;
+    let mut report = ster::json::value(&report);
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
     artifact.save(&output)?;

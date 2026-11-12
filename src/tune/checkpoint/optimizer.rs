@@ -7,10 +7,16 @@
 //! ones the uninterrupted run takes.
 
 use std::collections::BTreeMap;
+use std::sync::PoisonError;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 use candle_core::{Tensor, Var, backprop::GradStore};
 use candle_nn::{ParamsAdamW, VarMap};
+
+use crate::failures::{
+    amend, refuse, tensor,
+    tune::run::{STEP_EMPTY, unallocatable},
+};
 
 /// One trained tensor and the two running moments AdamW keeps for it.
 pub(crate) struct Tracked {
@@ -33,16 +39,21 @@ impl AdamW {
     /// An optimizer over every floating-point tensor `varmap` holds, with
     /// both moments at zero and no step taken, as candle's starts.
     pub(crate) fn over(varmap: &VarMap, params: ParamsAdamW) -> Result<Self> {
+        // A poisoned lock only says another thread panicked holding it; the
+        // map it guards is still whole, and nothing here writes to it.
         let named = varmap
             .data()
             .lock()
-            .map_err(|poisoned| anyhow!("the run's tensor map is unreadable: {poisoned}"))?;
+            .unwrap_or_else(PoisonError::into_inner);
         let mut tracked = BTreeMap::new();
         for (name, var) in named.iter().filter(|(_, var)| var.dtype().is_float()) {
-            let first = Var::zeros(var.shape(), var.dtype(), var.device())
-                .with_context(|| format!("the first moment of {name} could not be allocated"))?;
-            let second = Var::zeros(var.shape(), var.dtype(), var.device())
-                .with_context(|| format!("the second moment of {name} could not be allocated"))?;
+            let moment = || {
+                Var::zeros(var.shape(), var.dtype(), var.device()).map_err(|error| {
+                    unallocatable(&format!("the AdamW moments of {name}"), var.dims(), error)
+                })
+            };
+            let first = moment()?;
+            let second = moment()?;
             tracked.insert(
                 name.clone(),
                 Tracked {
@@ -63,15 +74,73 @@ impl AdamW {
         self.params.lr = learning_rate;
     }
 
+    /// Backpropagate the loss one step `summed` over `forwards` forwards
+    /// holding `units` `unit`s, and take the step; refused as `step-empty`
+    /// when the step summed no loss.
+    pub(crate) fn backward_summed(
+        &mut self,
+        summed: Option<Tensor>,
+        forwards: usize,
+        units: usize,
+        unit: &str,
+    ) -> Result<()> {
+        let Some(loss) = summed else {
+            return Err(refuse(
+                &STEP_EMPTY,
+                &[
+                    ("step", &(self.rates.len() + 1).to_string()),
+                    ("forwards", &forwards.to_string()),
+                    ("units", &units.to_string()),
+                    ("unit", unit),
+                    ("tensors", &self.tracked.len().to_string()),
+                ],
+            ));
+        };
+        self.backward_step(&loss)
+    }
+
     /// Backpropagate `loss` and take one step.
-    pub(crate) fn backward_step(&mut self, loss: &Tensor) -> Result<()> {
-        let grads = loss.backward()?;
-        self.step(&grads)
+    fn backward_step(&mut self, loss: &Tensor) -> Result<()> {
+        // The step's number before `step` records its rate.
+        let number = self.rates.len() + 1;
+        let taken = loss.backward().and_then(|grads| self.step(&grads));
+        taken.map_err(|error| {
+            let failed = tensor::computing(&Self::taking(number, "gradients and AdamW update"), error);
+            self.amended(failed, number)
+        })
+    }
+
+    /// The refusal of the step being taken when its forward pass or its loss
+    /// fails on the device: `error` itself when a cause already declares
+    /// it, otherwise the cause `ster.tensor` declares for its Candle error.
+    pub(crate) fn failed(&self, error: anyhow::Error) -> anyhow::Error {
+        let number = self.rates.len() + 1;
+        let failed = tensor::within(error, &Self::taking(number, "forward pass and loss"));
+        self.amended(failed, number)
+    }
+
+    /// The step a refusal names: `taking optimizer step 3 (forward pass and
+    /// loss)`.
+    fn taking(number: usize, phase: &str) -> String {
+        format!("taking optimizer step {number} ({phase})")
+    }
+
+    /// `failed` with what the step was: its learning rate and how many
+    /// tensors it trains, and that no earlier checkpoint was touched.
+    fn amended(&self, failed: anyhow::Error, number: usize) -> anyhow::Error {
+        amend(
+            failed,
+            format!(
+                "step {number} at learning rate {} over {} trained tensors; the run's earlier checkpoints are left as they were",
+                self.params.lr,
+                self.tracked.len()
+            ),
+        )
     }
 
     /// One AdamW step. `1 - b^t` is written `-expm1(t ln b)`, which is the
     /// same quantity computed without cancellation, and `1 - b` likewise.
-    fn step(&mut self, grads: &GradStore) -> Result<()> {
+    fn step(&mut self, grads: &GradStore) -> candle_core::Result<()> {
         let ParamsAdamW {
             lr,
             beta1,

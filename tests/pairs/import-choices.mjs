@@ -5,7 +5,7 @@
 // It imports both, reads each written pair set back, and checks that every
 // row whose answer resolves became a pair with the correct choice as its
 // positive and another choice of the same row as its negative, and that every
-// other row is skipped with its row and reason. Then it checks the refusals:
+// other row is skipped by its row under its declared cause. Then it checks the refusals:
 // row flags on another benchmark, choices without them, a missing
 // --answer-form, label form without --labels, and a pointer without its
 // leading slash, none of which may write a pair set. Every command, its exit
@@ -33,11 +33,15 @@ const repository = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const seed = String(process.pid);
 const root = join(repository, 'target', 'real-tests', 'pairs-import-choices', `${new Date().toISOString().replace(/[:.]/g, '-')}-${seed}`);
 mkdirSync(root, { recursive: true });
-const git = args => spawnSync('git', args, { cwd: repository, encoding: 'utf8' }).stdout.trim();
+// The binary runs under this run's own home, never the operator's.
+const home = join(root, 'home');
+mkdirSync(home);
+const environment = { ...process.env, HOME: home, HF_HOME: join(home, 'huggingface') };
+const git = args => spawnSync('git', ['--no-optional-locks', ...args], { cwd: repository, encoding: 'utf8' }).stdout.trim();
 const report = { revision: git(['rev-parse', 'HEAD']), dirty: git(['status', '--porcelain']) !== '', binary, seed, commands: [], checks: [], verdict: 'failed' };
 
 // The rows as the datasets publish them, then what each row must become: a
-// pair whose positive is `answer`, or a skip at `row` for `reason`.
+// pair whose positive is `answer`, or a skip at `row` under `cause`.
 const arcRows = `{"question": "Which gas do plants take in?", "choices": {"text": ["They take in oxygen.", "They take in carbon dioxide.", "They take in helium."], "label": ["A", "B", "C"]}, "answerKey": "B"}
 {"question": "What melts ice?", "choices": {"text": ["Heat melts it.", "Cold melts it."], "label": ["A", "B"]}, "answerKey": "D"}
 
@@ -46,8 +50,8 @@ const arcRows = `{"question": "Which gas do plants take in?", "choices": {"text"
 `;
 const arcExpected = [
   { answer: 'They take in carbon dioxide.' },
-  { row: '2', reason: 'answer is not one of the labels' },
-  { row: '4', reason: 'no answer' },
+  { row: '2', cause: 'answer-label-unknown' },
+  { row: '4', cause: 'answer-missing' },
   { answer: 'Mars is red.' },
 ];
 const hellaswagRows = `[
@@ -59,16 +63,16 @@ const hellaswagRows = `[
 ]`;
 const hellaswagExpected = [
   { answer: 'plays a tune.' },
-  { row: '2', reason: 'answer index is outside the choices' },
-  { row: '3', reason: 'choices are not a list of non-empty text' },
-  // A text answer that is not a number carries Rust's own parse error; an
-  // answer that is neither a number nor text is named as the row states it.
-  { row: '4', reason: 'answer "B" is not a whole-number index: invalid digit found in string' },
-  { row: '5', reason: 'answer true is not a whole-number index' },
+  { row: '2', cause: 'answer-index-outside' },
+  { row: '3', cause: 'choice-not-text' },
+  // A text answer that is not a number, and an answer that is neither a
+  // number nor text, are both not an index; the refusal says which.
+  { row: '4', cause: 'answer-not-index' },
+  { row: '5', cause: 'answer-not-index' },
 ];
 
 function importing(args) {
-  const result = spawnSync(binary, ['pairs', 'import', ...args], { cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const result = spawnSync(binary, ['pairs', 'import', ...args], { cwd: repository, env: environment, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   report.commands.push({ args, status: result.status, signal: result.signal, error: result.error?.message, stdout: result.stdout, stderr: result.stderr });
   return result;
 }
@@ -98,7 +102,11 @@ function accepted(name, file, text, expected, parts, args) {
     assert.ok(negatives.includes(set.pairs[index].negative), `${name}: pair ${index} negative ${set.pairs[index].negative} is not another choice`);
     report.checks.push({ name: `${name}: pair ${index} negative is another choice`, actual: set.pairs[index].negative });
   });
-  check(`${name}: skipped rows`, answer.report.skipped, expected.filter(row => row.reason));
+  check(`${name}: skipped rows`, answer.report.skipped.map(({ row, cause }) => ({ row, cause: cause.id })), expected.filter(row => row.cause));
+  answer.report.skipped.forEach(({ row, reason }) => {
+    assert.ok(reason.startsWith(`importing row ${row} of ${source}: `), `${name}: row ${row}'s reason does not name its row and export: ${reason}`);
+    report.checks.push({ name: `${name}: row ${row}'s reason`, actual: reason });
+  });
   return { set, source };
 }
 function refusedWith(name, args, sentence) {

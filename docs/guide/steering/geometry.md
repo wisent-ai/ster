@@ -53,9 +53,8 @@ states; Ster gives no threshold for it, and a reader compares tokens of one
 text, or texts read alike. `--input-file FILE` reads the text from a file
 instead. Refusals: a layer the model lacks, a layer the artifact carries no
 vector at (naming the layers it does carry), an artifact of another model or
-width, a direction with no usable length, an empty text, a text and a
-text file both given, and an encoder-decoder checkpoint, whose decoder reads
-no text of its own.
+width, a direction with no usable length, an empty text, and a text and a
+text file both given.
 
 ## Writing a direction into the weights
 

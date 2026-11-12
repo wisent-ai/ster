@@ -2,13 +2,13 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{Architecture, ExpertLayout, NgramSpec};
 use crate::runtime::load::family::experts::experts;
-use crate::runtime::load::family::read::{flag, number, text, whole};
+use crate::runtime::load::family::read::{flag, number, text, whole, whole_or};
 
 /// LongCat-Flash-Lite's n-gram embeddings (`longcat_flash_ngram`): tables
 /// for orders 2 to `emb_neighbor_num`, `emb_split_num` of each, sized by
@@ -17,31 +17,53 @@ use crate::runtime::load::family::read::{flag, number, text, whole};
 /// is left out).
 pub(in crate::runtime::load::family) fn longcat_ngram(
     raw: &Value,
+    hidden: usize,
     path: &Path,
 ) -> Result<NgramSpec> {
     let (Some(ratio), Some(splits), Some(neighbors)) = (
-        whole(raw, "ngram_vocab_size_ratio"),
-        whole(raw, "emb_split_num"),
-        whole(raw, "emb_neighbor_num"),
+        whole(raw, "ngram_vocab_size_ratio", path)?,
+        whole(raw, "emb_split_num", path)?,
+        whole(raw, "emb_neighbor_num", path)?,
     ) else {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["ngram_vocab_size_ratio", "emb_split_num", "emb_neighbor_num"],
             "{} declares a LongCat n-gram model without ngram_vocab_size_ratio, emb_split_num or emb_neighbor_num",
             path.display()
         );
     };
     if splits == 0 || neighbors < 2 {
-        bail!(
+        refused!(
+            OutOfRange,
+            in raw,
+            ["emb_split_num", "emb_neighbor_num"],
             "{} declares {splits} n-gram splits over neighbourhoods of {neighbors}; Ster needs at least one split and a neighbourhood of two tokens",
+            path.display()
+        );
+    }
+    let tables = splits * (neighbors - 1);
+    if hidden % tables != 0 {
+        refused!(
+            Contradictory,
+            in raw,
+            ["hidden_size", "emb_split_num", "emb_neighbor_num"],
+            "{} declares {tables} n-gram tables (emb_split_num times emb_neighbor_num - 1), which do not split a hidden width of {hidden} evenly",
             path.display()
         );
     }
     let eos = match raw.get("eos_token_id") {
         None | Some(Value::Null) => LONGCAT_NGRAM_EOS,
-        Some(Value::Array(ids)) => ids
-            .first()
-            .and_then(Value::as_u64)
-            .unwrap_or(LONGCAT_NGRAM_EOS),
-        Some(id) => id.as_u64().with_context(|| {
+        Some(Value::Array(ids)) => match ids.first() {
+            None => LONGCAT_NGRAM_EOS,
+            Some(first) => first.as_u64().or_malformed(raw, &["eos_token_id"], || {
+                format!(
+                    "{} lists an eos_token_id that is not a token",
+                    path.display()
+                )
+            })?,
+        },
+        Some(id) => id.as_u64().or_malformed(raw, &["eos_token_id"], || {
             format!(
                 "{} declares an eos_token_id that is not a token",
                 path.display()
@@ -80,30 +102,39 @@ pub(in crate::runtime::load::family) fn longcat_flash(
     path: &Path,
 ) -> Result<()> {
     let Some(latent) = architecture.latent else {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["kv_lora_rank"],
             "{} declares a LongCat-Flash model without kv_lora_rank",
             path.display()
         );
     };
-    if let Some(method) = text(raw, "attention_method").filter(|method| *method != "MLA") {
-        bail!(
+    if let Some(method) = text(raw, "attention_method", path)?.filter(|method| *method != "MLA") {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["attention_method"],
             "{} declares attention_method {method:?}; Ster implements LongCat-Flash's MLA",
             path.display()
         );
     }
-    let identity = whole(raw, "zero_expert_num").unwrap_or(0);
-    if identity > 0 && text(raw, "zero_expert_type").is_some_and(|kind| kind != "identity") {
-        bail!(
+    let identity = whole_or(raw, "zero_expert_num", 0, path)?;
+    if identity > 0 && text(raw, "zero_expert_type", path)?.is_some_and(|kind| kind != "identity") {
+        refused!(
+            Unimplemented,
+            in raw,
+            ["zero_expert_num", "zero_expert_type"],
             "{} declares zero_expert_type {:?}; Ster implements identity zero experts",
             path.display(),
             text(raw, "zero_expert_type")
         );
     }
     architecture.interleaved_rotary = true;
-    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
     let hidden = llama.hidden_size as f64;
     let scale = |key: &str, rank: Option<usize>| match rank {
-        Some(rank) if flag(raw, key) && rank > 0 => (hidden / rank as f64).sqrt(),
+        Some(rank) if flag(raw, key, path)? && rank > 0 => (hidden / rank as f64).sqrt(),
         _ => 1.0,
     };
     architecture.latent_scales = Some((
@@ -114,14 +145,14 @@ pub(in crate::runtime::load::family) fn longcat_flash(
         raw,
         "n_routed_experts",
         "expert_ffn_hidden_size",
-        flag(raw, "norm_topk_prob"),
+        flag(raw, "norm_topk_prob", path)?,
         ExpertLayout::LongCat,
         0,
         path,
     )?;
     routed.identity_experts = identity;
     routed.selection_bias = Some("mlp.router.e_score_correction_bias");
-    routed.routed_scale = number(raw, "routed_scaling_factor");
+    routed.routed_scale = number(raw, "routed_scaling_factor", path)?;
     architecture.shortcut_experts = Some(routed);
     Ok(())
 }

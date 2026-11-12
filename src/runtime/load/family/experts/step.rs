@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{ExpertLayout, MixtureOfExperts, SharedExpert, SharedForm, SwigluLimit};
 use crate::runtime::load::family::experts::experts;
@@ -20,13 +20,16 @@ pub(in crate::runtime::load::family) fn step_experts(
     path: &Path,
 ) -> Result<MixtureOfExperts> {
     fits(layers, path)?;
-    let routed_layers = match text(raw, "moe_layers_enum") {
+    let routed_layers = match text(raw, "moe_layers_enum", path)? {
         Some(list) => {
             let mut set = 0u128;
             for entry in list.split(',') {
                 match entry.trim().parse::<usize>() {
                     Ok(layer) if layer < layers => set |= 1u128 << layer,
-                    _ => bail!(
+                    _ => refused!(
+                        OutOfRange,
+                        in raw,
+                        ["moe_layers_enum"],
                         "{} lists moe_layers_enum entry {entry:?}, which names no layer below {layers}",
                         path.display()
                     ),
@@ -40,12 +43,12 @@ pub(in crate::runtime::load::family) fn step_experts(
         raw,
         "moe_num_experts",
         "moe_intermediate_size",
-        flag(raw, "norm_expert_weight"),
+        flag(raw, "norm_expert_weight", path)?,
         ExpertLayout::Step3,
         every_layer(layers, path)? & !routed_layers,
         path,
     )?;
-    routed.shared = whole(raw, "share_expert_dim")
+    routed.shared = whole(raw, "share_expert_dim", path)?
         .filter(|width| *width > 0)
         .map(|intermediate| SharedExpert {
             intermediate,
@@ -85,7 +88,7 @@ pub(in crate::runtime::load::family) fn step_limits(
                         })
                         .collect()
                 })
-                .with_context(|| {
+                .or_malformed(raw, &[key], || {
                     format!(
                         "{} declares {key} that is not a list of numbers",
                         path.display()
@@ -98,7 +101,10 @@ pub(in crate::runtime::load::family) fn step_limits(
         routed.dense_layers & (1u128 << layer) != 0
             && shared_limits.get(*layer).is_some_and(|limit| *limit != 0.0)
     }) {
-        bail!(
+        refused!(
+            Unimplemented,
+            in raw,
+            [shared_key],
             "{} clamps the dense feed-forward of layer {layer} ({shared_key}); Ster clamps expert feed-forwards only",
             path.display()
         );

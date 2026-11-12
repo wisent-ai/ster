@@ -147,8 +147,8 @@ Included now:
 - pair-set authoring and inspection for duplicates, length balance and
   diversity, with no model loaded;
 - synthetic pair generation from a trait description, written either by the
-  local runtime or by a hosted model reached through Brama, with every
-  answer judged for a refusal by the model that wrote it;
+  local runtime or by a hosted model Stado's inference alternatives answer,
+  with every answer judged for a refusal by the model that wrote it;
 - last-token hidden-state extraction from any selected transformer layer;
 - contrastive activation addition (`caa`), principal-direction (`pca`), and
   logistic-probe training;
@@ -183,11 +183,13 @@ Explicit boundaries:
   among them, since every family above is one decoder stack — fails before
   weights are loaded
   rather than silently running a wrong decoder.
-- Ster controls local open-weight models. Hosted model routing belongs to Brama.
+- Ster controls local open-weight models. Hosted model routing belongs to
+  Stado's inference alternatives (Brama among them).
 - Steering reads hidden states, so it always runs on a local open-weight model.
   Writing pair text needs no activations, so `ster pairs synthesize` may take
-  its generator from Brama instead. Ster holds no provider credential and
-  speaks no provider API: it calls the gateway, which owns the routing.
+  its generator from `stado capabilities call inference --consumer ster`
+  instead. Ster holds no provider credential, names no gateway and speaks no
+  provider API.
 - Fine-tuning trains low-rank adapters, and on a reward run the scalar head
   that reads them. It trains nothing else: the base weights are mapped
   read-only and never registered as trainable. One sequence goes through each

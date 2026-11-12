@@ -32,19 +32,17 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use serde::Serialize;
 
-use crate::{
-    lora,
-    runtime::{Checkpoint, Layout},
-    workflow,
-};
+use super::fit::{Fit, Source};
+use crate::failures::tune::rewrite::{GGUF_UNMERGEABLE, REWARD_UNMERGEABLE};
+use crate::{lora, workflow};
 
 mod checkpoint;
 
-pub(crate) use checkpoint::{read_tensors, write_checkpoint};
+pub(crate) use checkpoint::{copy, read_tensors, tensors_unwritable, unwritable, write_checkpoint};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MergeReport {
@@ -85,55 +83,31 @@ pub fn merge(
     // the result is going straight to disk.
     let device = Device::Cpu;
     let artifact = lora::Artifact::load(adapter, &device)?;
-    if artifact.kind != lora::Kind::Adapter {
-        // A reward model's adapters shaped a residual stream for a head to
-        // read. Baking them into a checkpoint and dropping the head produces a
-        // model that generates, trained by an objective that never asked it to.
-        bail!(
-            "adapter artifact is a {} model, not a generation adapter",
-            artifact.kind.name()
-        );
-    }
-    if artifact.model != model {
-        bail!(
-            "adapter was trained for model {:?}, current model is {:?}",
-            artifact.model,
-            model
-        );
-    }
-
-    let source = Checkpoint::resolve(model, revision)?;
+    let fit = Fit {
+        step: "merging",
+        path: adapter,
+        model,
+    };
+    // A reward model's adapters shaped a residual stream for a head to
+    // read. Baking them into a checkpoint and dropping the head produces a
+    // model that generates, trained by an objective that never asked it to.
+    fit.adapter(&artifact, &REWARD_UNMERGEABLE)?;
+    fit.trained_for(&artifact.model)?;
     // A merge writes the base's own tensors back with the delta folded in; a
     // GGUF base holds quantized tensors, and writing them dequantized would
     // publish a model of another size and precision under the base's name.
-    if source.layout == Layout::Gguf {
-        bail!(
-            "{model} is a GGUF checkpoint; an adapter is merged into safetensors weights only. Run the adapter on it unmerged (--adapter), or merge into the base model's safetensors release"
-        );
-    }
-    let (config, architecture, _) = source.decoder_config()?;
-    architecture.check_targets(&artifact.targets, &config)?;
-    if artifact.hidden_size != config.hidden_size {
-        bail!(
-            "adapter width {} does not match model width {}",
-            artifact.hidden_size,
-            config.hidden_size
-        );
-    }
-    if let Some(layer) = artifact
-        .layers
-        .iter()
-        .copied()
-        .find(|layer| *layer >= config.num_hidden_layers)
-    {
-        bail!(
-            "layer {layer} is outside the model's 0..{} range",
-            config.num_hidden_layers.saturating_sub(1)
-        );
-    }
-    artifact.validate_widths(lora::Widths::for_decoder(&config, &architecture))?;
+    let source = fit.source(revision, &GGUF_UNMERGEABLE)?;
+    let Source {
+        checkpoint: base,
+        config,
+        architecture,
+    } = &source;
+    architecture.check_targets(&artifact.targets, config, model)?;
+    fit.width(artifact.hidden_size, config.hidden_size)?;
+    fit.layers(&artifact.layers, config.num_hidden_layers)?;
+    artifact.validate_widths(lora::Widths::for_decoder(config, architecture))?;
 
-    let mut tensors = read_tensors(&source, model, &device)?;
+    let mut tensors = read_tensors(base, model, &device)?;
 
     let scale = artifact.alpha / artifact.rank as f64;
     let mut merged = 0usize;
@@ -142,88 +116,59 @@ pub fn merge(
         for &target in &artifact.targets {
             // A fused checkpoint (Phi-3, GLM, GPT-NeoX) has no tensor per
             // projection; the update lands on the rows that projection owns.
-            let placement = architecture
-                .placement(target, layer, &config)
-                .with_context(|| {
-                    format!(
-                        "this model has no {} projection to merge into",
-                        target.name()
-                    )
-                })?;
+            let placement = fit.placement(&source, target, layer)?;
             // A checkpoint saved from the base model (GPT-2's `h.0…` rather
             // than `transformer.h.0…`) carries every name without the root;
             // Mistral's own format stores every name its own way.
-            let stored = source.layout.stored_name(&placement.tensor);
+            let stored = base.layout.stored_name(&placement.tensor);
             let name = match placement.without_root() {
                 Some(rootless) if !tensors.contains_key(&stored) => {
-                    source.layout.stored_name(&rootless)
+                    base.layout.stored_name(&rootless)
                 }
                 _ => stored,
             };
-            let base = tensors
-                .get(&name)
-                .with_context(|| format!("checkpoint has no tensor {name} to merge into"))?;
+            let weight = fit.tensor(&tensors, "the checkpoint", &name, target, layer)?;
             let (a_name, b_name) = lora::Adapter::tensor_names(layer, target);
-            let a = artifact
-                .tensors
-                .get(&a_name)
-                .with_context(|| format!("adapter artifact is missing tensor {a_name}"))?;
-            let b = artifact
-                .tensors
-                .get(&b_name)
-                .with_context(|| format!("adapter artifact is missing tensor {b_name}"))?;
+            let a = fit.tensor(&artifact.tensors, "the adapter", &a_name, target, layer)?;
+            let b = fit.tensor(&artifact.tensors, "the adapter", &b_name, target, layer)?;
 
             // `b @ a` is the dense update the factorisation exists to avoid
             // materialising during training. Here it is materialised exactly
             // once and then thrown away, which is the entire point of merging.
-            let original = base.dtype();
+            let original = weight.dtype();
             dtype.get_or_insert(original);
-            let delta = (b.to_dtype(DType::F32)?.matmul(&a.to_dtype(DType::F32)?)? * scale)?;
-            // GPT-2's `Conv1D` stores `[inputs, outputs]`; the update is laid
-            // out `[outputs, inputs]`, so the base is turned to match and back.
-            let widened = base.to_dtype(DType::F32)?;
-            let widened = if placement.transposed {
-                widened.t()?
-            } else {
-                widened
-            };
-            let updated = match &placement.blocks {
-                None => widened + &delta,
-                Some(blocks) => blocks.iter().try_fold(widened, |sum, (row, from, rows)| {
-                    add_rows(&sum, *row, &delta.narrow(0, *from, *rows)?)
-                }),
-            }
-            .and_then(|updated| {
-                if placement.transposed {
-                    updated.t()?.contiguous()
-                } else {
-                    Ok(updated)
-                }
-            })
-            .with_context(|| {
-                format!(
-                    "adapter for layer {layer} {} does not fit {name}",
-                    target.name()
-                )
-            })?;
-            tensors.insert(name, updated.to_dtype(original)?);
+            let updated = fold(weight, a, b, scale, &placement.blocks, placement.transposed)
+                .and_then(|updated| updated.to_dtype(original))
+                .map_err(|error| fit.unfit(target, layer, &name, weight.dims(), error))?;
+            tensors.insert(name, updated);
             merged += 1;
         }
     }
     workflow::progress(format!("merged {merged} projections at scale {scale}"));
-    // An artifact naming no targets never validates, so `dtype` is set here;
-    // were it not, the merge is refused before anything is written rather
-    // than reporting a dtype nobody read.
+    // A projection merged above set `dtype`; an artifact naming no target or
+    // no layer merges none and is refused as `Artifact::load` refuses it.
     let Some(dtype) = dtype else {
-        bail!("the merge read no projection, so the checkpoint's dtype is not known");
+        let targets: Vec<&str> = artifact.targets.iter().map(|target| target.name()).collect();
+        let layers: Vec<String> = artifact.layers.iter().map(usize::to_string).collect();
+        return Err(if targets.is_empty() {
+            crate::failures::refuse(
+                &crate::failures::lora::artifact::TARGETS_NONE,
+                &[("layers", &layers.join(","))],
+            )
+        } else {
+            crate::failures::refuse(
+                &crate::failures::lora::artifact::LAYERS_NONE,
+                &[("targets", &targets.join(","))],
+            )
+        });
     };
 
-    let written = write_checkpoint(&source, output, &tensors)?;
+    let written = write_checkpoint(base, output, &tensors)?;
     let (files, parameters, total) = (written.files, written.parameters, written.total);
 
     Ok(MergeReport {
         model: model.to_owned(),
-        model_revision: source
+        model_revision: base
             .revision
             .clone()
             .or_else(|| artifact.model_revision.clone()),
@@ -246,6 +191,34 @@ pub fn merge(
         dtype: format!("{dtype:?}"),
         files,
     })
+}
+
+/// `weight` with `scale · b @ a` added, in F32, on the rows `blocks` names
+/// or the whole tensor; GPT-2's `Conv1D` stores `[inputs, outputs]` while
+/// the update is laid out `[outputs, inputs]`, so a `transposed` weight is
+/// turned to match and back.
+fn fold(
+    weight: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    scale: f64,
+    blocks: &Option<Vec<(usize, usize, usize)>>,
+    transposed: bool,
+) -> candle_core::Result<Tensor> {
+    let delta = (b.to_dtype(DType::F32)?.matmul(&a.to_dtype(DType::F32)?)? * scale)?;
+    let widened = weight.to_dtype(DType::F32)?;
+    let widened = if transposed { widened.t()? } else { widened };
+    let updated = match blocks {
+        None => (widened + &delta)?,
+        Some(blocks) => blocks.iter().try_fold(widened, |sum, (row, from, rows)| {
+            add_rows(&sum, *row, &delta.narrow(0, *from, *rows)?)
+        })?,
+    };
+    if transposed {
+        updated.t()?.contiguous()
+    } else {
+        Ok(updated)
+    }
 }
 
 /// `base` with `delta` added to its rows `offset..offset + delta.rows`.

@@ -1,18 +1,26 @@
 //! Compile an ordered native token declaration into a usable WordLevel tokenizer.
 
 mod declaration;
+mod verify;
 
 use declaration::{Declaration, Verification};
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::Result;
 use serde::Serialize;
 use tokenizers::{Model, Tokenizer, models::wordlevel::WordLevel};
+use wisent_errors::Cause;
+
+use crate::failures::{amend, file, refuse, tokenizer as causes};
+use verify::inspect_native;
+
+/// What the declaration is, for the `ster.file` refusals that name it.
+const ROLE: &str = "the tokenizer declaration";
 
 #[derive(Debug, Serialize)]
 pub struct VerificationReport {
@@ -35,41 +43,6 @@ pub struct Compilation {
     pub verification: VerificationReport,
 }
 
-fn inspect_native(
-    bytes: &[u8],
-    verification: Verification,
-    context: &str,
-) -> Result<(usize, VerificationReport)> {
-    let saved = Tokenizer::from_bytes(bytes)
-        .map_err(|error| anyhow::anyhow!("load native tokenizer {context}: {error}"))?;
-    let encoding = saved
-        .encode(verification.text.as_str(), verification.add_special_tokens)
-        .map_err(|error| {
-            anyhow::anyhow!("encode verification text through tokenizer {context}: {error}")
-        })?;
-    for (id, token) in encoding.get_ids().iter().zip(encoding.get_tokens()) {
-        let declared = saved.token_to_id(token);
-        ensure!(
-            declared == Some(*id),
-            "tokenizer {context} encoded token {token:?} as id {id}, but its vocabulary maps that token to {declared:?}"
-        );
-    }
-    let decoded = saved
-        .decode(encoding.get_ids(), verification.skip_special_tokens)
-        .map_err(|error| {
-            anyhow::anyhow!("decode verification token ids through tokenizer {context}: {error}")
-        })?;
-    Ok((
-        saved.get_vocab_size(true),
-        VerificationReport {
-            text: verification.text,
-            token_ids: encoding.get_ids().to_vec(),
-            tokens: encoding.get_tokens().to_vec(),
-            decoded,
-        },
-    ))
-}
-
 /// Compile and exercise a declaration without writing an intermediate file.
 /// Fixture creation uses this same producer for a declared tokenizer source.
 pub fn compile(declaration: &Path) -> Result<Compilation> {
@@ -88,162 +61,196 @@ pub fn compile(declaration: &Path) -> Result<Compilation> {
 
 fn prepare(declaration: &Path) -> Result<(String, Verification)> {
     let bytes = fs::read(declaration)
-        .with_context(|| format!("read tokenizer declaration {}", declaration.display()))?;
+        .map_err(|error| file::read::refusal_or(&causes::MISSING, ROLE, declaration, &error))?;
     let input: Declaration = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse tokenizer declaration {}", declaration.display()))?;
-    ensure!(
-        !input.model_tokens.is_empty(),
-        "tokenizer declaration {} contains no modelTokens",
-        declaration.display()
-    );
-    ensure!(
-        !input.unknown_token.is_empty(),
-        "tokenizer declaration requires unknownToken"
-    );
-    ensure!(
-        !input.verification.text.trim().is_empty(),
-        "tokenizer declaration requires verification.text"
-    );
-    ensure!(
-        input
-            .model_tokens
-            .iter()
-            .any(|token| token.content == input.unknown_token),
-        "tokenizer unknownToken {:?} is absent from its declared modelTokens",
-        input.unknown_token
-    );
+        .map_err(|error| file::json::refusal(ROLE, causes::FORM, declaration, &error))?;
+    let path = declaration.display().to_string();
+    let count = input.model_tokens.len().to_string();
+    let added = input.added_tokens.len().to_string();
+    let at = |cause: &'static Cause, extra: &[(&str, &str)]| {
+        let mut values = vec![("path", path.as_str()), ("count", count.as_str()), ("added", added.as_str())];
+        values.extend_from_slice(extra);
+        refuse(cause, &values)
+    };
+    if input.model_tokens.is_empty() {
+        return Err(at(&causes::MODEL_TOKENS_NONE, &[]));
+    }
+    if input.unknown_token.is_empty() {
+        return Err(at(&causes::UNKNOWN_BLANK, &[]));
+    }
+    if input.verification.text.trim().is_empty() {
+        let bytes = input.verification.text.len().to_string();
+        return Err(at(&causes::VERIFICATION_BLANK, &[("bytes", &bytes)]));
+    }
+    let unknown = input.unknown_token.as_str();
+    if !input.model_tokens.iter().any(|token| token.content == unknown) {
+        let first = format!("\"{}\"", input.model_tokens[0].content);
+        return Err(at(&causes::UNKNOWN_UNDECLARED, &[("unknown", unknown), ("first", &first)]));
+    }
+    // Positions are the model's ids: every content once, none empty, every
+    // position a 32-bit id.
+    let mut first_at: HashMap<&str, usize> = HashMap::with_capacity(input.model_tokens.len());
+    for (position, token) in input.model_tokens.iter().enumerate() {
+        let shown = position.to_string();
+        if token.content.is_empty() {
+            let before = match position.checked_sub(1) {
+                Some(earlier) => format!("\"{}\"", input.model_tokens[earlier].content),
+                None => "none, it is the first".to_owned(),
+            };
+            return Err(at(&causes::MODEL_TOKEN_BLANK, &[("position", &shown), ("before", &before)]));
+        }
+        if u32::try_from(position).is_err() {
+            let limit = (u64::from(u32::MAX) + 1).to_string();
+            return Err(at(&causes::IDS_EXHAUSTED, &[("position", &shown), ("limit", &limit)]));
+        }
+        if let Some(first) = first_at.insert(token.content.as_str(), position) {
+            return Err(at(
+                &causes::MODEL_TOKEN_REPEATED,
+                &[("content", &token.content), ("position", &shown), ("first", &first.to_string())],
+            ));
+        }
+    }
+    drop(first_at);
+    // Every position fits in 32 bits and every content is unique, so the
+    // vocabulary holds one identity per declared token.
     let vocabulary = input
         .model_tokens
         .iter()
-        .enumerate()
-        .map(|(index, token)| {
-            ensure!(
-                !token.content.is_empty(),
-                "tokenizer token at position {index} has empty content"
-            );
-            let id = u32::try_from(index).with_context(|| {
-                format!(
-                    "tokenizer token at position {index} exceeds the native token id representation"
-                )
-            })?;
-            Ok((token.content.clone(), id))
-        })
-        .collect::<Result<_>>()?;
+        .zip(0u32..)
+        .map(|(token, id)| (token.content.clone(), id))
+        .collect();
     let model = WordLevel::builder()
         .vocab(vocabulary)
-        .unk_token(input.unknown_token)
+        .unk_token(input.unknown_token.clone())
         .build()
-        .map_err(|error| anyhow::anyhow!("build native WordLevel tokenizer: {error}"))?;
-    if model.get_vocab_size() != input.model_tokens.len() {
-        let mut seen = HashSet::new();
-        for (index, token) in input.model_tokens.iter().enumerate() {
-            if !seen.insert(token.content.as_str()) {
-                bail!(
-                    "tokenizer token {:?} at position {index} duplicates earlier content; token identities must be unique",
-                    token.content
-                );
-            }
-        }
-        bail!(
-            "native WordLevel vocabulary holds {} identities for {} declared modelTokens",
-            model.get_vocab_size(),
-            input.model_tokens.len()
-        );
-    }
+        .expect("WordLevelBuilder::build reads a file only when one is named, and none is");
+    debug_assert_eq!(model.get_vocab_size(), input.model_tokens.len());
     let mut tokenizer = Tokenizer::new(model);
     tokenizer.with_normalizer(input.pipeline.normalizer);
     tokenizer.with_pre_tokenizer(input.pipeline.pre_tokenizer);
     tokenizer.with_post_processor(input.pipeline.post_processor);
     tokenizer.with_decoder(input.pipeline.decoder);
-    for (index, token) in input.added_tokens.iter().enumerate() {
-        ensure!(
-            !token.content.is_empty(),
-            "tokenizer declaration {} has empty addedTokens content at position {index}",
-            declaration.display()
-        );
+    if let Some(position) = input.added_tokens.iter().position(|token| token.content.is_empty()) {
+        return Err(at(&causes::ADDED_TOKEN_BLANK, &[("position", &position.to_string())]));
     }
     let applied = tokenizer.add_tokens(&input.added_tokens);
-    let registered = tokenizer.get_added_vocabulary().get_added_tokens_decoder();
-    ensure!(
-        applied == input.added_tokens.len() && registered.len() == input.added_tokens.len(),
-        "tokenizer declaration {} requested {} added-token records, but the native operation applied {applied} and stored {} unique identities; addedTokens content must be unique",
-        declaration.display(),
-        input.added_tokens.len(),
-        registered.len()
-    );
+    let stored = tokenizer.get_added_vocabulary().get_added_tokens_decoder().len();
+    if applied != input.added_tokens.len() || stored != input.added_tokens.len() {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        let repeated: Vec<String> = input
+            .added_tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(position, token)| {
+                seen.insert(token.content.as_str(), position)
+                    .map(|first| format!("\"{}\" at {first} and {position}", token.content))
+            })
+            .collect();
+        let repeated = if repeated.is_empty() {
+            "none by content; the library merged records of one identity".to_owned()
+        } else {
+            repeated.join(", ")
+        };
+        return Err(at(
+            &causes::ADDED_TOKENS_MERGED,
+            &[
+                ("requested", &added),
+                ("applied", &applied.to_string()),
+                ("stored", &stored.to_string()),
+                ("repeated", &repeated),
+            ],
+        ));
+    }
     let document = tokenizer.to_string(true).map_err(|error| {
-        anyhow::anyhow!(
-            "serialize native tokenizer from {}: {error}",
-            declaration.display()
-        )
+        let pipeline = format!(
+            "normalizer {}, preTokenizer {}, postProcessor {}, decoder {}",
+            stage(tokenizer.get_normalizer().is_some()),
+            stage(tokenizer.get_pre_tokenizer().is_some()),
+            stage(tokenizer.get_post_processor().is_some()),
+            stage(tokenizer.get_decoder().is_some()),
+        );
+        at(&causes::UNSERIALIZED, &[("pipeline", &pipeline), ("error", &error.to_string())])
     })?;
-    drop(tokenizer);
-    drop(input.model_tokens);
-    drop(input.added_tokens);
     Ok((document, input.verification))
+}
+
+/// How a pipeline stage was declared, for a refusal that lists them.
+fn stage(declared: bool) -> &'static str {
+    if declared { "declared" } else { "null" }
 }
 
 /// Compile and persist a new native tokenizer, then reload and exercise it.
 /// Existing output is refused. Native model token IDs are positions in the
 /// caller's declaration, never a vocabulary embedded in this implementation.
 pub fn create(declaration: &Path, output: &Path) -> Result<TokenizerReport> {
-    ensure!(
-        output.to_str().is_some(),
-        "tokenizer output {} is not representable in the JSON result path",
-        output.display()
-    );
+    let shown = output.display().to_string();
+    if output.to_str().is_none() {
+        return Err(refuse(&causes::OUTPUT_NOT_UTF8, &[("path", &shown)]));
+    }
     let (document, verification) = prepare(declaration)?;
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create tokenizer output parent {}", parent.display()))?;
+    let role = "the tokenizer ster model tokenizer create writes";
+    if let Some(parent) = output.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|error| {
+            file::write::refusal("creating the directory of", role, output, "nothing was written", &error)
+        })?;
     }
     // Serialization and input checks precede ownership of the output. The
     // native exclusive open refuses an existing file, directory or symlink.
-    let mut file = OpenOptions::new()
+    let mut created = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(output)
-        .with_context(|| {
-            format!(
-                "create new tokenizer output {}; existing output is not replaced",
-                output.display()
-            )
+        .map_err(|error| {
+            if error.kind() == ErrorKind::AlreadyExists {
+                refuse(&causes::OUTPUT_EXISTS, &[("path", &shown), ("state", &file::state(output))])
+            } else {
+                file::write::refusal("creating", role, output, "nothing was written", &error)
+            }
         })?;
+    let left = "the file this run created is removed next";
     let result = (|| -> Result<TokenizerReport> {
-        file.write_all(document.as_bytes())
-            .with_context(|| format!("write native tokenizer {}", output.display()))?;
-        file.sync_all()
-            .with_context(|| format!("persist native tokenizer {}", output.display()))?;
-        drop(file);
+        created
+            .write_all(document.as_bytes())
+            .map_err(|error| file::write::refusal("writing", role, output, left, &error))?;
+        created
+            .sync_all()
+            .map_err(|error| file::write::refusal("syncing to disk", role, output, left, &error))?;
+        drop(created);
         let observed = fs::read(output)
-            .with_context(|| format!("read back native tokenizer {}", output.display()))?;
-        ensure!(
-            observed == document.as_bytes(),
-            "native tokenizer {} readback differs from the serialized document",
-            output.display()
-        );
-        let (vocabulary_size, verification) = inspect_native(
-            &observed,
-            verification,
-            &format!("saved at {}", output.display()),
-        )?;
+            .map_err(|error| file::read::refusal("the tokenizer just written", output, &error))?;
+        if observed != document.as_bytes() {
+            let offset = observed
+                .iter()
+                .zip(document.as_bytes())
+                .position(|(read, written)| read != written)
+                .unwrap_or_else(|| observed.len().min(document.len()));
+            return Err(refuse(
+                &causes::READBACK_DIFFERS,
+                &[
+                    ("path", &shown),
+                    ("written", &document.len().to_string()),
+                    ("read", &observed.len().to_string()),
+                    ("offset", &offset.to_string()),
+                ],
+            ));
+        }
+        let (vocabulary_size, verification) =
+            inspect_native(&observed, verification, &format!("saved at {shown}"))?;
         Ok(TokenizerReport {
             path: output.to_owned(),
             vocabulary_size,
             verification,
         })
     })();
-    match result {
-        Ok(report) => Ok(report),
-        Err(error) => match fs::remove_file(output) {
-            Ok(()) => Err(error.context(format!(
-                "tokenizer creation failed; this invocation's output {} was removed",
-                output.display()
-            ))),
-            Err(cleanup) => Err(error.context(format!(
-                "tokenizer creation failed and removing its output {} also failed: {cleanup}",
-                output.display()
-            ))),
-        },
-    }
+    result.map_err(|error| match fs::remove_file(output) {
+        Ok(()) => amend(error, format!("the output {shown} this run created was removed")),
+        Err(cleanup) => amend(
+            error,
+            format!(
+                "removing the output {shown} this run created also failed ({}: {cleanup}); it is {}, and `rm {shown}` removes it",
+                file::kind(&cleanup),
+                file::state(output)
+            ),
+        ),
+    })
 }

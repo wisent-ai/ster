@@ -20,7 +20,7 @@
 use candle_core::{D, DType, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear_no_bias};
 
-use crate::model::{Cache, LightningForm, LightningSpec, Mode, attention::apply_rotary};
+use crate::model::{Cache, LightningForm, LightningSpec, Mode, attention::rope::apply_rotary};
 
 use super::super::norm::{Norm, NormSpec};
 

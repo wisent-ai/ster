@@ -2,9 +2,10 @@
 //! geometry.md`, "Scoring a text token by token"): every token's state at one
 //! layer projected onto the artifact's unit direction there.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
+use crate::failures::{refuse, workflow::project as causes};
 use crate::{Runtime, SteeringArtifact};
 
 /// One token and its length along the direction.
@@ -28,6 +29,19 @@ pub struct ScoreReport {
     pub mean: f64,
 }
 
+/// Refuses a text with no character but whitespace; `source` says where it
+/// came from (`--input`, `--input-file notes.txt`, `the request's text`).
+/// It reads no model, so a command checks it before loading one.
+pub fn check_text(text: &str, source: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        return Err(refuse(
+            &causes::TEXT_BLANK,
+            &[("source", source), ("bytes", &text.len().to_string())],
+        ));
+    }
+    Ok(())
+}
+
 /// `text` read through `runtime` and each token's state at `layer`
 /// projected onto `artifact`'s unit direction at that layer.
 pub fn score(
@@ -36,20 +50,22 @@ pub fn score(
     text: &str,
     layer: usize,
 ) -> Result<ScoreReport> {
-    if text.trim().is_empty() {
-        bail!("the text is empty; give the text to score");
-    }
+    check_text(text, "the text given")?;
     runtime.check_steering(artifact)?;
+    let carried: Vec<String> = artifact
+        .vectors
+        .iter()
+        .map(|vector| vector.layer.to_string())
+        .collect();
+    let carried = carried.join(", ");
+    let layer_shown = layer.to_string();
+    let at = [
+        ("trait", artifact.trait_name.as_str()),
+        ("layer", layer_shown.as_str()),
+        ("carried", carried.as_str()),
+    ];
     let Some(vector) = artifact.vectors.iter().find(|vector| vector.layer == layer) else {
-        let carried: Vec<String> = artifact
-            .vectors
-            .iter()
-            .map(|vector| vector.layer.to_string())
-            .collect();
-        bail!(
-            "the artifact carries no vector at layer {layer}; it carries layers {}",
-            carried.join(", ")
-        );
+        return Err(refuse(&causes::LAYER_UNCARRIED, &at));
     };
     let direction: Vec<f64> = vector
         .values
@@ -62,7 +78,10 @@ pub fn score(
         .sum::<f64>()
         .sqrt();
     if !length.is_normal() {
-        bail!("the artifact's direction at layer {layer} has no usable length ({length})");
+        let (length, width) = (length.to_string(), direction.len().to_string());
+        let mut values = at.to_vec();
+        values.extend([("length", length.as_str()), ("width", width.as_str())]);
+        return Err(refuse(&causes::DIRECTION_LENGTHLESS, &values));
     }
     let read = runtime.token_states(text, layer)?;
     let tokens: Vec<TokenScore> = read

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::model::{
@@ -11,7 +11,7 @@ use crate::model::{
 use crate::runtime::load::family::At;
 use crate::runtime::load::family::experts::experts;
 use crate::runtime::load::family::read::layers::{every_layer, fits};
-use crate::runtime::load::family::read::{flag, number, whole};
+use crate::runtime::load::family::read::{flag, flag_or, list, mistyped, number_or, whole, whole_or};
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
 /// sends only their `model_type` values here.
@@ -33,12 +33,17 @@ pub(in crate::runtime::load::family) fn configure(
             // mixer; Falcon-Mamba adds a scale-free RMS norm on the step and
             // the input and output matrices.
             let hidden = llama.hidden_size;
-            let inner = whole(raw, "intermediate_size")
-                .or_else(|| whole(raw, "expand").map(|expand| expand * hidden));
+            let inner = match whole(raw, "intermediate_size", path)? {
+                Some(inner) => Some(inner),
+                None => whole(raw, "expand", path)?.map(|expand| expand * hidden),
+            };
             let (Some(inner), Some(state), Some(kernel)) =
-                (inner, whole(raw, "state_size"), whole(raw, "conv_kernel"))
+                (inner, whole(raw, "state_size", path)?, whole(raw, "conv_kernel", path)?)
             else {
-                bail!(
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["intermediate_size", "expand", "state_size", "conv_kernel"],
                     "{} declares a state-space model without intermediate_size (or expand), state_size and conv_kernel",
                     path.display()
                 );
@@ -47,8 +52,7 @@ pub(in crate::runtime::load::family) fn configure(
                 Some(Value::String(rule)) if rule == "auto" => {
                     hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)
                 }
-                _ => whole(raw, "time_step_rank")
-                    .unwrap_or(hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)),
+                _ => whole_or(raw, "time_step_rank", hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK), path)?,
             };
             architecture.names = Names::MAMBA;
             architecture.positions = Positions::None;
@@ -57,13 +61,10 @@ pub(in crate::runtime::load::family) fn configure(
                 state,
                 kernel,
                 step_rank,
-                projection_bias: flag(raw, "use_bias"),
-                convolution_bias: raw
-                    .get("use_conv_bias")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                projection_bias: flag(raw, "use_bias", path)?,
+                convolution_bias: flag_or(raw, "use_conv_bias", true, path)?,
                 parameter_norm: if model_type == "falcon_mamba" {
-                    ParameterNorm::Bare(number(raw, "mixer_rms_eps").unwrap_or(llama.rms_norm_eps))
+                    ParameterNorm::Bare(number_or(raw, "mixer_rms_eps", llama.rms_norm_eps, path)?)
                 } else {
                     ParameterNorm::None
                 },
@@ -79,23 +80,26 @@ pub(in crate::runtime::load::family) fn configure(
             // every layer has a feed-forward, routed over `num_experts` on
             // every `expert_layer_period`-th layer from `expert_layer_offset`.
             fits(layers, path)?;
-            let periodic = |period: &str, offset: &str| -> u128 {
-                let period = whole(raw, period).unwrap_or(1).max(1);
-                let offset = whole(raw, offset).unwrap_or(0);
-                (0..layers)
+            let periodic = |period: &str, offset: &str| -> Result<u128> {
+                let period = whole_or(raw, period, 1, path)?.max(1);
+                let offset = whole_or(raw, offset, 0, path)?;
+                Ok((0..layers)
                     .filter(|layer| layer % period == offset)
-                    .fold(0, |set, layer| set | (1u128 << layer))
+                    .fold(0, |set, layer| set | (1u128 << layer)))
             };
-            let attention = periodic("attn_layer_period", "attn_layer_offset");
-            let routed = periodic("expert_layer_period", "expert_layer_offset");
+            let attention = periodic("attn_layer_period", "attn_layer_offset")?;
+            let routed = periodic("expert_layer_period", "expert_layer_offset")?;
             let hidden = llama.hidden_size;
-            let inner = whole(raw, "mamba_expand").map(|expand| expand * hidden);
+            let inner = whole(raw, "mamba_expand", path)?.map(|expand| expand * hidden);
             let (Some(inner), Some(state), Some(kernel)) = (
                 inner,
-                whole(raw, "mamba_d_state"),
-                whole(raw, "mamba_d_conv"),
+                whole(raw, "mamba_d_state", path)?,
+                whole(raw, "mamba_d_conv", path)?,
             ) else {
-                bail!(
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["mamba_expand", "mamba_d_state", "mamba_d_conv"],
                     "{} declares a Jamba model without mamba_expand, mamba_d_state and mamba_d_conv",
                     path.display()
                 );
@@ -104,8 +108,7 @@ pub(in crate::runtime::load::family) fn configure(
                 Some(Value::String(rule)) if rule == "auto" => {
                     hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)
                 }
-                _ => whole(raw, "mamba_dt_rank")
-                    .unwrap_or(hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK)),
+                _ => whole_or(raw, "mamba_dt_rank", hidden.div_ceil(MAMBA_WIDTH_PER_STEP_RANK), path)?,
             };
             architecture.names = Names::JAMBA;
             architecture.positions = Positions::None;
@@ -114,17 +117,14 @@ pub(in crate::runtime::load::family) fn configure(
                 state,
                 kernel,
                 step_rank,
-                projection_bias: flag(raw, "mamba_proj_bias"),
-                convolution_bias: raw
-                    .get("mamba_conv_bias")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                projection_bias: flag(raw, "mamba_proj_bias", path)?,
+                convolution_bias: flag_or(raw, "mamba_conv_bias", true, path)?,
                 parameter_norm: ParameterNorm::Weighted(llama.rms_norm_eps),
                 layers: every_layer(layers, path)? & !attention,
                 feed_forward: true,
                 structured: None,
             });
-            if whole(raw, "num_experts").is_some_and(|count| count > 1) {
+            if whole(raw, "num_experts", path)?.is_some_and(|count| count > 1) {
                 architecture.experts = Some(experts(
                     raw,
                     "num_experts",
@@ -140,9 +140,12 @@ pub(in crate::runtime::load::family) fn configure(
             // Mamba-2: every block is a norm and the structured mixer.
             let heads = structured(raw, "num_heads", "head_dim", "n_groups", path)?;
             let inner = heads.heads * heads.head_dim;
-            let (Some(state), Some(kernel)) = (whole(raw, "state_size"), whole(raw, "conv_kernel"))
+            let (Some(state), Some(kernel)) = (whole(raw, "state_size", path)?, whole(raw, "conv_kernel", path)?)
             else {
-                bail!(
+                refused!(
+                    Incomplete,
+                    in raw,
+                    ["state_size", "conv_kernel"],
                     "{} declares a Mamba-2 model without state_size and conv_kernel",
                     path.display()
                 );
@@ -154,18 +157,20 @@ pub(in crate::runtime::load::family) fn configure(
                 state,
                 kernel,
                 step_rank: 0,
-                projection_bias: flag(raw, "use_bias"),
-                convolution_bias: raw
-                    .get("use_conv_bias")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                projection_bias: flag(raw, "use_bias", path)?,
+                convolution_bias: flag_or(raw, "use_conv_bias", true, path)?,
                 parameter_norm: ParameterNorm::None,
                 layers: every_layer(layers, path)?,
                 feed_forward: false,
                 structured: Some(heads),
             });
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }
@@ -184,31 +189,45 @@ pub(in crate::runtime::load::family) fn structured(
     groups_key: &str,
     path: &Path,
 ) -> Result<StructuredSpec> {
-    let (Some(heads), Some(head_dim)) = (whole(raw, heads_key), whole(raw, width_key)) else {
-        bail!(
+    let (Some(heads), Some(head_dim)) = (whole(raw, heads_key, path)?, whole(raw, width_key, path)?) else {
+        refused!(
+            Incomplete,
+            in raw,
+            [heads_key, width_key],
             "{} declares a Mamba-2 mixer without {heads_key} and {width_key}",
             path.display()
         );
     };
-    let groups = whole(raw, groups_key).unwrap_or(1);
+    let groups = whole_or(raw, groups_key, 1, path)?;
     if groups == 0 || heads % groups != 0 {
-        bail!(
+        refused!(
+            Contradictory,
+            in raw,
+            [heads_key, groups_key],
             "{} splits {heads} Mamba-2 heads into {groups} groups; the groups must divide the heads evenly",
             path.display()
         );
     }
-    let limit = raw.get("time_step_limit").and_then(Value::as_array);
-    let bound = |index: usize, unstated: f64| {
-        limit
-            .and_then(|limit| limit.get(index))
-            .and_then(Value::as_f64)
-            .unwrap_or(unstated)
+    let limit = list(raw, "time_step_limit", path)?;
+    let bound = |index: usize, unstated: f64| -> Result<f64> {
+        match limit.and_then(|limit| limit.get(index)) {
+            None | Some(Value::Null) => Ok(unstated),
+            Some(value) => match value.as_f64() {
+                Some(bound) => Ok(bound),
+                None => Err(mistyped(
+                    &format!("time_step_limit[{index}]"),
+                    value,
+                    "a number",
+                    path,
+                )),
+            },
+        }
     };
     Ok(StructuredSpec {
         heads,
         head_dim,
         groups,
-        step_limit: (bound(0, 0.0), bound(1, f64::INFINITY)),
+        step_limit: (bound(0, 0.0)?, bound(1, f64::INFINITY)?),
         input_scale: 1.0,
         projection_scales: None,
         gated_norm: true,

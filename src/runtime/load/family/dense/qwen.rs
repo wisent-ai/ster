@@ -1,7 +1,6 @@
 //! Qwen2, Qwen3, their mixtures of experts, Qwen3-Next, Qwen3.5, MiMo and Mellum.
 
-use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{
     Architecture, DeltaRuleForm, DeltaRuleSpec, ExpertLayout, QueryKeyNorm, SharedExpert,
@@ -10,7 +9,7 @@ use crate::model::{
 use crate::runtime::load::family::At;
 use crate::runtime::load::family::experts::{experts, qwen_dense_layers};
 use crate::runtime::load::family::read::layers::{every_layer, fits};
-use crate::runtime::load::family::read::{flag, whole};
+use crate::runtime::load::family::read::{flag, flag_or, list, whole, whole_or};
 
 /// What the families this file reads add to the Llama block; [`super::super::family`]
 /// sends only their `model_type` values here.
@@ -34,12 +33,12 @@ pub(in crate::runtime::load::family) fn configure(
                 architecture.query_key_value_bias = true;
             } else {
                 architecture.query_key_norm = QueryKeyNorm::PerHead;
-                architecture.query_key_value_bias = flag(raw, "attention_bias");
+                architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
                 architecture.output_bias = architecture.query_key_value_bias;
             }
-            if flag(raw, "use_sliding_window") {
-                architecture.sliding_window = whole(raw, "sliding_window");
-                let from = whole(raw, "max_window_layers").unwrap_or(0);
+            if flag(raw, "use_sliding_window", path)? {
+                architecture.sliding_window = whole(raw, "sliding_window", path)?;
+                let from = whole_or(raw, "max_window_layers", 0, path)?;
                 architecture.sliding_layers =
                     every_layer(layers, path)? & !every_layer(from.min(layers), path)?;
             }
@@ -54,10 +53,13 @@ pub(in crate::runtime::load::family) fn configure(
                 // calls `linear_attention` (without it, on every layer but
                 // each `full_attention_interval`-th).
                 fits(layers, path)?;
-                let linear = match raw.get("layer_types").and_then(Value::as_array) {
+                let linear = match list(raw, "layer_types", path)? {
                     Some(types) => {
                         if types.len() != layers {
-                            bail!(
+                            refused!(
+                                Contradictory,
+                                in raw,
+                                ["layer_types", "num_hidden_layers"],
                                 "{} lists {} layer_types for {layers} layers",
                                 path.display(),
                                 types.len()
@@ -68,7 +70,10 @@ pub(in crate::runtime::load::family) fn configure(
                             match kind.as_str() {
                                 Some("linear_attention") => linear |= 1u128 << layer,
                                 Some("full_attention") => {}
-                                other => bail!(
+                                other => refused!(
+                                    Malformed,
+                                    in raw,
+                                    ["layer_types"],
                                     "{} names layer {layer} {other:?}; a Qwen3-Next layer is linear_attention or full_attention",
                                     path.display()
                                 ),
@@ -78,9 +83,12 @@ pub(in crate::runtime::load::family) fn configure(
                     }
                     None => {
                         let Some(interval) =
-                            whole(raw, "full_attention_interval").filter(|n| *n > 0)
+                            whole(raw, "full_attention_interval", path)?.filter(|n| *n > 0)
                         else {
-                            bail!(
+                            refused!(
+                                Incomplete,
+                                in raw,
+                                ["layer_types", "full_attention_interval"],
                                 "{} declares a Qwen3-Next model with neither layer_types nor full_attention_interval",
                                 path.display()
                             );
@@ -91,7 +99,7 @@ pub(in crate::runtime::load::family) fn configure(
                     }
                 };
                 let size = |key: &str| -> Result<usize> {
-                    whole(raw, key).filter(|size| *size > 0).with_context(|| {
+                    whole(raw, key, path)?.filter(|size| *size > 0).or_refuse(raw, &[key], || {
                         format!(
                             "{} declares a Qwen3-Next model without {key}",
                             path.display()
@@ -99,13 +107,21 @@ pub(in crate::runtime::load::family) fn configure(
                     })
                 };
                 architecture.norm_offset = true;
-                architecture.output_gate = raw
-                    .get("attn_output_gate")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
+                architecture.output_gate = flag_or(raw, "attn_output_gate", true, path)?;
+                let key_heads = size("linear_num_key_heads")?;
+                let value_heads = size("linear_num_value_heads")?;
+                if value_heads % key_heads != 0 {
+                    refused!(
+                        Contradictory,
+                        in raw,
+                        ["linear_num_key_heads", "linear_num_value_heads"],
+                        "{} shares {value_heads} value heads among {key_heads} key heads; each key head of the linear attention leads an equal group of value heads",
+                        path.display()
+                    );
+                }
                 architecture.delta_rule = Some(DeltaRuleSpec {
-                    key_heads: size("linear_num_key_heads")?,
-                    value_heads: size("linear_num_value_heads")?,
+                    key_heads,
+                    value_heads,
                     key_dim: size("linear_key_head_dim")?,
                     value_dim: size("linear_value_head_dim")?,
                     kernel: size("linear_conv_kernel_dim")?,
@@ -130,10 +146,7 @@ pub(in crate::runtime::load::family) fn configure(
                 // Qwen3-Next and Qwen3.5 renormalise unless told not to
                 // (vLLM's `getattr(config, "norm_topk_prob", True)`); Qwen2-
                 // and Qwen3-MoE only when told to.
-                let normalize = raw
-                    .get("norm_topk_prob")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(model_type == "qwen3_next" || qwen35);
+                let normalize = flag_or(raw, "norm_topk_prob", model_type == "qwen3_next" || qwen35, path)?;
                 let mut routed = experts(
                     raw,
                     "num_experts",
@@ -145,7 +158,7 @@ pub(in crate::runtime::load::family) fn configure(
                 )?;
                 if model_type != "qwen3_moe" {
                     routed.shared =
-                        whole(raw, "shared_expert_intermediate_size").map(|intermediate| {
+                        whole(raw, "shared_expert_intermediate_size", path)?.map(|intermediate| {
                             SharedExpert {
                                 intermediate,
                                 module: "mlp.shared_expert",
@@ -157,7 +170,12 @@ pub(in crate::runtime::load::family) fn configure(
                 architecture.experts = Some(routed);
             }
         }
-        other => bail!("model architecture {other:?} has no decoder in this Ster build"),
+        other => refused!(
+            Unimplemented,
+            in raw,
+            ["model_type"],
+            "model architecture {other:?} has no decoder in this Ster build"
+        ),
     }
     Ok(())
 }

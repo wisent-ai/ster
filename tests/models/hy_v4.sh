@@ -26,8 +26,10 @@ BIN=${STER:?set STER to the ster binary under test, e.g. STER=target/debug/ster}
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/models/hy_v4-$RUN"
 REPORT="$ROOT/report.txt"
-mkdir -p "$ROOT"
-echo "revision: $(git rev-parse HEAD)$(git diff --quiet || echo ' (dirty)')" >"$REPORT"
+mkdir -p "$ROOT/home"
+# The binary runs under this run's own home and Hub cache, never the operator's.
+export HOME="$ROOT/home" HF_HOME="$ROOT/home/huggingface"
+echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-locks diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 
 fail() {
@@ -77,7 +79,7 @@ check "the batch answer is the single-prompt answer" "$(jq -r 'first | .model_ou
 
 # A local copy of the downloaded checkpoint whose config is rewritten per case.
 SNAPSHOT=
-for dir in "$HOME"/.cache/huggingface/hub/models--hf-tiny-v2--tiny-random-HYV4ForCausalLM/snapshots/*/; do
+for dir in "$HF_HOME"/hub/models--hf-tiny-v2--tiny-random-HYV4ForCausalLM/snapshots/*/; do
   SNAPSHOT=$dir
 done
 [ -f "$SNAPSHOT/config.json" ] || fail "the Hub download left no config.json under $SNAPSHOT"

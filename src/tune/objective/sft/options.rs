@@ -6,8 +6,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::super::super::checkpoint::Durable;
+use super::super::super::{checkpoint::Durable, preflight::Preflight};
 use crate::lora;
+
+/// How supervised fine-tuning names itself in what it says.
+pub(super) const SUBJECT: &str = "supervised fine-tuning";
 
 #[derive(Debug, Clone)]
 pub struct SftOptions {
@@ -67,6 +70,28 @@ pub(super) struct Running {
 }
 
 impl SftOptions {
+    /// Refuses the settings no supervised run can train with, before any
+    /// model or data is read.
+    pub fn check(&self) -> anyhow::Result<()> {
+        self.spec.check()?;
+        self.preflight().check()
+    }
+
+    /// The shared checks, in supervised fine-tuning's words.
+    pub(super) fn preflight(&self) -> Preflight<'static> {
+        Preflight {
+            subject: SUBJECT,
+            unit: "example",
+            pass: "epoch",
+            noun: "adapter tensors",
+            epochs: self.epochs,
+            accumulation: self.accumulation,
+            batch: Some(self.batch),
+            learning_rate: self.learning_rate,
+            max_sequence: self.max_sequence,
+        }
+    }
+
     /// Everything a resumed run must share with the run that wrote the
     /// checkpoint.
     pub(super) fn fingerprint(&self) -> BTreeMap<String, Value> {

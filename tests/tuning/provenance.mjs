@@ -27,6 +27,12 @@ const examples = resolve(required('STER_TEST_EXAMPLES'));
 const limits = ['--max-sequence', required('STER_TEST_MAX_SEQUENCE'), '--batch-size', required('STER_TEST_BATCH_SIZE')];
 const root = join(repository, 'target', 'real-tests', 'provenance', randomUUID());
 await mkdir(root, { recursive: true });
+// The binary runs under this run's own home, never the operator's; a Hub
+// model id is fetched into the cache STER_TEST_HF_HOME names, or one of
+// this run's own.
+const home = join(root, 'home');
+await mkdir(home);
+const environment = { ...process.env, HOME: home, HF_HOME: process.env.STER_TEST_HF_HOME ?? join(home, 'huggingface') };
 const owned = join(root, 'inputs');
 await mkdir(owned);
 const weights = join(owned, 'adapter.safetensors');
@@ -35,7 +41,7 @@ const report = { revision, binary, model, examples, commands: [], checks: [], ve
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function command(program, args) {
-  const child = spawn(program, args, { cwd: repository, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(program, args, { cwd: repository, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
   const stdout = [];
   const stderr = [];
   const errors = [];
@@ -83,21 +89,21 @@ try {
   const loop = await evaluate();
   assert.notEqual(loop.status, success);
   check('sidecar inspection refuses with its path and operating-system cause',
-    loop.stderr.includes(metadata) && loop.stderr.includes('failed to inspect adapter sidecar') && loop.stderr.includes('os error'));
+    loop.stderr.includes(metadata) && loop.stderr.includes("reading the adapter's sidecar") && loop.stderr.includes('os error'));
   assert.equal(loop.stdout, '');
   await rm(metadata);
   await mkdir(metadata);
   const directory = await evaluate();
   assert.notEqual(directory.status, success);
   check('sidecar read refuses with its path and operating-system cause',
-    directory.stderr.includes(metadata) && directory.stderr.includes('failed to read adapter sidecar') && directory.stderr.includes('os error'));
+    directory.stderr.includes(metadata) && directory.stderr.includes("reading the adapter's sidecar") && directory.stderr.includes('is a directory'));
   assert.equal(directory.stdout, '');
   await rm(metadata, { recursive: true });
   await writeFile(metadata, '{');
   const malformed = await evaluate();
   assert.notEqual(malformed.status, success);
   check('malformed metadata retains the parse location and path',
-    malformed.stderr.includes(metadata) && malformed.stderr.includes('invalid adapter sidecar JSON') && malformed.stderr.includes('line') && malformed.stderr.includes('column'));
+    malformed.stderr.includes(metadata) && malformed.stderr.includes("reading the adapter's sidecar") && malformed.stderr.includes('line') && malformed.stderr.includes('column'));
   assert.equal(malformed.stdout, '');
 
   await writeFile(metadata, originalMetadata);

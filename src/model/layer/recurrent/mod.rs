@@ -7,5 +7,6 @@
 
 pub(super) mod delta;
 pub(super) mod lightning;
+pub(super) mod short_conv;
 pub(super) mod state_space;
 pub(super) mod structured;

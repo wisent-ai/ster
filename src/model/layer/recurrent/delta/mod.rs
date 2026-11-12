@@ -61,17 +61,11 @@ impl DeltaRule {
         spec: DeltaRuleSpec,
     ) -> candle_core::Result<Self> {
         let DeltaRuleSpec {
-            key_heads,
             value_heads,
             value_dim,
             form,
             ..
         } = spec;
-        if key_heads == 0 || value_heads % key_heads != 0 {
-            candle_core::bail!(
-                "{value_heads} value heads cannot be shared evenly among {key_heads} key heads"
-            );
-        }
         let (inputs, convolution, step_bias) = Inputs::load(&builder, hidden, spec)?;
         let (norm, output) = match form {
             DeltaRuleForm::Qwen3Next | DeltaRuleForm::Qwen35 => ("norm", "out_proj"),
@@ -94,10 +88,7 @@ impl DeltaRule {
             decay: {
                 let stored = builder.get_unchecked("A_log")?.flatten_all()?;
                 if stored.dim(0)? < value_heads {
-                    candle_core::bail!(
-                        "A_log holds {} entries for {value_heads} heads",
-                        stored.dim(0)?
-                    );
+                    return Err(crate::model::misshapen("A_log", (value_heads,), stored.shape()));
                 }
                 stored
                     .narrow(0, 0, value_heads)?

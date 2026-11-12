@@ -7,11 +7,15 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde_json::{Map, Value};
 
+mod blocks;
 mod eos;
 mod names;
+
+use crate::model::keys::within;
+use blocks::{experts, rope_yarn, sliding_window};
 
 pub use eos::end_of_sequence;
 
@@ -36,11 +40,6 @@ const MISTRAL_DEFAULT_CONTEXT: u64 = 128_000;
 const MISTRAL_ACTIVATION: &str = "silu";
 /// `tie_word_embeddings` without `tied_embeddings`.
 const MISTRAL_TIED: bool = false;
-/// What `apply_scale: false` makes YaRN's magnitude correction: none, which
-/// Transformers spells as an attention factor of one.
-const UNSCALED_ATTENTION: f64 = 1.0;
-/// The `mscale_all_dim` every Mistral YaRN rotation gets.
-const MISTRAL_YARN_MSCALE_ALL_DIM: f64 = 1.0;
 
 impl Layout {
     /// The config file this layout reads.
@@ -48,6 +47,24 @@ impl Layout {
         match self {
             Self::Transformers | Self::Gguf => "config.json",
             Self::Mistral => "params.json",
+        }
+    }
+
+    /// The layout as a refusal names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Transformers => "Transformers (config.json)",
+            Self::Mistral => "Mistral (params.json)",
+            Self::Gguf => "GGUF (config.json beside one .gguf file)",
+        }
+    }
+
+    /// The weight files this layout reads, as a refusal names them.
+    pub fn weights_kind(self) -> &'static str {
+        match self {
+            Self::Transformers => "*.safetensors",
+            Self::Mistral => "consolidated*.safetensors",
+            Self::Gguf => ".gguf",
         }
     }
 
@@ -94,8 +111,9 @@ impl Layout {
 /// pairs as Mistral's own weights are laid out. Experts without shared ones
 /// (Mixtral) are refused: their Mistral-format names are not read.
 pub fn transformers_config(params: Value, path: &Path) -> Result<Value> {
-    let Value::Object(mut config) = params else {
-        bail!("{} is not a JSON object", path.display());
+    let mut config = match params {
+        Value::Object(config) => config,
+        other => return Err(crate::failures::model::config_not_object(path, &other)),
     };
     rename(&mut config, "dim", "hidden_size");
     rename(&mut config, "norm_eps", "rms_norm_eps");
@@ -125,9 +143,12 @@ pub fn transformers_config(params: Value, path: &Path) -> Result<Value> {
         .is_some_and(|width| !width.is_null());
     let model_type = match config.remove("moe") {
         Some(Value::Object(moe)) => {
-            let shared = moe.get("num_shared_experts").and_then(Value::as_u64);
+            let section = Value::Object(moe.clone());
+            let shared = within::<usize>(&section, "moe", "num_shared_experts", path)?;
             if !shared.is_some_and(|shared| shared > 0) {
-                bail!(
+                refused!(
+                    Unimplemented,
+                    ["moe" => Value::Object(moe.clone())],
                     "{} declares experts without shared ones (Mixtral's layout); Ster reads Mistral's own format for dense models and Mistral Large 3 only, so use the Transformers conversion",
                     path.display()
                 );
@@ -140,7 +161,9 @@ pub fn transformers_config(params: Value, path: &Path) -> Result<Value> {
             config.insert("rope_interleave".to_owned(), Value::Bool(true));
             "mistral"
         }
-        Some(other) => bail!(
+        Some(other) => refused!(
+            Malformed,
+            ["moe" => other],
             "{} declares moe {other}, which is not an object",
             path.display()
         ),
@@ -156,121 +179,4 @@ fn rename(config: &mut Map<String, Value>, from: &str, to: &str) {
     if let Some(value) = config.remove(from) {
         config.insert(to.to_owned(), value);
     }
-}
-
-/// A `sliding_window` list (a window or null per layer, repeated over the
-/// layers) becomes `layer_types` and one window; a single window covers
-/// every layer.
-fn sliding_window(config: &mut Map<String, Value>, path: &Path) -> Result<()> {
-    match config.get("sliding_window").cloned() {
-        None | Some(Value::Null) | Some(Value::Number(_)) => {}
-        Some(Value::Array(pattern)) => {
-            let Some(layers) = config.get("num_hidden_layers").and_then(Value::as_u64) else {
-                bail!(
-                    "{} lists a sliding_window pattern but states no n_layers to repeat it over; state n_layers",
-                    path.display()
-                );
-            };
-            let layers = layers as usize;
-            if pattern.is_empty() || layers % pattern.len() != 0 {
-                bail!(
-                    "{} repeats a sliding_window pattern of {} over {layers} layers unevenly",
-                    path.display(),
-                    pattern.len()
-                );
-            }
-            let windows: Vec<u64> = pattern.iter().filter_map(Value::as_u64).collect();
-            if windows.iter().any(|window| Some(window) != windows.first()) {
-                bail!(
-                    "{} lists more than one sliding window; Ster gives every windowed layer one",
-                    path.display()
-                );
-            }
-            let kinds: Vec<Value> = (0..layers)
-                .map(|layer| {
-                    let kind = if pattern[layer % pattern.len()].is_null() {
-                        "full_attention"
-                    } else {
-                        "sliding_attention"
-                    };
-                    Value::from(kind)
-                })
-                .collect();
-            config.insert("layer_types".to_owned(), Value::Array(kinds));
-            // A pattern of nulls alone windows no layer, so it states no
-            // window either.
-            let window = match windows.first() {
-                Some(window) => Value::from(*window),
-                None => Value::Null,
-            };
-            config.insert("sliding_window".to_owned(), window);
-        }
-        Some(other) => bail!(
-            "{} declares sliding_window {other}, which is neither a window nor a list",
-            path.display()
-        ),
-    }
-    Ok(())
-}
-
-/// Mistral Large 3's `moe` block read as DeepSeek's keys.
-fn experts(config: &mut Map<String, Value>, moe: Map<String, Value>) {
-    let keys = [
-        ("route_every_n", "moe_layer_freq"),
-        ("first_k_dense_replace", "first_k_dense_replace"),
-        ("num_experts_per_tok", "num_experts_per_tok"),
-        ("num_experts", "n_routed_experts"),
-        ("expert_hidden_dim", "moe_intermediate_size"),
-        ("routed_scale", "routed_scaling_factor"),
-        ("num_shared_experts", "n_shared_experts"),
-        ("num_expert_groups", "n_group"),
-        ("num_expert_groups_per_tok", "topk_group"),
-    ];
-    for (from, to) in keys {
-        if let Some(value) = moe.get(from) {
-            config.insert(to.to_owned(), value.clone());
-        }
-    }
-    config.insert("topk_method".to_owned(), Value::from("greedy"));
-    config.insert("norm_topk_prob".to_owned(), Value::Bool(true));
-    config.insert("scoring_func".to_owned(), Value::from("softmax"));
-}
-
-/// Mistral's `yarn` block as Transformers' YaRN `rope_parameters`: `beta`
-/// and `alpha` are `beta_fast` and `beta_slow`, and `apply_scale: false`
-/// leaves the magnitude uncorrected.
-fn rope_yarn(config: &mut Map<String, Value>, yarn: &Value, path: &Path) -> Result<()> {
-    let stated = |key: &str| yarn.get(key).and_then(Value::as_f64);
-    let factor = stated("factor")
-        .with_context(|| format!("{} declares yarn without a factor", path.display()))?;
-    let mut rope = Map::new();
-    rope.insert("rope_type".to_owned(), Value::from("yarn"));
-    rope.insert(
-        "mscale_all_dim".to_owned(),
-        Value::from(MISTRAL_YARN_MSCALE_ALL_DIM),
-    );
-    rope.insert("factor".to_owned(), Value::from(factor));
-    if let Some(theta) = config.remove("rope_theta") {
-        rope.insert("rope_theta".to_owned(), theta);
-    }
-    if let Some(original) = yarn.get("original_max_position_embeddings") {
-        rope.insert(
-            "original_max_position_embeddings".to_owned(),
-            original.clone(),
-        );
-    }
-    if let Some(fast) = stated("beta") {
-        rope.insert("beta_fast".to_owned(), Value::from(fast));
-    }
-    if let Some(slow) = stated("alpha") {
-        rope.insert("beta_slow".to_owned(), Value::from(slow));
-    }
-    if yarn.get("apply_scale").and_then(Value::as_bool) == Some(false) {
-        rope.insert(
-            "attention_factor".to_owned(),
-            Value::from(UNSCALED_ATTENTION),
-        );
-    }
-    config.insert("rope_parameters".to_owned(), Value::Object(rope));
-    Ok(())
 }

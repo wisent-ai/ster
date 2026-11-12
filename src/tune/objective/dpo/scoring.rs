@@ -4,11 +4,12 @@
 use anyhow::Result;
 use candle_core::Tensor;
 
-use crate::{model::Route, runtime::Runtime, workflow};
+use crate::{failures::tune::run::score_failed, model::Route, runtime::Runtime, workflow};
 
 use super::super::super::{
     batch,
-    preflight::{EncodedPair, sequence_logprob, softplus},
+    encode::EncodedPair,
+    preflight::{sequence_logprob, softplus},
 };
 use super::DpoLoss;
 
@@ -57,16 +58,30 @@ pub(super) fn reference_scores(
             rows.push(&pair.pair.chosen);
             rows.push(&pair.pair.rejected);
         }
-        let read = batch::read_rows(&rows, pairs, 2, |pass| {
-            runtime.forward_scored_rows(pass, Route::Base)
-        })?;
-        for (position, pair) in group.iter_mut().enumerate() {
-            pair.chosen_reference =
-                sequence_logprob(&read[position * 2], &pair.pair.chosen, 1, device)?
-                    .to_scalar::<f32>()? as f64;
-            pair.rejected_reference =
-                sequence_logprob(&read[position * 2 + 1], &pair.pair.rejected, 1, device)?
-                    .to_scalar::<f32>()? as f64;
+        let scores = || -> Result<Vec<(f64, f64)>> {
+            let read = batch::read_rows(&rows, pairs, 2, |pass| {
+                runtime.forward_scored_rows(pass, Route::Base)
+            })?;
+            group
+                .iter()
+                .enumerate()
+                .map(|(position, pair)| {
+                    let side = |row: usize, ids: &[u32]| -> Result<f64> {
+                        let total = sequence_logprob(&read[row], ids, 1, device)?;
+                        Ok(total.to_scalar::<f32>()? as f64)
+                    };
+                    Ok((
+                        side(position * 2, &pair.pair.chosen)?,
+                        side(position * 2 + 1, &pair.pair.rejected)?,
+                    ))
+                })
+                .collect()
+        };
+        let scores = scores()
+            .map_err(|error| score_failed("pairs under the frozen reference model", error))?;
+        for (pair, (chosen, rejected)) in group.iter_mut().zip(scores) {
+            pair.chosen_reference = chosen;
+            pair.rejected_reference = rejected;
             scored += 1;
             workflow::progress(format!("reference pair {scored}/{total}"));
         }

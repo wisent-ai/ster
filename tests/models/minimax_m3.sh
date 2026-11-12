@@ -26,8 +26,11 @@ CHECKPOINT=${MINIMAX_M3_CHECKPOINT:?set MINIMAX_M3_CHECKPOINT to a local copy of
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/models/minimax_m3-$RUN"
 REPORT="$ROOT/report.txt"
-mkdir -p "$ROOT"
-echo "revision: $(git rev-parse HEAD)$(git diff --quiet || echo ' (dirty)')" >"$REPORT"
+mkdir -p "$ROOT/home"
+# The binary runs under this run's own home, never the operator's; the
+# checkpoint is a local directory, so no Hub cache is read.
+export HOME="$ROOT/home" HF_HOME="$ROOT/home/huggingface"
+echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-locks diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 echo "checkpoint: $CHECKPOINT" >>"$REPORT"
 

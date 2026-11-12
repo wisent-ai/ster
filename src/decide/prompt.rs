@@ -52,10 +52,13 @@ pub fn render(
     prompt.push_str("\n\nQuestion: ");
     prompt.push_str(text_of(question.instructions()).trim());
     prompt.push_str("\n\nOptions:\n");
-    for (position, &index) in order.iter().enumerate() {
-        prompt.push_str(LABELS[position]);
+    // `orders` lists every option index below `options.len()`, and a checked
+    // request shows at most as many options as there are letters.
+    let shown = order.iter().filter_map(|&index| options.get(index));
+    for (label, option) in LABELS.iter().zip(shown) {
+        prompt.push_str(label);
         prompt.push_str(". ");
-        prompt.push_str(options[index].trim());
+        prompt.push_str(option.trim());
         prompt.push('\n');
     }
     prompt.push_str("\nAnswer:");

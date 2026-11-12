@@ -1,7 +1,7 @@
 //! The loss of one supervised example: next-token cross-entropy over the
 //! completion only.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::loss;
 
@@ -11,38 +11,27 @@ use crate::runtime::Runtime;
 /// sits at the logit position of the token before it. Scoring the completion
 /// therefore means the window that starts at the last prompt token and is as
 /// long as the completion, against the targets `ids[boundary..]`. A
-/// completion needs a prompt token before it, and `encode_example` always
-/// prepends the prompt's special tokens.
+/// completion needs a prompt token before it, and a token to predict: the
+/// trainer refuses an example that encodes without either before its first
+/// step, so both hold here.
 pub(super) fn completion_loss(
     logits: &Tensor,
     ids: &[u32],
     boundary: usize,
     runtime: &Runtime,
 ) -> Result<Tensor> {
-    let (Some(prompt), Some(completion)) = (ids.get(..boundary), ids.get(boundary..)) else {
-        bail!(
-            "a training example's completion starts at token {boundary} of {}",
-            ids.len()
-        );
-    };
-    let Some((start, _)) = prompt.iter().enumerate().last() else {
-        bail!(
-            "a training example must begin with at least one prompt token; its completion starts at token {boundary}"
-        );
-    };
-    if completion.is_empty() {
-        bail!(
-            "a training example must end with at least one completion token; all {} tokens are prompt",
-            ids.len()
-        );
-    }
+    assert!(
+        boundary > 0 && boundary < ids.len(),
+        "an example reaches the loss with a prompt token and a completion token"
+    );
+    let start = boundary - 1;
+    let completion = &ids[boundary..];
     let (_, positions, vocab) = logits.dims3()?;
-    if positions != ids.len() {
-        bail!(
-            "the forward pass returned {positions} positions for {} tokens",
-            ids.len()
-        );
-    }
+    assert_eq!(
+        positions,
+        ids.len(),
+        "the forward pass answers one position per token"
+    );
     // Scored in F32 whatever the base weights are. `cross_entropy` takes the
     // log-softmax of this window, and a half-precision log-softmax over a
     // vocabulary is the one place in this loss where the summation range

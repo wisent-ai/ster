@@ -6,21 +6,43 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use hf_hub::{
     Repo, RepoType,
     api::sync::{Api, ApiRepo},
 };
 
-use crate::chat;
+use crate::{
+    chat,
+    failures::{
+        file,
+        model::{checkpoint as causes, download_refusal, repository_refusal},
+        refuse,
+    },
+};
 
 use super::{Checkpoint, supported};
 use crate::runtime::load::{config, mistral::Layout};
+
+mod files;
+
+use files::require_files;
 
 impl Checkpoint {
     /// Resolves `model` from a local directory or the Hugging Face Hub.
     pub fn resolve(model: &str, revision: Option<&str>) -> Result<Self> {
         let local = Path::new(model);
+        if !local.is_dir() && names_a_path(model) {
+            let state = if local.exists() {
+                "it is not a directory"
+            } else {
+                "nothing is there"
+            };
+            return Err(refuse(
+                &causes::DIRECTORY_MISSING,
+                &[("model", model), ("state", state)],
+            ));
+        }
         if local.is_dir() {
             let layout =
                 if !local.join("config.json").is_file() && local.join("params.json").is_file() {
@@ -41,7 +63,13 @@ impl Checkpoint {
                 &local.display().to_string(),
             )?);
             let weights = local_safetensors(local, layout)?;
-            require_files(&config, &tokenizer, &weights)?;
+            require_files(
+                &config,
+                &tokenizer,
+                &weights,
+                &local.display().to_string(),
+                layout,
+            )?;
             let (tokenizer_config, chat_template) = chat::local_files(local);
             return Ok(Self {
                 config,
@@ -53,7 +81,20 @@ impl Checkpoint {
                 layout,
             });
         }
-        let api = Api::new().context("failed to initialize Hugging Face Hub client")?;
+        let api = Api::new().map_err(|error| {
+            let hf_home = std::env::var_os("HF_HOME").map_or_else(
+                || "unset, so the cache is ~/.cache/huggingface".to_owned(),
+                |home| home.to_string_lossy().into_owned(),
+            );
+            refuse(
+                &causes::HUB_CLIENT,
+                &[
+                    ("model", model),
+                    ("error", &error.to_string()),
+                    ("hf_home", &hf_home),
+                ],
+            )
+        })?;
         // Without a stated revision the Hub serves its default branch,
         // which `Repo::model` names.
         let repo = match revision {
@@ -63,13 +104,14 @@ impl Checkpoint {
             None => Repo::model(model.to_owned()),
         };
         let remote = api.repo(repo);
+        let listing = remote.info_request().url().to_owned();
         let info = stado_wait::blocking(
             stado_wait::Kind::Network,
             format!("file list of {model}"),
             HUB,
             || remote.info(),
         )
-        .with_context(|| format!("failed to read model repository {model}"))?;
+        .map_err(|error| repository_refusal(model, revision, &listing, error.into()))?;
         let tokenizer = download(
             &remote,
             tokenizer_file(|name| published(&info, name), model)?,
@@ -106,13 +148,20 @@ impl Checkpoint {
             .filter(|name| layout.owns(name))
             .collect();
         if weight_names.is_empty() {
-            bail!("model {model} publishes no safetensors weights");
+            return Err(refuse(
+                &causes::WEIGHTS_ABSENT,
+                &[
+                    ("place", &format!("model {model}")),
+                    ("kind", layout.weights_kind()),
+                    ("layout", layout.name()),
+                ],
+            ));
         }
         let mut weights = Vec::with_capacity(weight_names.len());
         for name in weight_names {
             weights.push(download(&remote, &name, model)?);
         }
-        require_files(&config, &tokenizer, &weights)?;
+        require_files(&config, &tokenizer, &weights, model, layout)?;
         Ok(Self {
             config,
             tokenizer,
@@ -137,7 +186,18 @@ fn download(remote: &ApiRepo, file: &str, model: &str) -> Result<PathBuf> {
         HUB,
         || remote.get(file),
     )
-    .with_context(|| format!("failed to download {file} of {model}"))
+    .map_err(|error| download_refusal(file, model, &remote.url(file), error.into()))
+}
+
+/// Whether `model` names a local path rather than a Hub repository id: a
+/// Hub id never starts with `/`, `.` or `~`.
+fn names_a_path(model: &str) -> bool {
+    model.starts_with('/')
+        || model.starts_with("./")
+        || model.starts_with("../")
+        || model.starts_with("~/")
+        || model == "."
+        || model == ".."
 }
 
 /// Whether the repository lists a file, so an optional one is only fetched
@@ -162,17 +222,31 @@ const TOKENIZER_FILES: &[&str] = &[
 fn tokenizer_file(exists: impl Fn(&str) -> bool, place: &str) -> Result<&'static str> {
     match TOKENIZER_FILES.iter().copied().find(|name| exists(name)) {
         Some(name) => Ok(name),
-        None => bail!(
-            "{place} publishes no tokenizer: none of {} is there; use a checkpoint that ships its tokenizer.json",
-            TOKENIZER_FILES.join(", ")
-        ),
+        None => Err(refuse(
+            &causes::TOKENIZER_ABSENT,
+            &[("place", place), ("files", &TOKENIZER_FILES.join(", "))],
+        )),
     }
 }
 
 fn local_safetensors(root: &Path, layout: Layout) -> Result<Vec<PathBuf>> {
+    let unlistable = |error: std::io::Error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            return file::read::refusal("the checkpoint directory", root, &error);
+        }
+        refuse(
+            &causes::DIRECTORY_UNLISTABLE,
+            &[
+                ("path", &root.display().to_string()),
+                ("state", &file::state(root)),
+                ("kind", &file::kind(&error)),
+                ("error", &error.to_string()),
+            ],
+        )
+    };
     let mut weights = Vec::new();
-    for entry in fs::read_dir(root).with_context(|| format!("failed to list {}", root.display()))? {
-        let path = entry?.path();
+    for entry in fs::read_dir(root).map_err(unlistable)? {
+        let path = entry.map_err(unlistable)?.path();
         if path
             .file_name()
             .and_then(|name| name.to_str())
@@ -183,20 +257,4 @@ fn local_safetensors(root: &Path, layout: Layout) -> Result<Vec<PathBuf>> {
     }
     weights.sort();
     Ok(weights)
-}
-
-fn require_files(config: &Path, tokenizer: &Path, weights: &[PathBuf]) -> Result<()> {
-    if !config.is_file() {
-        bail!("model config is missing: {}", config.display());
-    }
-    if !tokenizer.is_file() {
-        bail!("tokenizer is missing: {}", tokenizer.display());
-    }
-    if weights.is_empty() {
-        bail!(
-            "model directory {} contains no safetensors or GGUF weights",
-            config.parent().unwrap_or(config).display()
-        );
-    }
-    Ok(())
 }

@@ -22,7 +22,7 @@ pub(super) fn decode(word: &str, body: &[u8]) -> Result<TuneCommand, serde_json:
 }
 
 impl Validate for TuneCommand {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> anyhow::Result<()> {
         self.check()
     }
 }

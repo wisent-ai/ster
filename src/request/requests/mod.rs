@@ -14,12 +14,14 @@ use defaults::default_device;
 
 mod defaults;
 
+mod account;
 mod decide;
 mod errors;
 mod model;
 mod pairs;
 mod vectors;
 
+pub(super) use account::{NoFieldsRequest, SupportReportRequest, TelemetrySetRequest};
 pub(super) use decide::{CalibrateRequest, DecideRequest};
 pub(super) use errors::{ErrorsListRequest, ErrorsShowRequest};
 pub(super) use model::ModelCreateRequest;
@@ -33,19 +35,17 @@ pub(super) use vectors::{
     InspectRequest, OptimizeRequest, ParityRequest, ProjectRequest, ScoreRequest, TrainRequest,
 };
 
-/// Field-level validation before a job starts streaming. The message is the
-/// one-sentence refusal the desktop shows for a malformed request.
+/// Field-level validation before a job starts streaming: the declared
+/// refusal (`ster.request` or the operation's own) the desktop shows for a
+/// malformed request.
 pub(super) trait Validate {
-    fn validate(&self) -> Result<(), String>;
+    fn validate(&self) -> Result<()>;
 }
 
-pub(super) fn require(value: &str, sentence: String) -> Result<(), String> {
-    if value.trim().is_empty() {
-        Err(sentence)
-    } else {
-        Ok(())
-    }
-}
+pub(super) use ster::failures::request::require;
+
+/// What the `model` field of a request holds.
+pub(super) const MODEL: &str = "a model (a Hugging Face Hub id or a checkpoint directory)";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,8 +59,8 @@ pub(in crate::request) struct ModelRequest {
 }
 
 impl ModelRequest {
-    fn check(&self, action: &str) -> Result<(), String> {
-        require(&self.model, format!("{action} requires a model"))
+    fn check(&self, action: &str) -> Result<()> {
+        require(&self.model, action, "model", MODEL, "--model")
     }
 
     /// The shared load. Every handler that maps a checkpoint goes through

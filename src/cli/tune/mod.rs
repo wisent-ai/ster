@@ -1,9 +1,13 @@
 //! One typed tuning operation and execution path for CLI and native requests.
 //! Each frontend renders the same actual result in its own transport.
 
-use anyhow::{Context, Result, bail};
 use serde_json::json;
-use ster::{Precision, lora, workflow::parse_layers};
+use ster::{
+    Precision,
+    failures::{lora::TARGETS_NONE, refuse},
+    lora,
+    workflow::parse_layers,
+};
 
 mod artifact;
 mod command;
@@ -12,11 +16,11 @@ mod train;
 
 pub(crate) use command::TuneCommand;
 
-pub(super) fn run(command: TuneCommand) -> Result<()> {
+pub(super) fn run(command: TuneCommand) -> anyhow::Result<()> {
     crate::cli::answer_document(&execute(command)?)
 }
 
-pub(crate) fn execute(command: TuneCommand) -> Result<serde_json::Value> {
+pub(crate) fn execute(command: TuneCommand) -> anyhow::Result<serde_json::Value> {
     match command {
         TuneCommand::Sft(args) => train::sft(args),
         TuneCommand::Dpo(args) => train::dpo(args),
@@ -37,17 +41,23 @@ pub(crate) fn execute(command: TuneCommand) -> Result<serde_json::Value> {
 /// Two runs of the same command at different precisions produce different
 /// losses, and an adapter that does not say which one made it leaves an
 /// operator comparing two numbers that were never comparable.
-pub(super) fn note_precision(report: &mut serde_json::Value, precision: Precision) -> Result<()> {
+pub(super) fn note_precision(
+    report: &mut serde_json::Value,
+    precision: Precision,
+) -> anyhow::Result<()> {
+    // Every caller hands it `json::value(&report)` of a `#[derive(Serialize)]
+    // pub struct ...Report` with named fields, which serde_json writes as an
+    // object.
     report
         .as_object_mut()
-        .context("a run report must be a JSON object to record its precision")?
+        .expect("every run report is a struct with named fields")
         .insert("precision".to_owned(), json!(precision.name()));
     Ok(())
 }
 
 /// `--targets` is a comma-separated projection list. Repeats collapse, so
 /// `query,query` builds one adapter, and the order follows the flag.
-pub(super) fn parse_targets(value: &str) -> Result<Vec<lora::Target>> {
+pub(super) fn parse_targets(value: &str) -> anyhow::Result<Vec<lora::Target>> {
     let mut targets = Vec::new();
     for segment in value
         .split(',')
@@ -60,7 +70,7 @@ pub(super) fn parse_targets(value: &str) -> Result<Vec<lora::Target>> {
         }
     }
     if targets.is_empty() {
-        bail!("no targets selected: {value:?} names none");
+        return Err(refuse(&TARGETS_NONE, &[("targets", &format!("{value:?}"))]));
     }
     Ok(targets)
 }
@@ -71,7 +81,7 @@ pub(super) fn parse_targets(value: &str) -> Result<Vec<lora::Target>> {
 /// which happens inside `Runtime::load_trainable`, after the spec exists. An
 /// empty layer list is the spec's way of saying every layer, and the loader
 /// resolves it against the real count before it builds any adapter.
-pub(super) fn parse_adapter_layers(value: &str) -> Result<Vec<usize>> {
+pub(super) fn parse_adapter_layers(value: &str) -> anyhow::Result<Vec<usize>> {
     if value.trim() == "all" {
         return Ok(Vec::new());
     }

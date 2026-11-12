@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::Tensor;
 
 use crate::lora;
@@ -48,19 +48,17 @@ impl Runtime {
     ) -> Result<lora::Artifact> {
         spec.validate(self.layer_count())?;
         let spec = spec.resolved(self.layer_count());
+        // Every caller (src/cli/tune/train/{sft,dpo,grpo,reward,decide}.rs)
+        // passes `&options.spec`, the spec it built the runtime with in
+        // `Runtime::load_trainable_at(..., &options.spec, ...)`, which places
+        // an adapter on every target of every layer of that spec.
         let adapters = self.model.adapters();
-        if adapters.is_empty() {
-            bail!(
-                "this runtime carries no adapters to write for layers {:?}",
-                spec.layers
-            );
-        }
         let mut tensors = BTreeMap::new();
         for &layer in &spec.layers {
             for &target in &spec.targets {
-                let adapter = adapters.get(layer, target).with_context(|| {
-                    format!("layer {layer} carries no {} adapter", target.name())
-                })?;
+                let adapter = adapters
+                    .get(layer, target)
+                    .expect("a trained runtime carries an adapter on every target of its spec");
                 let (a, b) = lora::Adapter::tensor_names(layer, target);
                 tensors.insert(a, adapter.a.clone());
                 tensors.insert(b, adapter.b.clone());

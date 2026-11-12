@@ -30,25 +30,21 @@ pub(super) fn validate_name(name: &str) -> Result<()> {
 /// holds none, or is not UTF-8, gives no id, and the refusal names the file
 /// and the flag that supplies one.
 pub(super) fn derived_name(source: &Path) -> Result<String> {
-    let refused = |why: &str| {
-        let file = source.file_name().map_or_else(
-            || "none".to_owned(),
-            |file| file.to_string_lossy().into_owned(),
-        );
+    let file = source.file_name().map_or_else(
+        || "none".to_owned(),
+        |file| file.to_string_lossy().into_owned(),
+    );
+    let refused = |cause: &'static wisent_errors::Cause| {
         refuse(
-            &import::NAME_UNDERIVABLE,
-            &[
-                ("source", &source.display().to_string()),
-                ("why", why),
-                ("file", &file),
-            ],
+            cause,
+            &[("source", &source.display().to_string()), ("file", &file)],
         )
     };
     let stem = source
         .file_stem()
-        .ok_or_else(|| refused("has no file name"))?
+        .ok_or_else(|| refused(&import::NAME_FILELESS))?
         .to_str()
-        .ok_or_else(|| refused("has a file name that is not UTF-8"))?;
+        .ok_or_else(|| refused(&import::NAME_NOT_UTF8))?;
     let mut name = String::new();
     let mut separator = false;
     for character in stem.chars() {
@@ -63,7 +59,7 @@ pub(super) fn derived_name(source: &Path) -> Result<String> {
         }
     }
     if name.is_empty() {
-        return Err(refused("has no ASCII letter or digit in its file name"));
+        return Err(refused(&import::NAME_UNDERIVABLE));
     }
     Ok(name)
 }

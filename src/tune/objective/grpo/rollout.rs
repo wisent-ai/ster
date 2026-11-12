@@ -11,19 +11,25 @@
 //! user ending the conversation; the rollout stops there, and the shorter
 //! conversation has fewer assistant turns to earn reward from.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::{
     chat::{self, Message},
+    failures::{
+        refuse,
+        tune::rollout::{CONVERSATION_TOO_LONG, TURN_EMPTY, USER_TEMPLATE_ABSENT},
+    },
     runtime::{Completion, DeviceChoice, GenerationOptions, Precision, Runtime},
     workflow,
 };
 
 /// One played conversation: the policy's turns with the context each was
-/// sampled from, and the whole transcript as `(role, text)` in order.
+/// sampled from, the whole transcript as `(role, text)` in order, and how
+/// many transcript entries precede each turn.
 pub struct Rollout {
     pub turns: Vec<Completion>,
     pub transcript: Vec<(&'static str, String)>,
+    pub before: Vec<usize>,
 }
 
 /// The model that writes the user's turns. Frozen and generation-only: it is
@@ -43,10 +49,12 @@ impl UserSimulator {
     ) -> Result<Self> {
         workflow::progress(format!("loading the simulated user {model}"));
         let mut runtime = Runtime::load_at(model, revision, device, precision)?;
-        if runtime.set_chat_template(chat::Choice::Auto)? != chat::Status::Applied {
-            bail!(
-                "the simulated user {model} publishes no chat template, so it cannot write a user's turn in a conversation"
-            );
+        let status = runtime.set_chat_template(chat::Choice::Auto)?;
+        if status != chat::Status::Applied {
+            return Err(refuse(
+                &USER_TEMPLATE_ABSENT,
+                &[("model", model), ("status", &format!("{status:?}"))],
+            ));
         }
         Ok(Self { runtime })
     }
@@ -88,7 +96,7 @@ pub fn rollout(
     draw: &mut u64,
 ) -> Result<Rollout> {
     let Some(user) = user else {
-        let completion = runtime.sample(prompt, None, next(generation, draw))?;
+        let completion = runtime.sample(prompt, next(generation, draw))?;
         refuse_empty(&completion, 1)?;
         let transcript = vec![
             ("user", prompt.to_owned()),
@@ -97,23 +105,30 @@ pub fn rollout(
         return Ok(Rollout {
             turns: vec![completion],
             transcript,
+            before: vec![1],
         });
     };
 
     let mut said: Vec<(Speaker, String)> = vec![(Speaker::User, prompt.to_owned())];
     let mut played = Vec::with_capacity(turns);
+    let mut before = Vec::with_capacity(turns);
     for turn in 1..=turns {
         let context = runtime.encode_conversation(&messages(&said, false))?;
         let longest = context.len() + generation.max_new_tokens;
         if longest > limit {
-            bail!(
-                "turn {turn} needs {} conversation tokens plus {} sampled tokens, past the {limit} token limit; lower --turns or raise --max-sequence",
-                context.len(),
-                generation.max_new_tokens
-            );
+            return Err(refuse(
+                &CONVERSATION_TOO_LONG,
+                &[
+                    ("turn", &turn.to_string()),
+                    ("context", &context.len().to_string()),
+                    ("sampled", &generation.max_new_tokens.to_string()),
+                    ("limit", &limit.to_string()),
+                ],
+            ));
         }
-        let completion = runtime.sample_tokens(context, None, next(generation, draw))?;
+        let completion = runtime.sample_tokens(context, next(generation, draw))?;
         refuse_empty(&completion, turn)?;
+        before.push(said.len());
         said.push((Speaker::Assistant, completion.text.clone()));
         played.push(completion);
         if turn == turns {
@@ -123,7 +138,7 @@ pub fn rollout(
         let context = user.runtime.encode_conversation(&messages(&said, true))?;
         let reply = user
             .runtime
-            .sample_tokens(context, None, next(generation, draw))?;
+            .sample_tokens(context, next(generation, draw))?;
         if reply.text.trim().is_empty() {
             break;
         }
@@ -136,6 +151,7 @@ pub fn rollout(
     Ok(Rollout {
         turns: played,
         transcript,
+        before,
     })
 }
 
@@ -168,7 +184,7 @@ fn next(generation: GenerationOptions, draw: &mut u64) -> GenerationOptions {
 /// upward by removing its worst member, so the whole group is refused.
 fn refuse_empty(completion: &Completion, turn: usize) -> Result<()> {
     if completion.tokens.is_empty() {
-        bail!("assistant turn {turn} of a sampled conversation was empty");
+        return Err(refuse(&TURN_EMPTY, &[("turn", &turn.to_string())]));
     }
     Ok(())
 }

@@ -35,7 +35,7 @@ pub(crate) enum TuneCommand {
 }
 
 impl InputCheck for TuneCommand {
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         match self {
             Self::Sft(args) => args.check(),
             Self::Dpo(args) => args.check(),

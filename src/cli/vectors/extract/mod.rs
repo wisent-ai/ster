@@ -44,10 +44,13 @@ pub(in super::super) fn extract(args: ExtractArgs) -> Result<()> {
         chat_template,
         precision,
     } = args;
+    // The prompt set is read before the weights, so a set that cannot be
+    // read is refused before the checkpoint is paid for.
+    let prompts = workflow::PromptSet::load(&input)?;
     let mut runtime = model.load_at(precision)?;
     runtime.set_chat_template(chat_template)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
-    workflow::extract(&runtime, &input, &output, &layers)?;
+    workflow::extract(&runtime, &prompts, &output, &layers)?;
     println!("{}", output.display());
     Ok(())
 }

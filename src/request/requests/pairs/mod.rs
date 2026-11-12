@@ -3,12 +3,21 @@
 
 use std::num::NonZeroUsize;
 
+use anyhow::Result;
 use serde::Deserialize;
 
-use ster::{ChatChoice, Precision, pairs::quality::dedupe::DedupeOptions};
+use ster::{
+    ChatChoice, Precision,
+    failures::{pairs::synthesize, refuse, request::too_few},
+    pairs::{InspectOptions, quality::dedupe::DedupeOptions},
+};
 
 use super::defaults::*;
 use super::{ModelRequest, Validate, require};
+
+mod sets;
+
+pub(in crate::request) use sets::{PairsImportRequest, PairsMergeRequest};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -20,10 +29,13 @@ pub(in crate::request) struct WorkspaceImportPairsRequest {
 }
 
 impl Validate for WorkspaceImportPairsRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
         require(
             &self.source,
-            "workspace import requires a source path".to_owned(),
+            "workspace import",
+            "source",
+            "the path of the pair set to import",
+            "the SOURCE argument of `ster workspace import`",
         )
     }
 }
@@ -34,7 +46,7 @@ impl Validate for WorkspaceImportPairsRequest {
 pub(in crate::request) struct WorkspaceShowRequest {}
 
 impl Validate for WorkspaceShowRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -49,10 +61,13 @@ pub(in crate::request) struct WorkspacePairSetRequest {
 }
 
 impl Validate for WorkspacePairSetRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
         require(
             &self.id,
-            "a workspace pair-set request requires the set's id".to_owned(),
+            "workspace pair-set",
+            "id",
+            "the set's workspace name, as workspace/show lists it",
+            "the ID argument of `ster workspace select` and `ster workspace remove`",
         )
     }
 }
@@ -70,11 +85,19 @@ pub(in crate::request) struct PairsInspectRequest {
 }
 
 impl Validate for PairsInspectRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
         require(
             &self.pairs,
-            "pairs inspect requires a pairs file".to_owned(),
-        )
+            "pairs inspect",
+            "pairs",
+            "the path of a pair set",
+            "--pairs",
+        )?;
+        InspectOptions {
+            dedupe: DedupeOptions::new(self.dedupe_bits, self.dedupe_bands),
+            unbalanced_ratio: self.unbalanced_ratio,
+        }
+        .validate()
     }
 }
 
@@ -99,10 +122,23 @@ pub(in crate::request) struct PairsSaveRequest {
 }
 
 impl Validate for PairsSaveRequest {
-    fn validate(&self) -> Result<(), String> {
-        require(&self.path, "pairs save requires an output path".to_owned())?;
+    fn validate(&self) -> Result<()> {
+        require(
+            &self.path,
+            "pairs save",
+            "path",
+            "the path the pair set is written to",
+            "`ster pairs add`'s --pairs",
+        )?;
         if self.entries.is_empty() {
-            return Err("pairs save requires at least one pair; entries is empty".to_owned());
+            return Err(too_few(
+                "pairs save",
+                "entries",
+                "pair",
+                1,
+                0,
+                "`ster pairs add`'s --positive and --negative",
+            ));
         }
         Ok(())
     }
@@ -153,127 +189,57 @@ pub(in crate::request) struct PairsSynthesizeRequest {
 }
 
 impl Validate for PairsSynthesizeRequest {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<()> {
+        let declared = refuse;
         // The local route loads weights and so needs a model; the brama route
-        // loads nothing and needs a gateway route instead.
+        // loads nothing and needs the route Stado's inference alternatives are
+        // asked for instead.
         match self.generator.as_str() {
-            "" => {
-                return Err(
-                    "pairs synthesize requires a generator: set generator to local or brama"
-                        .to_owned(),
-                );
+            "local" if self.model.model.trim().is_empty() => {
+                return Err(declared(
+                    &synthesize::MODEL_MISSING,
+                    &[("trait", &self.trait_description)],
+                ));
             }
-            "local" => self.model.check("pairs synthesize")?,
-            "brama" => {
-                let missing =
-                    "pairs synthesize with the brama generator requires generatorModel".to_owned();
-                match self.generator_model.as_deref() {
-                    Some(route) => require(route, missing)?,
-                    None => return Err(missing),
-                }
+            "brama"
+                if self
+                    .generator_model
+                    .as_deref()
+                    .is_none_or(|route| route.trim().is_empty()) =>
+            {
+                return Err(declared(
+                    &synthesize::ROUTE_MISSING,
+                    &[("trait", &self.trait_description)],
+                ));
             }
+            "local" | "brama" => {}
             other => {
-                return Err(format!(
-                    "unknown generator {other:?}; expected local or brama"
+                return Err(declared(
+                    &synthesize::GENERATOR_UNKNOWN,
+                    &[("generator", other)],
                 ));
             }
         }
-        require(
-            &self.trait_description,
-            "pairs synthesize requires a trait description".to_owned(),
-        )?;
+        if self.trait_description.trim().is_empty() {
+            return Err(declared(
+                &synthesize::TRAIT_BLANK,
+                &[("trait", &self.trait_description)],
+            ));
+        }
         require(
             &self.output,
-            "pairs synthesize requires an output path".to_owned(),
+            "pairs synthesize",
+            "output",
+            "the path the written pair set goes to",
+            "--output",
         )?;
         // Refused here, before a local model loads, rather than inside the run.
         if self.count.is_none() {
-            return Err(
-                "pairs synthesize requires count, a pair count above zero; the request names none"
-                    .to_owned(),
-            );
+            return Err(declared(
+                &synthesize::COUNT_MISSING,
+                &[("trait", &self.trait_description)],
+            ));
         }
-        DedupeOptions::new(self.dedupe_bits, self.dedupe_bands)
-            .validate()
-            .map_err(|error| error.to_string())
-    }
-}
-
-/// A pair set read from a benchmark export: the same fields as
-/// `ster pairs import`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(in crate::request) struct PairsImportRequest {
-    #[serde(default)]
-    pub(in crate::request) benchmark: String,
-    #[serde(default)]
-    pub(in crate::request) source: String,
-    #[serde(default)]
-    pub(in crate::request) examples: Option<String>,
-    #[serde(default)]
-    pub(in crate::request) question: Option<String>,
-    #[serde(default)]
-    pub(in crate::request) choices: Option<String>,
-    #[serde(default)]
-    pub(in crate::request) answer: Option<String>,
-    #[serde(default)]
-    pub(in crate::request) answer_form: Option<String>,
-    #[serde(default)]
-    pub(in crate::request) labels: Option<String>,
-    #[serde(default)]
-    pub(in crate::request) count: Option<usize>,
-    pub(in crate::request) seed: u64,
-    #[serde(default)]
-    pub(in crate::request) trait_name: Option<String>,
-    #[serde(default)]
-    pub(in crate::request) output: String,
-}
-
-impl Validate for PairsImportRequest {
-    fn validate(&self) -> Result<(), String> {
-        ster::pairs::benchmark::Benchmark::parse(&self.benchmark)
-            .map_err(|error| error.to_string())?;
-        ster::pairs::benchmark::ChoiceFields::from_parts(
-            self.question.clone(),
-            self.choices.clone(),
-            self.answer.clone(),
-            self.answer_form.clone(),
-            self.labels.clone(),
-        )
-        .map_err(|error| error.to_string())?;
-        require(
-            &self.source,
-            "pairs import requires a source export".to_owned(),
-        )?;
-        require(
-            &self.output,
-            "pairs import requires an output path".to_owned(),
-        )
-    }
-}
-
-/// Several pair sets written as one: the same fields as `ster pairs merge`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(in crate::request) struct PairsMergeRequest {
-    /// The pair sets to merge, two or more, in order.
-    pub(in crate::request) sources: Vec<String>,
-    pub(in crate::request) trait_name: String,
-    #[serde(default)]
-    pub(in crate::request) output: String,
-}
-
-impl Validate for PairsMergeRequest {
-    fn validate(&self) -> Result<(), String> {
-        for source in &self.sources {
-            require(
-                source,
-                "pairs merge names an empty pair-set path".to_owned(),
-            )?;
-        }
-        require(
-            &self.output,
-            "pairs merge requires an output path".to_owned(),
-        )
+        DedupeOptions::new(self.dedupe_bits, self.dedupe_bands).validate()
     }
 }

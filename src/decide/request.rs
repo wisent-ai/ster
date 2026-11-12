@@ -4,11 +4,21 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::prompt::LABELS;
+use crate::failures::{
+    decide::request::{
+        FORM, ID_EMPTY, INSTRUCTIONS_EMPTY, LEVEL_EMPTY, MISSING, OPTION_NAME_EMPTY,
+        OPTIONS_TOO_FEW, OPTIONS_TOO_MANY, QUESTIONS_NONE, STATE_EMPTY,
+    },
+    file, refuse,
+};
+
+/// What a decision request is called in a refusal of its file.
+pub const ROLE: &str = "the decision request";
 
 /// The most options one question may carry. Every option is answered by one
 /// letter of [`LABELS`], read from one token position, and a second letter
@@ -65,9 +75,16 @@ pub struct NoulCriteria {
 
 impl Request {
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        let request: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid decide request {}", path.display()))?;
+        let bytes =
+            fs::read(path).map_err(|error| file::read::refusal_or(&MISSING, ROLE, path, &error))?;
+        Self::parse(&bytes, path)
+    }
+
+    /// The request `bytes` hold, read from `source` (a path, or /dev/stdin
+    /// for standard input), checked whole.
+    pub fn parse(bytes: &[u8], source: &Path) -> Result<Self> {
+        let request: Self = serde_json::from_slice(bytes)
+            .map_err(|error| file::json::refusal(ROLE, FORM, source, &error))?;
         request.validate()?;
         Ok(request)
     }
@@ -75,48 +92,62 @@ impl Request {
     /// Every refusal a request can earn, checked before any model work.
     pub fn validate(&self) -> Result<()> {
         if text_of(&self.state).trim().is_empty() {
-            bail!("a decide request has an empty state: it holds only whitespace");
+            return Err(refuse(&STATE_EMPTY, &[("state", &self.state.to_string())]));
         }
         if self.questions.is_empty() {
-            bail!("a decide request needs at least one question; its questions map is empty");
+            return Err(refuse(&QUESTIONS_NONE, &[]));
         }
         for (id, question) in &self.questions {
             if id.trim().is_empty() {
-                bail!("a decide request has a question with an empty id {id:?}");
+                return Err(refuse(&ID_EMPTY, &[("id", id)]));
             }
-            if text_of(question.instructions()).trim().is_empty() {
-                bail!("question '{id}' has empty instructions");
+            let instructions = question.instructions();
+            if text_of(instructions).trim().is_empty() {
+                return Err(refuse(
+                    &INSTRUCTIONS_EMPTY,
+                    &[("id", id), ("instructions", &instructions.to_string())],
+                ));
+            }
+            let (kind, unit) = match question {
+                Question::Choice { .. } => ("choice", "options"),
+                Question::Score { .. } => ("score", "levels"),
+                Question::Noul { .. } => continue,
+            };
+            let count = question.option_count();
+            let (count_text, max_text) = (count.to_string(), MAX_OPTIONS.to_string());
+            let values: [(&str, &str); 5] = [
+                ("kind", kind),
+                ("id", id.as_str()),
+                ("unit", unit),
+                ("count", count_text.as_str()),
+                ("max", max_text.as_str()),
+            ];
+            if count < 2 {
+                return Err(refuse(&OPTIONS_TOO_FEW, &values));
+            }
+            if count > MAX_OPTIONS {
+                return Err(refuse(&OPTIONS_TOO_MANY, &values));
             }
             match question {
                 Question::Choice { criteria, .. } => {
-                    if criteria.len() < 2 {
-                        bail!("choice question '{id}' needs at least two options");
-                    }
-                    if criteria.len() > MAX_OPTIONS {
-                        bail!(
-                            "choice question '{id}' has {} options; Ster labels at most {MAX_OPTIONS}",
-                            criteria.len()
-                        );
-                    }
                     if let Some(name) = criteria.keys().find(|name| name.trim().is_empty()) {
-                        bail!("choice question '{id}' has an option with an empty name {name:?}");
+                        return Err(refuse(&OPTION_NAME_EMPTY, &[("id", id), ("name", name)]));
                     }
                 }
                 Question::Score { criteria, .. } => {
-                    if criteria.len() < 2 {
-                        bail!("score question '{id}' needs at least two levels");
-                    }
-                    if criteria.len() > MAX_OPTIONS {
-                        bail!(
-                            "score question '{id}' has {} levels; Ster labels at most {MAX_OPTIONS}",
-                            criteria.len()
-                        );
-                    }
-                    if let Some(index) = criteria
+                    if let Some((index, level)) = criteria
                         .iter()
-                        .position(|level| text_of(level).trim().is_empty())
+                        .enumerate()
+                        .find(|(_, level)| text_of(level).trim().is_empty())
                     {
-                        bail!("score question '{id}' has an empty description at level {index}");
+                        return Err(refuse(
+                            &LEVEL_EMPTY,
+                            &[
+                                ("id", id),
+                                ("index", &index.to_string()),
+                                ("level", &level.to_string()),
+                            ],
+                        ));
                     }
                 }
                 Question::Noul { .. } => {}
@@ -187,80 +218,5 @@ pub fn text_of(value: &Value) -> String {
         Value::String(text) => text.clone(),
         Value::Null => String::new(),
         other => format!("{other:#}"),
-    }
-}
-
-/// Labelled decisions a calibration is fitted on: each example is a request
-/// plus the answer a person gave to some or all of its questions.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ExampleSet {
-    pub examples: Vec<Example>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Example {
-    #[serde(flatten)]
-    pub request: Request,
-    /// Question id to the correct answer: an option name for a choice, a
-    /// level index for a score, `true` or `false` for a noul.
-    pub answers: BTreeMap<String, Value>,
-}
-
-impl ExampleSet {
-    pub fn load(path: &Path) -> Result<Self> {
-        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        let set: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid calibration examples {}", path.display()))?;
-        set.validate()?;
-        Ok(set)
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        if self.examples.is_empty() {
-            bail!("calibration needs at least one labelled example; the examples list is empty");
-        }
-        let mut labelled = 0usize;
-        for (index, example) in self.examples.iter().enumerate() {
-            example
-                .request
-                .validate()
-                .with_context(|| format!("calibration example {index} is not a valid request"))?;
-            for (id, answer) in &example.answers {
-                let Some(question) = example.request.questions.get(id) else {
-                    bail!("example {index} labels question '{id}', which it does not ask");
-                };
-                question.truth_index(answer).with_context(|| {
-                    format!(
-                        "example {index} answers question '{id}' with {answer}, which is not one of its options"
-                    )
-                })?;
-                labelled += 1;
-            }
-        }
-        if labelled == 0 {
-            bail!(
-                "calibration needs at least one labelled question; none of the {} examples labels one",
-                self.examples.len()
-            );
-        }
-        Ok(())
-    }
-}
-
-impl Question {
-    /// The canonical option index a labelled answer names, or `None` when the
-    /// label is not one of this question's options.
-    pub fn truth_index(&self, answer: &Value) -> Option<usize> {
-        match self {
-            Self::Choice { criteria, .. } => {
-                let name = answer.as_str()?;
-                criteria.keys().position(|option| option == name)
-            }
-            Self::Score { criteria, .. } => {
-                let level = answer.as_u64()? as usize;
-                (level < criteria.len()).then_some(level)
-            }
-            Self::Noul { .. } => answer.as_bool().map(|yes| if yes { 0 } else { 1 }),
-        }
     }
 }

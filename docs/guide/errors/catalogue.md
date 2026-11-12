@@ -65,7 +65,7 @@ Started through: `ster errors list`, `ster errors show`, `ster errors check`, `s
 
 - **What failed:** checking the failure catalogue
 - **Cause:** {count} finding(s): a malformed declaration, a declared test the repository does not hold, a command no functionality names, or a baseline entry no longer needed
-- **Observed state shown:** the findings, each listed in the answer printed above
+- **Observed state shown:** findings: {findings}
 - **Fix:** fix each finding as it says: correct the declaration in src/failures, write the declared test, declare the command's failures, or remove the entry from its baseline
 - **Code:** `refused`, exit 1; retrying unchanged will not help
 - **Test:** `tests/errors/catalogue.sh::check_finds_a_baseline_entry_no_longer_needed`

@@ -7,7 +7,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use wisent_errors::{Operation, catalogue_problems};
 
-use super::{catalogue, operations, refuse};
+use super::{catalogue, operations};
 
 /// The commands no functionality names as an entry: `ster <command>` is no
 /// entry's first words.
@@ -72,27 +72,12 @@ fn baseline(path: Option<&Path>, what: &str) -> anyhow::Result<BTreeSet<String>>
     let Some(path) = path else {
         return Ok(BTreeSet::new());
     };
-    let shown = path.display().to_string();
+    let role = format!("the {what} baseline");
     let text = std::fs::read_to_string(path).map_err(|error| {
-        refuse(
-            &catalogue::BASELINE_UNREADABLE,
-            &[
-                ("what", what),
-                ("path", &shown),
-                ("error", &error.to_string()),
-            ],
-        )
+        super::file::read::refusal_or(&catalogue::BASELINE_MISSING, &role, path, &error)
     })?;
-    serde_json::from_str(&text).map_err(|error| {
-        refuse(
-            &catalogue::BASELINE_MALFORMED,
-            &[
-                ("what", what),
-                ("path", &shown),
-                ("error", &error.to_string()),
-            ],
-        )
-    })
+    serde_json::from_str(&text)
+        .map_err(|error| super::file::json::refusal(&role, catalogue::BASELINE_FORM, path, &error))
 }
 
 /// Every declaration problem, every problem only the whole catalogue shows,

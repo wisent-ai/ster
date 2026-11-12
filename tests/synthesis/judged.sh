@@ -29,8 +29,12 @@ SETTINGS=${STER_SYNTHESIS_SETTINGS:?set STER_SYNTHESIS_SETTINGS to the JSON obje
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/synthesis/judged-$RUN"
 REPORT="$ROOT/report.txt"
-mkdir -p "$ROOT"
-echo "revision: $(git rev-parse HEAD)$(git diff --quiet || echo ' (dirty)')" >"$REPORT"
+mkdir -p "$ROOT/home"
+# The binary runs under this run's own home, never the operator's. A Hub
+# model id is fetched into the Hub cache STER_TEST_HF_HOME names, or into
+# one of this run's own.
+export HOME="$ROOT/home" HF_HOME="${STER_TEST_HF_HOME:-$ROOT/home/huggingface}"
+echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-locks diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 echo "model: $MODEL on $DEVICE" >>"$REPORT"
 echo "settings: $SETTINGS" >>"$REPORT"

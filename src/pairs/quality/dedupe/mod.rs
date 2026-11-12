@@ -11,10 +11,11 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::artifact::ContrastivePair;
+use crate::failures::{pairs::inspect, refuse};
 
 mod fingerprint;
 
@@ -26,10 +27,11 @@ pub use fingerprint::{hamming, normalize, simhash64};
 pub struct DedupeOptions {
     /// Hamming distance at or below which two fingerprints are near-duplicates.
     pub threshold_bits: u32,
-    /// Word-shingle size used for non-CJK text.
-    pub word_ngram: usize,
-    /// Character-shingle size used for CJK/Kana/Hangul text.
-    pub char_ngram: usize,
+    /// Word-shingle size used for non-CJK text; set by [`DedupeOptions::new`].
+    word_ngram: usize,
+    /// Character-shingle size used for CJK/Kana/Hangul text; set by
+    /// [`DedupeOptions::new`].
+    char_ngram: usize,
     /// Number of LSH bands the 64-bit fingerprint is split into.
     pub num_bands: u32,
 }
@@ -46,28 +48,21 @@ impl DedupeOptions {
             num_bands,
         }
     }
-}
 
-impl DedupeOptions {
+    /// The caller's two settings, held to the 64-bit fingerprint. The shingle
+    /// sizes are [`DedupeOptions::new`]'s and need no check.
     pub fn validate(&self) -> Result<()> {
         if self.num_bands == 0 || SIMHASH_BIT_WIDTH % self.num_bands != 0 {
-            bail!(
-                "dedupe band count {} must divide the 64-bit simhash evenly, such as 4, 8, 16, or 32",
-                self.num_bands
-            );
-        }
-        if self.word_ngram < 1 || self.char_ngram < 1 {
-            bail!(
-                "dedupe n-gram sizes must be at least 1; got word {} and char {}",
-                self.word_ngram,
-                self.char_ngram
-            );
+            return Err(refuse(
+                &inspect::BANDS_INVALID,
+                &[("bands", &self.num_bands.to_string())],
+            ));
         }
         if self.threshold_bits > SIMHASH_BIT_WIDTH {
-            bail!(
-                "dedupe threshold {} exceeds the 64-bit simhash width",
-                self.threshold_bits
-            );
+            return Err(refuse(
+                &inspect::THRESHOLD_TOO_WIDE,
+                &[("bits", &self.threshold_bits.to_string())],
+            ));
         }
         Ok(())
     }

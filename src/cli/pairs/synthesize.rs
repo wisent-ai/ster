@@ -1,15 +1,18 @@
 //! `ster pairs synthesize`: a contrastive pair set written by a local model
-//! or a hosted route. Which side declined its role is judged by the same
-//! generator as the pairs are written, so no refusal score is asked for.
+//! or a route Stado's inference alternatives answer. Which side declined its
+//! role is judged by the same generator as the pairs are written, so no
+//! refusal score is asked for.
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Args, ValueEnum};
 use serde_json::json;
 use ster::{
-    ChatChoice, DeviceChoice, GenerationOptions, Precision, Runtime, brama,
+    ChatChoice, DeviceChoice, GenerationOptions, Precision, Runtime,
+    failures::{pairs::synthesize, refuse},
+    inference::Inference,
     pairs::{self, SynthesisOptions, quality::dedupe::DedupeOptions},
 };
 
@@ -18,7 +21,7 @@ use ster::{
 pub(super) enum GeneratorKind {
     /// A model this machine loads.
     Local,
-    /// A route Brama serves.
+    /// A route Stado's inference alternatives answer (Brama among them).
     Brama,
 }
 
@@ -29,9 +32,10 @@ pub(super) struct SynthesizeArgs {
     /// hosted. Neither is assumed.
     #[arg(long, value_enum)]
     generator: GeneratorKind,
-    /// Route the Brama generator writes with: a Brama alias, a canonical
-    /// provider/model route, or a selector. Wisent's own served model is
-    /// wisent-backend/chat/primary. Required with --generator brama.
+    /// Route the hosted generator asks Stado's inference alternatives for: a
+    /// Brama alias, a canonical provider/model route, or a selector. Wisent's
+    /// own served model is wisent-backend/chat/primary. Required with
+    /// --generator brama.
     #[arg(long)]
     generator_model: Option<String>,
     /// Hugging Face model id or local model directory.
@@ -102,20 +106,21 @@ pub(super) fn run(args: SynthesizeArgs) -> Result<()> {
         retry_multiplier: args.retry_multiplier,
         dedupe: DedupeOptions::new(args.dedupe_bits, args.dedupe_bands),
         generation: GenerationOptions {
-            strength: None,
             max_new_tokens: args.max_new_tokens,
             temperature: args.temperature,
             top_p: Some(args.top_p),
             seed: args.seed,
         },
     };
-    // The runtime or the gateway is built inside the arm that uses it:
-    // `--generator brama` must not load weights or touch a device, and
-    // `--generator local` must not read the gateway's environment.
+    // Every setting is checked before a model loads or a route is asked.
+    options.validate()?;
+    // The runtime or the inference writer is built inside the arm that uses
+    // it: `--generator brama` must not load weights or touch a device, and
+    // `--generator local` must not ask Stado.
     let (pair_set, report) = match args.generator {
         GeneratorKind::Local => {
             let Some(model) = args.model else {
-                bail!("pairs synthesize with --generator local requires --model");
+                return Err(refuse(&synthesize::MODEL_MISSING, &[("trait", &options.trait_description)]));
             };
             let mut runtime = Runtime::load_at(
                 &model,
@@ -132,10 +137,10 @@ pub(super) fn run(args: SynthesizeArgs) -> Result<()> {
         }
         GeneratorKind::Brama => {
             let Some(route) = args.generator_model else {
-                bail!("pairs synthesize with --generator brama requires --generator-model");
+                return Err(refuse(&synthesize::ROUTE_MISSING, &[("trait", &options.trait_description)]));
             };
-            let gateway = brama::Gateway::from_env(&route)?;
-            pairs::synthesize(pairs::Generator::Gateway(&gateway), &options)?
+            let writer = Inference::new(&route)?;
+            pairs::synthesize(pairs::Generator::Inference(&writer), &options)?
         }
     };
     pair_set.save(&args.output)?;

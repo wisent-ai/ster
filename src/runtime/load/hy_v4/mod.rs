@@ -9,7 +9,6 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use anyhow::{Context, Result};
 use candle_core::safetensors::MmapedSafetensors;
 
 /// Transformers' `hy_v4` renames in the order it applies them: each
@@ -40,14 +39,11 @@ pub(super) struct StoredNames {
 }
 
 impl StoredNames {
-    /// Reads the names `weights` store, without reading a tensor.
-    pub(super) fn read(weights: &[PathBuf]) -> Result<Self> {
-        let files = unsafe { MmapedSafetensors::multi(weights) }.with_context(|| {
-            format!(
-                "failed to read the tensor names of {} HY-V4 weight files",
-                weights.len()
-            )
-        })?;
+    /// Reads the names `weights` store, without reading a tensor; the
+    /// mapping before it has already read these files, and a refusal is the
+    /// caller's `safetensors-unmappable`.
+    pub(super) fn read(weights: &[PathBuf]) -> candle_core::Result<Self> {
+        let files = unsafe { MmapedSafetensors::multi(weights) }?;
         let stored = files
             .tensors()
             .into_iter()

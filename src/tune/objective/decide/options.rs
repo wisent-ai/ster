@@ -6,8 +6,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::super::super::checkpoint::Durable;
+use super::super::super::{checkpoint::Durable, preflight::Preflight};
 use crate::lora;
+
+/// How calibrated decision training names itself in what it says.
+pub(super) const SUBJECT: &str = "calibrated decision training";
 
 #[derive(Debug, Clone)]
 pub struct DecideOptions {
@@ -75,6 +78,28 @@ pub(super) struct Running {
 }
 
 impl DecideOptions {
+    /// Refuses the settings no decision training run can train with, before
+    /// any model or data is read.
+    pub fn check(&self) -> anyhow::Result<()> {
+        self.spec.check()?;
+        self.preflight().check()
+    }
+
+    /// The shared checks, in calibrated decision training's words.
+    pub(super) fn preflight(&self) -> Preflight<'static> {
+        Preflight {
+            subject: SUBJECT,
+            unit: "row",
+            pass: "epoch",
+            noun: "adapter tensors",
+            epochs: self.epochs,
+            accumulation: self.accumulation,
+            batch: Some(self.batch),
+            learning_rate: self.learning_rate,
+            max_sequence: self.max_sequence,
+        }
+    }
+
     /// Everything a resumed run must share with the run that wrote the
     /// checkpoint.
     pub(super) fn fingerprint(&self) -> BTreeMap<String, Value> {

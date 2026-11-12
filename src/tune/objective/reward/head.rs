@@ -3,11 +3,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Init, VarMap};
 
 use crate::{
+    failures::tune::run::unallocatable,
     lora,
     runtime::{DeviceChoice, Runtime},
 };
@@ -36,16 +37,7 @@ impl RewardHead {
                 dtype,
                 device,
             )
-            .with_context(|| format!("failed to create {}", lora::REWARD_HEAD_TENSOR))?;
-        Ok(Self { weight })
-    }
-
-    /// The head read back out of an artifact, frozen.
-    pub fn from_tensor(weight: Tensor) -> Result<Self> {
-        let dims = weight.dims();
-        if dims.len() != 2 || dims[0] != 1 {
-            bail!("reward head has shape {dims:?}, expected one row of hidden-size weights");
-        }
+            .map_err(|error| unallocatable("the reward head", &[1, hidden], error))?;
         Ok(Self { weight })
     }
 
@@ -62,10 +54,13 @@ impl RewardHead {
     /// and never padding.
     pub fn score(&self, hidden: &Tensor) -> Result<Tensor> {
         let (_, sequence, width) = hidden.dims3()?;
-        let expected = self.weight.dim(1)?;
-        if width != expected {
-            bail!("reward head is {expected} wide, the model's residual stream is {width}");
-        }
+        // A fresh head is registered at the model's width, and a loaded one
+        // is refused at any other.
+        assert_eq!(
+            width,
+            self.weight.dim(1)?,
+            "a reward head is as wide as the residual stream it reads"
+        );
         // Read at the head's own dtype rather than the residual stream's. The
         // head is the smallest parameter in the run — one row — and it is the
         // one that rounds away first, so it is trained in F32 even when the
@@ -107,15 +102,25 @@ impl RewardModel {
     ) -> Result<Self> {
         let (runtime, artifact) =
             Runtime::load_artifact(model, revision, device, path, lora::Kind::Reward)?;
-        let weight = artifact
-            .tensors
-            .get(lora::REWARD_HEAD_TENSOR)
-            .with_context(|| format!("reward artifact is missing {}", lora::REWARD_HEAD_TENSOR))?
-            .to_device(runtime.device())?
-            .to_dtype(runtime.dtype())?;
+        // `load_artifact(.., lora::Kind::Reward)` refuses another kind as
+        // ARTIFACT_KIND; a reward artifact without its head is refused as
+        // `Artifact::validate` refuses it.
+        let Some(head) = artifact.tensors.get(lora::REWARD_HEAD_TENSOR) else {
+            let count = artifact.tensors.len().to_string();
+            return Err(crate::failures::refuse(
+                &crate::failures::lora::artifact::HEAD_MISSING,
+                &[("count", &count)],
+            ));
+        };
+        let weight = head
+            .to_device(runtime.device())
+            .and_then(|weight| weight.to_dtype(runtime.dtype()))
+            .map_err(|error| {
+                unallocatable("the reward head", &[1, runtime.hidden_size()], error)
+            })?;
         Ok(Self {
             runtime,
-            head: RewardHead::from_tensor(weight)?,
+            head: RewardHead { weight },
         })
     }
 

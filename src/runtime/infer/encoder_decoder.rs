@@ -6,10 +6,15 @@
 
 use std::num::NonZeroUsize;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use candle_core::Tensor;
 use candle_transformers::generation::LogitsProcessor;
 
+use crate::failures::{
+    model::t5::{CONTEXT_EXCEEDED, ROWS_EMPTY, inconsistent},
+    refuse,
+    runtime::generate::NEW_TOKENS_NONE,
+};
 use crate::model::{ForwardOutput, Mode, SteeringPlan, input::Inputs, t5};
 
 use super::super::{Runtime, requested_activations};
@@ -31,8 +36,16 @@ impl Runtime {
         self.check_source(model, &source)?;
         // The decoder holds its start token and every sampled token but the
         // last, one position per step.
-        let steps = NonZeroUsize::new(max_new_tokens)
-            .context("max_new_tokens must be greater than zero")?;
+        let Some(steps) = NonZeroUsize::new(max_new_tokens) else {
+            return Err(refuse(
+                &NEW_TOKENS_NONE,
+                &[
+                    ("tokens", "0"),
+                    ("prompt", &source.len().to_string()),
+                    ("model", &self.model_id),
+                ],
+            ));
+        };
         let mut cache = t5::Cache::new(config.decoder_layers, Some(steps));
         let encoder = Tensor::new(source.as_slice(), &self.device)?.unsqueeze(0)?;
         let mut sampled = Vec::with_capacity(max_new_tokens);
@@ -49,9 +62,7 @@ impl Runtime {
             };
             let output = model.forward(inputs, step, &mut cache, plan, &[], Mode::DECODE)?;
             // `Mode::DECODE` always asks for the last position's logits.
-            let logits = output
-                .logits
-                .context("the decode pass produced no logits")?;
+            let logits = output.into_logits(Mode::DECODE.readout)?;
             let next = sampler.sample(&logits.squeeze(0)?)?;
             sampled.push(next);
             if self.eos_tokens.contains(&next) {
@@ -64,10 +75,7 @@ impl Runtime {
             }
             next_input = next;
         }
-        let text = self
-            .tokenizer
-            .decode(&sampled, true)
-            .map_err(|error| anyhow::anyhow!("failed to decode generated tokens: {error}"))?;
+        let text = self.spell(&sampled)?;
         Ok(Completion {
             prompt: source,
             tokens: sampled,
@@ -104,8 +112,7 @@ impl Runtime {
                 let source: Vec<u32> = prefix.iter().chain(suffix.iter()).copied().collect();
                 let logits = self
                     .first_decoder_step(model, &source, None, &[])?
-                    .logits
-                    .context("this forward pass was asked for no vocabulary projection")?;
+                    .into_logits(Mode::DECODE.readout)?;
                 Ok(logits.squeeze(0)?.to_vec1::<f32>()?)
             })
             .collect()
@@ -138,17 +145,25 @@ impl Runtime {
     /// the `n_positions` the checkpoint states.
     fn check_source(&self, model: &t5::Model, source: &[u32]) -> Result<()> {
         if source.is_empty() {
-            bail!(
-                "a T5 prompt needs at least one token for its encoder to read; this one tokenized to none"
-            );
+            return Err(inconsistent(
+                &ROWS_EMPTY,
+                "encoder",
+                "a source of no tokens; every prompt is encoded to at least one",
+            ));
         }
-        if let Some(limit) = model.config().context_length {
-            if source.len() > limit {
-                bail!(
-                    "prompt contains {} tokens, past the {limit} positions (n_positions) this T5 model's encoder was built for",
-                    source.len()
-                );
-            }
+        if let Some(limit) = model
+            .config()
+            .context_length
+            .filter(|limit| source.len() > *limit)
+        {
+            return Err(refuse(
+                &CONTEXT_EXCEEDED,
+                &[
+                    ("stack", "encoder"),
+                    ("end", &source.len().to_string()),
+                    ("limit", &limit.to_string()),
+                ],
+            ));
         }
         Ok(())
     }

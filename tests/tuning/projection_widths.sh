@@ -12,13 +12,16 @@ EXAMPLES=${STER_TEST_EXAMPLES:?set STER_TEST_EXAMPLES to real supervised example
 RATE=${STER_TEST_LEARNING_RATE:?set STER_TEST_LEARNING_RATE explicitly}
 SEQUENCE=${STER_TEST_MAX_SEQUENCE:?set STER_TEST_MAX_SEQUENCE explicitly}
 ROOT="$PWD/target/real-tests/tuning/projection-widths-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-mkdir -p "$ROOT/model"
+mkdir -p "$ROOT/model" "$ROOT/home"
+# The binary runs under this run's own home, never the operator's; the
+# checkpoint is a local directory, so no Hub cache is read.
+export HOME="$ROOT/home" HF_HOME="$ROOT/home/huggingface"
 REPORT="$ROOT/report.txt"
 MODEL="$ROOT/model"
 ADAPTER="$ROOT/adapter.safetensors"
 fail() { printf 'FAIL: %s\n' "$*" | tee -a "$REPORT"; false; }
-printf 'source revision: %s\ncheckpoint: %s\n' "$(git rev-parse HEAD)" "$SOURCE" >"$REPORT"
-git diff --binary >"$ROOT/source.patch"
+printf 'source revision: %s\ncheckpoint: %s\n' "$(git --no-optional-locks rev-parse HEAD)" "$SOURCE" >"$REPORT"
+git --no-optional-locks diff --binary >"$ROOT/source.patch"
 shasum "$BIN" "$EXAMPLES" "$SOURCE/config.json" "$SOURCE"/*.safetensors >>"$REPORT"
 for file in "$SOURCE"/*; do
   [ -f "$file" ] || continue

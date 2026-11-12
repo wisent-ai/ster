@@ -85,7 +85,7 @@ pub(crate) struct DecideArgs {
 }
 
 impl InputCheck for DecideArgs {
-    fn check(&self) -> std::result::Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         self.model.check()?;
         input::required_path(&self.examples, "tune/decide examples")?;
         input::required_path(&self.output, "tune/decide output")?;
@@ -114,9 +114,6 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<serde_json::Value
         seed,
         durable,
     } = args;
-    // The examples are read before a weight is mapped, so a bad label is
-    // refused in milliseconds.
-    let example_set = ExampleSet::load(&examples)?;
     let device = model.device;
     let spec = lora::Spec {
         rank,
@@ -125,22 +122,7 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<serde_json::Value
         layers: parse_adapter_layers(&layers)?,
         seed,
     };
-    let (mut runtime, varmap) = Runtime::load_trainable_at(
-        &model.model,
-        model.revision.as_deref(),
-        device,
-        &spec,
-        precision,
-    )?;
-    let chat = runtime.set_chat_template(chat_template)?;
-    let identity = tune::identity(
-        &model.model,
-        model.revision.as_deref(),
-        &[("examples", examples.as_path())],
-        json!(format!("{chat_template:?}")),
-        json!(format!("{precision:?}")),
-    )?;
-    let options = DecideTuneOptions {
+    let mut options = DecideTuneOptions {
         spec,
         epochs,
         learning_rate,
@@ -151,10 +133,29 @@ pub(in crate::cli::tune) fn decide(args: DecideArgs) -> Result<serde_json::Value
         permutations,
         seed,
         durable: durable.durable(),
-        identity,
+        identity: Default::default(),
     };
+    // Every setting is refused before anything is read, and the examples
+    // before a weight is mapped, so a bad label is refused in milliseconds.
+    options.check()?;
+    let example_set = ExampleSet::load(&examples)?;
+    options.identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("examples", examples.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
+    let (mut runtime, varmap) = Runtime::load_trainable_at(
+        &model.model,
+        model.revision.as_deref(),
+        device,
+        &options.spec,
+        precision,
+    )?;
+    let chat = runtime.set_chat_template(chat_template)?;
     let report = tune::decide(&runtime, &varmap, &example_set, &options)?;
-    let mut report = serde_json::to_value(&report)?;
+    let mut report = ster::json::value(&report);
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
     let artifact = runtime.adapter_artifact(&options.spec, report)?;

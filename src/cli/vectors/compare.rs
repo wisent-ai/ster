@@ -4,7 +4,7 @@
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ster::{
     SteeringArtifact,
     workflow::{self, CompareOptions},
@@ -32,12 +32,13 @@ pub(in crate::cli) fn compare(args: CompareArgs) -> Result<()> {
         layers,
         clusters,
     } = args;
+    // How many artifacts and groups is known from the command line, so it
+    // is refused before any artifact is read.
+    let named: Vec<String> = artifacts.iter().map(|path| path.display().to_string()).collect();
+    workflow::check_counts(&named, clusters)?;
     let loaded = artifacts
         .iter()
-        .map(|path| {
-            SteeringArtifact::load(path)
-                .with_context(|| format!("failed to compare {}", path.display()))
-        })
+        .map(|path| SteeringArtifact::load(path))
         .collect::<Result<Vec<_>>>()?;
     let report = workflow::compare(&loaded, &CompareOptions { layers, clusters })?;
     super::super::answer(&report)

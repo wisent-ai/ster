@@ -4,10 +4,23 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use ster::{ChatChoice, GenerationOptions, Precision, Runtime, SteeringArtifact, tune, workflow};
+use anyhow::Result;
+use ster::{
+    ChatChoice, GenerationOptions, Precision, Runtime, SteeringArtifact,
+    failures::{
+        file, refuse,
+        runtime::{
+            encode::TEXT_BLANK,
+            generate::{STRENGTHS_UNPAIRED, SYSTEM_EMPTY},
+        },
+    },
+    tune, workflow,
+};
 
 use super::super::ModelArgs;
+
+/// What the answers file is called in a refusal of it.
+const ANSWERS: &str = "the answers";
 
 /// `ster generate`
 #[derive(Debug, clap::Args)]
@@ -83,6 +96,16 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
         top_p,
         seed,
     } = args;
+    // How the flags pair up is checked before any file is read.
+    if vector.len() != strength.len() {
+        return Err(refuse(
+            &STRENGTHS_UNPAIRED,
+            &[
+                ("vectors", &vector.len().to_string()),
+                ("strengths", &strength.len().to_string()),
+            ],
+        ));
+    }
     // Both documents are read before a single weight is mapped, so
     // the two halves of the wrong-document refusal cost the same. An
     // adapter was already refused this early because it is attached
@@ -94,29 +117,26 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
         .iter()
         .map(|path| SteeringArtifact::load(path))
         .collect::<Result<Vec<_>>>()?;
-    if artifacts.len() != strength.len() {
-        anyhow::bail!(
-            "every --vector needs its own --strength: got {} vector(s) and {} strength(s); Ster assumes no steering scale",
-            artifacts.len(),
-            strength.len()
-        );
-    }
     let parts: Vec<(&SteeringArtifact, f64)> =
         artifacts.iter().zip(strength.iter().copied()).collect();
     // The system turn is read here for the same reason: an unreadable or
     // empty file is refused before the checkpoint is paid for.
     let system = match system.as_deref() {
         Some(path) => {
+            let shown = path.display().to_string();
             let text = std::fs::read_to_string(path)
-                .with_context(|| format!("cannot read the system turn {}", path.display()))?;
+                .map_err(|error| file::read::refusal("the system turn", path, &error))?;
             if text.trim().is_empty() {
-                anyhow::bail!("the system turn {} is empty", path.display());
+                return Err(refuse(
+                    &SYSTEM_EMPTY,
+                    &[("path", &shown), ("bytes", &text.len().to_string())],
+                ));
             }
-            if prompt
-                .as_deref()
-                .is_some_and(|prompt| prompt.trim().is_empty())
-            {
-                anyhow::bail!("the prompt must not be empty: it holds only whitespace");
+            if let Some(prompt) = prompt.as_deref().filter(|prompt| prompt.trim().is_empty()) {
+                return Err(refuse(
+                    &TEXT_BLANK,
+                    &[("what", "prompt"), ("text", &format!("{prompt:?}"))],
+                ));
             }
             Some(text)
         }
@@ -142,9 +162,7 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
     for path in &vector {
         tune::warn_on_provenance(path, "direction", &runtime);
     }
-    // Every part carries its own strength, so the options carry none.
     let options = GenerationOptions {
-        strength: None,
         max_new_tokens,
         temperature,
         top_p,
@@ -170,6 +188,24 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
     };
     match (prompt_set, output) {
         (Some(set), Some(output)) => {
+            // The answers' directory is made before the first prompt is
+            // answered, so a path no file can be written at is refused
+            // before the model's work, not after it.
+            if let Some(parent) = output
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    let left = "no prompt was answered and nothing was written";
+                    file::write::refusal(
+                        "creating the directory of",
+                        ANSWERS,
+                        &output,
+                        left,
+                        &error,
+                    )
+                })?;
+            }
             let answers = set
                 .prompts
                 .iter()
@@ -182,19 +218,23 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
                     Ok(serde_json::json!({ "prompt": prompt, "model_output": answer(prompt)? }))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            if let Some(parent) = output
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            std::fs::write(&output, serde_json::to_vec_pretty(&answers)?)
-                .with_context(|| format!("failed to write {}", output.display()))?;
+            let text = ster::json::pretty(&answers).into_bytes();
+            std::fs::write(&output, text).map_err(|error| {
+                let left = format!(
+                    "all {} prompts were answered and their answers are lost; a file that was there may be emptied or cut short",
+                    answers.len()
+                );
+                file::write::refusal("writing", ANSWERS, &output, &left, &error)
+            })?;
             println!("{}", output.display());
         }
         _ => {
-            let prompt = prompt.context("ster generate needs --prompt or --prompts")?;
+            // `#[arg(long, requires = "output")] prompts` and `#[arg(long,
+            // requires = "prompts")] output` leave this arm only with neither
+            // given, and `#[arg(long, required_unless_present = "prompts")]
+            // prompt` then makes clap refuse a run without --prompt.
+            let prompt =
+                prompt.expect("clap requires --prompt unless --prompts and --output are given");
             println!("{}", answer(&prompt)?);
         }
     }

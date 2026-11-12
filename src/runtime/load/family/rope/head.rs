@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use candle_transformers::models::llama::LlamaConfig;
 use serde_json::Value;
+use {crate::failures::model::Stated, anyhow::Result};
 
 use crate::model::{Architecture, LatentAttention, Positions, RopeScaling};
-use crate::runtime::load::family::read::{number, whole};
+use crate::runtime::load::family::read::{number, whole, within};
 use crate::runtime::load::family::rope::scaling::{YARN_SLOPE, rope_scaling, yarn_mscale};
 
 /// The head's width, its latent attention when the config states one, how much
@@ -19,20 +19,22 @@ pub(in crate::runtime::load::family) fn head(
     architecture: &mut Architecture,
     path: &Path,
 ) -> Result<()> {
-    if let Some(head_dim) = whole(raw, "head_dim") {
+    if let Some(head_dim) = whole(raw, "head_dim", path)? {
         architecture.head_dim = head_dim;
         architecture.score_divisor = (head_dim as f64).sqrt();
     }
     // Multi-head latent attention (DeepSeek-V2 and V3, MiniCPM3) states its
     // bottlenecks and head parts; a head is its position-free part plus its
     // rotated part, and only the rotated part rotates.
-    if let Some(key_value_rank) = whole(raw, "kv_lora_rank") {
+    if let Some(key_value_rank) = whole(raw, "kv_lora_rank", path)? {
         let part = |key: &str| -> Result<usize> {
-            whole(raw, key)
-                .with_context(|| format!("{} declares kv_lora_rank without {key}", path.display()))
+            whole(raw, key, path)?
+                .or_refuse(raw, &["kv_lora_rank", key], || {
+                    format!("{} declares kv_lora_rank without {key}", path.display())
+                })
         };
         let latent = LatentAttention {
-            query_rank: whole(raw, "q_lora_rank"),
+            query_rank: whole(raw, "q_lora_rank", path)?,
             key_value_rank,
             unrotated: part("qk_nope_head_dim")?,
             rotated: part("qk_rope_head_dim")?,
@@ -46,8 +48,12 @@ pub(in crate::runtime::load::family) fn head(
     // `rotary_pct`) as a fraction, which Transformers truncates, GPT-J's
     // `rotary_dim` as a width, or latent attention's rotated part.
     let head_dim = architecture.head_dim;
-    let fraction = number(raw, "partial_rotary_factor").or_else(|| number(raw, "rotary_pct"));
-    architecture.rotary_dim = match (architecture.latent, fraction, whole(raw, "rotary_dim")) {
+    let fraction = match number(raw, "partial_rotary_factor", path)? {
+        Some(fraction) => Some(fraction),
+        None => number(raw, "rotary_pct", path)?,
+    };
+    let width = whole(raw, "rotary_dim", path)?;
+    architecture.rotary_dim = match (architecture.latent, fraction, width) {
         (Some(latent), _, _) => latent.rotated,
         (None, Some(factor), _) => (head_dim as f64 * factor) as usize,
         (None, None, Some(width)) => width,
@@ -64,7 +70,10 @@ pub(in crate::runtime::load::family) fn head(
         architecture.positions = Positions::None;
         architecture.rotary_dim = head_dim;
     } else if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
-        bail!(
+        refused!(
+            OutOfRange,
+            in raw,
+            ["head_dim", "partial_rotary_factor", "rotary_pct", "rotary_dim"],
             "{} rotates {rotary_dim} of {head_dim} components per head (partial_rotary_factor, rotary_pct or rotary_dim); the rotated width must be even, above zero and at most the head",
             path.display()
         );
@@ -73,10 +82,11 @@ pub(in crate::runtime::load::family) fn head(
     // DeepSeek sharpens the scores of a YaRN-stretched model by the square
     // of the temperature `mscale_all_dim` gives.
     if architecture.latent.is_some() {
-        let all = scaling
-            .and_then(|scaling| scaling.get("mscale_all_dim"))
-            .and_then(Value::as_f64)
-            .filter(|value| *value != 0.0);
+        let all = match scaling {
+            Some(scaling) => within::<f64>(scaling, "rope_scaling", "mscale_all_dim", path)?,
+            None => None,
+        }
+        .filter(|value| *value != 0.0);
         if let (RopeScaling::Yarn { factor, .. }, Some(all)) = (&architecture.rope_scaling, all) {
             let temperature = yarn_mscale(f64::from(*factor), all, YARN_SLOPE);
             architecture.score_divisor /= temperature * temperature;

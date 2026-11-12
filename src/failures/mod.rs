@@ -12,7 +12,7 @@
 
 use std::fmt;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use wisent_errors::{Cause, Operation};
 
 /// The page under docs/guide/errors/ an area's functionalities are listed
@@ -28,13 +28,38 @@ macro_rules! page {
     };
 }
 
+mod candle;
 mod catalogue;
+pub mod chat;
 pub mod check;
+pub mod decide;
+mod declared;
+pub mod file;
+pub mod fixture;
+pub mod inference;
+pub mod lora;
+pub mod model;
+pub mod onboarding;
 pub mod pairs;
-mod telemetry;
+mod rejection;
+pub mod request;
+pub mod runtime;
+mod shape;
+pub mod star;
+pub mod steering;
+pub mod telemetry;
+pub mod tensor;
+pub mod tokenizer;
+pub mod tune;
+pub mod workflow;
 pub mod workspace;
 
+pub use candle::{lift, lifted, refuse_candle, root as candle_root, shapes_differ};
+pub use catalogue::{list, markdown, show};
 pub use check::check;
+pub use declared::Declared;
+pub use rejection::{Refused, Rejection, Rejections};
+pub use shape::{excerpt, shape};
 
 /// The status a failure that is not a usage refusal and not retryable exits
 /// with, as `ster` has always exited.
@@ -46,76 +71,30 @@ pub const DOCS: &str = "https://github.com/wisent-ai/ster/blob/main/docs/guide/e
 
 /// Every functionality that declares how it fails.
 pub fn operations() -> Vec<&'static Operation> {
-    [
+    let mut all = [
         catalogue::OPERATIONS,
+        chat::OPERATIONS,
+        decide::OPERATIONS,
+        file::OPERATIONS,
+        fixture::OPERATIONS,
+        inference::OPERATIONS,
+        lora::OPERATIONS,
+        model::OPERATIONS,
+        onboarding::OPERATIONS,
         pairs::OPERATIONS,
+        request::OPERATIONS,
+        runtime::OPERATIONS,
+        star::OPERATIONS,
+        steering::OPERATIONS,
+        tensor::OPERATIONS,
+        tokenizer::OPERATIONS,
+        tune::OPERATIONS,
+        workflow::OPERATIONS,
         workspace::OPERATIONS,
-        telemetry::OPERATIONS,
     ]
-    .concat()
-}
-
-/// A refusal a declared cause raised, with the values its sentences name,
-/// and the error it declares when one was raised underneath it. That error
-/// is kept for callers that tell it by its type; its words are already in
-/// the sentence, so it is not a `source` the chain would print again.
-#[derive(Debug)]
-pub struct Declared {
-    pub cause: &'static Cause,
-    sentence: String,
-    fix: String,
-    underneath: Option<anyhow::Error>,
-}
-
-impl fmt::Display for Declared {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}; fix: {}", self.sentence, self.fix)
-    }
-}
-
-impl std::error::Error for Declared {}
-
-impl Declared {
-    /// The exit status the declaration gives this refusal.
-    pub fn exit_code(&self) -> i32 {
-        self.cause.exit_code(FAILURE_EXIT)
-    }
-
-    /// The error this refusal declares, when it declares one.
-    pub fn underneath(&self) -> Option<&anyhow::Error> {
-        self.underneath.as_ref()
-    }
-
-    /// What a machine reads beside the sentence: the cause's id, code, exit
-    /// status, whether retrying unchanged can help, and the fix.
-    pub fn summary(&self) -> Value {
-        json!({
-            "id": self.cause.id,
-            "code": self.cause.code.as_str(),
-            "exit": self.exit_code(),
-            "usage": self.cause.usage,
-            "retryable": self.cause.code.retryable(),
-            "remedy": self.fix,
-        })
-    }
-
-    /// The envelope this refusal reports: the failure point of the
-    /// functionality that declares the cause, its code, and the sentence and
-    /// fix with the actual names filled in.
-    pub fn failure(&self) -> wisent_errors::Failure {
-        let point = operations()
-            .into_iter()
-            .find(|operation| {
-                operation
-                    .causes
-                    .iter()
-                    .any(|cause| std::ptr::eq(*cause, self.cause))
-            })
-            .map_or("ster", |operation| operation.id);
-        wisent_errors::Failure::or_fallback(point, self.cause.code, "ster")
-            .detail(self.sentence.as_str())
-            .remedy(self.fix.as_str())
-    }
+    .concat();
+    all.extend(telemetry::operations());
+    all
 }
 
 /// The refusal `cause` declares, its `{name}` placeholders filled from
@@ -147,6 +126,79 @@ fn raise(
     })
 }
 
+/// `error` with `context` (what the step had reached or left: `pair 3`,
+/// `the output it created was removed`) added to its declared sentence, so
+/// the refusal keeps its cause, its exit status and its fix and says this
+/// too. An error no cause declares yet keeps `context` as its context line.
+pub fn amend(error: anyhow::Error, context: impl fmt::Display) -> anyhow::Error {
+    match error.downcast::<Declared>() {
+        Ok(mut declared) => {
+            declared.sentence = format!("{}; {context}", declared.sentence);
+            anyhow::Error::new(declared)
+        }
+        Err(error) => error.context(context.to_string()),
+    }
+}
+
+/// The refusal another Wisent library declared and handed over as its
+/// envelope (`wisent_errors::Failure`, its `context["cause"]` naming one of
+/// `operations`' causes): that cause, so the exit status, the id and the fix
+/// stay the declaring library's, with the envelope's own sentence and fix
+/// and `step` (what Ster was doing) after them. An envelope naming no cause
+/// `operations` declare is `undeclared`'s refusal, quoting the envelope.
+pub fn relay(
+    failure: &wisent_errors::Failure,
+    operations: &[&'static Operation],
+    undeclared: &'static Cause,
+    step: &str,
+) -> anyhow::Error {
+    let named = failure.context.get("cause");
+    let cause = named.and_then(|id| {
+        operations
+            .iter()
+            .flat_map(|operation| operation.causes.iter().copied())
+            .find(|cause| cause.id == id)
+    });
+    // The envelope's own values, so a cause whose envelope carries no
+    // sentence or fix still reads in its declaration's words with them.
+    let values: Vec<(&str, &str)> = failure
+        .context
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let detail = failure.detail.as_deref().filter(|detail| !detail.is_empty());
+    let remedy = failure.remedy.as_deref().filter(|remedy| !remedy.is_empty());
+    match cause {
+        Some(cause) => anyhow::Error::new(Declared {
+            cause,
+            sentence: match detail {
+                Some(detail) => format!("{detail}; it was {step}"),
+                None => format!(
+                    "{}; {} handed over no sentence for it; it was {step}",
+                    cause.sentence(&values),
+                    failure.failure_point
+                ),
+            },
+            fix: match remedy {
+                Some(remedy) => remedy.to_owned(),
+                None => cause.fix(&values),
+            },
+            underneath: None,
+        }),
+        None => refuse(
+            undeclared,
+            &[
+                ("step", step),
+                ("point", &failure.failure_point),
+                ("code", failure.code.as_str()),
+                ("named", named.map_or("no cause", String::as_str)),
+                ("detail", match detail { Some(detail) => detail, None => "no sentence" }),
+                ("remedy", match remedy { Some(remedy) => remedy, None => "no fix" }),
+            ],
+        ),
+    }
+}
+
 /// The declared cause an error carries, wherever in its chain it was raised.
 pub fn declared(error: &anyhow::Error) -> Option<&Declared> {
     error
@@ -157,8 +209,18 @@ pub fn declared(error: &anyhow::Error) -> Option<&Declared> {
 /// The refusal a `check` answer with findings ends in, once the answer that
 /// lists them is printed; `None` when it found nothing.
 pub fn findings(answer: &Value) -> Option<anyhow::Error> {
-    let count = answer["findings"].as_array().map_or(0, Vec::len);
-    (count > 0).then(|| refuse(&catalogue::FINDINGS, &[("count", &count.to_string())]))
+    let findings: Vec<&str> = answer["findings"]
+        .as_array()
+        .map_or_else(Vec::new, |all| all.iter().filter_map(Value::as_str).collect());
+    (!findings.is_empty()).then(|| {
+        refuse(
+            &catalogue::FINDINGS,
+            &[
+                ("count", &findings.len().to_string()),
+                ("findings", &findings.join("; ")),
+            ],
+        )
+    })
 }
 
 /// The status a command that ends in `error` exits with: the declared
@@ -167,93 +229,3 @@ pub fn exit_code(error: &anyhow::Error) -> i32 {
     declared(error).map_or(FAILURE_EXIT, Declared::exit_code)
 }
 
-/// The functionality `id` names, or the refusal listing the declared ones.
-fn named(id: &str) -> anyhow::Result<&'static Operation> {
-    let operations = operations();
-    match operations.iter().find(|operation| operation.id == id) {
-        Some(operation) => Ok(*operation),
-        None => {
-            let declared = operations
-                .iter()
-                .map(|operation| operation.id)
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(refuse(
-                &catalogue::FUNCTIONALITY_UNKNOWN,
-                &[("id", id), ("declared", &declared)],
-            ))
-        }
-    }
-}
-
-fn document(operation: &Operation) -> anyhow::Result<Value> {
-    Ok(serde_json::from_str(&operation.to_json(FAILURE_EXIT))?)
-}
-
-/// `ster errors list`: every functionality with its entries, what it uses
-/// and the causes it declares.
-pub fn list() -> anyhow::Result<Value> {
-    let operations = operations()
-        .into_iter()
-        .map(document)
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(json!({"docs": DOCS, "functionalities": operations}))
-}
-
-/// The documentation sections of the functionalities listed on `page` (a
-/// path such as docs/guide/errors/workspace.md), or of every functionality
-/// without one, in declaration order: what each area page holds below its
-/// generated-section marker.
-pub fn markdown(page: Option<&str>) -> anyhow::Result<String> {
-    let all = operations();
-    let listed: Vec<&Operation> = all
-        .iter()
-        .copied()
-        .filter(|operation| page.is_none_or(|page| operation.docs.ends_with(&format!("/{page}"))))
-        .collect();
-    if listed.is_empty() {
-        if let Some(page) = page {
-            let mut pages: Vec<&str> = all
-                .iter()
-                .filter_map(|operation| operation.docs.strip_prefix(PAGES))
-                .collect();
-            pages.dedup();
-            return Err(refuse(
-                &catalogue::PAGE_UNKNOWN,
-                &[("page", page), ("pages", &pages.join(", "))],
-            ));
-        }
-    }
-    Ok(listed
-        .iter()
-        .map(|operation| operation.markdown(FAILURE_EXIT))
-        .collect::<Vec<_>>()
-        .join("\n"))
-}
-
-/// What every area page's address starts with: the repository's blob root.
-const PAGES: &str = "https://github.com/wisent-ai/ster/blob/main/";
-
-/// `ster errors show <functionality>`: its own causes and every cause it
-/// meets through the functionalities it uses.
-pub fn show(id: &str) -> anyhow::Result<Value> {
-    let operation = named(id)?;
-    let met: Vec<Value> = operation
-        .met()
-        .into_iter()
-        .map(|(declared_by, cause)| {
-            json!({
-                "declared_by": declared_by,
-                "id": cause.id,
-                "code": cause.code.as_str(),
-                "exit": cause.exit_code(FAILURE_EXIT),
-                "failed": cause.failed,
-                "cause": cause.cause,
-                "observed": cause.observed,
-                "remedy": cause.remedy,
-                "test": cause.test,
-            })
-        })
-        .collect();
-    Ok(json!({"functionality": document(operation)?, "met": met}))
-}

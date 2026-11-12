@@ -90,7 +90,7 @@ pub(crate) struct DpoArgs {
 }
 
 impl InputCheck for DpoArgs {
-    fn check(&self) -> std::result::Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         self.model.check()?;
         if let Some(pairs) = &self.pairs {
             input::required_path(pairs, "tune/dpo pairs")?;
@@ -122,7 +122,6 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<serde_json::Value> {
         seed,
         durable,
     } = args;
-    let pairs = resolve_pairs(pairs)?;
     let device = model.device;
     let spec = lora::Spec {
         rank,
@@ -131,26 +130,7 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<serde_json::Value> {
         layers: parse_adapter_layers(&layers)?,
         seed,
     };
-    // The reference the objective measures against is this same
-    // runtime with the adapters skipped, so exactly one model is
-    // loaded however many times each sequence is scored.
-    let (mut runtime, varmap) = Runtime::load_trainable_at(
-        &model.model,
-        model.revision.as_deref(),
-        device,
-        &spec,
-        precision,
-    )?;
-    let chat = runtime.set_chat_template(chat_template)?;
-    let pair_set = PairSet::load(&pairs)?;
-    let identity = tune::identity(
-        &model.model,
-        model.revision.as_deref(),
-        &[("pairs", pairs.as_path())],
-        json!(format!("{chat_template:?}")),
-        json!(format!("{precision:?}")),
-    )?;
-    let options = DpoOptions {
+    let mut options = DpoOptions {
         spec,
         loss: DpoLoss::parse(&loss)?,
         beta,
@@ -162,10 +142,33 @@ pub(in crate::cli::tune) fn dpo(args: DpoArgs) -> Result<serde_json::Value> {
         max_sequence,
         seed,
         durable: durable.durable(),
-        identity,
+        identity: Default::default(),
     };
+    // Every setting is refused before the workspace, the pairs or a weight
+    // are read, and the pairs before a weight is mapped.
+    options.check()?;
+    let pairs = resolve_pairs(pairs)?;
+    let pair_set = PairSet::load(&pairs)?;
+    options.identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("pairs", pairs.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
+    // The reference the objective measures against is this same
+    // runtime with the adapters skipped, so exactly one model is
+    // loaded however many times each sequence is scored.
+    let (mut runtime, varmap) = Runtime::load_trainable_at(
+        &model.model,
+        model.revision.as_deref(),
+        device,
+        &options.spec,
+        precision,
+    )?;
+    let chat = runtime.set_chat_template(chat_template)?;
     let report = tune::dpo(&runtime, &varmap, &pair_set, &options)?;
-    let mut report = serde_json::to_value(&report)?;
+    let mut report = ster::json::value(&report);
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
     let artifact = runtime.adapter_artifact(&options.spec, report)?;

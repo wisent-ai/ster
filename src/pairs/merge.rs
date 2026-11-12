@@ -6,10 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::artifact::{ContrastivePair, PairSet};
+use crate::failures::{pairs::author, refuse};
 
 /// How many pairs each source gave.
 #[derive(Debug, Clone, Serialize)]
@@ -27,19 +28,33 @@ pub struct MergeReport {
 }
 
 /// Every pair of every set at `sources`, in order, under `trait_name`. Two
-/// sets at least: one is already itself. Each source is loaded with the
-/// same validation every pair set passes.
+/// sets at least: one is already itself. Both are checked before any set is
+/// read, and each source is loaded with the same validation every pair set
+/// passes.
 pub fn merge(sources: &[PathBuf], trait_name: &str) -> Result<(PairSet, MergeReport)> {
     let [_, _, ..] = sources else {
-        bail!(
-            "pairs merge needs at least two pair sets and got {}",
-            sources.len()
-        );
+        let named = sources
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(refuse(
+            &author::TOO_FEW_SOURCES,
+            &[
+                ("count", &sources.len().to_string()),
+                (
+                    "sources",
+                    if named.is_empty() {
+                        "none"
+                    } else {
+                        named.as_str()
+                    },
+                ),
+            ],
+        ));
     };
     if trait_name.trim().is_empty() {
-        bail!(
-            "pairs merge needs the trait name the merged set is fitted for; the given name holds only whitespace"
-        );
+        return Err(refuse(&author::TRAIT_BLANK, &[("trait", trait_name)]));
     }
     let mut pairs: Vec<ContrastivePair> = Vec::new();
     let mut merged = Vec::with_capacity(sources.len());

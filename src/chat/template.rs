@@ -3,10 +3,29 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use minijinja::Environment;
 
 use super::{Message, jinja};
+use crate::failures::{
+    chat as causes, model::tokenizer::read_refusal, refuse, runtime::encode::TEXT_BLANK,
+};
+use crate::runtime::vocabulary::tokenizer_config as read_tokenizer_config;
+
+mod config;
+
+use config::{embedded_template, token_text};
+
+/// Refuses `text`, the `what` a turn is made of, when it holds no text.
+fn filled(text: &str, what: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        return Err(refuse(
+            &TEXT_BLANK,
+            &[("what", what), ("text", &format!("{text:?}"))],
+        ));
+    }
+    Ok(())
+}
 
 /// The name the template is compiled under; it appears in engine errors, so it
 /// reads as the thing the operator would name.
@@ -38,23 +57,25 @@ impl Template {
         chat_template: Option<&Path>,
     ) -> Result<Option<Self>> {
         let config = match tokenizer_config {
-            Some(path) => {
-                let bytes =
-                    fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-                let value: serde_json::Value = serde_json::from_slice(&bytes)
-                    .with_context(|| format!("invalid tokenizer config {}", path.display()))?;
-                Some(value)
-            }
+            Some(path) => Some(read_tokenizer_config(path)?),
             None => None,
         };
-        let source = match chat_template {
-            Some(path) => Some(
-                fs::read_to_string(path)
-                    .with_context(|| format!("failed to read {}", path.display()))?,
+        let config_shown =
+            tokenizer_config.map_or("absent".to_owned(), |path| path.display().to_string());
+        let (source, from) = match chat_template {
+            Some(path) => (
+                Some(
+                    fs::read_to_string(path)
+                        .map_err(|error| read_refusal("chat template", path, &error))?,
+                ),
+                path.display().to_string(),
             ),
             None => match config.as_ref() {
-                Some(config) => embedded_template(config)?,
-                None => None,
+                Some(config) => (
+                    embedded_template(config, &config_shown)?,
+                    format!("the chat_template of {config_shown}"),
+                ),
+                None => (None, String::new()),
             },
         };
         let Some(source) = source else {
@@ -73,9 +94,10 @@ impl Template {
         // silent failure this module exists to prevent, so it is a refusal.
         for (name, value) in [("bos_token", &bos_token), ("eos_token", &eos_token)] {
             if value.is_none() && source.contains(name) {
-                bail!(
-                    "this model's chat template uses {name}, but its tokenizer config declares none"
-                );
+                return Err(refuse(
+                    &causes::TOKEN_UNDECLARED,
+                    &[("name", name), ("config", &config_shown), ("source", &from)],
+                ));
             }
         }
         let mut environment = Environment::new();
@@ -86,7 +108,10 @@ impl Template {
         environment
             .add_template_owned(TEMPLATE_NAME, jinja::plain_generation_blocks(source))
             .map_err(|error| {
-                anyhow::anyhow!("this model's chat template does not parse: {error}")
+                refuse(
+                    &causes::UNPARSABLE,
+                    &[("line", &line(&error)), ("error", &error.to_string())],
+                )
             })?;
         Ok(Some(Self {
             environment,
@@ -98,6 +123,8 @@ impl Template {
     /// Renders `messages`, optionally followed by the marker that opens the
     /// assistant's turn.
     pub fn render(&self, messages: &[Message<'_>], add_generation_prompt: bool) -> Result<String> {
+        let roles: Vec<&str> = messages.iter().map(|message| message.role).collect();
+        let count = messages.len();
         let messages: Vec<BTreeMap<&str, &str>> = messages
             .iter()
             .map(|message| BTreeMap::from([("role", message.role), ("content", message.content)]))
@@ -112,19 +139,28 @@ impl Template {
             .get_template(TEMPLATE_NAME)
             .and_then(|template| template.render(context))
             .map_err(|error| {
-                anyhow::anyhow!("this model's chat template failed to render: {error}")
+                let cause = if error.kind() == minijinja::ErrorKind::InvalidOperation {
+                    &causes::RENDER_REFUSED
+                } else {
+                    &causes::RENDER_FAILED
+                };
+                refuse(
+                    cause,
+                    &[
+                        ("count", &count.to_string()),
+                        ("roles", &roles.join(", ")),
+                        ("kind", &format!("{:?}", error.kind())),
+                        ("line", &line(&error)),
+                        ("error", &error.to_string()),
+                    ],
+                )
             })
     }
 
     /// One prompt as a user turn, ending exactly where the assistant's own
     /// tokens begin.
     pub fn prompt(&self, prompt: &str) -> Result<String> {
-        if prompt.trim().is_empty() {
-            bail!(
-                "prompt must not be empty: it holds {} characters of whitespace",
-                prompt.len()
-            );
-        }
+        filled(prompt, "prompt")?;
         self.render(
             &[Message {
                 role: "user",
@@ -165,12 +201,8 @@ impl Template {
         prompt: &str,
         completion: &str,
     ) -> Result<(String, String)> {
-        if prompt.trim().is_empty() {
-            bail!(
-                "prompt must not be empty: it holds {} characters of whitespace",
-                prompt.len()
-            );
-        }
+        filled(prompt, "prompt")?;
+        filled(completion, "completion")?;
         let mut turns: Vec<Message<'_>> = system
             .map(|content| Message {
                 role: "system",
@@ -199,16 +231,21 @@ impl Template {
             .or_else(|| full[agreed..].find(completion.trim()))
             .map(|offset| agreed + offset);
         let Some(start) = start else {
-            bail!(
-                "this model's chat template does not render the assistant turn after the prompt, so the completion boundary cannot be located"
-            );
+            let after: String = full[agreed..].chars().take(60).collect();
+            let wanted: String = completion.chars().take(40).collect();
+            return Err(refuse(
+                &causes::BOUNDARY_ABSENT,
+                &[
+                    ("head", &head.len().to_string()),
+                    ("full", &full.len().to_string()),
+                    ("agreed", &agreed.to_string()),
+                    ("after", &after),
+                    ("completion", &wanted),
+                ],
+            ));
         };
+        // The tail starts with the completion's own non-blank text.
         let tail = &full[start..];
-        if tail.is_empty() {
-            bail!(
-                "this model's chat template rendered an empty assistant turn at character {start}"
-            );
-        }
         Ok((full[..start].to_owned(), tail.to_owned()))
     }
 
@@ -221,12 +258,7 @@ impl Template {
     /// here: inventing a user turn to satisfy it would put words in the
     /// operator's data that the operator did not write.
     pub fn response(&self, text: &str) -> Result<String> {
-        if text.trim().is_empty() {
-            bail!(
-                "the response must not be empty: it holds {} characters of whitespace",
-                text.len()
-            );
-        }
+        filled(text, "response")?;
         self.render(
             &[Message {
                 role: "assistant",
@@ -247,48 +279,9 @@ fn common_prefix(left: &str, right: &str) -> usize {
         .sum()
 }
 
-/// The `chat_template` field, in either shape `transformers` ever wrote it.
-///
-/// The list form pairs a template with a name, and only the one called
-/// `default` is the conversation format; the others are tool or RAG variants
-/// that expect inputs Ster does not have.
-fn embedded_template(config: &serde_json::Value) -> Result<Option<String>> {
-    match config.get("chat_template") {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(source)) => Ok(Some(source.clone())),
-        Some(serde_json::Value::Array(entries)) => {
-            let named = entries.iter().find(|entry| {
-                entry.get("name").and_then(serde_json::Value::as_str) == Some("default")
-            });
-            match named.or_else(|| entries.first().filter(|_| entries.len() == 1)) {
-                Some(entry) => match entry.get("template").and_then(serde_json::Value::as_str) {
-                    Some(source) => Ok(Some(source.to_owned())),
-                    None => {
-                        bail!(
-                            "this model's chat template list has an entry with no template: {entry}"
-                        )
-                    }
-                },
-                None => bail!(
-                    "this model publishes several named chat templates and none of them is the default: {}",
-                    entries
-                        .iter()
-                        .filter_map(|entry| entry.get("name").and_then(serde_json::Value::as_str))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            }
-        }
-        Some(_) => bail!("this model's chat_template is neither a template nor a list of them"),
-    }
-}
-
-/// A special token as its text, from either the bare string or the
-/// `AddedToken` object `transformers` also writes.
-fn token_text(config: &serde_json::Value, key: &str) -> Option<String> {
-    match config.get(key)? {
-        serde_json::Value::String(text) => Some(text.clone()),
-        serde_json::Value::Object(object) => object.get("content")?.as_str().map(str::to_owned),
-        _ => None,
-    }
+/// The template line a minijinja error points at, or `unknown`.
+fn line(error: &minijinja::Error) -> String {
+    error
+        .line()
+        .map_or("unknown".to_owned(), |line| line.to_string())
 }

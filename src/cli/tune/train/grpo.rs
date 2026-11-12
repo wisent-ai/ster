@@ -119,7 +119,7 @@ pub(crate) struct GrpoArgs {
 }
 
 impl InputCheck for GrpoArgs {
-    fn check(&self) -> std::result::Result<(), String> {
+    fn check(&self) -> anyhow::Result<()> {
         self.model.check()?;
         input::required_path(&self.prompts, "tune/grpo prompts")?;
         input::required_path(&self.output, "tune/grpo output")?;
@@ -129,7 +129,12 @@ impl InputCheck for GrpoArgs {
         if let Some(revision) = &self.user_revision {
             input::required_text(revision, "tune/grpo userRevision")?;
             if self.user_model.is_none() {
-                return Err("tune/grpo userRevision requires userModel".to_owned());
+                return Err(ster::failures::request::unpaired(
+                    "tune/grpo",
+                    "userRevision",
+                    revision,
+                    "userModel",
+                ));
             }
         }
         self.durable.check()
@@ -172,6 +177,36 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<serde_json::Value> {
         layers: parse_adapter_layers(&layers)?,
         seed,
     };
+    let mut options = GrpoOptions {
+        spec,
+        group,
+        turns,
+        iterations,
+        beta,
+        learning_rate,
+        accumulation,
+        warmup_steps,
+        max_sequence,
+        generation: GenerationOptions {
+            max_new_tokens,
+            temperature,
+            top_p: Some(top_p),
+            seed,
+        },
+        durable: durable.durable(),
+        identity: Default::default(),
+    };
+    // Every setting is refused before the prompts, a reward or a weight
+    // are read.
+    options.check(user_model.as_deref())?;
+    let prompt_set = PromptSet::load(&prompts)?;
+    options.identity = tune::identity(
+        &model.model,
+        model.revision.as_deref(),
+        &[("prompts", prompts.as_path())],
+        json!(format!("{chat_template:?}")),
+        json!(format!("{precision:?}")),
+    )?;
     // The reward source is resolved before the policy is loaded: a
     // reward artifact for the wrong checkpoint should be refused
     // before an operator waits out a policy load to hear it.
@@ -184,38 +219,10 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<serde_json::Value> {
         &model.model,
         model.revision.as_deref(),
         device,
-        &spec,
+        &options.spec,
         precision,
     )?;
     let chat = runtime.set_chat_template(chat_template)?;
-    let prompt_set = PromptSet::load(&prompts)?;
-    let identity = tune::identity(
-        &model.model,
-        model.revision.as_deref(),
-        &[("prompts", prompts.as_path())],
-        json!(format!("{chat_template:?}")),
-        json!(format!("{precision:?}")),
-    )?;
-    let options = GrpoOptions {
-        spec,
-        group,
-        turns,
-        iterations,
-        beta,
-        learning_rate,
-        accumulation,
-        warmup_steps,
-        max_sequence,
-        generation: GenerationOptions {
-            strength: None,
-            max_new_tokens,
-            temperature,
-            top_p: Some(top_p),
-            seed,
-        },
-        durable: durable.durable(),
-        identity,
-    };
     let report = tune::grpo(
         &runtime,
         &varmap,
@@ -225,7 +232,7 @@ pub(in crate::cli::tune) fn grpo(args: GrpoArgs) -> Result<serde_json::Value> {
         user.as_ref().zip(user_model.as_deref()),
         &options,
     )?;
-    let mut report = serde_json::to_value(&report)?;
+    let mut report = ster::json::value(&report);
     chat.annotate(&mut report)?;
     note_precision(&mut report, precision)?;
     let artifact = runtime.adapter_artifact(&options.spec, report)?;

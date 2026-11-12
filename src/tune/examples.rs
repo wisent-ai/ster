@@ -3,8 +3,16 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::Deserialize;
+
+use crate::failures::{
+    file, refuse,
+    tune::examples::{BLANK, EMPTY, FORM, MISSING, SYSTEM_BLANK},
+};
+
+/// What an example set is called in a refusal of its file.
+const ROLE: &str = "the example set";
 
 // MARK: - Example sets
 
@@ -28,11 +36,12 @@ pub struct ExampleSet {
 
 impl ExampleSet {
     pub fn load(path: &Path) -> Result<Self> {
+        let shown = path.display().to_string();
         let bytes = std::fs::read(path)
-            .with_context(|| format!("failed to read example set {}", path.display()))?;
+            .map_err(|error| file::read::refusal_or(&MISSING, ROLE, path, &error))?;
         let value: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid example set JSON in {}", path.display()))?;
-        value.validate(&path.display().to_string())?;
+            .map_err(|error| file::json::refusal(ROLE, FORM, path, &error))?;
+        value.validate(&shown)?;
         Ok(value)
     }
 
@@ -46,22 +55,40 @@ impl ExampleSet {
     /// must stay byte-identical regardless of which caller triggers them.
     pub fn validate(&self, label: &str) -> Result<()> {
         if self.examples.is_empty() {
-            bail!("example set {label} contains no examples");
+            return Err(refuse(&EMPTY, &[("label", label), ("name", &self.name)]));
         }
-        if self
+        let blank = |text: &str| text.trim().is_empty();
+        if let Some((index, example)) = self
             .examples
             .iter()
-            .any(|example| example.prompt.trim().is_empty() || example.completion.trim().is_empty())
+            .enumerate()
+            .find(|(_, example)| blank(&example.prompt) || blank(&example.completion))
         {
-            bail!("example set {label} contains an empty prompt or completion");
+            return Err(refuse(
+                &BLANK,
+                &[
+                    ("label", label),
+                    ("index", &index.to_string()),
+                    ("prompt", &format!("{:?}", example.prompt)),
+                    ("completion", &format!("{:?}", example.completion)),
+                ],
+            ));
         }
-        if self.examples.iter().any(|example| {
+        if let Some((index, system)) = self.examples.iter().enumerate().find_map(|(index, example)| {
             example
                 .system
                 .as_deref()
-                .is_some_and(|system| system.trim().is_empty())
+                .filter(|system| blank(system))
+                .map(|system| (index, system))
         }) {
-            bail!("example set {label} contains an empty system prompt");
+            return Err(refuse(
+                &SYSTEM_BLANK,
+                &[
+                    ("label", label),
+                    ("index", &index.to_string()),
+                    ("system", &format!("{system:?}")),
+                ],
+            ));
         }
         Ok(())
     }

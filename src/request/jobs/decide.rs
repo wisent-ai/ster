@@ -14,7 +14,7 @@ use ster::{
 use super::super::requests::{CalibrateRequest, DecideRequest};
 
 pub(in crate::request) fn decide_job(request: DecideRequest) -> Result<Value> {
-    let document = request.request.expect("validated request");
+    let document = request.request;
     // The calibration is read before a single weight is mapped, so one
     // fitted for another model is refused in milliseconds rather than after
     // a full checkpoint load.
@@ -41,7 +41,7 @@ pub(in crate::request) fn decide_job(request: DecideRequest) -> Result<Value> {
         options,
         calibration.as_ref().map(|(path, _)| *path),
     )?;
-    Ok(serde_json::to_value(response)?)
+    Ok(ster::json::value(response))
 }
 
 pub(in crate::request) fn calibrate_job(request: CalibrateRequest) -> Result<Value> {
@@ -55,5 +55,5 @@ pub(in crate::request) fn calibrate_job(request: CalibrateRequest) -> Result<Val
     };
     let calibration = decide::calibrate(&runtime, &examples, options, request.ece_bins)?;
     calibration.save(Path::new(&request.output))?;
-    Ok(serde_json::to_value(calibration)?)
+    Ok(ster::json::value(calibration))
 }

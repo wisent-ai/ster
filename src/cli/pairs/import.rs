@@ -60,12 +60,14 @@ pub(super) fn run(args: ImportArgs) -> Result<()> {
         Some(trait_name) => trait_name,
         None => args.benchmark.clone(),
     };
+    let benchmark = Benchmark::parse(&args.benchmark)?;
     let options = ImportOptions {
-        benchmark: Benchmark::parse(&args.benchmark)?,
+        benchmark,
         trait_name,
         source: args.source,
         examples: args.examples,
         fields: ChoiceFields::from_parts(
+            benchmark,
             args.question,
             args.choices,
             args.answer,

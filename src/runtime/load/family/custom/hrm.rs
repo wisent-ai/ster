@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::model::{Architecture, GateFunction, Names, NormKind, QkvLayout, Recurrence};
-use crate::runtime::load::family::read::{flag, number, whole};
+use crate::runtime::load::family::read::{flag, flag_or, number, whole, whole_or};
 
 /// HRM-Text (`hrm_text`): two stacks of `num_layers_per_stack` (else
 /// `num_hidden_layers`) Llama layers — `attn.gqkv_proj` holding the
@@ -24,21 +24,27 @@ pub(in crate::runtime::load::family) fn hrm_text(
     architecture: &mut Architecture,
     path: &Path,
 ) -> Result<()> {
-    let (Some(high_cycles), Some(low_cycles)) = (whole(raw, "H_cycles"), whole(raw, "L_cycles"))
+    let (Some(high_cycles), Some(low_cycles)) = (whole(raw, "H_cycles", path)?, whole(raw, "L_cycles", path)?)
     else {
-        bail!(
+        refused!(
+            Incomplete,
+            in raw,
+            ["H_cycles", "L_cycles"],
             "{} declares an HRM-Text model without H_cycles and L_cycles",
             path.display()
         );
     };
-    let per_stack = whole(raw, "num_layers_per_stack").unwrap_or(layers);
+    let per_stack = whole_or(raw, "num_layers_per_stack", layers, path)?;
     let recurrence = Recurrence {
         per_stack,
         high_cycles,
         low_cycles,
     };
     if per_stack == 0 || high_cycles == 0 || recurrence.layers() > u128::BITS as usize {
-        bail!(
+        refused!(
+            OutOfRange,
+            in raw,
+            ["H_cycles", "L_cycles", "num_layers_per_stack", "num_hidden_layers"],
             "{} runs {high_cycles} high cycles of {low_cycles} low passes over stacks of {per_stack} layers; Ster runs at least one layer and one cycle, and at most {} layers in all",
             path.display(),
             u128::BITS
@@ -49,14 +55,11 @@ pub(in crate::runtime::load::family) fn hrm_text(
     architecture.qkv_layout = QkvLayout::GateStacked;
     architecture.attention_gate = Some(GateFunction::Sigmoid);
     architecture.fused_feed_forward = true;
-    architecture.query_key_value_bias = flag(raw, "attention_bias");
+    architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
     architecture.output_bias = architecture.query_key_value_bias;
-    architecture.feed_forward_bias = flag(raw, "mlp_bias");
-    architecture.embedding_multiplier = number(raw, "embedding_scale");
+    architecture.feed_forward_bias = flag(raw, "mlp_bias", path)?;
+    architecture.embedding_multiplier = number(raw, "embedding_scale", path)?;
     architecture.recurrence = Some(recurrence);
-    architecture.prefix_lm = raw
-        .get("prefix_lm")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    architecture.prefix_lm = flag_or(raw, "prefix_lm", true, path)?;
     Ok(())
 }

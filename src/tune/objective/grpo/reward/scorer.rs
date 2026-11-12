@@ -12,8 +12,17 @@
 //! pointer stops the run with what it answered: a reward that is missing is
 //! not zero.
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde_json::{Value, json};
+
+use crate::failures::{
+    refuse,
+    tune::policy::{
+        BEARER_EMPTY, BEARER_NOT_UNICODE, SCORER_ANSWER_UNREADABLE, SCORER_FAILING,
+        SCORER_FIELD_ABSENT, SCORER_LIMITED, SCORER_NO_NUMBER, SCORER_NOT_JSON, SCORER_NOT_TEXT,
+        SCORER_POINTER_INVALID, SCORER_REFUSED, SCORER_UNAUTHORIZED, SCORER_UNREACHABLE,
+    },
+};
 
 pub struct Scorer {
     url: String,
@@ -29,22 +38,30 @@ impl Scorer {
         if !lowered.starts_with("http://") && !lowered.starts_with("https://") {
             return Ok(None);
         }
+        let shown = format!("{source:?}");
         let Some((url, pointer)) = source.split_once('#') else {
-            bail!(
-                "reward scorer {source:?} names no field: end it with #/<json pointer> to the reward, for example #/score"
-            );
+            return Err(refuse(&SCORER_FIELD_ABSENT, &[("value", &shown)]));
         };
         if !pointer.starts_with('/') {
-            bail!("reward scorer field {pointer:?} is not a JSON pointer; it starts with /");
+            return Err(refuse(
+                &SCORER_POINTER_INVALID,
+                &[("value", &shown), ("pointer", &format!("{pointer:?}"))],
+            ));
         }
         let bearer = match std::env::var("STER_REWARD_BEARER") {
             Ok(value) if value.trim().is_empty() => {
-                bail!("STER_REWARD_BEARER is present but empty");
+                return Err(refuse(
+                    &BEARER_EMPTY,
+                    &[("bytes", &value.len().to_string()), ("url", url)],
+                ));
             }
             Ok(value) => Some(value),
             Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                bail!("STER_REWARD_BEARER is not valid Unicode");
+            Err(std::env::VarError::NotUnicode(raw)) => {
+                return Err(refuse(
+                    &BEARER_NOT_UNICODE,
+                    &[("bytes", &raw.len().to_string()), ("url", url)],
+                ));
             }
         };
         Ok(Some(Self {
@@ -71,42 +88,78 @@ impl Scorer {
                     .send_string(&json!({"prompt": prompt, "text": text}).to_string())
             },
         );
+        let url = self.url.as_str();
+        let unreadable = |error: std::io::Error| {
+            let cause = if error.kind() == std::io::ErrorKind::InvalidData {
+                &SCORER_NOT_TEXT
+            } else {
+                &SCORER_ANSWER_UNREADABLE
+            };
+            refuse(
+                cause,
+                &[
+                    ("url", url),
+                    ("kind", &crate::failures::file::kind(&error)),
+                    ("error", &error.to_string()),
+                ],
+            )
+        };
         let body = match sent {
-            Ok(response) => response
-                .into_string()
-                .with_context(|| format!("reading the reward scorer's answer from {}", self.url))?,
+            Ok(response) => response.into_string().map_err(unreadable)?,
             Err(ureq::Error::Status(status, response)) => {
-                let body = response.into_string().with_context(|| {
-                    format!(
-                        "reading the reward scorer refusal from {} with HTTP {status}",
-                        self.url
-                    )
-                })?;
-                bail!(
-                    "the reward scorer {} answered HTTP {status}: {body}",
-                    self.url
-                )
+                let body = response.into_string().map_err(unreadable)?;
+                let cause = match status {
+                    401 | 403 => &SCORER_UNAUTHORIZED,
+                    429 => &SCORER_LIMITED,
+                    500..=599 => &SCORER_FAILING,
+                    _ => &SCORER_REFUSED,
+                };
+                let bearer = if self.bearer.is_some() { "set" } else { "unset" };
+                return Err(refuse(
+                    cause,
+                    &[
+                        ("url", url),
+                        ("status", &status.to_string()),
+                        ("bearer", bearer),
+                        ("body", &wisent_errors::trim_detail(&body, 240)),
+                    ],
+                ));
             }
             Err(ureq::Error::Transport(transport)) => {
-                bail!(
-                    "the reward scorer {} could not be reached: {transport}",
-                    self.url
-                )
+                return Err(refuse(
+                    &SCORER_UNREACHABLE,
+                    &[
+                        ("url", url),
+                        ("kind", &format!("{:?}", transport.kind())),
+                        ("error", &transport.to_string()),
+                    ],
+                ));
             }
         };
-        let answer: Value = serde_json::from_str(&body).with_context(|| {
-            format!(
-                "the reward scorer {} answered with something other than JSON: {body}",
-                self.url
+        let answer: Value = serde_json::from_str(&body).map_err(|error| {
+            refuse(
+                &SCORER_NOT_JSON,
+                &[
+                    ("url", url),
+                    ("error", &error.to_string()),
+                    ("size", &body.len().to_string()),
+                    ("line", &error.line().to_string()),
+                    ("column", &error.column().to_string()),
+                    ("body", &wisent_errors::trim_detail(&body, 240)),
+                ],
             )
         })?;
         answer
             .pointer(&self.pointer)
             .and_then(Value::as_f64)
-            .with_context(|| {
-                format!(
-                    "the reward scorer {} answered without a number at {}: {body}",
-                    self.url, self.pointer
+            .ok_or_else(|| {
+                refuse(
+                    &SCORER_NO_NUMBER,
+                    &[
+                        ("url", url),
+                        ("pointer", &self.pointer),
+                        ("body", &wisent_errors::trim_detail(&body, 240)),
+                    ],
                 )
             })
     }

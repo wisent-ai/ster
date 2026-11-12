@@ -100,7 +100,7 @@ impl BlockIndexer {
                 .flatten_all()?
                 .to_vec1::<f32>()?;
             if let Some(angles) = &angles {
-                rotate(&mut values, head_dim, branch_heads, sequence, angles)?;
+                rotate(&mut values, head_dim, branch_heads, sequence, angles);
             }
             Tensor::from_vec(
                 values,
@@ -122,12 +122,9 @@ impl BlockIndexer {
         if keys.div_ceil(block) <= top_blocks {
             return Ok(None);
         }
+        // The config reading holds the query heads a multiple of the index
+        // heads (`index_fits`), so each index head leads `repeats` of them.
         let repeats = heads / groups;
-        if repeats * groups != heads {
-            candle_core::bail!(
-                "layer {layer} has {heads} query heads, which its {groups} index heads do not divide into equal groups"
-            );
-        }
         let query = branch(&self.query, &self.query_norm, groups)?;
         // `[batch, sequence · groups, keys]` scores, unscaled.
         let scores = query.matmul(&key.t()?.contiguous()?)?.to_vec3::<f32>()?;
@@ -183,24 +180,19 @@ impl BlockIndexer {
 /// Rotate every `head_dim`-wide head of `values`, laid out as `[batch,
 /// sequence, heads, head_dim]`, by its position's angles: the first half
 /// against the second half of the rotated share, as Transformers'
-/// `rotate_half` does, and the rest of the head passed through.
+/// `rotate_half` does, and the rest of the head passed through. The config
+/// reading holds the rotated share within an index head (`index_fits`).
 fn rotate(
     values: &mut [f32],
     head_dim: usize,
     heads: usize,
     sequence: usize,
     (cos, sin): &(Vec<Vec<f32>>, Vec<Vec<f32>>),
-) -> candle_core::Result<()> {
+) {
     for (index, head) in values.chunks_mut(head_dim).enumerate() {
         let offset = (index / heads) % sequence;
         let (cos, sin) = (&cos[offset], &sin[offset]);
         let half = cos.len();
-        if half + half > head_dim {
-            candle_core::bail!(
-                "the index heads of {head_dim} components cannot rotate {} of them",
-                half + half
-            );
-        }
         let (first, rest) = head.split_at_mut(half);
         for (((leading, trailing), cos), sin) in first
             .iter_mut()
@@ -213,5 +205,4 @@ fn rotate(
             *trailing = latter * cos + former * sin;
         }
     }
-    Ok(())
 }

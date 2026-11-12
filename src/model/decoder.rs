@@ -1,28 +1,27 @@
 //! The whole decoder: embeddings, the stack of blocks, the final norm and
 //! the head — plus the one entry every caller runs a forward pass through.
 
-use std::collections::BTreeMap;
+mod decode;
+mod embeddings;
+mod load;
+mod stack;
 
-use anyhow::{Result, bail};
-use candle_core::{DType, IndexOp, Tensor};
-use candle_nn::{Embedding, Linear, Module, VarBuilder, embedding};
+use anyhow::Result;
+use candle_core::Tensor;
+use candle_nn::{Embedding, Linear};
 use candle_transformers::models::llama::Config;
 
+use crate::failures::lifted;
 use crate::lora::Adapters;
 
 use super::{
-    Architecture, Cache, ForwardOutput, Mode, Names, Positions, Readout, SteeringPlan,
-    attention::padded_causal_mask,
+    Architecture, Cache, ForwardOutput, Mode, Readout, SteeringPlan,
+    attention::attend::padded_causal_mask,
     deepseek4::HyperHead,
     depth::DepthMix,
-    layer::{
-        DecoderLayer, LayerInputs,
-        altup::StreamProjections,
-        norm::{Norm, NormSpec},
-        projection,
-        shared::SharedBlock,
-    },
+    layer::{DecoderLayer, altup::StreamProjections, norm::Norm},
 };
+use embeddings::{NgramEmbeddings, PerLayerEmbeddings};
 
 #[derive(Debug, Clone)]
 pub struct SteeringLlama {
@@ -53,319 +52,6 @@ pub struct SteeringLlama {
 }
 
 impl SteeringLlama {
-    pub fn load(
-        builder: VarBuilder<'_>,
-        config: Config,
-        architecture: Architecture,
-    ) -> Result<Self> {
-        Ok(Self::load_with_adapters(
-            builder,
-            config,
-            architecture,
-            Adapters::default(),
-        )?)
-    }
-
-    /// Loads the frozen base and attaches `adapters`.
-    ///
-    /// The base weights come from `builder`, which Ster maps read-only out of
-    /// safetensors; only the adapter factors were ever registered in a `VarMap`.
-    /// Attaching them here therefore cannot make a base weight trainable, which
-    /// is the property the whole training path rests on.
-    pub fn load_with_adapters(
-        builder: VarBuilder<'_>,
-        config: Config,
-        mut architecture: Architecture,
-        adapters: crate::lora::Adapters,
-    ) -> candle_core::Result<Self> {
-        // A multimodal checkpoint keeps the language model below a wrapper
-        // (Gemma 3's `language_model`); the vision tower beside it is never
-        // mapped.
-        // The head may sit outside it, at the checkpoint's root (Qwen3.5's
-        // and MuseGlimmer's `lm_head`).
-        let outer = builder.clone();
-        let builder = if architecture.names.wrapper.is_empty() {
-            builder
-        } else {
-            builder.pp(architecture.names.wrapper)
-        };
-        // A checkpoint saved from the base model drops the family's root
-        // (`wte` rather than `transformer.wte`); which one this is shows in
-        // whether the embedding is where the root says.
-        if !builder.contains_tensor(&format!("{}.weight", architecture.names.embeddings)) {
-            architecture.names = architecture.names.without_root();
-        }
-        // Transformers saves Kimi-K2.5's decoder layers as `model.blocks`
-        // where Moonshot's release keeps `model.layers`; which one this is
-        // shows in where the first layer's norm is.
-        let first_norm =
-            |layers: &str| format!("{layers}.0.{}.weight", architecture.names.attention_norm);
-        if architecture.names.layers == Names::LLAMA.layers
-            && !builder.contains_tensor(&first_norm(architecture.names.layers))
-            && builder.contains_tensor(&first_norm(Names::BLOCKS_LAYERS))
-        {
-            architecture.names.layers = Names::BLOCKS_LAYERS;
-        }
-        let names = architecture.names;
-        let embeddings = embedding(
-            config.vocab_size,
-            config.hidden_size,
-            builder.pp(names.embeddings),
-        )?;
-        let positions = match architecture.positions {
-            Positions::Learned { offset } => Some((
-                embedding(
-                    config.max_position_embeddings + offset,
-                    config.hidden_size,
-                    builder.pp(names.positions),
-                )?,
-                offset,
-            )),
-            _ => None,
-        };
-        let spec = NormSpec::of(&architecture);
-        // BLOOM's embedding norm is stored; MuseGlimmer's is weightless and
-        // names no tensor.
-        let embedding_norm = if architecture.embedding_norm {
-            Some(if names.embedding_norm.is_empty() {
-                spec.unscaled(config.hidden_size, &builder)?
-            } else {
-                spec.load(config.hidden_size, builder.pp(names.embedding_norm))?
-            })
-        } else {
-            None
-        };
-        let lm_head = if config.tie_word_embeddings {
-            let bias = if architecture.lm_head_bias {
-                Some(builder.pp(names.lm_head).get(config.vocab_size, "bias")?)
-            } else {
-                None
-            };
-            Linear::new(embeddings.embeddings().clone(), bias)
-        } else {
-            let stored = |builder: &VarBuilder<'_>, name: &str| {
-                builder.contains_tensor(&format!("{name}.weight"))
-            };
-            // DeepSeek-V4's own checkpoints keep the head as `head`.
-            let name = if !stored(&builder, names.lm_head)
-                && !stored(&outer, names.lm_head)
-                && stored(&builder, "head")
-            {
-                "head"
-            } else {
-                names.lm_head
-            };
-            let head = if stored(&builder, name) {
-                &builder
-            } else {
-                &outer
-            };
-            projection(
-                config.hidden_size,
-                config.vocab_size,
-                architecture.lm_head_bias,
-                false,
-                head.pp(name),
-            )?
-        };
-        let final_spec = if architecture.plain_final_norm {
-            NormSpec {
-                offset: false,
-                ..spec
-            }
-        } else {
-            spec
-        };
-        let final_norm = final_spec.load(config.hidden_size, builder.pp(names.final_norm))?;
-        let per_layer = match architecture.per_layer_input {
-            Some(per_layer) => {
-                let root = if names.root.is_empty() {
-                    builder.clone()
-                } else {
-                    builder.pp(names.root)
-                };
-                let packed = config.num_hidden_layers * per_layer.width;
-                Some(PerLayerEmbeddings {
-                    embeddings: embedding(
-                        per_layer.vocab,
-                        packed,
-                        root.pp("embed_tokens_per_layer"),
-                    )?,
-                    projection: candle_nn::linear_no_bias(
-                        config.hidden_size,
-                        packed,
-                        root.pp("per_layer_model_projection"),
-                    )?,
-                    norm: spec.load(per_layer.width, root.pp("per_layer_projection_norm"))?,
-                    width: per_layer.width,
-                })
-            }
-            None => None,
-        };
-        let ngram = match architecture.ngram {
-            Some(spec) => {
-                let root = if names.root.is_empty() {
-                    builder.clone()
-                } else {
-                    builder.pp(names.root)
-                };
-                Some(NgramEmbeddings::load(
-                    spec,
-                    config.vocab_size,
-                    config.hidden_size,
-                    root.pp("ngram_embeddings"),
-                )?)
-            }
-            None => None,
-        };
-        let streams = match architecture.altup_streams {
-            Some(count) => {
-                let root = if names.root.is_empty() {
-                    builder.clone()
-                } else {
-                    builder.pp(names.root)
-                };
-                Some(StreamProjections::load(&root, config.hidden_size, count)?)
-            }
-            None => None,
-        };
-        // Zamba2's shared blocks are mapped once, from the first hybrid
-        // layers that use them, and every later use shares their tensors.
-        let shared = match architecture.shared_blocks {
-            Some(blocks) => {
-                let owners: Vec<usize> = blocks.layers().take(blocks.blocks).collect();
-                owners
-                    .iter()
-                    .map(|owner| {
-                        let block_builder =
-                            builder.pp(format!("{}.{owner}.shared_transformer", names.layers));
-                        let block = SharedBlock::load(
-                            &block_builder,
-                            &config,
-                            &architecture,
-                            *owner,
-                            blocks,
-                        )?;
-                        Ok((block, block_builder))
-                    })
-                    .collect::<candle_core::Result<Vec<_>>>()?
-            }
-            None => Vec::new(),
-        };
-        // A looped model (Nanbeige's `num_loops`) runs its stored layers
-        // more than once; each later pass reuses the first pass's tensors.
-        // LongCat-Flash's stored layers are two Ster layers each, read under
-        // their halves' names.
-        // HRM-Text's two stacks are stored apart, each below its own path.
-        let stored = match (architecture.recurrence, architecture.loops) {
-            (Some(recurrence), _) => 2 * recurrence.per_stack,
-            (None, Some(loops)) => loops.physical,
-            (None, None) => config.num_hidden_layers,
-        };
-        let physical = (0..stored)
-            .map(|index| {
-                let block = architecture
-                    .shared_blocks
-                    .filter(|blocks| {
-                        index < u128::BITS as usize && blocks.hybrid_layers & (1u128 << index) != 0
-                    })
-                    .and_then(|blocks| shared.get(blocks.slot(index) % blocks.blocks))
-                    .map(|(block, block_builder)| (block, block_builder));
-                let (source, layer_names) = architecture.stored_layer(index);
-                let half;
-                let layer_architecture = if layer_names == architecture.names {
-                    &architecture
-                } else {
-                    half = Architecture {
-                        names: layer_names,
-                        ..architecture.clone()
-                    };
-                    &half
-                };
-                DecoderLayer::load(
-                    builder.pp(format!(
-                        "{}.{source}",
-                        if architecture.recurrence.is_some() {
-                            layer_names.layers
-                        } else {
-                            names.layers
-                        }
-                    )),
-                    &config,
-                    layer_architecture,
-                    index,
-                    &adapters,
-                    block,
-                )
-            })
-            .collect::<candle_core::Result<Vec<_>>>()?;
-        let layers = (0..config.num_hidden_layers)
-            .map(|index| match architecture.recurrence {
-                Some(recurrence) => physical[recurrence.stored(index)].clone(),
-                None => physical[index % stored].clone(),
-            })
-            .collect();
-        let low_start = match architecture.recurrence {
-            Some(_) => Some(builder.get(config.hidden_size, "model.z_L_init")?),
-            None => None,
-        };
-        // Kimi-K3's last mix, of every block sum and the last running sum,
-        // below the model's root.
-        let depth_output = match architecture.depth_block_size {
-            Some(_) => {
-                let root = if names.root.is_empty() {
-                    builder.clone()
-                } else {
-                    builder.pp(names.root)
-                };
-                Some(DepthMix::load(
-                    &root,
-                    config.hidden_size,
-                    "output_attn_res_norm",
-                    "output_attn_res_proj",
-                    architecture.norm_eps,
-                )?)
-            }
-            None => None,
-        };
-        // DeepSeek-V4's collapse of its last streams, below the model's root;
-        // GLM-5-Next averages them and stores nothing.
-        let hyper_head = match architecture.hyper_connections {
-            Some(spec) if spec.learned_head => {
-                let root = if names.root.is_empty() {
-                    builder.clone()
-                } else {
-                    builder.pp(names.root)
-                };
-                Some(HyperHead::load(
-                    &root,
-                    config.hidden_size,
-                    spec.streams,
-                    spec.eps,
-                    architecture.norm_eps,
-                )?)
-            }
-            _ => None,
-        };
-        Ok(Self {
-            embeddings,
-            positions,
-            embedding_norm,
-            layers,
-            per_layer,
-            ngram,
-            streams,
-            low_start,
-            depth_output,
-            hyper_head,
-            final_norm,
-            lm_head,
-            config,
-            architecture,
-            adapters,
-        })
-    }
-
     pub fn adapters(&self) -> &crate::lora::Adapters {
         &self.adapters
     }
@@ -386,18 +72,19 @@ impl SteeringLlama {
         steering: Option<&SteeringPlan>,
         capture_layers: &[usize],
     ) -> Result<ForwardOutput> {
-        Ok(self.forward_pass(
+        self.forward_pass(
             tokens,
             index_pos,
             cache,
             steering,
             capture_layers,
             Mode::DECODE,
-        )?)
+        )
     }
 
     /// `mode` picks the kernels, the adapter route and the readout; every
-    /// other argument is unchanged.
+    /// other argument is unchanged. A refusal a layer declared comes out as
+    /// that refusal.
     pub fn forward_pass(
         &self,
         tokens: &Tensor,
@@ -406,7 +93,7 @@ impl SteeringLlama {
         steering: Option<&SteeringPlan>,
         capture_layers: &[usize],
         mode: Mode,
-    ) -> candle_core::Result<ForwardOutput> {
+    ) -> Result<ForwardOutput> {
         self.decode(
             tokens,
             index_pos,
@@ -416,6 +103,7 @@ impl SteeringLlama {
             None,
             mode,
         )
+        .map_err(lifted)
     }
 
     /// A batch of unequal-length sequences in a single pass.
@@ -459,41 +147,39 @@ impl SteeringLlama {
         mode: Mode,
     ) -> Result<ForwardOutput> {
         let (batch, sequence) = tokens.dims2()?;
-        if batch == 0 || sequence == 0 {
-            bail!(
-                "a batched forward needs at least one row of at least one token; got {batch} rows of {sequence} tokens"
-            );
-        }
-        if lengths.len() != batch {
-            bail!(
-                "a batched forward got {} lengths for {batch} rows",
-                lengths.len()
-            );
-        }
-        if cache.use_kv_cache {
-            bail!(
-                "a batched forward cannot share one key-value cache across rows; this call has use_kv_cache set"
-            );
-        }
-        if sequence > self.config.max_position_embeddings {
-            bail!(
-                "a batch {sequence} tokens wide exceeds the {} positions this model was built for",
-                self.config.max_position_embeddings
-            );
-        }
-        if matches!(mode.readout, Readout::LastPosition) {
-            bail!(
-                "a batched forward cannot read one last position, because every row ends somewhere else"
-            );
-        }
-        for (row, &length) in lengths.iter().enumerate() {
-            if length == 0 {
-                bail!("row {row} of the batch holds no tokens");
-            }
-            if length > sequence {
-                bail!("row {row} claims {length} tokens in a batch only {sequence} wide");
-            }
-        }
+        // Every caller is `Runtime::forward_rows`, which pads encoded rows
+        // (each of at least one token) to the longest, never past the limit
+        // its run clamped to `max_position_embeddings`, with no cache and a
+        // readout of every position: each of these is a defect of a caller,
+        // not of anything a run was given.
+        assert!(
+            batch > 0 && sequence > 0,
+            "a batched forward needs at least one row of at least one token"
+        );
+        assert_eq!(
+            lengths.len(),
+            batch,
+            "a batched forward gets one length per row"
+        );
+        assert!(
+            !cache.use_kv_cache,
+            "a batched forward cannot share one key-value cache across rows"
+        );
+        assert!(
+            sequence <= self.config.max_position_embeddings,
+            "a batch {sequence} tokens wide exceeds the {} positions this model was built for",
+            self.config.max_position_embeddings
+        );
+        assert!(
+            !matches!(mode.readout, Readout::LastPosition),
+            "a batched forward cannot read one last position, because every row ends somewhere else"
+        );
+        assert!(
+            lengths
+                .iter()
+                .all(|&length| length > 0 && length <= sequence),
+            "every row of a batch holds tokens and fits its width"
+        );
         let full = padded_causal_mask(lengths, sequence, None, None, tokens.device())?;
         let windowed = match self.architecture.sliding_window {
             Some(window) if self.architecture.sliding_layers != 0 => Some(padded_causal_mask(
@@ -506,242 +192,8 @@ impl SteeringLlama {
             _ => None,
         };
         let masks = BatchMasks { full, windowed };
-        Ok(self.decode(tokens, 0, cache, steering, &[], Some(&masks), mode)?)
-    }
-
-    /// The decoder loop both entry points run.
-    ///
-    /// `masks`, when present, replace the cache's causal mask for every layer:
-    /// a batched caller builds the combined causal and key-padding mask up
-    /// front — once for full attention and once more for a sliding window, if
-    /// the model has one — and every layer takes the one its attention uses,
-    /// because the constraint depends only on the batch's lengths and the
-    /// layer's window. `None` is the historical single-sequence path, which
-    /// still asks the cache for a mask keyed by shape and window alone — a
-    /// padding mask has no such key, since two batches of the same shape can
-    /// pad differently, which is why it is built per call and never memoised.
-    fn decode(
-        &self,
-        tokens: &Tensor,
-        index_pos: usize,
-        cache: &mut Cache,
-        steering: Option<&SteeringPlan>,
-        capture_layers: &[usize],
-        masks: Option<&BatchMasks>,
-        mode: Mode,
-    ) -> candle_core::Result<ForwardOutput> {
-        let (_, sequence) = tokens.dims2()?;
-        let mut hidden = self.embeddings.forward(tokens)?;
-        if let Some(ngram) = &self.ngram {
-            hidden = ngram.embed(tokens, hidden, index_pos, cache)?;
-        }
-        if let Some((table, offset)) = &self.positions {
-            let first = (index_pos + offset) as u32;
-            let rows = Tensor::arange(first, first + sequence as u32, tokens.device())?;
-            hidden = hidden.broadcast_add(&table.forward(&rows)?.unsqueeze(0)?)?;
-        }
-        if let Some(norm) = &self.embedding_norm {
-            hidden = norm.forward(&hidden, mode.pass)?;
-        }
-        if let Some(multiplier) = self.architecture.embedding_multiplier {
-            // Gemma multiplies the embedding by `sqrt(hidden_size)` and Granite
-            // by its `embedding_multiplier`, in the embedding's own dtype,
-            // before the first block.
-            hidden = (hidden * multiplier)?;
-        }
-        // Zamba2's hybrid layers read the embeddings beside the hidden state;
-        // Gemma 4 projects its per-layer inputs from them.
-        let embedded = hidden.clone();
-        let per_layer = match &self.per_layer {
-            Some(per_layer) => {
-                Some(per_layer.inputs(tokens, &embedded, self.layers.len(), mode)?)
-            }
-            None => None,
-        };
-        let mut activations = BTreeMap::new();
-        let mut positions = BTreeMap::new();
-        // Solar's block skip connections keep up to two earlier hidden states.
-        let mut kept: [Option<Tensor>; 2] = [None, None];
-        // Gemma 3n's AltUp streams beside the first, which is `hidden`.
-        let mut rest = match &self.streams {
-            Some(streams) => Some(streams.spread(&hidden)?),
-            None => None,
-        };
-        // HRM-Text's high and low states: the high one starts as the scaled
-        // embedding, the low one as `z_L_init` at every position.
-        let mut states = match (self.architecture.recurrence, &self.low_start) {
-            (Some(_), Some(low)) => Some((
-                hidden.clone(),
-                low.to_dtype(hidden.dtype())?
-                    .broadcast_as(hidden.shape())?
-                    .contiguous()?,
-            )),
-            _ => None,
-        };
-        // Kimi-K3's finished block sums; `hidden` is the running sum.
-        let mut blocks: Vec<Tensor> = Vec::new();
-        // DeepSeek-V4's and GLM-5-Next's residual streams, each the
-        // embedding at first; `hidden` is their mean, and steering moves
-        // every one of them.
-        let mut hyper = match self.architecture.hyper_connections {
-            Some(spec) => {
-                let (batch, sequence, width) = hidden.dims3()?;
-                Some(
-                    hidden
-                        .unsqueeze(2)?
-                        .expand((batch, sequence, spec.streams, width))?
-                        .contiguous()?,
-                )
-            }
-            _ => None,
-        };
-        if hyper.is_some()
-            || self
-                .architecture
-                .experts
-                .as_ref()
-                .is_some_and(|experts| experts.hash_layers != 0)
-        {
-            cache.token_ids = Some(tokens.flatten_all()?.to_vec1::<u32>()?);
-        }
-        for (index, layer) in self.layers.iter().enumerate() {
-            // A pass of either stack reads the two states summed.
-            if let (Some(recurrence), Some((high, low))) = (self.architecture.recurrence, &states) {
-                if index % recurrence.per_stack == 0 {
-                    hidden = (high + low)?;
-                }
-            }
-            // Nanbeige normalises the hidden state by the final norm after
-            // every pass but the last, whose norm is the model's own.
-            if let Some(loops) = self.architecture.loops {
-                if loops.norm_between && index > 0 && index % loops.physical == 0 {
-                    hidden = self.final_norm.forward(&hidden, mode.pass)?;
-                }
-            }
-            if let Some(skips) = &self.architecture.skip_connections {
-                hidden = skips.apply(index, hidden, &mut kept)?;
-            }
-            let mask = masks.map(|masks| masks.for_window(layer.window()));
-            let inputs = LayerInputs {
-                embedded: &embedded,
-                per_layer: per_layer
-                    .as_ref()
-                    .map(|all| all.i((.., .., index, ..)))
-                    .transpose()?,
-            };
-            hidden = match rest.take() {
-                Some(others) => {
-                    let mut all = Vec::with_capacity(others.len() + 1);
-                    all.push(hidden);
-                    all.extend(others);
-                    let mut corrected = layer
-                        .forward_streams(&all, &inputs, index_pos, index, cache, mask, mode)?;
-                    let first = corrected.remove(0);
-                    rest = Some(corrected);
-                    first
-                }
-                None if hyper.is_some() => {
-                    let streams = match hyper.take() {
-                        Some(streams) => layer.forward_hyper(
-                            &streams, &inputs, index_pos, index, cache, mask, mode,
-                        )?,
-                        None => candle_core::bail!("layer {index} lost the residual streams"),
-                    };
-                    let mean = streams.mean(2)?;
-                    hyper = Some(streams);
-                    mean
-                }
-                None if self.depth_output.is_some() => layer.forward_depth(
-                    &hidden,
-                    &mut blocks,
-                    &inputs,
-                    index_pos,
-                    index,
-                    cache,
-                    mask,
-                    mode,
-                )?,
-                None => layer.forward(&hidden, &inputs, index_pos, index, cache, mask, mode)?,
-            };
-            if capture_layers.binary_search(&index).is_ok() {
-                let activation = hidden
-                    .i((0, sequence - 1, ..))?
-                    .to_dtype(DType::F32)?
-                    .to_vec1::<f32>()?;
-                activations.insert(index, activation);
-                // Every position's state, `[sequence, hidden]`: a view of the
-                // tensor the layer wrote, so no copy is made until it is read.
-                positions.insert(index, hidden.i(0)?);
-            }
-            if let Some(plan) = steering {
-                if let Some(vector) = plan.vector(index) {
-                    let scaled = (vector * plan.strength)?.reshape((1, 1, plan.hidden_size))?;
-                    hidden = hidden.broadcast_add(&scaled).map_err(|error| {
-                        error.context(format!("failed to apply steering at layer {index}"))
-                    })?;
-                    if let Some(streams) = hyper.take() {
-                        hyper = Some(streams.broadcast_add(&scaled.unsqueeze(2)?)?);
-                    }
-                }
-            }
-            // The pass ends in the stack's scale-free norm and replaces its
-            // own state.
-            if let (Some(recurrence), Some((high, low))) =
-                (self.architecture.recurrence, states.as_mut())
-            {
-                if index % recurrence.per_stack == recurrence.per_stack - 1 {
-                    hidden = self.final_norm.forward(&hidden, mode.pass)?;
-                    if recurrence.low(index) {
-                        *low = hidden.clone();
-                    } else {
-                        *high = hidden.clone();
-                    }
-                }
-            }
-        }
-        let hidden = match (&self.streams, &rest) {
-            (Some(streams), Some(others)) => streams.join(&hidden, others)?,
-            _ => hidden,
-        };
-        let hidden = match &self.depth_output {
-            Some(mix) => mix.mix(&blocks, &hidden)?,
-            None => hidden,
-        };
-        let hidden = match (&self.hyper_head, &hyper) {
-            (Some(head), Some(streams)) => head.collapse(streams)?,
-            (None, Some(streams)) => streams.mean(2)?,
-            _ => hidden,
-        };
-        // HRM-Text's last pass already ended in its norm.
-        let hidden = if states.is_some() {
-            hidden
-        } else {
-            self.final_norm.forward(&hidden, mode.pass)?
-        };
-        // Decoding only ever samples the next token, so it projects one row and
-        // leaves the rest of the vocabulary matmul undone. Anything that scores
-        // a sequence against its own successors needs every position, and a
-        // reward head needs no vocabulary at all.
-        let logits = match mode.readout {
-            Readout::LastPosition => {
-                let last = hidden.i((.., sequence - 1, ..))?.contiguous()?;
-                Some(self.soft_cap(self.lm_head.forward(&last)?.to_dtype(DType::F32)?)?)
-            }
-            Readout::EveryPosition => Some(
-                self.soft_cap(
-                    self.lm_head
-                        .forward(&hidden.contiguous()?)?
-                        .to_dtype(DType::F32)?,
-                )?,
-            ),
-            Readout::Hidden => None,
-        };
-        Ok(ForwardOutput {
-            logits,
-            hidden: hidden.to_dtype(DType::F32)?,
-            activations,
-            positions,
-        })
+        self.decode(tokens, 0, cache, steering, &[], Some(&masks), mode)
+            .map_err(lifted)
     }
 }
 
@@ -765,181 +217,6 @@ impl SteeringLlama {
             Some(cap) => (logits / cap)?.tanh()? * cap,
             None => Ok(logits),
         }
-    }
-}
-
-/// Gemma 4's per-layer input tables, below the model root:
-/// `embed_tokens_per_layer`, `per_layer_model_projection` and
-/// `per_layer_projection_norm`.
-#[derive(Debug, Clone)]
-struct PerLayerEmbeddings {
-    embeddings: Embedding,
-    projection: Linear,
-    norm: Norm,
-    width: usize,
-}
-
-impl PerLayerEmbeddings {
-    /// Every layer's input, `[batch, sequence, layers, width]`: the token's
-    /// row of `embed_tokens_per_layer` times `sqrt(width)`, plus the scaled
-    /// embeddings projected, times `hidden_size^-0.5` and normed, the sum
-    /// times `2^-0.5`, as Transformers' `get_per_layer_inputs` and
-    /// `project_per_layer_inputs` compute them.
-    fn inputs(
-        &self,
-        tokens: &Tensor,
-        embedded: &Tensor,
-        layers: usize,
-        mode: Mode,
-    ) -> candle_core::Result<Tensor> {
-        let (batch, sequence) = tokens.dims2()?;
-        let hidden = embedded.dim(candle_core::D::Minus1)?;
-        let shape = (batch, sequence, layers, self.width);
-        let identity =
-            (self.embeddings.forward(tokens)? * (self.width as f64).sqrt())?.reshape(shape)?;
-        let context =
-            (self.projection.forward(embedded)? * (hidden as f64).powf(-0.5))?.reshape(shape)?;
-        let context = self.norm.forward(&context, mode.pass)?;
-        (context + identity)? * std::f64::consts::FRAC_1_SQRT_2
-    }
-}
-
-/// LongCat's n-gram tables, below the model root: `embedders.{i}` and
-/// `post_projs.{i}` for each of `splits · (neighbors - 1)` tables, as
-/// LongCat-Flash-Lite's `modeling_longcat_ngram.py` names them.
-#[derive(Debug, Clone)]
-struct NgramEmbeddings {
-    tables: Vec<(Embedding, Linear)>,
-    spec: super::NgramSpec,
-    vocab: u64,
-}
-
-impl NgramEmbeddings {
-    fn load(
-        spec: super::NgramSpec,
-        vocab: usize,
-        hidden: usize,
-        builder: VarBuilder<'_>,
-    ) -> candle_core::Result<Self> {
-        let count = spec.splits * spec.neighbors.saturating_sub(1);
-        if count == 0 || hidden % count != 0 {
-            candle_core::bail!(
-                "{count} n-gram tables cannot split a hidden width of {hidden} evenly (emb_split_num times emb_neighbor_num - 1)"
-            );
-        }
-        let width = hidden / count;
-        let tables = (0..count)
-            .map(|index| -> candle_core::Result<(Embedding, Linear)> {
-                Ok((
-                    embedding(
-                        Self::rows(spec, vocab, index),
-                        width,
-                        builder.pp(format!("embedders.{index}")),
-                    )?,
-                    candle_nn::linear_no_bias(
-                        width,
-                        hidden,
-                        builder.pp(format!("post_projs.{index}")),
-                    )?,
-                ))
-            })
-            .collect::<candle_core::Result<Vec<_>>>()?;
-        Ok(Self {
-            tables,
-            spec,
-            vocab: vocab as u64,
-        })
-    }
-
-    /// Table `index`'s height, which is also the modulus its hashes reduce by.
-    fn rows(spec: super::NgramSpec, vocab: usize, index: usize) -> usize {
-        spec.ratio * vocab + 2 * index + 1
-    }
-
-    /// `embedded` (the token embeddings of `tokens`) averaged with every
-    /// table's projected row, the n-grams reaching back into the tokens the
-    /// cache kept from the previous call when this call continues one.
-    /// Hashing follows `NgramEmbedding.forward`: for order `i` the id is
-    /// `token + Σ_{d=1}^{i-1} token_{-d} · vocab^d mod rows`, reduced mod
-    /// `rows`, a token before the start of its run (the sequence, or the
-    /// last `eos` up to and including it) counting as zero.
-    fn embed(
-        &self,
-        tokens: &Tensor,
-        embedded: Tensor,
-        index_pos: usize,
-        cache: &mut super::Cache,
-    ) -> candle_core::Result<Tensor> {
-        let (batch, sequence) = tokens.dims2()?;
-        let rows: Vec<Vec<u32>> = tokens.to_dtype(DType::U32)?.to_vec2()?;
-        let kept = self.spec.neighbors - 1;
-        let earlier = cache
-            .ngram_context
-            .take()
-            .filter(|_| cache.use_kv_cache && index_pos > 0);
-        let contexts: Vec<Vec<u32>> = rows
-            .iter()
-            .enumerate()
-            .map(|(row, tokens)| -> candle_core::Result<Vec<u32>> {
-                // The first call of a decode has no earlier tokens.
-                let mut context = match &earlier {
-                    Some(earlier) => match earlier.get(row) {
-                        Some(kept) => kept.clone(),
-                        None => candle_core::bail!(
-                            "the n-gram embedding kept the context of {} rows and was given row {row}",
-                            earlier.len()
-                        ),
-                    },
-                    None => Vec::new(),
-                };
-                context.extend_from_slice(tokens);
-                Ok(context)
-            })
-            .collect::<candle_core::Result<_>>()?;
-        if cache.use_kv_cache {
-            cache.ngram_context = Some(
-                contexts
-                    .iter()
-                    .map(|context| context[context.len().saturating_sub(kept)..].to_vec())
-                    .collect(),
-            );
-        }
-        let device = tokens.device();
-        let mut sum = embedded.clone();
-        for order in 2..=self.spec.neighbors {
-            for split in 0..self.spec.splits {
-                let index = (order - 2) * self.spec.splits + split;
-                let modulus = Self::rows(self.spec, self.vocab as usize, index) as u64;
-                let mut ids = Vec::with_capacity(batch * sequence);
-                for context in &contexts {
-                    let start = context.len() - sequence;
-                    let mut run_start = 0;
-                    for (position, token) in context.iter().enumerate() {
-                        if position >= start {
-                            let mut id = u64::from(*token);
-                            let mut power = 1u64;
-                            for back in 1..order {
-                                power = power * self.vocab % modulus;
-                                if position >= run_start + back {
-                                    id += u64::from(context[position - back]) * power;
-                                }
-                            }
-                            ids.push((id % modulus) as u32);
-                        }
-                        if *token == self.spec.eos {
-                            run_start = position + 1;
-                        }
-                    }
-                }
-                let ids = Tensor::from_vec(ids, (batch, sequence), device)?;
-                let (table, projection) = &self.tables[index];
-                sum = (sum
-                    + projection
-                        .forward(&table.forward(&ids)?)?
-                        .to_dtype(embedded.dtype())?)?;
-            }
-        }
-        sum / (1 + self.tables.len()) as f64
     }
 }
 

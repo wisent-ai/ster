@@ -8,10 +8,21 @@
 
 use std::{fs, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+
+use crate::failures::{
+    decide::calibration::{
+        CALIBRATION_FORM, CALIBRATION_MISSING, CALIBRATION_MODEL, CALIBRATION_SCHEMA,
+        CALIBRATION_TEMPERATURE,
+    },
+    file, refuse,
+};
 use serde::{Deserialize, Serialize};
 
 use super::answer::{QuestionLogits, argmax};
+
+/// What a calibration is called in a refusal of its file.
+const ROLE: &str = "the calibration";
 
 pub const SCHEMA: &str = "ster-calibration/1";
 
@@ -64,21 +75,29 @@ pub struct Metrics {
 
 impl Calibration {
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let shown = path.display().to_string();
+        let bytes = fs::read(path)
+            .map_err(|error| file::read::refusal_or(&CALIBRATION_MISSING, ROLE, path, &error))?;
         let calibration: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid calibration {}", path.display()))?;
+            .map_err(|error| file::json::refusal(ROLE, CALIBRATION_FORM, path, &error))?;
         if calibration.schema != SCHEMA {
-            bail!(
-                "calibration {} has schema {:?}; this Ster reads {SCHEMA}",
-                path.display(),
-                calibration.schema
-            );
+            return Err(refuse(
+                &CALIBRATION_SCHEMA,
+                &[
+                    ("path", &shown),
+                    ("schema", &calibration.schema),
+                    ("expected", SCHEMA),
+                ],
+            ));
         }
         if !(calibration.temperature.is_finite() && calibration.temperature > 0.0) {
-            bail!(
-                "calibration {} has a temperature that is not a positive number",
-                path.display()
-            );
+            return Err(refuse(
+                &CALIBRATION_TEMPERATURE,
+                &[
+                    ("path", &shown),
+                    ("temperature", &calibration.temperature.to_string()),
+                ],
+            ));
         }
         Ok(calibration)
     }
@@ -88,22 +107,29 @@ impl Calibration {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+            fs::create_dir_all(parent).map_err(|error| {
+                let left = "nothing was written";
+                file::write::refusal("creating the directory of", ROLE, path, left, &error)
+            })?;
         }
-        fs::write(path, serde_json::to_string_pretty(self)?)
-            .with_context(|| format!("failed to write {}", path.display()))
+        fs::write(path, crate::json::pretty(self)).map_err(|error| {
+            let left = "a calibration that was there may be emptied or cut short";
+            file::write::refusal("writing", ROLE, path, left, &error)
+        })
     }
 
     /// Refuses a calibration fitted on a different checkpoint than the one
     /// about to use it.
     pub fn check_model(&self, path: &Path, model: &str) -> Result<()> {
         if self.model != model {
-            bail!(
-                "calibration {} was fitted for model '{}', not '{model}'",
-                path.display(),
-                self.model
-            );
+            return Err(refuse(
+                &CALIBRATION_MODEL,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("fitted", &self.model),
+                    ("model", model),
+                ],
+            ));
         }
         Ok(())
     }
