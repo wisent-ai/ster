@@ -34,7 +34,8 @@ an_unknown_repository_is_refused() {
     --temperature 0 --seed 1 2>"$ROOT/stderr" </dev/null)
   status=$?
   set -e
-  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || true)
+  # grep exits 1 when every line was a wait line; any other failure stops the run.
+  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])
   printf '$ ster generate --model %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$MISSING" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq 1 ] || fail "an unknown repository exited $status, expected 1: $err"
   case "$err" in

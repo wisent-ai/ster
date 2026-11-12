@@ -39,7 +39,8 @@ generate() {
     --temperature 0 --seed 1 --chat-template off 2>"$ROOT/stderr" </dev/null)
   status=$?
   set -e
-  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || true)
+  # grep exits 1 when every line was a wait line; any other failure stops the run.
+  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])
   printf '$ ster generate --model %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$model" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "loading $model exited $status, expected $expected: $err"
 }

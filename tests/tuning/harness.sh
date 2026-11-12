@@ -19,7 +19,7 @@ mkdir -p "$ROOT/home"
 ROOT=$(cd "$ROOT" && pwd -P)
 REPORT="$ROOT/report.txt"
 export HOME="$ROOT/home" HF_HOME="$ROOT/home/huggingface"
-unset STER_REWARD_BEARER || true
+unset STER_REWARD_BEARER
 echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-locks diff --quiet || echo ' (dirty)')" >"$REPORT"
 echo "binary: $BIN" >>"$REPORT"
 
@@ -36,7 +36,8 @@ run() {
   out=$("$BIN" "$@" 2>"$ROOT/stderr" </dev/null)
   status=$?
   set -e
-  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || true)
+  # grep exits 1 when every line was a wait line; any other failure stops the run.
+  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])
   printf '$ ster %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$*" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "ster $* exited $status, expected $expected: $err"
 }

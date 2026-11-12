@@ -41,7 +41,8 @@ generate() {
     --temperature 0 --seed 1 2>"$ROOT/stderr" </dev/null)
   status=$?
   set -e
-  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || true)
+  # grep exits 1 when every line was a wait line; any other failure stops the run.
+  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])
   printf '$ ster generate %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$*" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "ster generate $* exited $status, expected $expected: $err"
 }

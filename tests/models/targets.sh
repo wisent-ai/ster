@@ -38,7 +38,8 @@ sft() {
     --output "$OUT" $TRAIN 2>"$ROOT/stderr" </dev/null)
   status=$?
   set -e
-  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || true)
+  # grep exits 1 when every line was a wait line; any other failure stops the run.
+  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])
   printf '$ ster tune sft --model %s --targets %s\nexit: %s\nstderr: %s\n\n' "$2" "$3" "$status" "$err" >>"$REPORT"
   [ "$status" -eq "$1" ] || fail "tune sft on $2 exited $status, expected $1: $err"
   [ ! -e "$OUT" ] || fail "a refused run wrote $OUT"
