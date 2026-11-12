@@ -1,4 +1,4 @@
-//! grpo.rs — group-relative policy optimization.
+//! Group-relative policy optimization.
 //!
 //! The other trainers here learn from text someone already wrote. This one
 //! learns from text the policy writes: for each prompt it draws a group of
@@ -55,7 +55,7 @@ use super::super::{
     schedule,
 };
 use crate::{
-    failures::{amend, tune::run::nothing_fits},
+    failures::amend,
     runtime::Runtime,
     workflow::{self, PromptSet},
 };
@@ -69,7 +69,7 @@ mod totals;
 pub use reward::{GrpoIteration, GrpoOptions, GrpoReport, Reward};
 pub use rollout::{Rollout, UserSimulator, rollout};
 
-use group::{group_loss, sample_group};
+use group::{fitting_prompts, group_loss, sample_group};
 use running::{Running, SUBJECT};
 use totals::Totals;
 
@@ -109,31 +109,7 @@ pub fn grpo(
         limit,
     } = options.preflight().open(runtime, varmap, &options.spec)?;
 
-    // The prompt is tokenized once here only to decide whether the prompt plus
-    // its longest possible completion can fit; the sampler tokenizes it again
-    // per draw and that encode is the one the scored sequence comes from.
-    let mut usable: Vec<usize> = Vec::with_capacity(prompts.prompts.len());
-    let mut lengths = Vec::with_capacity(prompts.prompts.len());
-    for (index, prompt) in prompts.prompts.iter().enumerate() {
-        let ids = runtime.encode(prompt).map_err(|error| {
-            amend(
-                error,
-                format!("it was prompt {index} of {}", prompts.prompts.len()),
-            )
-        })?;
-        lengths.push(ids.len() + max_new_tokens);
-        if ids.len() + max_new_tokens > limit {
-            workflow::progress(format!(
-                "skipping prompt {index}: {} prompt tokens plus {max_new_tokens} sampled tokens exceed the {limit} token limit",
-                ids.len()
-            ));
-            continue;
-        }
-        usable.push(index);
-    }
-    if usable.is_empty() {
-        return Err(nothing_fits("prompt", "train on", lengths, limit));
-    }
+    let usable = fitting_prompts(runtime, prompts, max_new_tokens, limit)?;
 
     let fingerprint = options.fingerprint(requested_reward, user.map(|(_, model)| model));
     let mut optimizer = AdamW::over(

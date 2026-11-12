@@ -238,9 +238,7 @@ cargo install --git https://github.com/wisent-ai/ster --features cuda --locked
 The crates.io name `ster` is currently unclaimed and is not Ster's release
 surface. `pip install ster` installs unrelated software from another publisher.
 
-Delivery through Stado and the checkpoint cache are covered in
-[installing and where downloads land](docs/guide/install.md).
-
+Delivery through Stado and the checkpoint cache: [installing and where downloads land](docs/guide/install.md).
 
 ## First steering workflow
 
@@ -285,18 +283,7 @@ it changes your data; it exits 1 when one failed
 
 ## Architecture
 
-The runtime uses Candle directly. Ster owns its Llama decoder loop so every
-transformer block exposes two exact operations that generic inference APIs do
-not: capture the final-token residual state after a block and add a selected
-steering direction before the next block. The same decoder can also run a
-differentiable pass, which is what makes fine-tuning possible at all: Candle's
-fused `rotary_emb::rope`, `ops::softmax_last_dim`, and `ops::rms_norm` kernels
-have no backward pass, so training selects composed equivalents at exactly those
-three call sites while inference keeps the fused ones. The same pass also
-chooses whether the attached adapters apply, which is what lets preference
-optimization score the frozen reference without a second copy of the weights.
-Tokenization, Safetensors loading, attention, KV caching, sampling, and device
-kernels remain native Rust.
+How one Candle decoder pass serves inference, steering and training: [architecture](docs/guide/start/architecture.md).
 
 ## Documentation and support
 

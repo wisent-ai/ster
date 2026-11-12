@@ -6,14 +6,16 @@ use candle_core::Tensor;
 
 use crate::{
     failures::{
-        refuse,
+        amend, refuse,
         tune::{
             objectives::{GROUP_TOO_SMALL, TURNS_NONE},
             policy::{GROUP_SPREAD_NOT_FINITE, REWARD_NOT_FINITE},
+            run::nothing_fits,
         },
     },
     model::Route,
     runtime::{Completion, Runtime},
+    workflow::{self, PromptSet},
 };
 
 use super::super::super::preflight::token_logprobs;
@@ -251,4 +253,40 @@ fn sequence(completion: &Completion) -> Vec<u32> {
     ids.extend_from_slice(&completion.prompt);
     ids.extend_from_slice(&completion.tokens);
     ids
+}
+
+/// The indices of `prompts` whose prompt plus its longest possible completion
+/// fits in `limit` tokens. Each that does not is skipped with a progress line,
+/// and a set none of whose prompts fits is refused. The prompt is tokenized
+/// once here only to decide that; the sampler tokenizes it again per draw and
+/// that encode is the one the scored sequence comes from.
+pub(super) fn fitting_prompts(
+    runtime: &Runtime,
+    prompts: &PromptSet,
+    max_new_tokens: usize,
+    limit: usize,
+) -> Result<Vec<usize>> {
+    let mut usable: Vec<usize> = Vec::with_capacity(prompts.prompts.len());
+    let mut lengths = Vec::with_capacity(prompts.prompts.len());
+    for (index, prompt) in prompts.prompts.iter().enumerate() {
+        let ids = runtime.encode(prompt).map_err(|error| {
+            amend(
+                error,
+                format!("it was prompt {index} of {}", prompts.prompts.len()),
+            )
+        })?;
+        lengths.push(ids.len() + max_new_tokens);
+        if ids.len() + max_new_tokens > limit {
+            workflow::progress(format!(
+                "skipping prompt {index}: {} prompt tokens plus {max_new_tokens} sampled tokens exceed the {limit} token limit",
+                ids.len()
+            ));
+            continue;
+        }
+        usable.push(index);
+    }
+    if usable.is_empty() {
+        return Err(nothing_fits("prompt", "train on", lengths, limit));
+    }
+    Ok(usable)
 }
