@@ -28,5 +28,13 @@ fn main() -> ExitCode {
     if status == 0 {
         return ExitCode::SUCCESS;
     }
-    u8::try_from(status).map_or(ExitCode::FAILURE, ExitCode::from)
+    match u8::try_from(status) {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!(
+                "ster: the exit status {status} of this failure does not fit a process exit status ({error}); ster exits 1"
+            );
+            ExitCode::FAILURE
+        }
+    }
 }
