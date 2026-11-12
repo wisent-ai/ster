@@ -10,10 +10,10 @@
 # declared sentence and exit status 2, nothing is written, and no model is
 # fetched. Writing pairs with a real model is tests/synthesis/judged.sh.
 #
-# Usage: tests/pairs/synthesize.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/pairs/synthesize.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/pairs-synthesize/$RUN"

@@ -6,7 +6,7 @@
 # names the selection, the segment at fault and the model's layers, and
 # writes no artifact. The run's home and fixture are tests/runtime/harness.sh's.
 #
-# Usage: tests/steering/vectors/layers.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/steering/vectors/layers.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=steering-layers . "$(dirname "$0")/../../runtime/harness.sh"
 # train EXIT SELECTION [FLAG...]: vector train at --layers SELECTION.
 train() {

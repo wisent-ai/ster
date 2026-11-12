@@ -5,7 +5,7 @@
 # decisions` itself. Every setting is refused before a file is read or a
 # model or server is asked, and no output is written.
 #
-# Usage: tests/decide/remote/pipeline.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/decide/remote/pipeline.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=pipeline . "$(dirname "$0")/../harness.sh"
 
 printf '{"context": "the sea is calm", "options": ["calm", "storm"], "label": 0}\n' >"$ROOT/rows.jsonl"

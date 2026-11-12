@@ -9,7 +9,7 @@
 # tune inspect`, which refuses it before any tensor is trusted. Every
 # refusal names the sidecar and the weights it read.
 #
-# Usage: tests/tuning/scales/sidecar.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/tuning/scales/sidecar.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=sidecar
 . "$(dirname "$0")/../harness.sh"
 

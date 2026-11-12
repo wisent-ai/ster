@@ -12,7 +12,7 @@
 # no trainer writes (a NaN factor, a head on an adapter, a key projection
 # of another width) are written as safetensors by hand.
 #
-# Usage: tests/tuning/runs/adapters.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/tuning/runs/adapters.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=adapters
 . "$(dirname "$0")/../harness.sh"
 

@@ -16,7 +16,7 @@
 #
 # Every command, its exit status and output go to the run's report.txt.
 #
-# Usage: STER=target/debug/ster STER_TEST_STADO=<stado> tests/synthesis/resolved.sh
+# Usage: STER=.build/kompilator/debug/ster STER_TEST_STADO=<stado> tests/synthesis/resolved.sh
 set -eu
 cd "$(dirname "$0")/../.."
 BIN=$(cd "$(dirname "${STER:?set STER to the ster binary under test}")" && pwd)/$(basename "$STER")

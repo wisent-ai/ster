@@ -5,7 +5,7 @@
 # example set, or one whose labels break a rule. Every refusal is made before
 # the checkpoint loads, and no calibration is written.
 #
-# Usage: tests/decide/examples.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/decide/examples.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=examples . "$(dirname "$0")/harness.sh"
 
 jq '{examples: [(. + {answers: {weather: "calm"}})]}' "$ROOT/ok.json" >"$ROOT/examples.json"

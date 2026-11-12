@@ -12,7 +12,7 @@
 #
 # Every command, its exit status and output go to the run's report.txt.
 #
-# Usage: tests/models/loading/settings.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/models/loading/settings.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=models-settings . "$(dirname "$0")/../../runtime/harness.sh"
 
 # config NAME JQ: a copy of the fixture whose config.json is the fixture's

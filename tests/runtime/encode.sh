@@ -11,7 +11,7 @@
 #   * a decision is refused when the vocabulary has no token for the answer
 #     letter, which the fixture's lower-case vocabulary lacks.
 #
-# Usage: tests/runtime/encode.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/runtime/encode.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=encode
 . "$(dirname "$0")/harness.sh"
 

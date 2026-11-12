@@ -5,7 +5,7 @@
 # states that are not finite. Neither writes an artifact. The run's home and
 # fixture are tests/runtime/harness.sh's.
 #
-# Usage: tests/steering/vectors/direction.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/steering/vectors/direction.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=steering-direction . "$(dirname "$0")/../../runtime/harness.sh"
 unwritten() {
   [ ! -e "$ROOT/out.json" ] || fail "a refused run wrote $ROOT/out.json"

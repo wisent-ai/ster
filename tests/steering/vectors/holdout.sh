@@ -6,7 +6,7 @@
 # all the same, which proves it was checked before any weight was read; and
 # nothing is written. The run's home is tests/runtime/harness.sh's.
 #
-# Usage: tests/steering/vectors/holdout.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/steering/vectors/holdout.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=steering-holdout . "$(dirname "$0")/../../runtime/harness.sh"
 # A model directory that does not exist: a refusal that names the holdout
 # rather than the missing checkpoint was raised before any load.

@@ -13,7 +13,7 @@
 # 8 by 8 and whose attention output writes 32 rows, which the config it
 # carries does not describe.
 #
-# Usage: tests/tuning/scales/rewrite.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/tuning/scales/rewrite.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=rewrite
 . "$(dirname "$0")/../harness.sh"
 

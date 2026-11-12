@@ -9,7 +9,7 @@
 # another model, or an output that cannot be written, and checks the
 # declared sentence and exit status.
 #
-# Usage: tests/decide/calibration.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/decide/calibration.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=calibration . "$(dirname "$0")/harness.sh"
 
 jq '{examples: [(. + {answers: {weather: "calm"}}),

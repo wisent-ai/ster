@@ -10,7 +10,7 @@
 # rewritten, the tensors replaced by another run's) and resumes from it.
 # Every refusal exits 1.
 #
-# Usage: tests/tuning/runs/checkpoint.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/tuning/runs/checkpoint.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=checkpoint
 . "$(dirname "$0")/../harness.sh"
 

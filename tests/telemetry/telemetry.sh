@@ -15,14 +15,14 @@
 #     plain-http collector are refused by name.
 #
 # Usage: tests/telemetry/telemetry.sh
-#   STER                            the binary, default target/debug/ster
+#   STER                            the binary, default .build/kompilator/debug/ster
 #   STER_TEST_TELEMETRY_COLLECTOR   https://<echo web>/api/analytics/mobile/collect
 #   STER_TEST_FLUSH_WAIT_SECONDS    how long the detached flush may take before the test fails
 #   ECHO_CLI                        the echo-cli command that reads Echo back, e.g. "node ../echo/cli/main.mjs",
 #                                   with ECHO_WEB_BASE_URL and ECHO_INTERNAL_BEARER set for it
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 : "${STER_TEST_TELEMETRY_COLLECTOR:?set it to the Echo app collector: this test sends to the real one}"
 : "${STER_TEST_FLUSH_WAIT_SECONDS:?set it to how many seconds the detached flush may take}"

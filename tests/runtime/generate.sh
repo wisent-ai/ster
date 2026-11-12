@@ -6,7 +6,7 @@
 # of 300 words, each one token, before anything is sampled; a --vector
 # without its --strength, a system turn that cannot be read or holds no
 # text, and answers whose file cannot be written.
-# Usage: tests/runtime/generate.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/runtime/generate.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=generate
 . "$(dirname "$0")/harness.sh"
 

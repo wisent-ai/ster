@@ -10,7 +10,7 @@
 # known. The rollout causes run policy optimization on the fixture and on a
 # copy of it carrying docs/examples/chat-template/tokenizer_config.json.
 #
-# Usage: tests/tuning/runs/objectives.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/tuning/runs/objectives.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=objectives
 . "$(dirname "$0")/../harness.sh"
 

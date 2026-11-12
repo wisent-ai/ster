@@ -5,7 +5,7 @@
 # read: the runs name a model and an artifact that do not exist, so a
 # refusal that came after either was looked for would say so instead.
 #
-# Usage: tests/tuning/scales/strength.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/tuning/scales/strength.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=strength
 . "$(dirname "$0")/../harness.sh"
 

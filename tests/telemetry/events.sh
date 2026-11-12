@@ -7,11 +7,11 @@
 # that makes Ster send something new fails here until the page says so.
 #
 # Usage: tests/telemetry/events.sh
-#   STER                the binary, default target/debug/ster
+#   STER                the binary, default .build/kompilator/debug/ster
 #   STER_TEST_LANDING   the ster-landing checkout, default ../ster-landing
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 LANDING=${STER_TEST_LANDING:-$PWD/../ster-landing}
 [ -f "$LANDING/src/cli/check-telemetry-events.mjs" ] ||

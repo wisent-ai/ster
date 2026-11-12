@@ -9,7 +9,7 @@
 #   * an export whose only row is refused for one cause is refused (exit 1)
 #     with that row's cause, its values and its fix, and writes nothing.
 #
-# Usage: tests/decide/import-rows.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/decide/import-rows.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=import-rows . "$(dirname "$0")/harness.sh"
 
 # refused NAME ROW: import the export holding ROW alone, which must be

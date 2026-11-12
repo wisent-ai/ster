@@ -12,10 +12,10 @@
 #     naming the directory and how to fix it.
 #
 # Usage: tests/doctor/doctor.sh
-#   STER   the binary, default target/debug/ster
+#   STER   the binary, default .build/kompilator/debug/ster
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/doctor/$RUN"

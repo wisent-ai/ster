@@ -12,10 +12,10 @@
 # text file both given, and a request with no model. Every command, its exit
 # status and output go to the run's report.txt.
 #
-# Usage: tests/steering/score.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/steering/score.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/steering/score-$RUN"
 REPORT="$ROOT/report.txt"

@@ -10,10 +10,10 @@
 # named do not exist), and a set that is missing. The request answers the
 # same refusal with its declared cause in json.cause.
 #
-# Usage: tests/pairs/merge.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/pairs/merge.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/pairs-merge/$RUN"

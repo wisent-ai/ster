@@ -11,7 +11,7 @@
 # residual stream past the f32 range, and the group is refused before a
 # policy update.
 #
-# Usage: tests/tuning/runs/reward.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/tuning/runs/reward.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=reward
 . "$(dirname "$0")/../harness.sh"
 

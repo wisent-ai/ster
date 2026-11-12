@@ -12,7 +12,7 @@
 // status and output go to the run's report.json. The seed is this run's
 // process id, so any incorrect choice of the row is accepted as a negative.
 //
-// Usage: STER=target/debug/ster node tests/pairs/merging/import-choices.mjs
+// Usage: STER=.build/kompilator/debug/ster node tests/pairs/merging/import-choices.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -24,7 +24,7 @@ function required(name, why) {
   assert.ok(value, `${name} is required: ${why}`);
   return value;
 }
-const binary = required('STER', 'the built ster binary this test runs, e.g. target/debug/ster');
+const binary = required('STER', 'the built ster binary this test runs, e.g. .build/kompilator/debug/ster');
 // The status a program that succeeded exits with, measured on this machine
 // from `true` rather than asked of whoever runs the test.
 const successExit = spawnSync('true').status;

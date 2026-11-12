@@ -6,10 +6,10 @@
 # fixture's own vocabulary and then broken, and a tiktoken tokenizer.model
 # of two byte tokens. Every refusal exits 1, before any weight is mapped.
 #
-# Usage: tests/models/families/tokenizer.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/models/families/tokenizer.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 set -eu
 cd "$(dirname "$0")/../../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/models/tokenizer-$RUN"

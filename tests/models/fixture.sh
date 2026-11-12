@@ -5,10 +5,10 @@
 # run's own HOME. Each refusal names its declared cause; nothing is written to
 # an output a refusal names, and an output that existed is left as it was.
 #
-# Usage: tests/models/fixture.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/models/fixture.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/models/fixture-$RUN"

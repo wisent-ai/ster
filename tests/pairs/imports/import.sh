@@ -11,10 +11,10 @@
 # benchmark's, a count of zero or above the pairs, and an export no row of
 # which becomes a pair.
 #
-# Usage: tests/pairs/imports/import.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/pairs/imports/import.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 set -eu
 cd "$(dirname "$0")/../../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/pairs-import/$RUN"

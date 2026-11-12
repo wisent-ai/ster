@@ -6,7 +6,7 @@
 # width, or at a layer the fixture lacks; the strengths are refused before
 # any vector is added.
 #
-# Usage: tests/runtime/steer.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/runtime/steer.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=steer
 . "$(dirname "$0")/harness.sh"
 

@@ -6,7 +6,7 @@
 # projection [128, 64] standing in for 128 positions of states. The run's
 # home and fixture are tests/runtime/harness.sh's.
 #
-# Usage: tests/steering/vectors/parity.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/steering/vectors/parity.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=steering-parity . "$(dirname "$0")/../../runtime/harness.sh"
 # parity EXIT RECORDS: ster parity over a file holding RECORDS (JSON).
 parity() {

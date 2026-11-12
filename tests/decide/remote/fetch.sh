@@ -4,7 +4,7 @@
 # docs/guide/errors/decide-pipeline.md). What the server answers is listed in
 # tests/errors/untested.json: only the real server produces it.
 #
-# Usage: tests/decide/remote/fetch.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/decide/remote/fetch.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=fetch . "$(dirname "$0")/../harness.sh"
 
 a_count_of_zero_is_refused() {

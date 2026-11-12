@@ -9,7 +9,7 @@
 # `ster request decide`, which refuses a request before anything runs);
 # every refusal of the document is made before the checkpoint loads.
 #
-# Usage: tests/decide/remote/request.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/decide/remote/request.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=request . "$(dirname "$0")/../harness.sh"
 
 run 0 $DECIDE --request "$ROOT/ok.json"

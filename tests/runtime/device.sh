@@ -5,7 +5,7 @@
 # a device this binary was built without exits 1: cuda on a macOS build,
 # metal on any other.
 #
-# Usage: tests/runtime/device.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/runtime/device.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=device
 . "$(dirname "$0")/harness.sh"
 

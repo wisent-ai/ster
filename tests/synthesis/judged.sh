@@ -17,12 +17,12 @@
 # retry_multiplier, dedupe_bits, dedupe_bands, unbalanced_ratio,
 # max_new_tokens, temperature, top_p and seed; a missing key is refused by name.
 #
-# Usage: STER=target/release/ster STER_SYNTHESIS_MODEL=<instruct model id> \
+# Usage: STER=.build/kompilator/release/ster STER_SYNTHESIS_MODEL=<instruct model id> \
 #   STER_SYNTHESIS_DEVICE=<cpu|metal|cuda> STER_SYNTHESIS_SETTINGS='{...}' \
 #   tests/synthesis/judged.sh
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:?set STER to the ster binary under test, e.g. STER=target/release/ster}
+BIN=${STER:?set STER to the ster binary under test, e.g. STER=.build/kompilator/release/ster}
 MODEL=${STER_SYNTHESIS_MODEL:?set STER_SYNTHESIS_MODEL to the instruct checkpoint that writes and judges the pairs}
 DEVICE=${STER_SYNTHESIS_DEVICE:?set STER_SYNTHESIS_DEVICE to the device the checkpoint runs on}
 SETTINGS=${STER_SYNTHESIS_SETTINGS:?set STER_SYNTHESIS_SETTINGS to the JSON object of the run settings}

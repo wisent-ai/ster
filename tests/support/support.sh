@@ -11,7 +11,7 @@
 #     are refused by name, and nothing is kept for a report support did not take.
 #
 # Usage: tests/support/support.sh
-#   STER                        the binary, default target/debug/ster
+#   STER                        the binary, default .build/kompilator/debug/ster
 #   STER_TEST_SUPPORT           http(s)://<support>/v1/public/reports of a running wisent-customer-support
 #   STER_TEST_SUPPORT_TOKEN     that service's support token, for the agent's side
 #   STER_TEST_SUPPORT_AGENT     the service's own origin, where its agent API answers; default
@@ -19,7 +19,7 @@
 #                               /v1/public/reports, so a public address needs the private one here
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 : "${STER_TEST_SUPPORT:?set it to a running wisent-customer-support /v1/public/reports: this test files real reports}"
 : "${STER_TEST_SUPPORT_TOKEN:?set it to that service support token, which the agent reply needs}"

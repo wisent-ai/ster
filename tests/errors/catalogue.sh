@@ -14,10 +14,10 @@
 #   * the causes of ster.errors, each by the name its declaration gives as its
 #     test, and the same catalogue through `ster request errors/list|show`.
 #
-# Usage: tests/errors/catalogue.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/errors/catalogue.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 set -eu
 cd "$(dirname "$0")/../.."
-BIN=${STER:-target/debug/ster}
+BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/errors/$RUN"

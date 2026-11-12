@@ -5,7 +5,7 @@
 # `ster tune evaluate` on the four-layer fixture. Every refusal exits 1 and
 # no run that refused writes an adapter.
 #
-# Usage: tests/tuning/runs/examples.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/tuning/runs/examples.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=examples
 . "$(dirname "$0")/../harness.sh"
 

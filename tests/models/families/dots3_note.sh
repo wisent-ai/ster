@@ -18,10 +18,10 @@
 # accepted, and its answer go to the run's report.txt; a failed check stops
 # the run (set -e) after naming itself there.
 #
-# Usage: STER=target/release/ster DOTS3_NOTE_CHECKPOINT=/path/to/dots3-note-prev STER_TEST_MAX_NEW_TOKENS=<n> STER_TEST_SEED=<n> tests/models/families/dots3_note.sh
+# Usage: STER=.build/kompilator/release/ster DOTS3_NOTE_CHECKPOINT=/path/to/dots3-note-prev STER_TEST_MAX_NEW_TOKENS=<n> STER_TEST_SEED=<n> tests/models/families/dots3_note.sh
 set -eu
 cd "$(dirname "$0")/../../.."
-BIN=${STER:?set STER to the ster binary under test, e.g. STER=target/release/ster}
+BIN=${STER:?set STER to the ster binary under test, e.g. STER=.build/kompilator/release/ster}
 CHECKPOINT=${DOTS3_NOTE_CHECKPOINT:?set DOTS3_NOTE_CHECKPOINT to a local copy of dots-studio/dots3-note-prev}
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/models/dots3_note-$RUN"

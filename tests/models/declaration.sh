@@ -6,7 +6,7 @@
 # that is wrong in one way, and checks the refusal and that no output was
 # left behind. The run's home is tests/runtime/harness.sh's.
 #
-# Usage: tests/models/declaration.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/models/declaration.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=models-declaration . "$(dirname "$0")/../runtime/harness.sh"
 # declared NAME JQ: the example declaration through JQ, compiled to
 # $ROOT/NAME.out, which must not exist afterwards.

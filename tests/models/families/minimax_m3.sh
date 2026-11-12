@@ -18,10 +18,10 @@
 # was accepted, and its answer go to the run's report.txt; a failed check
 # stops the run (set -e) after naming itself there.
 #
-# Usage: STER=target/release/ster MINIMAX_M3_CHECKPOINT=/path/to/checkpoint STER_TEST_MAX_NEW_TOKENS=<n> STER_TEST_SEED=<n> tests/models/families/minimax_m3.sh
+# Usage: STER=.build/kompilator/release/ster MINIMAX_M3_CHECKPOINT=/path/to/checkpoint STER_TEST_MAX_NEW_TOKENS=<n> STER_TEST_SEED=<n> tests/models/families/minimax_m3.sh
 set -eu
 cd "$(dirname "$0")/../../.."
-BIN=${STER:?set STER to the ster binary under test, e.g. STER=target/release/ster}
+BIN=${STER:?set STER to the ster binary under test, e.g. STER=.build/kompilator/release/ster}
 CHECKPOINT=${MINIMAX_M3_CHECKPOINT:?set MINIMAX_M3_CHECKPOINT to a local copy of a MiniMax-M3 checkpoint}
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/models/minimax_m3-$RUN"

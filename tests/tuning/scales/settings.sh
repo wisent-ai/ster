@@ -9,7 +9,7 @@
 # provoked by a sequence limit no example fits and a pair side the
 # fixture's tokenizer turns into one token.
 #
-# Usage: tests/tuning/scales/settings.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/tuning/scales/settings.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=settings
 . "$(dirname "$0")/../harness.sh"
 

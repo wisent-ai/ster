@@ -4,7 +4,7 @@
 # directory XDG_STATE_HOME makes impossible, because a file stands where the
 # directory belongs. The run's home is tests/runtime/harness.sh's.
 #
-# Usage: tests/onboarding/star.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/onboarding/star.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=onboarding-star . "$(dirname "$0")/../runtime/harness.sh"
 
 run 0 star status

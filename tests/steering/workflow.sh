@@ -7,7 +7,7 @@
 # way and reads what was refused and what was written. The run's home and
 # fixture are tests/runtime/harness.sh's.
 #
-# Usage: tests/steering/workflow.sh   (STER selects the binary, default target/debug/ster)
+# Usage: tests/steering/workflow.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 AREA=steering-workflow . "$(dirname "$0")/../runtime/harness.sh"
 train() {
   run 0 vector train --model "$ROOT/base" --pairs docs/examples/pairs.json --output "$1" --layers "$2"
