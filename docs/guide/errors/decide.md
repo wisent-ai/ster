@@ -33,7 +33,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** path: {path}
 - **Fix:** name an existing decision document with --request, or give `--request -` and write it on standard input
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_missing_request_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_missing_request_is_refused`
 
 <a id="ster-decide-request-request-unreadable"></a>
 
@@ -44,7 +44,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** path: {path}
 - **Fix:** name a decision document this account can read; a directory is not one
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_directory_named_as_the_request_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_directory_named_as_the_request_is_refused`
 
 <a id="ster-decide-request-request-malformed"></a>
 
@@ -55,7 +55,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** source: {path}
 - **Fix:** write it as {"state": <text or JSON>, "questions": {"<id>": {"type": "choice", "instructions": "<text>", "criteria": {"<option>": null, "<option>": null}}}}; a question's type is choice, score or noul
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_request_that_is_not_json_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_request_that_is_not_json_is_refused`
 
 <a id="ster-decide-request-state-empty"></a>
 
@@ -66,7 +66,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** state: {state}
 - **Fix:** give the request a non-empty state: the text or JSON the questions are about
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::an_empty_state_is_refused`
+- **Test:** `tests/decide/remote/request.sh::an_empty_state_is_refused`
 
 <a id="ster-decide-request-questions-none"></a>
 
@@ -77,7 +77,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** questions: {}
 - **Fix:** add a question under questions, such as {"<id>": {"type": "noul", "instructions": "<text>"}}
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_request_without_questions_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_request_without_questions_is_refused`
 
 <a id="ster-decide-request-question-id-empty"></a>
 
@@ -88,7 +88,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** question id: "{id}"
 - **Fix:** give the question an id with at least one character other than white space
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_question_with_an_empty_id_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_question_with_an_empty_id_is_refused`
 
 <a id="ster-decide-request-instructions-empty"></a>
 
@@ -99,7 +99,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** instructions: {instructions}
 - **Fix:** write the question in its instructions field
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_question_without_instructions_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_question_without_instructions_is_refused`
 
 <a id="ster-decide-request-options-too-few"></a>
 
@@ -110,7 +110,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** {unit}: {count}
 - **Fix:** give its criteria at least two {unit}; a yes or no question is a noul question
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_question_with_one_option_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_question_with_one_option_is_refused`
 
 <a id="ster-decide-request-options-too-many"></a>
 
@@ -121,7 +121,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** {unit}: {count}
 - **Fix:** split the question into questions of at most {max} {unit} each
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_question_with_more_options_than_letters_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_question_with_more_options_than_letters_is_refused`
 
 <a id="ster-decide-request-option-name-empty"></a>
 
@@ -132,7 +132,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** option name: "{name}"
 - **Fix:** give every key of its criteria at least one character other than white space
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::an_option_with_an_empty_name_is_refused`
+- **Test:** `tests/decide/remote/request.sh::an_option_with_an_empty_name_is_refused`
 
 <a id="ster-decide-request-level-empty"></a>
 
@@ -143,7 +143,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** level {index}: {level}
 - **Fix:** describe every level of its criteria, in order from the first
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_level_without_a_description_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_level_without_a_description_is_refused`
 
 ## `ster.decide`
 
@@ -160,7 +160,7 @@ Started through: `ster decide`, `ster request decide`. Uses: `ster.decide.reques
 - **Observed state shown:** tokens: {tokens}; context: {context}
 - **Fix:** shorten the state or the question's options, or decide with a model whose context holds the prompt
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_question_longer_than_the_context_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_question_longer_than_the_context_is_refused`
 
 <a id="ster-decide-letter-outside"></a>
 
@@ -171,7 +171,7 @@ Started through: `ster decide`, `ster request decide`. Uses: `ster.decide.reques
 - **Observed state shown:** token: {token}; scored tokens: {vocabulary}
 - **Fix:** load the checkpoint with the tokenizer it was trained with; its config's vocab_size counts every token the tokenizer can produce
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::a_letter_the_model_does_not_score_is_refused`
+- **Test:** `tests/decide/remote/request.sh::a_letter_the_model_does_not_score_is_refused`
 
 <a id="ster-decide-answer-unwritable"></a>
 
@@ -182,4 +182,4 @@ Started through: `ster decide`, `ster request decide`. Uses: `ster.decide.reques
 - **Observed state shown:** path: {path}
 - **Fix:** name an --output in a directory that exists and this account can write, or leave --output out to read the answer on standard output
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/request.sh::an_answer_that_cannot_be_written_is_refused`
+- **Test:** `tests/decide/remote/request.sh::an_answer_that_cannot_be_written_is_refused`

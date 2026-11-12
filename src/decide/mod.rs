@@ -31,10 +31,12 @@ use crate::{
 
 mod answer;
 mod calibration;
+#[path = "kept/examples.rs"]
 mod examples;
 mod pipeline;
 mod prompt;
 mod request;
+#[path = "kept/rows.rs"]
 mod rows;
 
 pub use answer::{Answer, Explanation, Order, QuestionLogits, Response, Usage};

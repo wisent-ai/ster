@@ -9,7 +9,9 @@ use super::file::FILE;
 use super::model::weights::LOAD;
 
 pub mod calibration;
+#[path = "remote/fetch.rs"]
 pub mod fetch;
+#[path = "remote/pipeline.rs"]
 pub mod pipeline;
 pub mod request;
 pub mod rows;
@@ -31,7 +33,7 @@ pub static QUESTION_TOO_LONG: Cause = Cause {
     cause: "its prompt is {tokens} tokens, and this model reads at most {context} at once",
     observed: "tokens: {tokens}; context: {context}",
     remedy: "shorten the state or the question's options, or decide with a model whose context holds the prompt",
-    test: "tests/decide/request.sh::a_question_longer_than_the_context_is_refused",
+    test: "tests/decide/remote/request.sh::a_question_longer_than_the_context_is_refused",
 };
 
 pub static LETTER_OUTSIDE: Cause = Cause {
@@ -43,7 +45,7 @@ pub static LETTER_OUTSIDE: Cause = Cause {
     cause: "the tokenizer spells {letter} as token {token}, and the model scores only tokens 0 to {vocabulary} exclusive, so its tokenizer and weights are of different vocabularies",
     observed: "token: {token}; scored tokens: {vocabulary}",
     remedy: "load the checkpoint with the tokenizer it was trained with; its config's vocab_size counts every token the tokenizer can produce",
-    test: "tests/decide/request.sh::a_letter_the_model_does_not_score_is_refused",
+    test: "tests/decide/remote/request.sh::a_letter_the_model_does_not_score_is_refused",
 };
 
 pub static BINS_NONE: Cause = Cause {

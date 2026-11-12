@@ -1,8 +1,10 @@
 //! Typed training arguments and their shared operation handlers.
 //! Handlers return the actual document; CLI and request frontends render it.
 
+#[path = "preference/bipo.rs"]
 mod bipo;
 mod decide;
+#[path = "preference/dpo.rs"]
 mod dpo;
 mod grpo;
 mod reward;

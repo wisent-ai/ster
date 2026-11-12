@@ -28,27 +28,39 @@ macro_rules! page {
     };
 }
 
+#[path = "models/candle.rs"]
 mod candle;
+#[path = "catalog/catalogue.rs"]
 mod catalogue;
+#[path = "asks/chat.rs"]
 pub mod chat;
+#[path = "catalog/check.rs"]
 pub mod check;
 pub mod decide;
+#[path = "catalog/declared.rs"]
 mod declared;
 pub mod file;
 pub mod fixture;
+#[path = "asks/inference.rs"]
 pub mod inference;
 pub mod lora;
 pub mod model;
 pub mod onboarding;
 pub mod pairs;
+#[path = "asks/rejection.rs"]
 mod rejection;
+#[path = "asks/request.rs"]
 pub mod request;
 pub mod runtime;
+#[path = "models/shape.rs"]
 mod shape;
+#[path = "catalog/star.rs"]
 pub mod star;
 pub mod steering;
 pub mod telemetry;
+#[path = "models/tensor.rs"]
 pub mod tensor;
+#[path = "models/tokenizer.rs"]
 pub mod tokenizer;
 pub mod tune;
 pub mod workflow;

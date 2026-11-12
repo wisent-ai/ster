@@ -59,7 +59,7 @@ and original inputs must remain unchanged. Reports are under
 
 ## Pair and activation counts
 
-`tests/pairs/counts.mjs` runs this journey.
+`tests/pairs/merging/counts.mjs` runs this journey.
 
 Real BiPO CSV imports with unanswered rows and insufficient yield must refuse
 without output. Empty pair and prompt sets must also refuse. A successful
@@ -84,7 +84,7 @@ Reports are under `.build/steering/strength/`.
 
 ## Merged pair sets
 
-`tests/pairs/merge.mjs` runs this journey.
+`tests/pairs/merging/merge.mjs` runs this journey.
 
 Every persisted pair and source receipt must agree with both input sets in
 order. The merged dataset then trains a real direction consumed by native

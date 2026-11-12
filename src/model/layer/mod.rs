@@ -2,15 +2,19 @@
 //! around both halves and how their outputs join the residual stream — and
 //! what some families add around it.
 
+#[path = "mixing/altup.rs"]
 pub(super) mod altup;
 mod block;
+#[path = "mixing/dense.rs"]
 mod dense;
 pub(super) mod experts;
 mod feed_forward;
+#[path = "mixing/mixer.rs"]
 mod mixer;
 pub(super) mod norm;
 mod recurrent;
 mod run;
+#[path = "mixing/shared.rs"]
 pub(super) mod shared;
 
 use candle_core::Tensor;

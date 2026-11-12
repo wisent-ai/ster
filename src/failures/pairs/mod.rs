@@ -12,9 +12,12 @@ use super::{file, refuse};
 pub const FORM: &str = "the JSON `ster pairs add`, `ster pairs import` or `ster pairs synthesize` writes, {\"trait_name\": \"<trait>\", \"pairs\": [{\"positive\": \"<text>\", \"negative\": \"<text>\"}]} as docs/examples/pairs.json shows";
 
 pub mod author;
+#[path = "io/export.rs"]
 pub mod export;
+#[path = "io/import.rs"]
 pub mod import;
 pub mod inspect;
+#[path = "io/rows.rs"]
 pub mod rows;
 pub mod synthesize;
 
@@ -31,7 +34,7 @@ pub static MISSING: Cause = Cause {
     cause: "no file is there: nothing at {path} is the pair set named",
     observed: "path: {path} ({state}); its directory {parent}; the system answered: {error}",
     remedy: "name an existing pair-set file (`ls -ln {parent}` shows what that directory holds), or write one with `ster pairs add --pairs {path} --positive <text> --negative <text>`",
-    test: "tests/pairs/file.sh::a_missing_pair_set_is_refused",
+    test: "tests/pairs/imports/file.sh::a_missing_pair_set_is_refused",
 };
 
 pub static EMPTY: Cause = Cause {
@@ -43,7 +46,7 @@ pub static EMPTY: Cause = Cause {
     cause: "pair set {label} contains no pairs",
     observed: "pairs: 0; trait_name: \"{trait}\"",
     remedy: "add a pair with `ster pairs add --pairs <file> --positive <text> --negative <text>`, or name a set that holds pairs",
-    test: "tests/pairs/file.sh::removing_the_last_pair_is_refused_and_the_file_kept",
+    test: "tests/pairs/imports/file.sh::removing_the_last_pair_is_refused_and_the_file_kept",
 };
 
 pub static BLANK: Cause = Cause {
@@ -55,7 +58,7 @@ pub static BLANK: Cause = Cause {
     cause: "pair set {label} contains an empty positive or negative prompt",
     observed: "pair {index} has an empty {side}",
     remedy: "write that side with `ster pairs edit --pairs <file> --index {index} --{side} <text>`, or take the pair out with `ster pairs remove --pairs <file> --index {index}`",
-    test: "tests/pairs/file.sh::a_pair_with_an_empty_side_is_refused",
+    test: "tests/pairs/imports/file.sh::a_pair_with_an_empty_side_is_refused",
 };
 
 /// Reading, checking and writing one pair-set file.

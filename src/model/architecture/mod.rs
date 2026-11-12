@@ -56,7 +56,9 @@
 mod fields;
 mod layers;
 mod llama;
+#[path = "placing/placement.rs"]
 mod placement;
+#[path = "placing/targets.rs"]
 mod targets;
 
 pub use fields::Architecture;

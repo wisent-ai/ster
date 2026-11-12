@@ -26,7 +26,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** benchmarks: truthfulqa, dna, livecodebench, bipo, choices
 - **Fix:** name one of them with --benchmark
 - **Code:** `not_found`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::an_unknown_benchmark_is_refused`
+- **Test:** `tests/pairs/imports/import.sh::an_unknown_benchmark_is_refused`
 
 <a id="ster-pairs-import-choice-fields-not-applicable"></a>
 
@@ -37,7 +37,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** given: {given}
 - **Fix:** leave the row flags out for {benchmark}, or import multiple-choice rows with --benchmark choices
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::row_flags_on_another_benchmark_are_refused`
+- **Test:** `tests/pairs/imports/import.sh::row_flags_on_another_benchmark_are_refused`
 
 <a id="ster-pairs-import-choice-fields-missing"></a>
 
@@ -48,7 +48,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** none of the row flags is given
 - **Fix:** name each part's JSON pointer and the answer's form, e.g. --question /question --choices /choices/text --answer /answerKey --answer-form label --labels /choices/label
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::choices_without_row_flags_are_refused`
+- **Test:** `tests/pairs/imports/import.sh::choices_without_row_flags_are_refused`
 
 <a id="ster-pairs-import-choice-field-missing"></a>
 
@@ -59,7 +59,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** given: {given}
 - **Fix:** add {flag}: a JSON pointer to that part of a row, or for --answer-form the form the answer takes (index, label or text)
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::a_missing_row_flag_is_refused`
+- **Test:** `tests/pairs/imports/import.sh::a_missing_row_flag_is_refused`
 
 <a id="ster-pairs-import-answer-form-unknown"></a>
 
@@ -70,7 +70,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** --answer-form {form}
 - **Fix:** give --answer-form index (a position counted from 0), label (one of --labels) or text (the choice itself)
 - **Code:** `not_found`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::an_unknown_answer_form_is_refused`
+- **Test:** `tests/pairs/imports/import.sh::an_unknown_answer_form_is_refused`
 
 <a id="ster-pairs-import-pointer-invalid"></a>
 
@@ -81,7 +81,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** {flag} {pointer}
 - **Fix:** write {flag} as a JSON pointer (RFC 6901) from the row's root, e.g. /question
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::a_pointer_without_its_slash_is_refused`
+- **Test:** `tests/pairs/imports/import.sh::a_pointer_without_its_slash_is_refused`
 
 <a id="ster-pairs-import-labels-missing"></a>
 
@@ -92,7 +92,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** --answer-form label without --labels
 - **Fix:** add --labels with the pointer to the row's labels, aligned with its choices, e.g. /choices/label
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::label_form_without_labels_is_refused`
+- **Test:** `tests/pairs/imports/import.sh::label_form_without_labels_is_refused`
 
 <a id="ster-pairs-import-labels-not-applicable"></a>
 
@@ -103,7 +103,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** --answer-form {form} with --labels {labels}
 - **Fix:** leave --labels out, or read the answer as a label with --answer-form label
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::labels_with_another_answer_form_are_refused`
+- **Test:** `tests/pairs/imports/import.sh::labels_with_another_answer_form_are_refused`
 
 <a id="ster-pairs-import-examples-missing"></a>
 
@@ -114,7 +114,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** no --examples given
 - **Fix:** add --examples with the question_examples.json published beside problems.json
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::livecodebench_without_examples_is_refused`
+- **Test:** `tests/pairs/imports/import.sh::livecodebench_without_examples_is_refused`
 
 <a id="ster-pairs-import-examples-not-applicable"></a>
 
@@ -125,7 +125,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** --benchmark {benchmark} with --examples {examples}
 - **Fix:** leave --examples out for {benchmark}
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::examples_on_another_benchmark_are_refused`
+- **Test:** `tests/pairs/imports/import.sh::examples_on_another_benchmark_are_refused`
 
 <a id="ster-pairs-import-count-zero"></a>
 
@@ -136,7 +136,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** --count 0
 - **Fix:** give --count a number above zero, or leave it out to keep every pair
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::a_count_of_zero_is_refused`
+- **Test:** `tests/pairs/imports/import.sh::a_count_of_zero_is_refused`
 
 <a id="ster-pairs-import-count-exceeds"></a>
 
@@ -147,7 +147,7 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** rows: {rows}, rows skipped: {skipped}
 - **Fix:** give --count {pairs} or fewer, or leave it out to keep every pair
 - **Code:** `refused`, exit 1; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::a_count_above_the_pairs_is_refused`
+- **Test:** `tests/pairs/imports/import.sh::a_count_above_the_pairs_is_refused`
 
 <a id="ster-pairs-import-no-pairs"></a>
 
@@ -158,4 +158,4 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Observed state shown:** rows: {rows}; {first}
 - **Fix:** name the {benchmark} export itself, or for --benchmark choices point the row flags at each part; a skipped row's reason says what it lacks
 - **Code:** `refused`, exit 1; retrying unchanged will not help
-- **Test:** `tests/pairs/import.sh::an_export_without_a_usable_row_is_refused`
+- **Test:** `tests/pairs/imports/import.sh::an_export_without_a_usable_row_is_refused`

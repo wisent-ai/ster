@@ -42,7 +42,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** path: {path}
 - **Fix:** give this account read access to {path}, or name another checkpoint
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::an_unreadable_config_is_refused`
+- **Test:** `tests/models/loading/load.sh::an_unreadable_config_is_refused`
 
 <a id="ster-model-config-config-malformed"></a>
 
@@ -53,7 +53,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** path: {path}
 - **Fix:** use the checkpoint's config as its publisher wrote it, one JSON object, as docs/examples/model/config.json is
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_config_that_is_not_json_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_config_that_is_not_json_is_refused`
 
 <a id="ster-model-config-model-type-absent"></a>
 
@@ -64,7 +64,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** model_type: absent; architectures: {architectures}
 - **Fix:** use a Hugging Face checkpoint whose model_type is one of {families}
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_config_naming_no_model_type_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_config_naming_no_model_type_is_refused`
 
 <a id="ster-model-config-model-type-not-text"></a>
 
@@ -75,7 +75,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** model_type: {value}
 - **Fix:** use a Hugging Face checkpoint whose model_type is one of {families}
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_model_type_that_is_not_text_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_model_type_that_is_not_text_is_refused`
 
 <a id="ster-model-config-family-unknown"></a>
 
@@ -86,7 +86,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** model_type: "{model_type}"
 - **Fix:** use a Hugging Face checkpoint whose model_type is one of {families}
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::an_unknown_model_type_is_refused`
+- **Test:** `tests/models/loading/load.sh::an_unknown_model_type_is_refused`
 
 <a id="ster-model-config-quantized"></a>
 
@@ -97,7 +97,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** quantization_config: {value}
 - **Fix:** use the checkpoint it was quantized from
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_quantized_checkpoint_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_quantized_checkpoint_is_refused`
 
 <a id="ster-model-config-key-absent"></a>
 
@@ -108,7 +108,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** {key}: absent
 - **Fix:** add {key} to the config as {kind}
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_config_without_a_required_key_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_config_without_a_required_key_is_refused`
 
 <a id="ster-model-config-key-mistyped"></a>
 
@@ -119,7 +119,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** {key}: {value}
 - **Fix:** state {key} as {kind}, the type the publisher's config class reads it as
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_key_of_the_wrong_kind_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_key_of_the_wrong_kind_is_refused`
 
 <a id="ster-model-config-config-undecodable"></a>
 
@@ -130,7 +130,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** path: {path}
 - **Fix:** state the key the reader names with the type it names, as the publisher's config does
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_config_candle_cannot_read_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_config_candle_cannot_read_is_refused`
 
 <a id="ster-model-config-settings-unrunnable"></a>
 
@@ -141,4 +141,4 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** the config states {observed}
 - **Fix:** load a checkpoint whose config states settings Ster's decoder for its family implements, or, where the config contradicts itself, correct the key the sentence names; README.md lists the families Ster runs
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_setting_ster_does_not_implement_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_setting_ster_does_not_implement_is_refused`

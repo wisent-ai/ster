@@ -164,8 +164,8 @@ a missing one (`multiple-choice rows need --answer: …`), a pointer that does n
 start with `/`, `--answer-form label` without `--labels`, and `--labels` with
 any other form; each exits 2 before the export is read. A file that is neither
 a JSON list nor JSON Lines refuses the import and names the line that is not
-JSON. `tests/pairs/import-choices.mjs` runs the built binary over ARC- and
-HellaSwag-shaped rows, and `tests/pairs/import.sh` provokes every refusal
+JSON. `tests/pairs/merging/import-choices.mjs` runs the built binary over ARC- and
+HellaSwag-shaped rows, and `tests/pairs/imports/import.sh` provokes every refusal
 above; both keep each command and its result in their report.
 
 Nothing else in the suite produces pair sets. Every other set is one you wrote,

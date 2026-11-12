@@ -7,8 +7,11 @@
 use wisent_errors::Operation;
 
 pub mod compare;
+#[path = "layers_kept/direction.rs"]
 pub mod direction;
+#[path = "layers_kept/holdout.rs"]
 pub mod holdout;
+#[path = "layers_kept/layers.rs"]
 pub mod layers;
 pub mod parity;
 pub mod project;

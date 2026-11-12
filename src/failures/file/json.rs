@@ -52,7 +52,7 @@ pub static MALFORMED: Cause = Cause {
     cause: "it is not JSON, and {role} is {form}: it is another kind of file, or one broken by hand",
     observed: "path: {path} ({state}); the JSON reader stopped at line {line}, column {column}: {error}",
     remedy: "name {role}, which is {form}, or repair the JSON of {path} at line {line}, column {column}",
-    test: "tests/pairs/file.sh::a_pair_set_that_is_not_json_is_refused",
+    test: "tests/pairs/imports/file.sh::a_pair_set_that_is_not_json_is_refused",
 };
 
 pub static TRUNCATED: Cause = Cause {
@@ -64,7 +64,7 @@ pub static TRUNCATED: Cause = Cause {
     cause: "it ends before its JSON value closes: it was cut short while it was written (a full disk, a process stopped midway)",
     observed: "path: {path} ({state}); the JSON reader ran out at line {line}, column {column}: {error}",
     remedy: "write {role} again; it is {form}",
-    test: "tests/pairs/file.sh::a_pair_set_cut_short_is_refused",
+    test: "tests/pairs/imports/file.sh::a_pair_set_cut_short_is_refused",
 };
 
 pub static SHAPE: Cause = Cause {
@@ -76,5 +76,5 @@ pub static SHAPE: Cause = Cause {
     cause: "it is JSON of another form than {role}, which is {form}: a field it requires is missing, a field holds another type or value, or it is a document of another kind",
     observed: "path: {path} ({state}); at line {line}, column {column} the reader answered: {error}",
     remedy: "name {role}, which is {form}; the reader's answer names the field that differs",
-    test: "tests/pairs/file.sh::a_file_that_is_not_a_pair_set_is_refused",
+    test: "tests/pairs/imports/file.sh::a_file_that_is_not_a_pair_set_is_refused",
 };

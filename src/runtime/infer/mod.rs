@@ -10,8 +10,10 @@ use super::{Runtime, requested_activations, validate_layers};
 
 mod encoder_decoder;
 mod generate;
+#[path = "steering/positions.rs"]
 mod positions;
 mod rows;
+#[path = "steering/steer.rs"]
 mod steer;
 
 pub use generate::{Completion, GenerationOptions};

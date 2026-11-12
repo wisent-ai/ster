@@ -17,14 +17,18 @@ mod command;
 mod converse;
 mod decide;
 mod decisions;
+#[path = "admin/doctor.rs"]
 pub(crate) mod doctor;
+#[path = "admin/errors.rs"]
 mod errors;
 pub(crate) mod input;
 mod model;
 mod onboarding;
 mod pairs;
+#[path = "admin/star.rs"]
 pub(crate) mod star;
 pub(crate) mod support;
+#[path = "admin/telemetry.rs"]
 pub(crate) mod telemetry;
 pub(crate) mod tune;
 mod vectors;

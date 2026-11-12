@@ -28,7 +28,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** model: {model}
 - **Fix:** name an existing checkpoint directory, or a Hugging Face model id such as org/name; `ster model fixture create` writes a local one
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_local_path_that_is_no_directory_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_local_path_that_is_no_directory_is_refused`
 
 <a id="ster-model-checkpoint-directory-unlistable"></a>
 
@@ -39,7 +39,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** path: {path}
 - **Fix:** give this account read access to {path}, or name another checkpoint directory
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::an_unreadable_directory_is_refused`
+- **Test:** `tests/models/loading/load.sh::an_unreadable_directory_is_refused`
 
 <a id="ster-model-checkpoint-config-absent"></a>
 
@@ -50,7 +50,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** path: {path}
 - **Fix:** use a checkpoint that holds its config.json (or Mistral's params.json) beside its weights, as `ster model fixture create` writes one
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_directory_without_a_config_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_directory_without_a_config_is_refused`
 
 <a id="ster-model-checkpoint-tokenizer-absent"></a>
 
@@ -61,7 +61,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** looked for: {files}
 - **Fix:** use a checkpoint that ships its tokenizer.json, or write one beside the weights with `ster model tokenizer create`
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_directory_without_a_tokenizer_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_directory_without_a_tokenizer_is_refused`
 
 <a id="ster-model-checkpoint-weights-absent"></a>
 
@@ -72,7 +72,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** layout: {layout}
 - **Fix:** use a checkpoint that holds its weights: *.safetensors files (Mistral's consolidated*.safetensors beside params.json), or one .gguf file beside a Transformers config and tokenizer
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_directory_without_weights_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_directory_without_weights_is_refused`
 
 <a id="ster-model-checkpoint-hub-client"></a>
 
@@ -83,7 +83,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** HF_HOME: {hf_home}
 - **Fix:** let this account create and write the Hugging Face cache directory, or point HF_HOME at one it can
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/hub.sh::a_hub_client_that_cannot_start_is_refused`
+- **Test:** `tests/models/loading/hub.sh::a_hub_client_that_cannot_start_is_refused`
 
 <a id="ster-model-checkpoint-repository-unknown"></a>
 
@@ -94,7 +94,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** the Hub's answer: {error}
 - **Fix:** name a repository and revision that exist on https://huggingface.co, or a local checkpoint directory; for a gated or private repository, store a Hugging Face token in $HF_HOME/token (default ~/.cache/huggingface/token)
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/hub.sh::an_unknown_repository_is_refused`
+- **Test:** `tests/models/loading/hub.sh::an_unknown_repository_is_refused`
 
 <a id="ster-model-checkpoint-hub-unreachable"></a>
 
@@ -105,7 +105,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** the Hub's answer: {error}
 - **Fix:** run the command again once https://huggingface.co answers; the files already fetched stay in the Hugging Face cache
 - **Code:** `infra_down`, exit 69; retrying unchanged can help
-- **Test:** `tests/models/hub.sh::an_unreachable_hub_is_refused`
+- **Test:** `tests/models/loading/hub.sh::an_unreachable_hub_is_refused`
 
 <a id="ster-model-checkpoint-download-failed"></a>
 
@@ -116,7 +116,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** the Hub's answer: {error}
 - **Fix:** run the command again; the files already fetched stay in the Hugging Face cache and are not fetched twice
 - **Code:** `infra_down`, exit 69; retrying unchanged can help
-- **Test:** `tests/models/hub.sh::a_download_that_breaks_is_refused`
+- **Test:** `tests/models/loading/hub.sh::a_download_that_breaks_is_refused`
 
 ## `ster.model.weights`
 
@@ -133,7 +133,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** files: {files}
 - **Fix:** keep the one .gguf file the checkpoint is beside its config and tokenizer, and move the others out
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::two_gguf_files_are_refused`
+- **Test:** `tests/models/loading/load.sh::two_gguf_files_are_refused`
 
 <a id="ster-model-weights-gguf-unreadable"></a>
 
@@ -144,7 +144,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** path: {path}
 - **Fix:** replace it with the complete .gguf file its publisher wrote; a partial download reads as this
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_file_that_is_not_gguf_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_file_that_is_not_gguf_is_refused`
 
 <a id="ster-model-weights-safetensors-unmappable"></a>
 
@@ -155,7 +155,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** files: {files}
 - **Fix:** replace the file the sentence names with the complete one its publisher wrote; a partial download reads as this
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::a_weight_file_that_is_not_safetensors_is_refused`
+- **Test:** `tests/models/loading/load.sh::a_weight_file_that_is_not_safetensors_is_refused`
 
 <a id="ster-model-weights-weights-unfit"></a>
 
@@ -166,4 +166,4 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Observed state shown:** {shapes}
 - **Fix:** use the config the weights were written with: a tensor's shape follows from hidden_size, intermediate_size, the head counts and vocab_size
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/load.sh::weights_that_do_not_fit_the_config_are_refused`
+- **Test:** `tests/models/loading/load.sh::weights_that_do_not_fit_the_config_are_refused`

@@ -18,7 +18,7 @@ pub static TARGET_UNKNOWN: Cause = Cause {
     cause: "unknown adapter target {target}; expected one of query, key, value, output, gate, up, down",
     observed: "--targets {targets}",
     remedy: "name targets among query, key, value, output, gate, up and down (or q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj), comma-separated",
-    test: "tests/tuning/adapters.sh::an_unknown_target_is_refused_before_the_model_loads",
+    test: "tests/tuning/runs/adapters.sh::an_unknown_target_is_refused_before_the_model_loads",
 };
 
 pub static TARGETS_NONE: Cause = Cause {
@@ -30,7 +30,7 @@ pub static TARGETS_NONE: Cause = Cause {
     cause: "adapter spec names no targets; choose at least one of query, key, value, output, gate, up, down",
     observed: "--targets {targets}",
     remedy: "give --targets at least one projection, such as query,value",
-    test: "tests/tuning/adapters.sh::no_target_is_refused_before_the_model_loads",
+    test: "tests/tuning/runs/adapters.sh::no_target_is_refused_before_the_model_loads",
 };
 
 pub static TARGET_TWICE: Cause = Cause {
@@ -42,7 +42,7 @@ pub static TARGET_TWICE: Cause = Cause {
     cause: "adapter spec names target {target} twice",
     observed: "targets: {targets}",
     remedy: "name each target once",
-    test: "tests/tuning/adapters.sh::a_target_named_twice_by_a_request_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_target_named_twice_by_a_request_is_refused",
 };
 
 pub static RANK_ZERO: Cause = Cause {
@@ -54,7 +54,7 @@ pub static RANK_ZERO: Cause = Cause {
     cause: "adapter rank 0 trains nothing; choose a rank of at least 1",
     observed: "--rank {rank}",
     remedy: "give --rank at least 1, such as 8",
-    test: "tests/tuning/adapters.sh::a_rank_of_zero_is_refused_before_the_model_loads",
+    test: "tests/tuning/runs/adapters.sh::a_rank_of_zero_is_refused_before_the_model_loads",
 };
 
 pub static ALPHA_UNUSABLE: Cause = Cause {
@@ -66,7 +66,7 @@ pub static ALPHA_UNUSABLE: Cause = Cause {
     cause: "adapter alpha {alpha} is not a positive finite number",
     observed: "--alpha {alpha}",
     remedy: "give --alpha a finite number above zero; twice the rank is a common choice",
-    test: "tests/tuning/adapters.sh::an_alpha_of_zero_is_refused_before_the_model_loads",
+    test: "tests/tuning/runs/adapters.sh::an_alpha_of_zero_is_refused_before_the_model_loads",
 };
 
 pub static LAYER_PAST: Cause = Cause {
@@ -78,7 +78,7 @@ pub static LAYER_PAST: Cause = Cause {
     cause: "adapter spec names layer {layer}, but the model has {count} layers",
     observed: "--layers {layers}",
     remedy: "give --layers indexes from 0 to {last}, or all",
-    test: "tests/tuning/adapters.sh::a_layer_past_the_model_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_layer_past_the_model_is_refused",
 };
 
 pub static LAYERS_NONE: Cause = Cause {
@@ -90,7 +90,7 @@ pub static LAYERS_NONE: Cause = Cause {
     cause: "the model's config states {count} layers, so it holds no projection an adapter can be placed on",
     observed: "num_hidden_layers: {count}",
     remedy: "train on a checkpoint whose config.json states num_hidden_layers of at least 1",
-    test: "tests/tuning/adapters.sh::a_model_without_layers_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_model_without_layers_is_refused",
 };
 
 /// The rank, alpha, targets and layers a trainer is given.

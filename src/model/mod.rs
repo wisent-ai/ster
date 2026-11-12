@@ -81,7 +81,9 @@ mod inkling;
 pub(crate) mod input;
 pub(crate) mod keys;
 mod layer;
+#[path = "modes/misfit.rs"]
 mod misfit;
+#[path = "modes/mode.rs"]
 mod mode;
 mod names;
 mod network;

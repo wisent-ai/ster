@@ -65,7 +65,7 @@ pub static SYSTEM_UNPLACEABLE: Cause = Cause {
     cause: "the example has a system prompt, which only a chat template can place, and this run's chat template is {status}",
     observed: "system: {system}; chat template: {status}",
     remedy: "train a model whose tokenizer_config.json carries a chat_template with --chat-template auto, or remove the example's system key",
-    test: "tests/tuning/examples.sh::a_system_prompt_without_a_chat_template_is_refused",
+    test: "tests/tuning/runs/examples.sh::a_system_prompt_without_a_chat_template_is_refused",
 };
 
 pub static CONVERSATION_UNTEMPLATED: Cause = Cause {

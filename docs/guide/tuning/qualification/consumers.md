@@ -4,8 +4,8 @@ These journeys execute the actual Ster CLI and native request frontend against
 an explicitly declared local checkpoint, with export qualification also
 executing vLLM's public batch interface on the actual exported adapter; no
 simulated provider or owned Python driver stands in for that consumer. They
-are `tests/tuning/bipo.mjs`, `tests/tuning/export/creation.mjs`,
-`tests/tuning/system.mjs` and `tests/tuning/checkpoints.mjs`, run with the
+are `tests/tuning/journeys/bipo.mjs`, `tests/tuning/export/creation.mjs`,
+`tests/tuning/journeys/system.mjs` and `tests/tuning/journeys/checkpoints.mjs`, run with the
 commands below; a run qualifies only the candidate it ran against.
 
 ## Candidate and isolation
@@ -59,7 +59,7 @@ A collision refuses by field name instead of silently replacing an input.
 Additionally declare `STER_TEST_PAIRS` as the absolute pair-set path.
 
 ```sh
-node --env-file=.build/qualification.env tests/tuning/bipo.mjs
+node --env-file=.build/qualification.env tests/tuning/journeys/bipo.mjs
 ```
 
 The journey creates the real checkpoint, trains the CLI direction, reads its
@@ -129,7 +129,7 @@ the chat template, and `STER_TEST_SYSTEM_PROMPT` as the system instruction.
 not a context or batch size inferred from unrelated input counts.
 
 ```sh
-node --env-file=.build/qualification.env tests/tuning/system.mjs
+node --env-file=.build/qualification.env tests/tuning/journeys/system.mjs
 ```
 
 The journey creates actual bare and chat checkpoints, applies the declared
@@ -155,7 +155,7 @@ dataset paths. `STER_TEST_CHECKPOINT_EVERY` is the explicit save interval;
 used for the mismatched-run refusal.
 
 ```sh
-node --env-file=.build/qualification.env tests/tuning/checkpoints.mjs
+node --env-file=.build/qualification.env tests/tuning/journeys/checkpoints.mjs
 ```
 
 Every objective first completes actual uninterrupted training. Its checkpointed

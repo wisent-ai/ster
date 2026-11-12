@@ -216,23 +216,24 @@ Explicit boundaries:
 
 ## Install
 
-Install the current source release from GitHub:
+Install the current release through Stado, which places `ster` on `PATH`:
 
 ```bash
-cargo install --git https://github.com/wisent-ai/ster --locked
+stado product install --surface cli ster
 ```
 
-From this source checkout:
+From this source checkout, kompilator builds it (no Cargo runs):
 
 ```bash
-cargo install --path . --locked
+mkdir -p .build/ster
+WISENT_OUTPUT_DIR="$PWD/.build/ster" stado product kompilator stage --bin ster
 ```
 
 Metal and CUDA are build-time choices:
 
 ```bash
-cargo install --git https://github.com/wisent-ai/ster --features metal --locked
-cargo install --git https://github.com/wisent-ai/ster --features cuda --locked
+WISENT_OUTPUT_DIR="$PWD/.build/ster" stado product kompilator stage --bin ster --features metal
+WISENT_OUTPUT_DIR="$PWD/.build/ster" stado product kompilator stage --bin ster --features cuda
 ```
 
 The crates.io name `ster` is currently unclaimed and is not Ster's release

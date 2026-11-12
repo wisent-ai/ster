@@ -93,7 +93,7 @@ pub static DENIED: Cause = Cause {
     cause: "this account may not read it: the file's permission bits or owner keep this account out",
     observed: "path: {path} ({state}); the system answered: {error}",
     remedy: "give this account read access to {path} (`chmod u+r {path}` as its owner), or name a copy it may read",
-    test: "tests/pairs/file.sh::a_pair_set_this_account_may_not_read_is_refused",
+    test: "tests/pairs/imports/file.sh::a_pair_set_this_account_may_not_read_is_refused",
 };
 
 pub static DIRECTORY: Cause = Cause {
@@ -105,7 +105,7 @@ pub static DIRECTORY: Cause = Cause {
     cause: "{path} is a directory, and {role} is one file",
     observed: "path: {path} ({state}); error kind {kind}; the system answered: {error}",
     remedy: "name the file that holds {role}, not a directory; `ls -ln {path}` shows what the directory holds",
-    test: "tests/pairs/file.sh::a_directory_named_as_a_pair_set_is_refused",
+    test: "tests/pairs/imports/file.sh::a_directory_named_as_a_pair_set_is_refused",
 };
 
 pub static NOT_TEXT: Cause = Cause {
@@ -117,7 +117,7 @@ pub static NOT_TEXT: Cause = Cause {
     cause: "it holds bytes that are not UTF-8, and {role} is read as UTF-8 text",
     observed: "path: {path} ({state}); the system answered: {error}",
     remedy: "convert {path} to UTF-8 (`iconv -t UTF-8`), or name {role} as it was first written",
-    test: "tests/pairs/import.sh::an_export_that_is_not_text_is_refused",
+    test: "tests/pairs/imports/import.sh::an_export_that_is_not_text_is_refused",
 };
 
 pub static BELOW_FILE: Cause = Cause {
@@ -129,7 +129,7 @@ pub static BELOW_FILE: Cause = Cause {
     cause: "the path runs through a file: {blocker} is not a directory, so nothing can be found below it",
     observed: "path: {path}; {blocker}: {blocker_state}; the system answered: {error}",
     remedy: "name {role} by a path that runs through directories only; {blocker} is a file",
-    test: "tests/pairs/file.sh::a_pair_set_below_a_file_is_refused",
+    test: "tests/pairs/imports/file.sh::a_pair_set_below_a_file_is_refused",
 };
 
 pub static FAILED: Cause = Cause {
@@ -141,5 +141,5 @@ pub static FAILED: Cause = Cause {
     cause: "the system broke off the read although this account may read the file: it was removed or replaced while Ster read it, or the disk failed",
     observed: "path: {path} ({state}); error kind {kind}; the system answered: {error}",
     remedy: "see what is at {path} with `ls -ln {path}`, and run the command again once the file is whole",
-    test: "tests/pairs/file.sh::a_read_the_system_breaks_off_is_refused",
+    test: "tests/pairs/imports/file.sh::a_read_the_system_breaks_off_is_refused",
 };

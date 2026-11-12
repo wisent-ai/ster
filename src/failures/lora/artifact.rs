@@ -20,7 +20,7 @@ pub static ADAPTER_MISSING: Cause = Cause {
     cause: "no file is there: nothing at {path} is the adapter named",
     observed: "path: {path} ({state}); its directory {parent}",
     remedy: "name the .safetensors file a ster tune command wrote, with its .json sidecar beside it; `ls -ln {parent}` shows what that directory holds",
-    test: "tests/tuning/adapters.sh::a_missing_adapter_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_missing_adapter_is_refused",
 };
 
 pub static SIDECAR_MISSING: Cause = Cause {
@@ -32,7 +32,7 @@ pub static SIDECAR_MISSING: Cause = Cause {
     cause: "adapter {path} has no sidecar at {sidecar}; the pair is written together and must travel together",
     observed: "missing: {sidecar}",
     remedy: "copy {sidecar} beside the weights from where the adapter was trained",
-    test: "tests/tuning/adapters.sh::an_adapter_without_its_sidecar_is_refused",
+    test: "tests/tuning/runs/adapters.sh::an_adapter_without_its_sidecar_is_refused",
 };
 
 pub static STEERING_GIVEN: Cause = Cause {
@@ -44,7 +44,7 @@ pub static STEERING_GIVEN: Cause = Cause {
     cause: "{sidecar} is a steering artifact, not a LoRA adapter sidecar: it carries trait_name and vectors where an adapter sidecar carries rank and targets",
     observed: "{sidecar}: a steering artifact",
     remedy: "pass a steering artifact with --vector and a LoRA adapter with --adapter",
-    test: "tests/tuning/adapters.sh::a_steering_artifact_given_as_an_adapter_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_steering_artifact_given_as_an_adapter_is_refused",
 };
 
 pub static SCHEMA_UNSUPPORTED: Cause = Cause {
@@ -56,7 +56,7 @@ pub static SCHEMA_UNSUPPORTED: Cause = Cause {
     cause: "adapter artifact schema {schema} is unsupported; this Ster build reads schema {supported}",
     observed: "schema_version: {schema}",
     remedy: "read it with the Ster release that wrote it, or train the adapter again with this one",
-    test: "tests/tuning/adapters.sh::a_sidecar_of_another_schema_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_sidecar_of_another_schema_is_refused",
 };
 
 pub static PRODUCT_FOREIGN: Cause = Cause {
@@ -68,7 +68,7 @@ pub static PRODUCT_FOREIGN: Cause = Cause {
     cause: "adapter artifact belongs to product {product}, not Ster",
     observed: "product: {product}",
     remedy: "read it with the product that wrote it; Ster reads the adapters ster tune writes",
-    test: "tests/tuning/adapters.sh::a_sidecar_of_another_product_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_sidecar_of_another_product_is_refused",
 };
 
 /// What every sidecar declaration refusal tells its reader to do.
@@ -83,7 +83,7 @@ pub static RANK_ZERO: Cause = Cause {
     cause: "the sidecar declares rank 0, and an adapter of rank 0 stores no update: every factor pair is zero columns wide, which no Ster trainer writes",
     observed: "rank: 0",
     remedy: DECLARED_REMEDY,
-    test: "tests/tuning/sidecar.sh::a_sidecar_declaring_rank_zero_is_refused",
+    test: "tests/tuning/scales/sidecar.sh::a_sidecar_declaring_rank_zero_is_refused",
 };
 
 pub static ALPHA_INVALID: Cause = Cause {
@@ -95,7 +95,7 @@ pub static ALPHA_INVALID: Cause = Cause {
     cause: "the sidecar declares an alpha that is not a positive finite number, so the update's scale, alpha over rank, is zero, negative or not a number",
     observed: "alpha: {alpha}; rank: {rank}",
     remedy: DECLARED_REMEDY,
-    test: "tests/tuning/sidecar.sh::a_sidecar_declaring_alpha_zero_is_refused",
+    test: "tests/tuning/scales/sidecar.sh::a_sidecar_declaring_alpha_zero_is_refused",
 };
 
 pub static HIDDEN_SIZE_ZERO: Cause = Cause {
@@ -107,7 +107,7 @@ pub static HIDDEN_SIZE_ZERO: Cause = Cause {
     cause: "the sidecar declares hidden size 0, and an adapter is trained on a model whose residual stream is at least one wide",
     observed: "hidden_size: 0; model: {model}",
     remedy: DECLARED_REMEDY,
-    test: "tests/tuning/sidecar.sh::a_sidecar_declaring_hidden_size_zero_is_refused",
+    test: "tests/tuning/scales/sidecar.sh::a_sidecar_declaring_hidden_size_zero_is_refused",
 };
 
 pub static TARGETS_NONE: Cause = Cause {
@@ -119,7 +119,7 @@ pub static TARGETS_NONE: Cause = Cause {
     cause: "the sidecar names no target projection, so the adapter adapts nothing",
     observed: "targets: []; layers: {layers}",
     remedy: DECLARED_REMEDY,
-    test: "tests/tuning/sidecar.sh::a_sidecar_naming_no_target_is_refused",
+    test: "tests/tuning/scales/sidecar.sh::a_sidecar_naming_no_target_is_refused",
 };
 
 pub static LAYERS_NONE: Cause = Cause {
@@ -131,7 +131,7 @@ pub static LAYERS_NONE: Cause = Cause {
     cause: "the sidecar names no layer, so the adapter adapts nothing",
     observed: "layers: []; targets: {targets}",
     remedy: DECLARED_REMEDY,
-    test: "tests/tuning/sidecar.sh::a_sidecar_naming_no_layer_is_refused",
+    test: "tests/tuning/scales/sidecar.sh::a_sidecar_naming_no_layer_is_refused",
 };
 
 pub static TARGET_REPEATED: Cause = Cause {
@@ -143,7 +143,7 @@ pub static TARGET_REPEATED: Cause = Cause {
     cause: "the sidecar names target {target} twice, and a projection holds one factor pair per layer, so the two entries would name the same tensors",
     observed: "targets: {targets}",
     remedy: DECLARED_REMEDY,
-    test: "tests/tuning/sidecar.sh::a_sidecar_naming_a_target_twice_is_refused",
+    test: "tests/tuning/scales/sidecar.sh::a_sidecar_naming_a_target_twice_is_refused",
 };
 
 pub static LAYER_REPEATED: Cause = Cause {
@@ -155,7 +155,7 @@ pub static LAYER_REPEATED: Cause = Cause {
     cause: "the sidecar names layer {layer} twice, and a layer holds one factor pair per target, so the two entries would name the same tensors",
     observed: "layers: {layers}",
     remedy: DECLARED_REMEDY,
-    test: "tests/tuning/sidecar.sh::a_sidecar_naming_a_layer_twice_is_refused",
+    test: "tests/tuning/scales/sidecar.sh::a_sidecar_naming_a_layer_twice_is_refused",
 };
 
 pub static TENSOR_ABSENT: Cause = Cause {
@@ -167,7 +167,7 @@ pub static TENSOR_ABSENT: Cause = Cause {
     cause: "adapter artifact is missing tensor {name}, which its sidecar's targets and layers need",
     observed: "missing: {name}",
     remedy: "use the weights and the sidecar a ster tune command wrote together",
-    test: "tests/tuning/adapters.sh::a_sidecar_naming_a_layer_the_weights_lack_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_sidecar_naming_a_layer_the_weights_lack_is_refused",
 };
 
 pub static TENSOR_SHAPE: Cause = Cause {
@@ -179,7 +179,7 @@ pub static TENSOR_SHAPE: Cause = Cause {
     cause: "adapter tensor {name} has {found}, expected {expected}",
     observed: "{name}: {shape}",
     remedy: "use the weights and the sidecar a ster tune command wrote together, for the model it was trained on",
-    test: "tests/tuning/adapters.sh::a_sidecar_of_another_rank_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_sidecar_of_another_rank_is_refused",
 };
 
 pub static TENSOR_NOT_FINITE: Cause = Cause {
@@ -191,7 +191,7 @@ pub static TENSOR_NOT_FINITE: Cause = Cause {
     cause: "adapter tensor {name} contains a non-finite value, which would carry NaN through every forward pass",
     observed: "{name}: {count} non-finite values",
     remedy: "train the adapter again with a lower --learning-rate; a run that diverged writes infinite factors",
-    test: "tests/tuning/adapters.sh::a_non_finite_factor_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_non_finite_factor_is_refused",
 };
 
 pub static HEAD_MISSING: Cause = Cause {
@@ -203,7 +203,7 @@ pub static HEAD_MISSING: Cause = Cause {
     cause: "reward artifact is missing tensor reward.head, which is the head it exists to carry",
     observed: "kind: reward, tensors: {count}",
     remedy: "use the weights ster tune reward wrote beside this sidecar",
-    test: "tests/tuning/adapters.sh::a_reward_sidecar_without_its_head_is_refused",
+    test: "tests/tuning/runs/adapters.sh::a_reward_sidecar_without_its_head_is_refused",
 };
 
 pub static HEAD_UNEXPECTED: Cause = Cause {
@@ -215,7 +215,7 @@ pub static HEAD_UNEXPECTED: Cause = Cause {
     cause: "adapter artifact carries a reward.head tensor but declares kind adapter",
     observed: "kind: adapter, with reward.head of shape {shape} among {count} tensors; trained for {model}",
     remedy: "use the sidecar ster tune reward wrote beside these weights",
-    test: "tests/tuning/adapters.sh::an_adapter_sidecar_over_reward_weights_is_refused",
+    test: "tests/tuning/runs/adapters.sh::an_adapter_sidecar_over_reward_weights_is_refused",
 };
 
 pub static WIDTH_UNFIT: Cause = Cause {
@@ -227,7 +227,7 @@ pub static WIDTH_UNFIT: Cause = Cause {
     cause: "adapter tensor {name} has shape {found}, expected {expected} for the model projection",
     observed: "{name}: {found}",
     remedy: "use the adapter with the model it was trained on",
-    test: "tests/tuning/adapters.sh::an_adapter_of_another_projection_width_is_refused",
+    test: "tests/tuning/runs/adapters.sh::an_adapter_of_another_projection_width_is_refused",
 };
 
 /// Reading, checking and writing one adapter artifact.

@@ -3,10 +3,13 @@
 
 mod attention;
 mod block;
+#[path = "experts_kept/experts.rs"]
 mod experts;
 mod families;
+#[path = "experts_kept/mixers.rs"]
 mod mixers;
 mod schedule;
+#[path = "experts_kept/sparse.rs"]
 mod sparse;
 
 pub use attention::{

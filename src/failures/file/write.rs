@@ -70,7 +70,7 @@ pub static DENIED: Cause = Cause {
     cause: "this account may not change {directory} or {path}: their permission bits or owner keep this account out",
     observed: "path: {path} ({state}); directory {directory} ({directory_state}); {left}; the system answered: {error}",
     remedy: "give this account write access to {directory} (`chmod u+w {directory}` as its owner), or name a path in a directory it may write",
-    test: "tests/pairs/file.sh::a_set_in_a_read_only_directory_is_refused",
+    test: "tests/pairs/imports/file.sh::a_set_in_a_read_only_directory_is_refused",
 };
 
 pub static READ_ONLY: Cause = Cause {
@@ -82,7 +82,7 @@ pub static READ_ONLY: Cause = Cause {
     cause: "the file system holding {directory} is mounted read-only, so nothing on it can change",
     observed: "path: {path}; directory {directory} ({directory_state}); {left}; the system answered: {error}",
     remedy: "name a path on a file system mounted for writing (`mount` lists which are read-only)",
-    test: "tests/pairs/file.sh::a_set_on_a_read_only_file_system_is_refused",
+    test: "tests/pairs/imports/file.sh::a_set_on_a_read_only_file_system_is_refused",
 };
 
 pub static FULL: Cause = Cause {
@@ -94,7 +94,7 @@ pub static FULL: Cause = Cause {
     cause: "the disk holding {directory} has no room left for {path}, or the file passes the largest size it allows",
     observed: "path: {path} ({state}); directory {directory}; {left}; the system answered: {error}",
     remedy: "free space on the disk holding {directory} (`df -h {directory}` shows it), then run the command again",
-    test: "tests/pairs/file.sh::a_set_on_a_full_disk_is_refused",
+    test: "tests/pairs/imports/file.sh::a_set_on_a_full_disk_is_refused",
 };
 
 pub static BELOW_FILE: Cause = Cause {
@@ -106,7 +106,7 @@ pub static BELOW_FILE: Cause = Cause {
     cause: "the path runs through a file: {blocker} is not a directory, so nothing can be created below it",
     observed: "path: {path}; {blocker}: {blocker_state}; {left}; the system answered: {error}",
     remedy: "name a path that runs through directories only, or move {blocker} out of the way",
-    test: "tests/pairs/file.sh::a_set_under_a_file_is_refused",
+    test: "tests/pairs/imports/file.sh::a_set_under_a_file_is_refused",
 };
 
 pub static DIRECTORY: Cause = Cause {
@@ -118,7 +118,7 @@ pub static DIRECTORY: Cause = Cause {
     cause: "{path} is a directory, and {role} is one file",
     observed: "path: {path} ({state}); {left}; the system answered: {error}",
     remedy: "name a file path for {role}, not the directory {path}",
-    test: "tests/pairs/file.sh::a_merge_into_a_directory_is_refused",
+    test: "tests/pairs/imports/file.sh::a_merge_into_a_directory_is_refused",
 };
 
 pub static FAILED: Cause = Cause {
@@ -130,5 +130,5 @@ pub static FAILED: Cause = Cause {
     cause: "the system broke off the change although this account may write {directory}: the disk failed, or another process changed {path} meanwhile",
     observed: "path: {path} ({state}); directory {directory} ({directory_state}); {left}; error kind {kind}; the system answered: {error}",
     remedy: "see {directory} with `ls -ln {directory}`, and run the command again once nothing else changes it",
-    test: "tests/pairs/file.sh::a_write_the_system_breaks_off_is_refused",
+    test: "tests/pairs/imports/file.sh::a_write_the_system_breaks_off_is_refused",
 };

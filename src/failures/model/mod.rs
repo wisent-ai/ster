@@ -9,9 +9,11 @@ use wisent_errors::{Cause, Operation};
 use super::{refuse, refuse_from};
 
 pub mod checkpoint;
+#[path = "formats/hub.rs"]
 pub mod hub;
 pub mod decoder;
 pub mod config;
+#[path = "formats/t5.rs"]
 pub mod t5;
 pub mod tokenizer;
 pub mod weights;

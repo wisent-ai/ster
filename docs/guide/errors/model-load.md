@@ -29,7 +29,7 @@ Started through: run only by the functionalities that use it. Uses: `ster.model.
 - **Observed state shown:** kind: {kind}
 - **Fix:** attach a {wanted} artifact here: `ster tune inspect {path}` prints an artifact's kind
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/adapter.sh::a_reward_model_given_as_a_generation_adapter_is_refused`
+- **Test:** `tests/models/loading/adapter.sh::a_reward_model_given_as_a_generation_adapter_is_refused`
 
 <a id="ster-model-load-artifact-model"></a>
 
@@ -40,7 +40,7 @@ Started through: run only by the functionalities that use it. Uses: `ster.model.
 - **Observed state shown:** trained for: {trained}
 - **Fix:** load the model the artifact was trained for with --model {trained}, or train an artifact for {model}
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/adapter.sh::an_adapter_for_another_model_is_refused`
+- **Test:** `tests/models/loading/adapter.sh::an_adapter_for_another_model_is_refused`
 
 <a id="ster-model-load-artifact-width"></a>
 
@@ -51,7 +51,7 @@ Started through: run only by the functionalities that use it. Uses: `ster.model.
 - **Observed state shown:** hidden_size: {width}
 - **Fix:** train an artifact for {model}; an artifact attaches only to the width it was trained at
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/adapter.sh::an_adapter_of_another_width_is_refused`
+- **Test:** `tests/models/loading/adapter.sh::an_adapter_of_another_width_is_refused`
 
 <a id="ster-model-load-adapters-unsupported"></a>
 
@@ -62,7 +62,7 @@ Started through: run only by the functionalities that use it. Uses: `ster.model.
 - **Observed state shown:** the family's {feature}
 - **Fix:** steer this model with a steering vector (`ster extract`), or train adapters on a checkpoint of a family with attention projections on every layer
 - **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/models/targets.sh::a_model_that_trains_no_adapters_is_refused`
+- **Test:** `tests/models/loading/targets.sh::a_model_that_trains_no_adapters_is_refused`
 
 <a id="ster-model-load-target-absent"></a>
 
@@ -73,4 +73,4 @@ Started through: run only by the functionalities that use it. Uses: `ster.model.
 - **Observed state shown:** targets this model has: {choices}
 - **Fix:** choose adapter targets among {choices} with --targets
 - **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/models/targets.sh::a_target_the_model_lacks_is_refused`
+- **Test:** `tests/models/loading/targets.sh::a_target_the_model_lacks_is_refused`

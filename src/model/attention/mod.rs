@@ -5,11 +5,15 @@
 pub(super) mod attend;
 mod blocks;
 mod forward;
+#[path = "positions/indexer.rs"]
 mod indexer;
+#[path = "positions/latent.rs"]
 mod latent;
 mod load;
 mod mix;
+#[path = "positions/relative.rs"]
 pub(super) mod relative;
+#[path = "positions/rope.rs"]
 pub(super) mod rope;
 
 use candle_core::Tensor;
