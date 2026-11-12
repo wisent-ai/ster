@@ -1,6 +1,6 @@
 # Unreleased: chat templates, encoding, devices, generation and steering
 
-Part of the [changelog](../../../CHANGELOG.md).
+Part of the [changelog](../../../../CHANGELOG.md).
 
 - `ster.chat.template` splits what used to be one sentence per site: a
   template list without a default (naming the listed names), an entry

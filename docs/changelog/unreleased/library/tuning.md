@@ -1,6 +1,6 @@
 # Unreleased: tuning
 
-Part of the [changelog](../../../CHANGELOG.md).
+Part of the [changelog](../../../../CHANGELOG.md).
 
 - Device failures in a training step say which phase failed (forward and
   loss, or gradients and update) and the learning rate; the raw device

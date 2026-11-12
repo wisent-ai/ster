@@ -1,6 +1,6 @@
 # Unreleased: loading models, configs, tokenizers and fixtures
 
-Part of the [changelog](../../../CHANGELOG.md).
+Part of the [changelog](../../../../CHANGELOG.md).
 
 - `ster model fixture create` and `ster request model/fixture/create`
   refuse through declared causes of `ster.model.fixture`

@@ -238,7 +238,7 @@ cargo install --git https://github.com/wisent-ai/ster --features cuda --locked
 The crates.io name `ster` is currently unclaimed and is not Ster's release
 surface. `pip install ster` installs unrelated software from another publisher.
 
-Delivery through Stado and the checkpoint cache: [installing and where downloads land](docs/guide/install.md).
+Delivery through Stado and the checkpoint cache: [installing and where downloads land](docs/guide/start/install.md).
 
 ## First steering workflow
 
@@ -292,8 +292,7 @@ How one Candle decoder pass serves inference, steering and training: [architectu
 - Community: https://discord.gg/qRjpkthq54
 - Private vulnerabilities: GitHub Security Advisories for this repository
 
-Ster is pre-1.0. Artifact schema changes and supported-model expansion remain
-subject to the repository's versioned release contract.
+Ster is pre-1.0; artifact schema changes and supported-model expansion follow its versioned release contract.
 
 ## License
 

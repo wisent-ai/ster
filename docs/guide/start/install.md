@@ -2,7 +2,7 @@
 
 How the binary reaches a machine inside Wisent, and where a `--model`
 argument that is not a local directory puts its weights. The
-[README](../../README.md) covers the `cargo install` route.
+[README](../../../README.md) covers the `cargo install` route.
 
 ## Installing through Stado
 
