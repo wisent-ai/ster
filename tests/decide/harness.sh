@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # What every real test under tests/decide/ shares: the binary, the run's own
 # directory and home under target/real-tests/decide/, the report each
 # command, its exit status and its output are written to, and the checkpoint

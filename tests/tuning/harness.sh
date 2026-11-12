@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # What every real test under tests/tuning/ shares: the binary, the run's own
 # directory and home under target/real-tests/tuning/, the report each
 # command, its exit status and its output are written to, the four-layer
