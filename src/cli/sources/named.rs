@@ -19,6 +19,7 @@ pub(super) const NAMED: &[(&str, &str, &str, &str)] = &[
     ("IMP-STER-15", "a PyTorch checkpoint (.bin, .pt)", WEIGHTS, AS_SAFETENSORS),
     ("IMP-STER-18", "an MLX LoRA adapter", "is an adapter in MLX's own layout, which no Ster command reads", "merge it into its base model, convert that to safetensors and use it as IMP-STER-12"),
     ("IMP-STER-17", "a PEFT/LoRA adapter", "is a layout Ster writes as a tune artifact but does not read back", "merge it into its base model and use the merged directory as IMP-STER-12"),
+    ("IMP-STER-20", "wisent-evaluators evaluations", "name the evaluator, verdict, score, details and meta of each request, not the prompt or the response they judged (wisent-evaluators' evaluation format), so an evaluation alone gives no pair", "for a prompt with a truthful and an untruthful response, write the row (prompt, chosen: the truthful one, rejected: the untruthful one) and read it as IMP-STER-06"),
 ];
 
 pub(super) fn row(&(id, source, why, remedy): &(&str, &str, &str, &str)) -> Value {
