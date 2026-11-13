@@ -76,7 +76,7 @@ Part of the [changelog](../../../CHANGELOG.md).
   `ster decisions import`, names the `functionality` that declares it (the id
   `ster errors show` takes) and `docs`, its line on the area page, so a
   consumer can show the whole declaration and link it.
-- `tests/errors/pages.rs` (`cargo test --test error-pages`) compares every
+- `tests/errors/pages.rs` (`kompilator test --manifest-path Cargo.toml --test error-pages`) compares every
   page under `docs/guide/errors/` with `Operation::markdown` of the
   functionalities that name it, so a page edited by hand cannot drift from
   the catalogue.
