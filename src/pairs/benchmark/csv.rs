@@ -136,7 +136,7 @@ fn rows(text: &str, path: &str, benchmark: &str) -> Result<Vec<Vec<String>>> {
         }
     }
     if quoted {
-        let start: String = field.chars().take(40).collect();
+        let start = field.as_str();
         return Err(refuse(
             &export::CSV_QUOTE_OPEN,
             &[

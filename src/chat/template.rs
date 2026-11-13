@@ -231,8 +231,8 @@ impl Template {
             .or_else(|| full[agreed..].find(completion.trim()))
             .map(|offset| agreed + offset);
         let Some(start) = start else {
-            let after: String = full[agreed..].chars().take(60).collect();
-            let wanted: String = completion.chars().take(40).collect();
+            let after = &full[agreed..];
+            let wanted = completion;
             return Err(refuse(
                 &causes::BOUNDARY_ABSENT,
                 &[
