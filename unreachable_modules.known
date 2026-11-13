@@ -1,0 +1,6 @@
+# Files of this crate that nothing compiles, each with the reason it is still
+# here. `stado quality check` reads this list: a file it does not name is
+# refused, and so is a line for a file the crate no longer holds. Removing a
+# line, with the file declared or deleted, is the repair.
+
+src/tune/artifact/fit.rs  # fitting a trained artifact to the checkpoint a merge, an export or an ablation writes it into, refusing through ster.tune.fit; 5d8538542 (2026-11-11) brought it, src/tune/artifact/mod.rs declares ablate, evaluate, export and merge only and nothing names its items; declare it and have those three fit through it, or delete it
