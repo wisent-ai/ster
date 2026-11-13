@@ -272,6 +272,15 @@ How one Candle decoder pass serves inference, steering and training: [architectu
 
 Ster is pre-1.0; artifact schema changes and supported-model expansion follow its versioned release contract.
 
+## Import
+
+The import plan's adapters for Ster: IMP-STER-01 to 20, listed by `ster sources
+[--all]` (example sets read by `tune sft --examples`, preference rows by
+`pairs import --benchmark preference`, checkpoints by `--model`, the rest named
+with why) and read one file at a time by `ster sources discover <adapter>
+--path <file>`; `ster doctor --check import-sources` names what waits
+outside.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
