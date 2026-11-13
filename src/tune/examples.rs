@@ -39,8 +39,21 @@ impl ExampleSet {
         let shown = path.display().to_string();
         let bytes = std::fs::read(path)
             .map_err(|error| file::read::refusal_or(&MISSING, ROLE, path, &error))?;
-        let value: Self = serde_json::from_slice(&bytes)
-            .map_err(|error| file::json::refusal(ROLE, FORM, path, &error))?;
+        // `{"examples": [...]}` is Ster's own set; a list or JSON Lines of rows is
+        // a set another trainer publishes (`imported.rs`).
+        let rows = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(serde_json::Value::Object(set)) if set.contains_key("examples") => {
+                // Read from the bytes, so a refusal names the line and column it stopped at.
+                let value: Self = serde_json::from_slice(&bytes)
+                    .map_err(|error| file::json::refusal(ROLE, FORM, path, &error))?;
+                value.validate(&shown)?;
+                return Ok(value);
+            }
+            Ok(serde_json::Value::Array(rows)) => rows,
+            Ok(row) => vec![row],
+            Err(error) => super::imported::lines(&bytes).ok_or_else(|| file::json::refusal(ROLE, FORM, path, &error))?,
+        };
+        let value = Self { name: String::new(), examples: super::imported::examples(&rows, &shown)? };
         value.validate(&shown)?;
         Ok(value)
     }

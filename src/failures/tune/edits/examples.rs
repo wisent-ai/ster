@@ -59,6 +59,30 @@ pub static SYSTEM_BLANK: Cause = Cause {
     test: "tests/tuning/runs/examples.sh::an_empty_system_prompt_is_refused",
 };
 
+pub static CONVERSATION_UNFIT: Cause = Cause {
+    id: "example-conversation-unfit",
+    code: Code::Config,
+    usage: false,
+    exit: None,
+    failed: "reading example set {label}",
+    cause: "row {index} of example set {label} is a conversation of other turns than one example's: an optional system turn, one of the user, one of the assistant",
+    observed: "row {index}: turns {turns}",
+    remedy: "split row {index} into rows of one exchange each, carrying the turns before it in its user turn, or remove it",
+    test: "tests/tuning/runs/examples.sh::a_conversation_of_more_than_one_exchange_is_refused",
+};
+
+pub static ROW_UNKNOWN: Cause = Cause {
+    id: "example-row-unknown",
+    code: Code::Config,
+    usage: false,
+    exit: None,
+    failed: "reading example set {label}",
+    cause: "row {index} of example set {label} is none of the forms an example row is read in: OpenAI's messages, ShareGPT's conversations, Alpaca's instruction and output, or prompt and completion",
+    observed: "row {index}: fields {fields}",
+    remedy: "write row {index} in one of those forms, or the set as {\"examples\": [{\"prompt\": \"<text>\", \"completion\": \"<text>\"}]}",
+    test: "tests/tuning/runs/examples.sh::a_row_of_no_known_form_is_refused",
+};
+
 /// Reading and checking one example-set file.
 pub static EXAMPLES: Operation = Operation {
     id: "ster.tune.examples",
@@ -72,5 +96,7 @@ pub static EXAMPLES: Operation = Operation {
         &EMPTY,
         &BLANK,
         &SYSTEM_BLANK,
+        &CONVERSATION_UNFIT,
+        &ROW_UNKNOWN,
     ],
 };

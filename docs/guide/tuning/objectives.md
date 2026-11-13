@@ -18,6 +18,16 @@ run's chat template is <absent|off>`, because raw text has no place for a system
 `ster tune evaluate` reads the same field and echoes it in each scored entry.
 Examples written in the reference fixture's vocabulary are checked in as
 [`docs/examples/tuning/examples.json`](../../examples/tuning/examples.json).
+A set other trainers publish is read too, as a JSON list or JSON Lines of rows, each
+row's form read from its fields: OpenAI's fine-tuning `messages` (`role`, `content`)
+and its legacy `prompt` and `completion`, ShareGPT's `conversations` (`from`:
+`system`, `human`, `gpt`; `value`) and Alpaca's `instruction`, optional `input` and
+`output`, whose prompt is the instruction followed, after a blank line, by a
+non-empty input. A conversation is one example when it is an optional system turn,
+one user turn and one assistant turn; one of more turns is refused with
+`row <n> of example set <label> is a conversation of other turns than one example's`,
+and a row of none of these forms with `... is none of the forms an example row is
+read in`, naming its fields.
 An offline checkpoint is created with
 `ster model fixture create --from docs/examples/model/fixture.json --output <DIR>`.
 That declaration selects the grouped-query Llama architecture, native

@@ -83,6 +83,40 @@ a_system_prompt_without_a_chat_template_is_refused() {
   passed a_system_prompt_without_a_chat_template_is_refused
 }
 
+# Each published form is read into the same examples: with example 2's completion
+# blank, every form is refused naming example 2's prompt, so prompt and completion
+# were read from where the form keeps them.
+rows_of_other_trainers_are_read_as_examples() {
+  blanked='.examples[2].completion = "  " | .examples[]'
+  jq -c "$blanked"' | {messages: [{role: "user", content: .prompt}, {role: "assistant", content: .completion}]}' "$ROOT/examples.json" >"$ROOT/openai.jsonl"
+  jq "[$blanked"' | {conversations: [{from: "human", value: .prompt}, {from: "gpt", value: .completion}]}]' "$ROOT/examples.json" >"$ROOT/sharegpt.json"
+  jq -c "$blanked"' | {instruction: .prompt, input: "", output: .completion}' "$ROOT/examples.json" >"$ROOT/alpaca.jsonl"
+  for SET in "$ROOT/openai.jsonl" "$ROOT/sharegpt.json" "$ROOT/alpaca.jsonl"; do
+    tune 1 sft "$SFT" --examples "$SET"
+    said "Error: reading example set $SET: example set $SET contains an empty prompt or completion; observed: example 2: prompt \"question : describe the harbor .\", completion \"  \""
+  done
+  no_adapter
+  passed rows_of_other_trainers_are_read_as_examples
+}
+
+a_conversation_of_more_than_one_exchange_is_refused() {
+  jq -c '.examples[] | {messages: [{role: "user", content: .prompt}, {role: "assistant", content: .completion}, {role: "user", content: .prompt}, {role: "assistant", content: .completion}]}' "$ROOT/examples.json" >"$ROOT/long.jsonl"
+  tune 1 sft "$SFT" --examples "$ROOT/long.jsonl"
+  said "row 0 of example set $ROOT/long.jsonl is a conversation of other turns than one example's"
+  said "observed: row 0: turns user, assistant, user, assistant"
+  no_adapter
+  passed a_conversation_of_more_than_one_exchange_is_refused
+}
+
+a_row_of_no_known_form_is_refused() {
+  echo '[{"question": "a", "answer": "b"}]' >"$ROOT/unknown.json"
+  tune 1 sft "$SFT" --examples "$ROOT/unknown.json"
+  said "row 0 of example set $ROOT/unknown.json is none of the forms an example row is read in"
+  said "observed: row 0: fields answer, question"
+  no_adapter
+  passed a_row_of_no_known_form_is_refused
+}
+
 a_missing_example_set_is_refused
 a_directory_named_as_an_example_set_is_refused
 a_file_that_is_not_an_example_set_is_refused
@@ -90,6 +124,9 @@ an_example_set_without_examples_is_refused
 an_example_with_an_empty_side_is_refused
 an_empty_system_prompt_is_refused
 a_system_prompt_without_a_chat_template_is_refused
+rows_of_other_trainers_are_read_as_examples
+a_conversation_of_more_than_one_exchange_is_refused
+a_row_of_no_known_form_is_refused
 
 touch "$ROOT/passed"
 echo "PASS" >>"$REPORT"

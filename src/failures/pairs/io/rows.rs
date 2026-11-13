@@ -136,12 +136,19 @@ row_cause!(ANSWER_TEXT_UNKNOWN, "answer-text-unknown",
     "correct the answer of {row} to the text of one of its choices",
     "an_answer_that_names_no_choice_is_skipped");
 
+// --benchmark preference: DPO rows of prompt, chosen and rejected.
+row_cause!(PREFERENCE_SIDE_MISSING, "preference-side-missing",
+    "{row} holds no {field} text (a string, or a list of chat messages ending with the assistant's), and it is the {side} side of the pair",
+    "{found}",
+    "write the {field} of {row} in {source}, or remove the row",
+    "a_preference_row_without_a_side_is_skipped");
+
 /// Why one row of a benchmark export cannot become a pair.
 pub static ROWS: Operation = Operation {
     id: "ster.pairs.import.rows",
     entries: &[],
     uses: &[],
-    summary: "read one row of a TruthfulQA, Do-Not-Answer, BiPO, LiveCodeBench or multiple-choice export into one pair, or name why it cannot be one",
+    summary: "read one row of a TruthfulQA, Do-Not-Answer, BiPO, LiveCodeBench, multiple-choice or preference (DPO) export into one pair, or name why it cannot be one",
     docs: DOCS,
     warnings: &[],
     causes: &[
@@ -166,5 +173,6 @@ pub static ROWS: Operation = Operation {
         &ANSWER_LABEL_UNKNOWN,
         &ANSWER_TEXT_NOT_TEXT,
         &ANSWER_TEXT_UNKNOWN,
+        &PREFERENCE_SIDE_MISSING,
     ],
 };

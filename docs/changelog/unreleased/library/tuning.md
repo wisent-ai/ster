@@ -2,6 +2,14 @@
 
 Part of the [changelog](../../../../CHANGELOG.md).
 
+- `--examples` of `ster tune sft` and `ster tune evaluate` reads
+  the example sets other trainers publish, a JSON list or JSON Lines of rows:
+  OpenAI's fine-tuning `messages` and legacy `prompt`/`completion` rows
+  (IMP-STER-03), ShareGPT's `conversations` (04) and Alpaca's `instruction`,
+  `input` and `output` (05). A conversation of more than one exchange is
+  refused (`example-conversation-unfit`), as is a row of no known form
+  (`example-row-unknown`, naming its fields).
+
 - Device failures in a training step say which phase failed (forward and
   loss, or gradients and update) and the learning rate; the raw device
   answer moves to the observed state. A step that summed no loss, a GRPO

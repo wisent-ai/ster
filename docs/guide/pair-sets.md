@@ -25,7 +25,7 @@ ster pairs synthesize --trait <TRAIT_DESCRIPTION> --count <COUNT> --output <OUTP
                       --dedupe-bands <BANDS>
                       --max-new-tokens <N> --temperature <T>
                       --top-p <P> --seed <SEED>
-ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo|choices --source <FILE> --output <FILE>
+ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo|choices|preference --source <FILE> --output <FILE>
                   [--examples <FILE>] [--count <N>] --seed <SEED> [--trait <NAME>]
                   [--question <POINTER> --choices <POINTER> --answer <POINTER>
                    --answer-form index|label|text [--labels <POINTER>]]
@@ -89,7 +89,7 @@ ster vector train --model meta-llama/Llama-3.2-1B --pairs pairs.json --output ta
 `ster pairs import` reads a published benchmark export into a set:
 
 ```text
-ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo|choices --source <FILE> --output <FILE>
+ster pairs import --benchmark truthfulqa|dna|livecodebench|bipo|choices|preference --source <FILE> --output <FILE>
                   [--examples <FILE>] [--count <N>] --seed <SEED> [--trait <NAME>]
                   [--question <POINTER> --choices <POINTER> --answer <POINTER>
                    --answer-form index|label|text [--labels <POINTER>]]
@@ -146,6 +146,16 @@ choice), `choices-few` (fewer than two), `answer-missing`, `answer-not-index`
 `answer-text-unknown`. Its row is its line (JSON Lines) or its position from
 one (a list); every cause is on [How importing a benchmark export
 fails](errors/pairs-import.md). Every row is read unless `--count` keeps fewer.
+
+`--benchmark preference` reads preference rows — `prompt`, `chosen` and
+`rejected`, the shape TRL's DPO trainer and the Hugging Face preference
+datasets publish, and what the Preferences product exports — as JSON Lines or
+one JSON list. The chosen answer is the positive side and the rejected one the
+negative, both asked the row's prompt. A side given in the conversational form
+(a list of `{"role", "content"}` messages) is its last message's content, and
+when the row has no `prompt` the messages before it are the question. A row
+without text on a side is skipped as `preference-side-missing`, naming the
+field.
 
 ```bash
 # ARC-Easy: {"question": …, "choices": {"text": [...], "label": ["A", …]}, "answerKey": "B"}

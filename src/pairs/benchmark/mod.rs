@@ -13,6 +13,7 @@
 //! flag is checked before the export is read.
 
 mod choices;
+mod preference;
 mod csv;
 mod fields;
 mod livecodebench;
@@ -49,6 +50,9 @@ pub enum Benchmark {
     /// positive the correct choice, negative another choice drawn with the
     /// seed, each part read where [`ChoiceFields`] says it sits.
     Choices,
+    /// Preference rows (DPO: prompt, chosen, rejected; JSON Lines or a JSON
+    /// list): positive the chosen answer, negative the rejected one.
+    Preference,
 }
 
 impl Benchmark {
@@ -59,9 +63,10 @@ impl Benchmark {
             "livecodebench" => Ok(Self::Livecodebench),
             "bipo" => Ok(Self::Bipo),
             "choices" => Ok(Self::Choices),
+            "preference" => Ok(Self::Preference),
             other => Err(refuse(
                 &import::BENCHMARK_UNKNOWN,
-                &[("benchmark", other), ("benchmarks", "truthfulqa, dna, livecodebench, bipo, choices")],
+                &[("benchmark", other), ("benchmarks", "truthfulqa, dna, livecodebench, bipo, choices, preference")],
             )),
         }
     }
@@ -74,6 +79,7 @@ impl Benchmark {
             Self::Livecodebench => "livecodebench",
             Self::Bipo => "bipo",
             Self::Choices => "choices",
+            Self::Preference => "preference",
         }
     }
 }
@@ -226,6 +232,20 @@ pub fn import(options: &ImportOptions) -> Result<(PairSet, ImportReport)> {
             let mut found = Read::new(&label, records.len());
             for (row, record) in records {
                 match choices::pair_of(&record, fields, &mut rng) {
+                    Ok(made) => found.pairs.push(made),
+                    Err(rejection) => {
+                        let place = format!("row {row}");
+                        found.skip(row, place, rejection);
+                    }
+                }
+            }
+            found
+        }
+        Benchmark::Preference => {
+            let records = choices::rows(&text, &label)?;
+            let mut found = Read::new(&label, records.len());
+            for (row, record) in records {
+                match preference::pair_of(&record) {
                     Ok(made) => found.pairs.push(made),
                     Err(rejection) => {
                         let place = format!("row {row}");

@@ -9,9 +9,11 @@ use ster::pairs::benchmark::{self, Benchmark, ChoiceFields, ImportOptions};
 
 #[derive(Debug, Args)]
 pub(super) struct ImportArgs {
-    /// Which export SOURCE is: truthfulqa, dna, livecodebench, bipo, or
+    /// Which export SOURCE is: truthfulqa, dna, livecodebench, bipo,
     /// choices (multiple-choice rows of any dataset, read through --question,
-    /// --choices, --answer and --answer-form).
+    /// --choices, --answer and --answer-form), or preference (DPO rows of
+    /// prompt, chosen and rejected, as Hugging Face preference datasets and
+    /// TRL publish them).
     #[arg(long)]
     benchmark: String,
     /// The export: TruthfulQA_en.csv, DnA_en.csv, LiveCodeBench problems.json,

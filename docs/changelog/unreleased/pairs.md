@@ -84,3 +84,9 @@ Part of the [changelog](../../../CHANGELOG.md).
   that holds no row. A LiveCodeBench problem without a `question_id` is
   reported as `problem <n>`, where it was `(no question_id)`.
   `tests/pairs/import-rows.sh` provokes each cause.
+- `ster pairs import --benchmark preference` writes a pair set from preference
+  rows (IMP-STER-06, 01, 19): `prompt`, `chosen` and `rejected` as TRL's DPO
+  trainer and the Hugging Face preference datasets publish them, as strings
+  or in the conversational message form; the chosen answer is the positive
+  side. A row without text on a side is skipped as
+  `preference-side-missing`.
