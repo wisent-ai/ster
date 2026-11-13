@@ -20,14 +20,27 @@ pub static ADAPTER_UNKNOWN: Cause = Cause {
     test: "tests/sources/sources.sh::an_unknown_adapter_is_refused",
 };
 
+/// `ster sources share yes|no` keeps its answer in a file; one it cannot write is refused.
+pub static SHARE_UNKEPT: Cause = Cause {
+    id: "sources-share-unkept",
+    code: Code::Config,
+    usage: false,
+    exit: None,
+    failed: "keeping whether discoveries report their counts",
+    cause: "{problem}",
+    observed: "the answer was not kept",
+    remedy: "set XDG_CONFIG_HOME to a directory this user can write, then answer again",
+    test: "tests/sources/sources.sh::an_answer_to_sharing_that_cannot_be_kept_is_refused",
+};
+
 /// Listing the sources Ster reads and discovering one file.
 pub static SOURCES: Operation = Operation {
     id: "ster.sources",
-    entries: &["ster sources"],
+    entries: &["ster sources", "ster sources discover", "ster sources share"],
     uses: &[],
     summary: "list the data other tools keep that Ster reads, one adapter each (IMP-STER-<NN>), and say how many examples or pairs one file gives",
     docs: DOCS,
-    causes: &[&ADAPTER_UNKNOWN],
+    causes: &[&ADAPTER_UNKNOWN, &SHARE_UNKEPT],
     warnings: &[],
 };
 

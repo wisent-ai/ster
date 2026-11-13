@@ -114,7 +114,7 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
                             ("dataset", &options.dataset),
                             ("index", &index),
                             ("text", &options.text_field),
-                            ("found", &wisent_errors::trim_detail(&other.to_string(), 80)),
+                            ("found", &other.to_string().trim()),
                         ],
                     ));
                 }

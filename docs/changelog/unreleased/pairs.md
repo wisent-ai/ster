@@ -113,3 +113,18 @@ Part of the [changelog](../../../CHANGELOG.md).
   since `--model` reads a checkpoint where it is; it lists the models the
   Hugging Face hub cache keeps (`HF_HUB_CACHE`, else `HF_HOME/hub`, else
   `~/.cache/huggingface/hub`) under `read_in_place`.
+- `ster sources share yes | no` keeps, once, whether each `ster sources
+  discover` reports `ster.sources.discovered` (adapter, whether the file is
+  that source, its examples or pairs in buckets, a random subject) to Wisent
+  Integrations with `STER_STADO_INTEGRATION_TOKEN`; `ster sources` asks with
+  exactly that event until then, each discovery answers `reported`, and an
+  answer that cannot be written is `ster.sources.sources-share-unkept`
+  (`tests/sources/sources.sh`).
+- JSON Lines is read by wisent-formats' one JSON Lines reader, which Zrodlo
+  shares, in place of Ster's four copies: example sets for `tune sft
+  --examples`, preference rows `ster sources discover` reads, multiple-choice
+  rows (`ster.pairs.import.export`: `row-unclosed` when a value runs past its
+  line, else `row-not-json`, with the line and column as before) and decision
+  exports (`ster decisions import`, each line still read on its own so a line
+  that does not read is one rejected row). The refusals and their values are
+  unchanged.

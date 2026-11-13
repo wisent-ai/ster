@@ -14,7 +14,7 @@ use crate::{
 pub(super) fn fields(value: &Value) -> String {
     match value.as_object() {
         Some(fields) => fields.keys().cloned().collect::<Vec<_>>().join(", "),
-        None => format!("none: it is {}", wisent_errors::trim_detail(&value.to_string(), 60)),
+        None => format!("none: it is {value}"),
     }
 }
 
@@ -83,7 +83,7 @@ pub(super) fn read_page(
                     ("split", &options.split),
                     ("url", &url),
                     ("status", &code),
-                    ("said", &wisent_errors::trim_detail(&said, 240)),
+                    ("said", &said.trim()),
                 ],
             ));
         }
@@ -106,7 +106,7 @@ pub(super) fn read_page(
             &[
                 ("dataset", dataset),
                 ("url", &url),
-                ("page", &wisent_errors::trim_detail(&text, 240)),
+                ("page", &text.trim()),
                 ("size", &text.len().to_string()),
                 ("line", &error.line().to_string()),
                 ("column", &error.column().to_string()),
@@ -140,7 +140,7 @@ pub(super) fn class_names(page: &Value, options: &FetchOptions) -> Result<Vec<St
             &[
                 ("dataset", dataset),
                 ("label", label),
-                ("feature", &wisent_errors::trim_detail(&feature["type"].to_string(), 120)),
+                ("feature", &feature["type"].to_string().trim()),
             ],
         ));
     };

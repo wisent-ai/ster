@@ -164,7 +164,7 @@ fn supported(raw: &serde_json::Value, path: &Path) -> Result<(String, Family)> {
                 ("path", &shown),
                 (
                     "value",
-                    &wisent_errors::trim_detail(&stated.to_string(), 120),
+                    &stated.to_string().trim(),
                 ),
             ],
         ));

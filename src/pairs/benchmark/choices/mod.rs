@@ -15,7 +15,8 @@ use std::path::Path;
 
 use anyhow::Result;
 use rand::{rngs::StdRng, seq::IndexedRandom};
-use serde_json::{Value, error::Category};
+use serde_json::Value;
+use wisent_formats::jsonl::Fault;
 use wisent_errors::Cause;
 
 use super::fields::{AnswerForm, ChoiceFields};
@@ -51,27 +52,26 @@ pub(super) fn rows(text: &str, path: &str) -> Result<Vec<(String, Value)>> {
             .map(|(index, row)| ((index + FIRST_ROW).to_string(), row))
             .collect());
     }
-    text.lines()
-        .enumerate()
-        .filter(|(_, line)| !line.trim().is_empty())
-        .map(|(index, line)| {
-            let number = (index + FIRST_ROW).to_string();
-            serde_json::from_str(line)
-                .map_err(|error| {
+    // JSON Lines through wisent-formats' one reader: each line on its own.
+    wisent_formats::jsonl::lines(text)
+        .map(|line| {
+            let number = line.number.to_string();
+            line.value
+                .map_err(|refused| {
                     // A value that runs out at the line's end continues on
                     // the next: a document spread over lines, not JSON Lines.
-                    let cause = match error.classify() {
-                        Category::Eof => &export::ROW_UNCLOSED,
-                        _ => &export::ROW_NOT_JSON,
+                    let cause = match refused.fault {
+                        Fault::Unclosed => &export::ROW_UNCLOSED,
+                        Fault::NotJson | Fault::NotUtf8 => &export::ROW_NOT_JSON,
                     };
                     refuse(
                         cause,
                         &[
                             ("path", path),
                             ("line", &number),
-                            ("column", &error.column().to_string()),
-                            ("excerpt", &excerpt(line)),
-                            ("error", &error.to_string()),
+                            ("column", &refused.column.to_string()),
+                            ("excerpt", &excerpt(line.text)),
+                            ("error", &refused.said),
                         ],
                     )
                 })

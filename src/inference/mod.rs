@@ -29,9 +29,6 @@ const CONSUMER: &str = "ster";
 /// The call every completion is, after the program, as a refusal names it.
 const CALL: &str = "capabilities call inference --consumer ster --json";
 
-/// How much of an answer that is not one a refusal quotes.
-const QUOTED: usize = 400;
-
 /// One route asked through Stado's inference alternatives.
 pub struct Inference {
     model: String,
@@ -213,7 +210,7 @@ impl Inference {
     }
 }
 
-/// `text` cut at a word edge to a length a refusal can carry.
+/// `text` as a refusal quotes it: whole, its ends trimmed.
 fn quoted(text: &str) -> String {
-    wisent_errors::trim_detail(text.trim(), QUOTED)
+    text.trim().to_owned()
 }

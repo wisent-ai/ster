@@ -143,7 +143,7 @@ pub fn config_not_object(path: &Path, held: &Value) -> anyhow::Error {
         &config::NOT_OBJECT,
         &[
             ("path", &path.display().to_string()),
-            ("held", &wisent_errors::trim_detail(&held.to_string(), 80)),
+            ("held", &held.to_string().trim()),
         ],
     )
 }

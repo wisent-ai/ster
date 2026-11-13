@@ -279,7 +279,14 @@ The import plan's adapters for Ster: IMP-STER-01 to 20, listed by `ster sources
 `pairs import --benchmark preference`, checkpoints by `--model`, the rest named
 with why) and read one file at a time by `ster sources discover <adapter>
 --path <file>`; `ster doctor --check import-sources` names what waits
-outside.
+outside. `ster sources share yes | no` answers, once, whether each discovery
+reports `ster.sources.discovered` (the adapter, whether the file is that source,
+its examples or pairs rounded into buckets, under a random subject; never a
+row or path) to Wisent Integrations with `STER_STADO_INTEGRATION_TOKEN`; until
+then `ster sources` asks with exactly that event, the answer is kept in
+`$XDG_CONFIG_HOME/ster/sources-share.json` (one that cannot be written is
+`ster.sources.sources-share-unkept`), and each discovery's `reported` says
+whether it was sent.
 
 ## License
 

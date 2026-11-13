@@ -36,17 +36,19 @@ fn field<'a>(fields: &'a Map<String, Value>, name: &str) -> Result<&'a Value, Re
     }
 }
 
-/// `line` read as one `{"context", "options", "label"}` row.
-pub(super) fn read(line: &str) -> Result<Row, Rejection> {
-    let value: Value = match serde_json::from_str(line) {
+/// `read`, one line wisent-formats' JSON Lines reader read on its own, as one
+/// `{"context", "options", "label"}` row.
+pub(super) fn read(given: wisent_formats::jsonl::Line<'_>) -> Result<Row, Rejection> {
+    let line = given.text;
+    let value: Value = match given.value {
         Ok(value) => value,
-        Err(error) => {
+        Err(unread) => {
             return refused(
                 &causes::NOT_JSON,
                 vec![
                     ("excerpt", excerpt(line)),
-                    ("column", error.column().to_string()),
-                    ("error", error.to_string()),
+                    ("column", unread.column.to_string()),
+                    ("error", unread.said),
                 ],
             );
         }

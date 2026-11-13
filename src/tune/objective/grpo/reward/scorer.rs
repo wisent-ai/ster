@@ -121,7 +121,7 @@ impl Scorer {
                         ("url", url),
                         ("status", &status.to_string()),
                         ("bearer", bearer),
-                        ("body", &wisent_errors::trim_detail(&body, 240)),
+                        ("body", &body.trim()),
                     ],
                 ));
             }
@@ -145,7 +145,7 @@ impl Scorer {
                     ("size", &body.len().to_string()),
                     ("line", &error.line().to_string()),
                     ("column", &error.column().to_string()),
-                    ("body", &wisent_errors::trim_detail(&body, 240)),
+                    ("body", &body.trim()),
                 ],
             )
         })?;
@@ -158,7 +158,7 @@ impl Scorer {
                     &[
                         ("url", url),
                         ("pointer", &self.pointer),
-                        ("body", &wisent_errors::trim_detail(&body, 240)),
+                        ("body", &body.trim()),
                     ],
                 )
             })

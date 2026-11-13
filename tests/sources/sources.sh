@@ -71,10 +71,22 @@ an_unknown_adapter_is_refused() {
   passed an_unknown_adapter_is_refused
 }
 
+an_answer_to_sharing_that_cannot_be_kept_is_refused() {
+  # XDG_CONFIG_HOME names a file, so the folder the answer goes in cannot be made.
+  printf 'a file where the answer folder would go\n' >"$ROOT/config-is-a-file"
+  export XDG_CONFIG_HOME="$ROOT/config-is-a-file"
+  run 1 sources share no
+  unset XDG_CONFIG_HOME
+  said "keeping whether discoveries report their counts"
+  said "could not be written"
+  passed an_answer_to_sharing_that_cannot_be_kept_is_refused
+}
+
 the_listing_names_every_adapter
 a_sharegpt_file_is_discovered_with_its_examples
 a_dpo_file_is_discovered_with_its_pairs
 an_unknown_adapter_is_refused
+an_answer_to_sharing_that_cannot_be_kept_is_refused
 
 touch "$ROOT/passed"
 echo "PASS" >>"$REPORT"

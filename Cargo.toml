@@ -65,6 +65,10 @@ ureq = "2.12"
 # reports what failed on a user's machine, with their consent (`ster telemetry`),
 # and its diagnosis is `ster doctor`.
 wisent-errors = { git = "https://github.com/wisent-ai/wisent-errors", rev = "f1d10d652e2952ed4beee10937c6a18a641ed92a", features = ["telemetry", "diagnosis"] }
+# JSON Lines (example sets, pair sets, decision exports) is read by wisent-formats'
+# one JSON Lines reader, which Zrodlo shares; declared by repository without a
+# revision, as stado-wait is, so Cargo.lock holds the one it reads.
+wisent-formats = { git = "https://github.com/wisent-ai/wisent-formats" }
 
 # A bool is tested with if/else, never matched against true and false.
 [lints.clippy]

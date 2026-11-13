@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
-use ster::failures::{refuse, sources::ADAPTER_UNKNOWN};
+use ster::failures::{refuse, sources::{ADAPTER_UNKNOWN, SHARE_UNKEPT}};
 
 #[derive(Debug, Args)]
 pub(super) struct SourcesArgs {
@@ -34,6 +34,11 @@ enum SourcesCommand {
         /// The file to read.
         #[arg(long)]
         path: PathBuf,
+    },
+    /// Whether each discovery reports its adapter and counts to Wisent Integrations; alone, the question.
+    Share {
+        #[arg(value_parser = ["yes", "no"])]
+        answer: Option<String>,
     },
 }
 
@@ -61,11 +66,8 @@ fn preference_pairs(text: &str) -> Result<(usize, usize), String> {
     let rows: Vec<Value> = match serde_json::from_str::<Value>(text) {
         Ok(Value::Array(rows)) => rows,
         Ok(row) => vec![row],
-        Err(_) => text
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(serde_json::from_str)
-            .collect::<Result<_, _>>()
+        Err(_) => wisent_formats::jsonl::read(text.as_bytes())
+            .map(|rows| rows.into_iter().map(|row| row.value).collect())
             .map_err(|error| format!("it is neither a JSON list nor JSON Lines: {error}"))?,
     };
     let pairs = rows.iter().filter(|row| ster::pairs::benchmark::preference_pair(row).is_ok()).count();
@@ -74,13 +76,17 @@ fn preference_pairs(text: &str) -> Result<(usize, usize), String> {
 
 pub(super) fn run(args: SourcesArgs) -> Result<()> {
     let Some(SourcesCommand::Discover { adapter, path }) = args.command else {
+        if let Some(SourcesCommand::Share { answer }) = args.command {
+            let kept = super::sharing::share(answer.map(|answer| answer == "yes")).map_err(|problem| refuse(&SHARE_UNKEPT, &[("problem", &problem)]))?;
+            return super::answer_document(&kept);
+        }
         let adapters: Vec<Value> = ADAPTERS
             .iter()
             .map(row)
             .chain(models::MODELS.iter().map(models::row))
             .chain(named::NAMED.iter().map(named::row))
             .collect();
-        return super::answer_document(&json!({"adapters": adapters, "all": args.all}));
+        return super::answer_document(&json!({"adapters": adapters, "all": args.all, "sharing": super::sharing::question()}));
     };
     let shown = path.display().to_string();
     if let Some(model) = models::MODELS.iter().find(|(id, _)| *id == adapter) {
@@ -113,7 +119,9 @@ pub(super) fn run(args: SourcesArgs) -> Result<()> {
         }
         Err(why) => answer["why_not"] = json!(why),
     }
-    super::answer_document(&answer)
+    let given = answer["pairs"].as_u64().or(answer["examples"].as_u64()).map_or(0, |given| given as usize);
+    let present = answer["found"] == json!(true);
+    super::answer_document(&super::sharing::reported(answer, found.0, present, &[(if found.2 { "pairs" } else { "examples" }, given)], "discovered"))
 }
 
 /// The checks `ster doctor --check` runs alone.

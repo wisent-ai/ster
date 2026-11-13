@@ -4,11 +4,6 @@
 
 use serde_json::Value;
 
-/// How much of a value or a line a refusal quotes: the length Ster's other
-/// refusals of one stated value quote (src/model/keys/mod.rs, a config key's
-/// value), enough to recognise a row without printing a whole document.
-const QUOTED: usize = 120;
-
 /// `value` as a refusal names what was found: `absent`, `null`, `true`, `the
 /// number -1`, `text "B"`, `a list of 2`, `an object with keys a, b`.
 pub fn shape(value: Option<&Value>) -> String {
@@ -29,7 +24,8 @@ pub fn shape(value: Option<&Value>) -> String {
     }
 }
 
-/// `text` cut to the length a refusal quotes.
+/// `text` as a refusal quotes it: whole, its ends trimmed. A cut at a chosen length dropped
+/// the part past it, which was often the part that said why.
 pub fn excerpt(text: &str) -> String {
-    wisent_errors::trim_detail(text, QUOTED)
+    text.trim().to_owned()
 }

@@ -51,12 +51,11 @@ pub fn import_jsonl(
     let mut rejections = Rejections::default();
     let mut rows = 0usize;
     let shown = path.display().to_string();
-    for (number, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
+    // Each line on its own through wisent-formats' JSON Lines reader, so a line
+    // that does not read is one rejected row, not the end of the export.
+    for line in wisent_formats::jsonl::lines(&text) {
         rows += 1;
-        let line_number = number + 1;
+        let line_number = line.number;
         let row = match row::read(line) {
             Ok(row) => row,
             Err(rejection) => {

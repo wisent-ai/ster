@@ -86,17 +86,11 @@ fn example(row: &Value, label: &str, index: usize) -> Result<Example> {
     Err(refuse(&ROW_UNKNOWN, &[("label", label), ("index", &index.to_string()), ("fields", &fields)]))
 }
 
-/// The rows of JSON Lines, read when `bytes` is not one JSON value; none when a
-/// line is not JSON either.
+/// The rows of JSON Lines (wisent-formats' one reader), read when `bytes` is not
+/// one JSON value; none when a line is not JSON either.
 pub(super) fn lines(bytes: &[u8]) -> Option<Vec<Value>> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let rows: Vec<Value> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str)
-        .collect::<Result<_, _>>()
-        .ok()?;
-    (!rows.is_empty()).then_some(rows)
+    let rows = wisent_formats::jsonl::read(bytes).ok()?;
+    (!rows.is_empty()).then(|| rows.into_iter().map(|row| row.value).collect())
 }
 
 /// The examples of imported `rows`, every row one example.

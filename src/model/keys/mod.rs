@@ -101,7 +101,7 @@ pub(crate) fn mistyped(key: &str, value: &Value, kind: &str, path: &Path) -> any
         &[
             ("path", &path.display().to_string()),
             ("key", key),
-            ("value", &wisent_errors::trim_detail(&value.to_string(), 120)),
+            ("value", &value.to_string().trim()),
             ("kind", kind),
         ],
     )

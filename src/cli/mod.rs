@@ -31,6 +31,7 @@ pub(crate) mod support;
 #[path = "admin/telemetry.rs"]
 pub(crate) mod telemetry;
 pub(crate) mod tune;
+mod sharing;
 mod sources;
 mod vectors;
 mod workspace;
