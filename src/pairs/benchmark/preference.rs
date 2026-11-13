@@ -30,7 +30,8 @@ fn side(value: &Value) -> Option<(String, String)> {
     (!answer.is_empty()).then_some((asked, answer))
 }
 
-pub(super) fn pair_of(row: &Value) -> Result<ContrastivePair, Rejection> {
+/// One preference row as the pair `pairs import --benchmark preference` writes, or why it is none.
+pub fn pair_of(row: &Value) -> Result<ContrastivePair, Rejection> {
     let read = |field: &'static str, which: &'static str| {
         side(&row[field]).ok_or_else(|| {
             Rejection::new(

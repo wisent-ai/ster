@@ -1,0 +1,97 @@
+//! `ster sources [--all] | ster sources discover <adapter> --path <file>`: the data other
+//! tools keep that Ster reads, one adapter each (`IMP-STER-<NN>`), under the import
+//! guidelines' contract. An example set another trainer published (03 OpenAI, 04 ShareGPT,
+//! 05 Alpaca) is read by `tune sft --examples`; preference rows (01 Hugging Face, 06 DPO, 19
+//! Preferences) by `pairs import --benchmark preference`, which writes a pair set. `discover`
+//! reads a file as that command would and says how many examples or pairs it gives, or why
+//! it is not that source; nothing is written, so the writing verbs are those commands.
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::{Args, Subcommand};
+use serde_json::{Value, json};
+use ster::failures::{refuse, sources::ADAPTER_UNKNOWN};
+
+#[derive(Debug, Args)]
+pub(super) struct SourcesArgs {
+    /// List every adapter (Ster reads the same files on every system).
+    #[arg(long)]
+    all: bool,
+    #[command(subcommand)]
+    command: Option<SourcesCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum SourcesCommand {
+    /// How many examples or pairs a file gives as an adapter's source.
+    Discover {
+        adapter: String,
+        /// The file to read.
+        #[arg(long)]
+        path: PathBuf,
+    },
+}
+
+/// Each adapter: its id, its source and whether it is preference rows (else an example set).
+const ADAPTERS: &[(&str, &str, bool)] = &[
+    ("IMP-STER-01", "a Hugging Face preference dataset (prompt, chosen, rejected)", true),
+    ("IMP-STER-03", "OpenAI's fine-tuning JSONL (messages, or prompt and completion)", false),
+    ("IMP-STER-04", "ShareGPT conversations", false),
+    ("IMP-STER-05", "Alpaca (instruction, input, output)", false),
+    ("IMP-STER-06", "DPO rows (prompt, chosen, rejected), as TRL's DPO trainer reads them", true),
+    ("IMP-STER-19", "Preferences' exported comparisons (prompt, chosen, rejected)", true),
+];
+
+fn row(&(id, source, preference): &(&str, &str, bool)) -> Value {
+    let read_by = if preference {
+        "ster pairs import --benchmark preference <file> …"
+    } else {
+        "ster tune sft --examples <file> …"
+    };
+    json!({"adapter": id, "source": source, "kind": "E", "read_by": read_by, "found": false})
+}
+
+/// The pairs preference rows give and how many rows give none: a JSON list, else JSON Lines.
+fn preference_pairs(text: &str) -> Result<(usize, usize), String> {
+    let rows: Vec<Value> = match serde_json::from_str::<Value>(text) {
+        Ok(Value::Array(rows)) => rows,
+        Ok(row) => vec![row],
+        Err(_) => text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()
+            .map_err(|error| format!("it is neither a JSON list nor JSON Lines: {error}"))?,
+    };
+    let pairs = rows.iter().filter(|row| ster::pairs::benchmark::preference_pair(row).is_ok()).count();
+    Ok((pairs, rows.len() - pairs))
+}
+
+pub(super) fn run(args: SourcesArgs) -> Result<()> {
+    let Some(SourcesCommand::Discover { adapter, path }) = args.command else {
+        let adapters: Vec<Value> = ADAPTERS.iter().map(row).collect();
+        return super::answer_document(&json!({"adapters": adapters, "all": args.all}));
+    };
+    let shown = path.display().to_string();
+    let Some(found) = ADAPTERS.iter().find(|(id, ..)| *id == adapter) else {
+        let known: Vec<&str> = ADAPTERS.iter().map(|(id, ..)| *id).collect();
+        return Err(refuse(&ADAPTER_UNKNOWN, &[("adapter", &adapter), ("path", &shown), ("known", &known.join(", "))]));
+    };
+    let mut answer = row(found);
+    answer["path"] = json!(shown);
+    let read = if found.2 {
+        std::fs::read_to_string(&path).map_err(|error| format!("{shown}: {error}")).and_then(|text| preference_pairs(&text))
+    } else {
+        ster::tune::ExampleSet::load(&path).map(|set| (set.examples.len(), 0)).map_err(|error| format!("{error:#}"))
+    };
+    match read {
+        Ok((given, left_out)) => {
+            answer["found"] = json!(given > 0);
+            answer[if found.2 { "pairs" } else { "examples" }] = json!(given);
+            answer["left_out"] = json!(left_out);
+        }
+        Err(why) => answer["why_not"] = json!(why),
+    }
+    super::answer_document(&answer)
+}

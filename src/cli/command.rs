@@ -15,6 +15,7 @@ use super::telemetry::TelemetryCommand;
 use super::tune::TuneCommand;
 use super::vectors::{ExtractArgs, GenerateArgs, OnboardingArgs, ParityArgs, VectorCommand};
 use super::workspace::WorkspaceCommand;
+use super::sources::SourcesArgs;
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
@@ -35,6 +36,9 @@ pub(super) enum Command {
     /// each as {"messages": [...]}: the rollout tune grpo --turns trains on,
     /// with no gradient.
     Converse(ConverseArgs),
+    /// List the data other tools keep that Ster reads, one adapter each
+    /// (IMP-STER-<NN>), or say how many examples or pairs one file gives.
+    Sources(SourcesArgs),
     /// Import existing contrastive data during first use, or replay the walkthrough.
     Onboarding(OnboardingArgs),
     /// Answer typed questions about a state from one forward pass, with a

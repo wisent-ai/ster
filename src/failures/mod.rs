@@ -56,6 +56,7 @@ pub mod runtime;
 mod shape;
 #[path = "catalog/star.rs"]
 pub mod star;
+pub mod sources;
 pub mod steering;
 pub mod telemetry;
 #[path = "models/tensor.rs"]
@@ -97,6 +98,7 @@ pub fn operations() -> Vec<&'static Operation> {
         request::OPERATIONS,
         runtime::OPERATIONS,
         star::OPERATIONS,
+        sources::OPERATIONS,
         steering::OPERATIONS,
         tensor::OPERATIONS,
         tokenizer::OPERATIONS,

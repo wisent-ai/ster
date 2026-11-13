@@ -56,6 +56,7 @@ its report on both surfaces.
 | [errors/pairs-synthesize.md](errors/pairs-synthesize.md) | `ster.pairs.synthesize` |
 | [errors/request.md](errors/request.md) | `ster.request` |
 | [errors/runtime.md](errors/runtime.md) | `ster.runtime.device`, `.encode`, `.layers`, `.steer`, `.generate`; `ster.generate` |
+| [errors/sources.md](errors/sources.md) | `ster.sources` |
 | [errors/steering.md](errors/steering.md) | `ster.steering.artifact` |
 | [errors/support.md](errors/support.md) | `ster.support` |
 | [errors/telemetry.md](errors/telemetry.md) | `ster.telemetry` |

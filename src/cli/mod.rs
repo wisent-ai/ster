@@ -31,6 +31,7 @@ pub(crate) mod support;
 #[path = "admin/telemetry.rs"]
 pub(crate) mod telemetry;
 pub(crate) mod tune;
+mod sources;
 mod vectors;
 mod workspace;
 
@@ -216,6 +217,7 @@ pub(crate) fn run() -> Result<()> {
         Command::Support { command } => support::run(command),
         Command::Doctor { json } => doctor::run(json),
         Command::Converse(args) => converse::run(args),
+        Command::Sources(args) => sources::run(args),
         Command::Request { operation } => {
             let status = crate::request::run(&operation)?;
             std::process::exit(status);

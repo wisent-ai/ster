@@ -2,6 +2,16 @@
 
 Part of the [changelog](../../../CHANGELOG.md).
 
+- `ster sources [--all]` lists the data other tools keep that Ster reads, one
+  adapter each: example sets for `tune sft --examples` (IMP-STER-03 OpenAI,
+  04 ShareGPT, 05 Alpaca) and preference rows for `pairs import --benchmark
+  preference` (01 Hugging Face, 06 DPO, 19 Preferences). `ster sources
+  discover <adapter> --path <file>` reads a file as that command would and says
+  how many examples or pairs it gives, and how many rows give none, writing
+  nothing; an adapter Ster does not have is refused
+  (`ster.sources.sources-adapter-unknown`). `tests/sources/sources.sh`
+  provokes it.
+
 - Every refusal of the workspace and of a pair-set file is a declared cause
   (wisent-errors): it says what failed, why, the state observed and the fix,
   and exits `2` for a usage refusal, `69` when retrying unchanged can help and

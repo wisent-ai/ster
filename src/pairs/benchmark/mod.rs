@@ -20,6 +20,7 @@ mod livecodebench;
 mod published;
 
 pub use fields::{AnswerForm, ChoiceFields};
+pub use preference::pair_of as preference_pair;
 
 use std::path::{Path, PathBuf};
 
