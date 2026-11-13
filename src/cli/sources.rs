@@ -8,11 +8,12 @@
 //! model checkpoints `--model` loads (12, 13, 16) are in `models`.
 
 mod models;
+mod named;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 use ster::failures::{refuse, sources::ADAPTER_UNKNOWN};
 
@@ -73,15 +74,28 @@ fn preference_pairs(text: &str) -> Result<(usize, usize), String> {
 
 pub(super) fn run(args: SourcesArgs) -> Result<()> {
     let Some(SourcesCommand::Discover { adapter, path }) = args.command else {
-        let adapters: Vec<Value> = ADAPTERS.iter().map(row).chain(models::MODELS.iter().map(models::row)).collect();
+        let adapters: Vec<Value> = ADAPTERS
+            .iter()
+            .map(row)
+            .chain(models::MODELS.iter().map(models::row))
+            .chain(named::NAMED.iter().map(named::row))
+            .collect();
         return super::answer_document(&json!({"adapters": adapters, "all": args.all}));
     };
     let shown = path.display().to_string();
     if let Some(model) = models::MODELS.iter().find(|(id, _)| *id == adapter) {
         return super::answer_document(&models::discover(model, &path));
     }
+    if let Some(listed) = named::NAMED.iter().find(|(id, ..)| *id == adapter) {
+        return super::answer_document(&named::row(listed));
+    }
     let Some(found) = ADAPTERS.iter().find(|(id, ..)| *id == adapter) else {
-        let known: Vec<&str> = ADAPTERS.iter().map(|(id, ..)| *id).chain(models::MODELS.iter().map(|(id, _)| *id)).collect();
+        let known: Vec<&str> = ADAPTERS
+            .iter()
+            .map(|(id, ..)| *id)
+            .chain(models::MODELS.iter().map(|(id, _)| *id))
+            .chain(named::NAMED.iter().map(|(id, ..)| *id))
+            .collect();
         return Err(refuse(&ADAPTER_UNKNOWN, &[("adapter", &adapter), ("path", &shown), ("known", &known.join(", "))]));
     };
     let mut answer = row(found);
@@ -100,4 +114,34 @@ pub(super) fn run(args: SourcesArgs) -> Result<()> {
         Err(why) => answer["why_not"] = json!(why),
     }
     super::answer_document(&answer)
+}
+
+/// The checks `ster doctor --check` runs alone.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(super) enum DoctorCheck {
+    /// The model checkpoints on this machine and how Ster reads them.
+    ImportSources,
+}
+
+/// `ster doctor --check import-sources`: Ster moves no data in. The models the Hugging
+/// Face hub cache keeps (`HF_HUB_CACHE`, else `HF_HOME/hub`, else
+/// `~/.cache/huggingface/hub`) are read where they are by `--model <org/name>`, so none
+/// is outside; the example sets and preference rows are files a person names.
+pub(super) fn doctor(check: DoctorCheck) -> Result<()> {
+    let DoctorCheck::ImportSources = check;
+    let cache = std::env::var_os("HF_HUB_CACHE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HF_HOME").map(|home| PathBuf::from(home).join("hub")))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/huggingface/hub")));
+    let in_place: Vec<Value> = cache
+        .filter(|cache| cache.is_dir())
+        .and_then(|cache| models::MODELS.iter().find(|(id, _)| *id == "IMP-STER-16").map(|model| models::discover(model, &cache)))
+        .into_iter()
+        .collect();
+    super::answer_document(&json!({
+        "check": "import-sources",
+        "outside": [],
+        "read_in_place": in_place,
+        "note": "--model reads a checkpoint where it is; an example set or preference file is named to tune sft --examples or pairs import",
+    }))
 }

@@ -215,7 +215,8 @@ pub(crate) fn run() -> Result<()> {
         Command::Errors { command } => errors::run(command),
         Command::Telemetry { command } => telemetry::run(command),
         Command::Support { command } => support::run(command),
-        Command::Doctor { json } => doctor::run(json),
+        Command::Doctor { check: Some(check), .. } => sources::doctor(check),
+        Command::Doctor { json, check: None } => doctor::run(json),
         Command::Converse(args) => converse::run(args),
         Command::Sources(args) => sources::run(args),
         Command::Request { operation } => {

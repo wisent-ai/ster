@@ -106,6 +106,10 @@ pub(super) enum Command {
         /// Print the findings as JSON.
         #[arg(long)]
         json: bool,
+        /// Run one named check alone: import-sources names the model checkpoints on this
+        /// machine that `--model` reads where they are.
+        #[arg(long, value_enum)]
+        check: Option<super::sources::DoctorCheck>,
     },
     /// Run one JSON request from a desktop app to completion: the body on
     /// stdin, NDJSON log events and one result event on stdout, and the

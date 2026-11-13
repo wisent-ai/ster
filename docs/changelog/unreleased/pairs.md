@@ -15,6 +15,11 @@ Part of the [changelog](../../../CHANGELOG.md).
   tokenizer (13) and the Hugging Face hub cache (16). `discover` resolves a
   directory as `--model` does, saying how many weight files it has or why it
   is not that adapter's, and lists the Hub ids a hub cache directory keeps.
+  Parquet or Arrow files, other steering libraries' vectors (repeng,
+  steering-vectors, TransformerLens, nnsight, SAE Lens), MLX and PyTorch
+  weights, PEFT and MLX LoRA adapters and wisent-evaluators' judgments (02,
+  07–11, 14, 15, 17, 18, 20) are listed as sources no command reads, each with
+  why and what to do; `discover` of one answers that row.
 
 - Every refusal of the workspace and of a pair-set file is a declared cause
   (wisent-errors): it says what failed, why, the state observed and the fix,
@@ -104,3 +109,7 @@ Part of the [changelog](../../../CHANGELOG.md).
   or in the conversational message form; the chosen answer is the positive
   side. A row without text on a side is skipped as
   `preference-side-missing`.
+- `ster doctor --check import-sources` answers alone: nothing is outside Ster,
+  since `--model` reads a checkpoint where it is; it lists the models the
+  Hugging Face hub cache keeps (`HF_HUB_CACHE`, else `HF_HOME/hub`, else
+  `~/.cache/huggingface/hub`) under `read_in_place`.
