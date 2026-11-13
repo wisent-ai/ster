@@ -10,7 +10,11 @@ Part of the [changelog](../../../CHANGELOG.md).
   how many examples or pairs it gives, and how many rows give none, writing
   nothing; an adapter Ster does not have is refused
   (`ster.sources.sources-adapter-unknown`). `tests/sources/sources.sh`
-  provokes it.
+  provokes it. The model checkpoints `--model` loads are listed too: a
+  Transformers directory (12), a GGUF file beside its base model's config and
+  tokenizer (13) and the Hugging Face hub cache (16). `discover` resolves a
+  directory as `--model` does, saying how many weight files it has or why it
+  is not that adapter's, and lists the Hub ids a hub cache directory keeps.
 
 - Every refusal of the workspace and of a pair-set file is a declared cause
   (wisent-errors): it says what failed, why, the state observed and the fix,

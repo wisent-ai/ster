@@ -4,7 +4,10 @@
 //! 05 Alpaca) is read by `tune sft --examples`; preference rows (01 Hugging Face, 06 DPO, 19
 //! Preferences) by `pairs import --benchmark preference`, which writes a pair set. `discover`
 //! reads a file as that command would and says how many examples or pairs it gives, or why
-//! it is not that source; nothing is written, so the writing verbs are those commands.
+//! it is not that source; nothing is written, so the writing verbs are those commands. The
+//! model checkpoints `--model` loads (12, 13, 16) are in `models`.
+
+mod models;
 
 use std::path::PathBuf;
 
@@ -70,12 +73,15 @@ fn preference_pairs(text: &str) -> Result<(usize, usize), String> {
 
 pub(super) fn run(args: SourcesArgs) -> Result<()> {
     let Some(SourcesCommand::Discover { adapter, path }) = args.command else {
-        let adapters: Vec<Value> = ADAPTERS.iter().map(row).collect();
+        let adapters: Vec<Value> = ADAPTERS.iter().map(row).chain(models::MODELS.iter().map(models::row)).collect();
         return super::answer_document(&json!({"adapters": adapters, "all": args.all}));
     };
     let shown = path.display().to_string();
+    if let Some(model) = models::MODELS.iter().find(|(id, _)| *id == adapter) {
+        return super::answer_document(&models::discover(model, &path));
+    }
     let Some(found) = ADAPTERS.iter().find(|(id, ..)| *id == adapter) else {
-        let known: Vec<&str> = ADAPTERS.iter().map(|(id, ..)| *id).collect();
+        let known: Vec<&str> = ADAPTERS.iter().map(|(id, ..)| *id).chain(models::MODELS.iter().map(|(id, _)| *id)).collect();
         return Err(refuse(&ADAPTER_UNKNOWN, &[("adapter", &adapter), ("path", &shown), ("known", &known.join(", "))]));
     };
     let mut answer = row(found);
