@@ -164,7 +164,7 @@ impl FeedForward {
             },
             sparsity: architecture
                 .activation_sparsity
-                .filter(|(_, layers)| layer < 128 && layers & (1u128 << layer) != 0)
+                .filter(|(_, layers)| layer < u128::BITS as usize && layers & (1u128 << layer) != 0)
                 .map(|(multiplier, _)| multiplier),
             clamp: architecture.dense_swiglu_limit,
         })

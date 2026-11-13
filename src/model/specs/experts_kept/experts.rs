@@ -102,7 +102,7 @@ pub struct QueryTemperature {
 impl QueryTemperature {
     /// Whether layer `layer`'s queries are tempered.
     pub fn at(&self, layer: usize) -> bool {
-        layer < 128 && self.layers & (1u128 << layer) != 0
+        layer < u128::BITS as usize && self.layers & (1u128 << layer) != 0
     }
 }
 

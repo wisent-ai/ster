@@ -10,7 +10,7 @@ use super::Architecture;
 impl Architecture {
     /// The window layer `layer` attends through, or `None` for full attention.
     pub fn window(&self, layer: usize) -> Option<usize> {
-        let sliding = layer < 128 && self.sliding_layers & (1u128 << layer) != 0;
+        let sliding = layer < u128::BITS as usize && self.sliding_layers & (1u128 << layer) != 0;
         self.sliding_window.filter(|_| sliding)
     }
 
@@ -66,7 +66,7 @@ impl Architecture {
 
     /// Whether layer `layer`'s softmax holds a learned sink logit per head.
     pub fn sinks_at(&self, layer: usize) -> bool {
-        layer < 128 && self.attention_sinks & (1u128 << layer) != 0
+        layer < u128::BITS as usize && self.attention_sinks & (1u128 << layer) != 0
     }
 
     /// How many components the global rotation spans: the full-attention
@@ -104,7 +104,7 @@ impl Architecture {
     /// whose positions are learned or ALiBi.
     pub fn rotates(&self, layer: usize) -> bool {
         self.positions == Positions::Rotary
-            && (layer >= 128 || self.unrotated_layers & (1u128 << layer) == 0)
+            && (layer >= u128::BITS as usize || self.unrotated_layers & (1u128 << layer) == 0)
     }
 
     /// Width of the query projection and of the attention output.
@@ -117,7 +117,7 @@ impl Architecture {
     pub fn short_convolution_at(&self, layer: usize) -> Option<&ShortConvolution> {
         self.short_convolution
             .as_ref()
-            .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
+            .filter(|spec| layer < u128::BITS as usize && spec.layers & (1u128 << layer) != 0)
     }
 
     /// The state-space mixer layer `layer` uses in place of attention, if
@@ -125,7 +125,7 @@ impl Architecture {
     pub fn state_space_at(&self, layer: usize) -> Option<&StateSpaceSpec> {
         self.state_space
             .as_ref()
-            .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
+            .filter(|spec| layer < u128::BITS as usize && spec.layers & (1u128 << layer) != 0)
     }
 
     /// The lightning attention layer `layer` uses in place of attention, if
@@ -133,7 +133,7 @@ impl Architecture {
     pub fn lightning_at(&self, layer: usize) -> Option<&LightningSpec> {
         self.lightning
             .as_ref()
-            .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
+            .filter(|spec| layer < u128::BITS as usize && spec.layers & (1u128 << layer) != 0)
     }
 
     /// The gated delta-rule mixer layer `layer` uses in place of attention,
@@ -141,7 +141,7 @@ impl Architecture {
     pub fn delta_rule_at(&self, layer: usize) -> Option<&DeltaRuleSpec> {
         self.delta_rule
             .as_ref()
-            .filter(|spec| layer < 128 && spec.layers & (1u128 << layer) != 0)
+            .filter(|spec| layer < u128::BITS as usize && spec.layers & (1u128 << layer) != 0)
     }
 
     /// Layer `layer`'s mixture of experts, with the layer's own count of
@@ -163,7 +163,7 @@ impl Architecture {
     pub fn routed(&self, layer: usize) -> bool {
         self.experts
             .as_ref()
-            .is_some_and(|experts| layer >= 128 || experts.dense_layers & (1u128 << layer) == 0)
+            .is_some_and(|experts| layer >= u128::BITS as usize || experts.dense_layers & (1u128 << layer) == 0)
     }
 
     /// Width of one head's value: narrower than the query in latent
