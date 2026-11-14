@@ -2322,6 +2322,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d8f70e07b9c3962945a74e59ca1c511bba65b6419468acc217c457d93f3c740"
 
 [[package]]
+name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2937,6 +2946,7 @@ dependencies = [
  "unicode-normalization",
  "ureq",
  "wisent-errors",
+ "wisent-formats",
  "wisent-onboarding-client",
 ]
 
@@ -3929,6 +3939,18 @@ dependencies = [
  "getrandom 0.2.17",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "wisent-formats"
+version = "0.1.0"
+source = "git+https://github.com/wisent-ai/wisent-formats#1d10e484e7286dd6ca8037c242a2bff84aabe2e1"
+dependencies = [
+ "base64 0.22.1",
+ "encoding_rs",
+ "quick-xml",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
