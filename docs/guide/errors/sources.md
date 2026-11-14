@@ -35,7 +35,7 @@ Started through: `ster sources`, `ster sources discover`, `ster sources share`. 
 ### `ster.sources.sources-share-unkept`
 
 - **What failed:** keeping whether discoveries report their counts
-- **Cause:** {problem}
+- **Cause:** {why}
 - **Observed state shown:** the answer was not kept
 - **Fix:** set XDG_CONFIG_HOME to a directory this user can write, then answer again
 - **Code:** `config`, exit 1; retrying unchanged will not help

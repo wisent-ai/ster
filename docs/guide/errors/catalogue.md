@@ -13,7 +13,7 @@ Everything below the marker is
 
 list, show and check every declared way a Ster functionality fails
 
-Started through: `ster errors list`, `ster errors show`, `ster errors check`, `ster request errors/list`, `ster request errors/show`. Uses: none. Failure catalogue `ster.errors`: 5 declared cause(s) of its own.
+Started through: `ster errors list`, `ster errors show`, `ster errors check`, `ster request errors/list`, `ster request errors/show`. Uses: `ster.file`. Failure catalogue `ster.errors`: 4 declared cause(s) of its own.
 
 <a id="ster-errors-functionality-unknown"></a>
 
@@ -37,27 +37,16 @@ Started through: `ster errors list`, `ster errors show`, `ster errors check`, `s
 - **Code:** `not_found`, exit 2; retrying unchanged will not help
 - **Test:** `tests/errors/catalogue.sh::markdown_refuses_a_page_no_functionality_is_listed_on`
 
-<a id="ster-errors-baseline-unreadable"></a>
+<a id="ster-errors-baseline-missing"></a>
 
-### `ster.errors.baseline-unreadable`
+### `ster.errors.baseline-missing`
 
-- **What failed:** reading the {what} baseline {path}
-- **Cause:** the file could not be read: {error}
-- **Observed state shown:** baseline: {path}
+- **What failed:** reading {role} {path}
+- **Cause:** no file is there: nothing at {path} is the baseline named
+- **Observed state shown:** path: {path} ({state}); its directory {parent}; the system answered: {error}
 - **Fix:** name the baseline file the repository holds: tests/errors/uncatalogued.json for --uncatalogued, tests/errors/untested.json for --untested
-- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Code:** `not_found`, exit 2; retrying unchanged will not help
 - **Test:** `tests/errors/catalogue.sh::check_refuses_an_unreadable_baseline`
-
-<a id="ster-errors-baseline-malformed"></a>
-
-### `ster.errors.baseline-malformed`
-
-- **What failed:** reading the {what} baseline {path}
-- **Cause:** it is not a JSON list of strings: {error}
-- **Observed state shown:** baseline: {path}
-- **Fix:** write it as a JSON list, e.g. ["generate"] of command names for --uncatalogued or of declared test paths for --untested; `ster errors check` prints both lists
-- **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/errors/catalogue.sh::check_refuses_a_baseline_that_is_not_a_list`
 
 <a id="ster-errors-findings"></a>
 

@@ -20,40 +20,18 @@ Everything below the marker is
 
 read a calibration artifact, check its schema, temperature and model, and write one back
 
-Started through: run only by the functionalities that use it. Uses: none. Failure catalogue `ster.decide.calibration`: 8 declared cause(s) of its own.
+Started through: run only by the functionalities that use it. Uses: `ster.file`. Failure catalogue `ster.decide.calibration`: 4 declared cause(s) of its own.
 
 <a id="ster-decide-calibration-calibration-missing"></a>
 
 ### `ster.decide.calibration.calibration-missing`
 
 - **What failed:** reading calibration {path}
-- **Cause:** no file is there: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** name a calibration `ster calibrate --output {path}` wrote for this model, or leave --calibration out to read raw probabilities
+- **Cause:** no file is there: nothing at {path} is the calibration named
+- **Observed state shown:** path: {path} ({state}); its directory {parent}; the system answered: {error}
+- **Fix:** name a calibration `ster calibrate --output {path}` wrote for this model (`ls -ln {parent}` shows what that directory holds), or leave --calibration out to read raw probabilities
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
 - **Test:** `tests/decide/calibration.sh::a_missing_calibration_is_refused`
-
-<a id="ster-decide-calibration-calibration-unreadable"></a>
-
-### `ster.decide.calibration.calibration-unreadable`
-
-- **What failed:** reading calibration {path}
-- **Cause:** it cannot be read as a file: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** name a calibration file this account can read; a directory is not one
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/calibration.sh::a_directory_named_as_the_calibration_is_refused`
-
-<a id="ster-decide-calibration-calibration-malformed"></a>
-
-### `ster.decide.calibration.calibration-malformed`
-
-- **What failed:** reading calibration {path}
-- **Cause:** it is not a calibration artifact: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** write it again with `ster calibrate --examples <labelled.json> --output {path}`
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/calibration.sh::a_calibration_that_is_not_json_is_refused`
 
 <a id="ster-decide-calibration-calibration-schema"></a>
 
@@ -88,66 +66,22 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/decide/calibration.sh::a_calibration_for_another_model_is_refused`
 
-<a id="ster-decide-calibration-calibration-directory"></a>
-
-### `ster.decide.calibration.calibration-directory`
-
-- **What failed:** writing calibration {path}
-- **Cause:** its directory {directory} cannot be created: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** name an --output whose directory this account can create, or create {directory} first
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/calibration.sh::a_calibration_under_a_file_is_refused`
-
-<a id="ster-decide-calibration-calibration-unwritable"></a>
-
-### `ster.decide.calibration.calibration-unwritable`
-
-- **What failed:** writing calibration {path}
-- **Cause:** the file cannot be written: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** name an --output in a directory this account can write
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/calibration.sh::a_calibration_in_a_read_only_directory_is_refused`
-
 ## `ster.decide.examples`
 
 read a labelled example set and check every request in it and every label against the options it names
 
-Started through: run only by the functionalities that use it. Uses: `ster.decide.request`. Failure catalogue `ster.decide.examples`: 7 declared cause(s) of its own.
+Started through: run only by the functionalities that use it. Uses: `ster.decide.request`, `ster.file`. Failure catalogue `ster.decide.examples`: 5 declared cause(s) of its own.
 
 <a id="ster-decide-examples-examples-missing"></a>
 
 ### `ster.decide.examples.examples-missing`
 
 - **What failed:** reading labelled examples {path}
-- **Cause:** no file is there: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** name an existing labelled example set with --examples, or write one with `ster decisions import` or `ster decisions synthesize`
+- **Cause:** no file is there: nothing at {path} is the labelled example set named
+- **Observed state shown:** path: {path} ({state}); its directory {parent}; the system answered: {error}
+- **Fix:** name an existing labelled example set with --examples (`ls -ln {parent}` shows what that directory holds), or write one with `ster decisions import` or `ster decisions synthesize`
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
 - **Test:** `tests/decide/examples.sh::a_missing_example_set_is_refused`
-
-<a id="ster-decide-examples-examples-unreadable"></a>
-
-### `ster.decide.examples.examples-unreadable`
-
-- **What failed:** reading labelled examples {path}
-- **Cause:** it cannot be read as a file: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** name an example set this account can read; a directory is not one
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/examples.sh::a_directory_named_as_the_examples_is_refused`
-
-<a id="ster-decide-examples-examples-malformed"></a>
-
-### `ster.decide.examples.examples-malformed`
-
-- **What failed:** reading labelled examples {path}
-- **Cause:** it is not a labelled example set: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** write it as {"examples": [{"request": <decision request>, "answers": {"<question id>": <the option it names>}}]}
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/examples.sh::an_example_set_that_is_not_json_is_refused`
 
 <a id="ster-decide-examples-examples-none"></a>
 
@@ -155,7 +89,7 @@ Started through: run only by the functionalities that use it. Uses: `ster.decide
 
 - **What failed:** checking the labelled examples
 - **Cause:** the set holds no example, and a temperature is fitted on labelled examples
-- **Observed state shown:** examples: 0
+- **Observed state shown:** {source}: "examples": []
 - **Fix:** add at least one example with a request and the answer a person gave to one of its questions
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/decide/examples.sh::an_empty_example_set_is_refused`
@@ -205,7 +139,7 @@ Started through: `ster calibrate`, `ster request calibrate`. Uses: `ster.decide.
 
 - **What failed:** checking the calibration settings
 - **Cause:** the expected calibration error is measured over equal-width confidence bins, and zero bins measure nothing
-- **Observed state shown:** --ece-bins 0
+- **Observed state shown:** --ece-bins {bins}
 - **Fix:** give --ece-bins a whole number of 1 or more, such as 10
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/decide/calibration.sh::zero_confidence_bins_are_refused`

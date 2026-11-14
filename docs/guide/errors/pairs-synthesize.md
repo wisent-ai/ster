@@ -15,7 +15,7 @@ Everything below the marker is
 
 write a contrastive pair set with a local model or a route Stado's inference alternatives answer: the opposite trait, then a question and two answers per attempt, each answer judged for refusal and each pair checked for a near-duplicate as it lands
 
-Started through: `ster pairs synthesize`, `ster request pairs/synthesize`. Uses: `ster.inference`, `ster.model.load`, `ster.pairs.dedupe`, `ster.pairs.file`. Failure catalogue `ster.pairs.synthesize`: 9 declared cause(s) of its own.
+Started through: `ster pairs synthesize`, `ster request pairs/synthesize`. Uses: `ster.inference`, `ster.model.load`, `ster.pairs.dedupe`, `ster.pairs.file`. Failure catalogue `ster.pairs.synthesize`: 10 declared cause(s) of its own.
 
 <a id="ster-pairs-synthesize-trait-blank"></a>
 
@@ -56,7 +56,7 @@ Started through: `ster pairs synthesize`, `ster request pairs/synthesize`. Uses:
 
 - **What failed:** choosing the model that writes the pairs
 - **Cause:** pairs synthesize with --generator local requires --model
-- **Observed state shown:** --generator local without --model
+- **Observed state shown:** --generator local without --model; writing pairs for "{trait}"
 - **Fix:** name the Hugging Face model id or local model directory that writes the pairs with --model, or write them through Stado's inference alternatives with --generator brama --generator-model <route>
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/pairs/synthesize.sh::a_local_generator_without_a_model_is_refused`
@@ -67,7 +67,7 @@ Started through: `ster pairs synthesize`, `ster request pairs/synthesize`. Uses:
 
 - **What failed:** choosing the model that writes the pairs
 - **Cause:** pairs synthesize with --generator brama requires --generator-model
-- **Observed state shown:** --generator brama without --generator-model
+- **Observed state shown:** --generator brama without --generator-model; writing pairs for "{trait}"
 - **Fix:** name the route that writes the pairs with --generator-model: a Brama alias, a provider/model route or a selector
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/pairs/synthesize.sh::a_brama_generator_without_a_route_is_refused`
@@ -78,7 +78,7 @@ Started through: `ster pairs synthesize`, `ster request pairs/synthesize`. Uses:
 
 - **What failed:** reading the pairs/synthesize request
 - **Cause:** pairs synthesize requires count, a pair count above zero
-- **Observed state shown:** the request names no count
+- **Observed state shown:** the request names no count; writing pairs for "{trait}"
 - **Fix:** give count, the number of pairs to keep
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/pairs/synthesize.sh::a_request_without_a_count_is_refused`
@@ -89,7 +89,7 @@ Started through: `ster pairs synthesize`, `ster request pairs/synthesize`. Uses:
 
 - **What failed:** asking {generator} for the opposite of {trait}
 - **Cause:** {generator} returned no opposite trait for {trait}
-- **Observed state shown:** its answer was empty
+- **Observed state shown:** its answer was empty, sampled with at most {tokens} new tokens at temperature {temperature}
 - **Fix:** state the opposite trait with --opposite
 - **Code:** `refused`, exit 1; retrying unchanged will not help
 - **Test:** `tests/pairs/synthesize.sh::a_generator_naming_no_opposite_is_refused`
@@ -99,11 +99,22 @@ Started through: `ster pairs synthesize`, `ster request pairs/synthesize`. Uses:
 ### `ster.pairs.synthesize.verdict-malformed`
 
 - **What failed:** reading {generator}'s refusal judgement
-- **Cause:** {generator} answered the refusal judgement with {text}, which is not exactly {"refuses": true} or {"refuses": false}
-- **Observed state shown:** the parser stopped: {error}
+- **Cause:** {generator} answered the refusal judgement with {text}, which is not JSON, where the judgement is exactly one object whose only key `refuses` is true or false
+- **Observed state shown:** {length} characters; the JSON reader stopped at column {column}: {error}
 - **Fix:** write the pairs with a generator that answers a one-line JSON instruction exactly: an instruction-tuned --model, or another --generator-model route
 - **Code:** `refused`, exit 1; retrying unchanged will not help
 - **Test:** `tests/pairs/synthesize.sh::a_judgement_that_is_not_the_json_form_is_refused`
+
+<a id="ster-pairs-synthesize-verdict-shape"></a>
+
+### `ster.pairs.synthesize.verdict-shape`
+
+- **What failed:** reading {generator}'s refusal judgement
+- **Cause:** {generator} answered the refusal judgement with {text}, JSON of another form than exactly one object whose only key `refuses` is true or false: another key, a key beside refuses, or a value that is not true or false
+- **Observed state shown:** {length} characters; at column {column} the reader answered: {error}
+- **Fix:** write the pairs with a generator that answers a one-line JSON instruction exactly: an instruction-tuned --model, or another --generator-model route
+- **Code:** `refused`, exit 1; retrying unchanged will not help
+- **Test:** `tests/pairs/synthesize.sh::a_judgement_of_another_json_form_is_refused`
 
 <a id="ster-pairs-synthesize-no-pairs"></a>
 

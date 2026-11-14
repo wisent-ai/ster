@@ -22,40 +22,18 @@ Everything below the marker is
 
 read a decision request from a file or standard input and check its state and every question before a weight is mapped
 
-Started through: run only by the functionalities that use it. Uses: none. Failure catalogue `ster.decide.request`: 11 declared cause(s) of its own.
+Started through: run only by the functionalities that use it. Uses: `ster.file`. Failure catalogue `ster.decide.request`: 9 declared cause(s) of its own.
 
 <a id="ster-decide-request-request-missing"></a>
 
 ### `ster.decide.request.request-missing`
 
 - **What failed:** reading decision request {path}
-- **Cause:** no file is there: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** name an existing decision document with --request, or give `--request -` and write it on standard input
+- **Cause:** no file is there: nothing at {path} is the decision request named
+- **Observed state shown:** path: {path} ({state}); its directory {parent}; the system answered: {error}
+- **Fix:** name an existing decision document with --request (`ls -ln {parent}` shows what that directory holds), or give `--request -` and write it on standard input
 - **Code:** `not_found`, exit 1; retrying unchanged will not help
 - **Test:** `tests/decide/remote/request.sh::a_missing_request_is_refused`
-
-<a id="ster-decide-request-request-unreadable"></a>
-
-### `ster.decide.request.request-unreadable`
-
-- **What failed:** reading decision request {path}
-- **Cause:** it cannot be read as a file: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** name a decision document this account can read; a directory is not one
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/remote/request.sh::a_directory_named_as_the_request_is_refused`
-
-<a id="ster-decide-request-request-malformed"></a>
-
-### `ster.decide.request.request-malformed`
-
-- **What failed:** reading decision request {path}
-- **Cause:** it is not a decision document: {error}
-- **Observed state shown:** source: {path}
-- **Fix:** write it as {"state": <text or JSON>, "questions": {"<id>": {"type": "choice", "instructions": "<text>", "criteria": {"<option>": null, "<option>": null}}}}; a question's type is choice, score or noul
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/remote/request.sh::a_request_that_is_not_json_is_refused`
 
 <a id="ster-decide-request-state-empty"></a>
 
@@ -74,8 +52,8 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 
 - **What failed:** checking the decision request
 - **Cause:** it asks no question
-- **Observed state shown:** questions: {}
-- **Fix:** add a question under questions, such as {"<id>": {"type": "noul", "instructions": "<text>"}}
+- **Observed state shown:** questions: {questions}
+- **Fix:** add a question under questions: an object keyed by the question's id, holding its `type` (choice, score or noul) and its `instructions`
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/decide/remote/request.sh::a_request_without_questions_is_refused`
 
@@ -149,7 +127,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 
 answer every typed question of a decision request with the probability the model puts on each option
 
-Started through: `ster decide`, `ster request decide`. Uses: `ster.decide.request`, `ster.decide.calibration`, `ster.model.load`. Failure catalogue `ster.decide`: 3 declared cause(s) of its own.
+Started through: `ster decide`, `ster request decide`. Uses: `ster.decide.request`, `ster.decide.calibration`, `ster.model.load`, `ster.file`. Failure catalogue `ster.decide`: 2 declared cause(s) of its own.
 
 <a id="ster-decide-question-too-long"></a>
 
@@ -172,14 +150,3 @@ Started through: `ster decide`, `ster request decide`. Uses: `ster.decide.reques
 - **Fix:** load the checkpoint with the tokenizer it was trained with; its config's vocab_size counts every token the tokenizer can produce
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/decide/remote/request.sh::a_letter_the_model_does_not_score_is_refused`
-
-<a id="ster-decide-answer-unwritable"></a>
-
-### `ster.decide.answer-unwritable`
-
-- **What failed:** writing the decision to {path}
-- **Cause:** the file cannot be written: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** name an --output in a directory that exists and this account can write, or leave --output out to read the answer on standard output
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/decide/remote/request.sh::an_answer_that_cannot_be_written_is_refused`

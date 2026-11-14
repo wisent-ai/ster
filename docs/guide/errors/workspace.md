@@ -14,7 +14,7 @@ Everything below the marker is
 
 locate the workspace under XDG_DATA_HOME or HOME, read its document, and write it so a reader never sees half of it
 
-Started through: run only by the functionalities that use it. Uses: none. Failure catalogue `ster.workspace.store`: 6 declared cause(s) of its own.
+Started through: run only by the functionalities that use it. Uses: `ster.file`. Failure catalogue `ster.workspace.store`: 2 declared cause(s) of its own.
 
 <a id="ster-workspace-store-home-unset"></a>
 
@@ -22,32 +22,10 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 
 - **What failed:** locating the Ster workspace
 - **Cause:** neither XDG_DATA_HOME nor HOME is set
-- **Observed state shown:** XDG_DATA_HOME and HOME are unset or empty
+- **Observed state shown:** XDG_DATA_HOME is {xdg}; HOME is {home}
 - **Fix:** set XDG_DATA_HOME, or HOME, to the directory the workspace lives under: $XDG_DATA_HOME/ster, else ~/.local/share/ster
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/workspace/failures.sh::a_workspace_without_a_home_is_refused`
-
-<a id="ster-workspace-store-workspace-unreadable"></a>
-
-### `ster.workspace.store.workspace-unreadable`
-
-- **What failed:** reading the Ster workspace {path}
-- **Cause:** the file cannot be read: {error}
-- **Observed state shown:** path: {path}
-- **Fix:** make {path} a file this account can read
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/workspace/failures.sh::an_unreadable_workspace_is_refused`
-
-<a id="ster-workspace-store-workspace-malformed"></a>
-
-### `ster.workspace.store.workspace-malformed`
-
-- **What failed:** reading the Ster workspace {path}
-- **Cause:** it is not a Ster workspace document
-- **Observed state shown:** invalid Ster workspace JSON in {path}: {error}
-- **Fix:** restore {path} from a copy, or move it aside and import the pair sets again with `ster workspace import`
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/workspace/failures.sh::a_workspace_that_is_not_its_document_is_refused`
 
 <a id="ster-workspace-store-workspace-schema"></a>
 
@@ -59,28 +37,6 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Fix:** read it with the ster that wrote it, or move {path} aside and import the pair sets again with `ster workspace import`
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/workspace/failures.sh::a_workspace_of_another_schema_is_refused`
-
-<a id="ster-workspace-store-workspace-directory"></a>
-
-### `ster.workspace.store.workspace-directory`
-
-- **What failed:** creating the Ster workspace directory {directory}
-- **Cause:** {error}
-- **Observed state shown:** the workspace lives under {root}
-- **Fix:** point XDG_DATA_HOME, or HOME, at a directory this account can write
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/workspace/failures.sh::a_workspace_under_a_file_is_refused`
-
-<a id="ster-workspace-store-workspace-unwritable"></a>
-
-### `ster.workspace.store.workspace-unwritable`
-
-- **What failed:** writing the Ster workspace {path}
-- **Cause:** {step} failed: {error}
-- **Observed state shown:** {left}
-- **Fix:** make {directory} writable for this account and run the command again
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/workspace/failures.sh::a_read_only_workspace_is_refused_and_the_import_undone`
 
 ## `ster.workspace.set`
 
@@ -103,7 +59,7 @@ Started through: run only by the functionalities that use it. Uses: `ster.worksp
 
 validate a pair-set file, copy it into the workspace under its id, and make it the active set; a repeat of the same content is the same import
 
-Started through: `ster workspace import`, `ster onboarding --import-pairs`, `ster request workspace/import`. Uses: `ster.pairs.file`, `ster.workspace.store`. Failure catalogue `ster.workspace.import`: 8 declared cause(s) of its own.
+Started through: `ster workspace import`, `ster onboarding --import-pairs`, `ster request workspace/import`. Uses: `ster.pairs.file`, `ster.workspace.store`. Failure catalogue `ster.workspace.import`: 9 declared cause(s) of its own.
 
 <a id="ster-workspace-import-name-invalid"></a>
 
@@ -121,11 +77,33 @@ Started through: `ster workspace import`, `ster onboarding --import-pairs`, `ste
 ### `ster.workspace.import.name-underivable`
 
 - **What failed:** deriving a pair-set id from {source}
-- **Cause:** {source} {why}, so no pair-set id can be derived from it
+- **Cause:** {source} has no ASCII letter or digit in its file name, so no pair-set id can be derived from it
 - **Observed state shown:** file name: {file}
-- **Fix:** name the set with --name
+- **Fix:** name the set with --name, such as --name my-pairs
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/workspace/failures.sh::a_file_name_without_letters_needs_a_name`
+
+<a id="ster-workspace-import-name-fileless"></a>
+
+### `ster.workspace.import.name-fileless`
+
+- **What failed:** deriving a pair-set id from {source}
+- **Cause:** {source} ends in no file name (it is a root or ends in ..), so no pair-set id can be derived from it
+- **Observed state shown:** file name: {file}
+- **Fix:** name the pair-set file itself, or name the set with --name
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/workspace/failures.sh::a_source_without_a_file_name_needs_a_name`
+
+<a id="ster-workspace-import-name-not-utf8"></a>
+
+### `ster.workspace.import.name-not-utf8`
+
+- **What failed:** deriving a pair-set id from {source}
+- **Cause:** {source} has a file name that is not UTF-8, and a pair-set id is text
+- **Observed state shown:** file name, its bytes that are not UTF-8 replaced: {file}
+- **Fix:** name the set with --name, or rename the file to a UTF-8 name
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/workspace/failures.sh::a_file_name_that_is_not_utf8_needs_a_name`
 
 <a id="ster-workspace-import-name-conflict"></a>
 
@@ -171,27 +149,16 @@ Started through: `ster workspace import`, `ster onboarding --import-pairs`, `ste
 - **Code:** `refused`, exit 1; retrying unchanged will not help
 - **Test:** `tests/workspace/failures.sh::a_leftover_staging_file_is_refused`
 
-<a id="ster-workspace-import-commit-failed"></a>
+<a id="ster-workspace-import-link-unsupported"></a>
 
-### `ster.workspace.import.commit-failed`
+### `ster.workspace.import.link-unsupported`
 
 - **What failed:** committing the import of {source} as {id}
-- **Cause:** linking {staging} to {path} failed: {error}
-- **Observed state shown:** {left}
-- **Fix:** keep the workspace on a filesystem that supports hard links, writable for this account, then import again
+- **Cause:** the file system holding {directory} does not make hard links, and an import is committed by linking its staged copy into place so no reader sees half of it
+- **Observed state shown:** {path}: not created; {left}; the system answered: {error}
+- **Fix:** keep the workspace on a file system that makes hard links (point XDG_DATA_HOME at one), then import again
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/workspace/failures.sh::a_commit_the_filesystem_refuses_is_rolled_back`
-
-<a id="ster-workspace-import-staging-unremovable"></a>
-
-### `ster.workspace.import.staging-unremovable`
-
-- **What failed:** finishing the import of {source} as {id}
-- **Cause:** the staging file {staging} cannot be removed: {error}
-- **Observed state shown:** {left}
-- **Fix:** remove {staging} and import again
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/workspace/failures.sh::a_staging_file_that_cannot_be_removed_is_rolled_back`
 
 ## `ster.workspace.show`
 
@@ -220,24 +187,13 @@ Started through: `ster workspace select`, `ster request workspace/select`. Uses:
 
 delete the workspace's copy of an imported pair set and take it out of the workspace; the source file is not touched
 
-Started through: `ster workspace remove`, `ster request workspace/remove`. Uses: `ster.workspace.set`, `ster.workspace.store`. Failure catalogue `ster.workspace.remove`: 1 declared cause(s) of its own.
-
-<a id="ster-workspace-remove-copy-undeletable"></a>
-
-### `ster.workspace.remove.copy-undeletable`
-
-- **What failed:** removing pair set {id}
-- **Cause:** its copy {path} cannot be deleted: {error}
-- **Observed state shown:** the workspace still holds {id}; nothing was changed
-- **Fix:** make {directory} writable for this account and run `ster workspace remove {id}` again
-- **Code:** `config`, exit 1; retrying unchanged will not help
-- **Test:** `tests/workspace/failures.sh::a_copy_that_cannot_be_deleted_keeps_the_set`
+Started through: `ster workspace remove`, `ster request workspace/remove`. Uses: `ster.workspace.set`, `ster.workspace.store`, `ster.file`. Failure catalogue `ster.workspace.remove`: 0 declared cause(s) of its own.
 
 ## `ster.workspace.active`
 
 name the active imported pair set's copy for a command run without --pairs
 
-Started through: `ster vector train`, `ster vector optimize`, `ster vector evaluate`, `ster vector curve`, `ster vector project`, `ster tune dpo`, `ster tune bipo`, `ster tune reward`. Uses: `ster.workspace.store`. Failure catalogue `ster.workspace.active`: 3 declared cause(s) of its own.
+Started through: run only by the functionalities that use it. Uses: `ster.workspace.store`. Failure catalogue `ster.workspace.active`: 3 declared cause(s) of its own.
 
 <a id="ster-workspace-active-no-active-set"></a>
 
