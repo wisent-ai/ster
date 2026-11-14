@@ -10,15 +10,47 @@ repositories:
           - src/workspace/**
           - src/artifact/**
           - Cargo.toml
-          - .probierz/ster/journeys/**
+          - .probierz/ster/journeys/onboarding-first-use.mjs
         journeys: [onboarding-first-use]
+      - paths:
+          - src/workspace/**
+          - .probierz/ster/journeys/desktop-first-use.mjs
+        journeys: [desktop-first-use]
+  - repository: ster-desktop
+    mappings:
+      - paths:
+          - Sources/SterDesktop/Onboarding/**
+          - Sources/SterDesktop/Resources/ster-desktop-first-use.json
+          - Sources/SterDesktop/App/Import/**
+          - Package.swift
+        journeys: [desktop-first-use]
 surfaces:
   tui:
     spec: journeys/
     journeys: [onboarding-first-use]
     conditions:
       TUI_CMD: "{workspace}/ster/target/release/ster"
+  desktop:cua:
+    spec: journeys/
+    journeys: [desktop-first-use]
+    conditions:
+      CUA_APP_EXECUTABLE: ~/Applications/Ster.app/Contents/MacOS/SterDesktop
+      WISENT_WORKSPACE: "{workspace}"
 journeys:
+  desktop-first-use:
+    owner: Ster maintainers
+    timeoutMs: 240000
+    description: With its onboarding cleared from the app's defaults and restored afterwards, and a workspace of its own, Ster Desktop's three-screen walkthrough refuses a malformed pair set chosen in the open panel without finishing, and finishes only when a real pair set is imported and made active; reopened, the walkthrough is gone.
+    value: A researcher brings their own contrastive data into the desktop app, validated before anything is written.
+    journeyId: first-use
+    journeyVersion: 2026-09-05.1
+    journeyVersionId: 1d6f9b3a-5e27-4c84-b0a6-8c2e4f7d1b95
+    firstSuccessFact: contrastive_pair_set_imported
+    publication:
+      screenId: first_success
+      artifactKinds: [screenshot]
+      minimumEvidence: E3
+      redactionRequired: false
   onboarding-first-use:
     owner: Ster maintainers
     timeoutMs: 120000
