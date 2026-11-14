@@ -77,7 +77,7 @@ fn preference_pairs(text: &str) -> Result<(usize, usize), String> {
 pub(super) fn run(args: SourcesArgs) -> Result<()> {
     let Some(SourcesCommand::Discover { adapter, path }) = args.command else {
         if let Some(SourcesCommand::Share { answer }) = args.command {
-            let kept = super::sharing::share(answer.map(|answer| answer == "yes")).map_err(|problem| refuse(&SHARE_UNKEPT, &[("problem", &problem)]))?;
+            let kept = super::sharing::share(answer.map(|answer| answer == "yes")).map_err(|why| refuse(&SHARE_UNKEPT, &[("why", &why)]))?;
             return super::answer_document(&kept);
         }
         let adapters: Vec<Value> = ADAPTERS

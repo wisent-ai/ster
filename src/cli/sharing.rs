@@ -6,7 +6,7 @@
 //! the token `TOKEN` names; Integrations refuses any field but these. An event holds the
 //! adapter, whether its source was found, its counts rounded into buckets and the outcome,
 //! under a random subject kept with the answer; never a name, a path or a value. Nothing
-//! is sent before the person answers once (`<PRODUCT> sources share --yes | --no`), kept in
+//! is sent before the person answers once (`<PRODUCT> sources share yes | no`), kept in
 //! `$XDG_CONFIG_HOME/<PRODUCT>/sources-share.json` (else `~/.config/<PRODUCT>/`); the
 //! listing shows the question with exactly what an event holds until then. Every step
 //! works the same either way, and each answer's `reported` says whether it was sent and
@@ -31,12 +31,14 @@ fn kept() -> Option<PathBuf> {
     Some(base.join(PRODUCT).join("sources-share.json"))
 }
 
-fn random_hex(count: usize) -> String {
+/// `count` random bytes as hex, or why /dev/urandom gave none: a buffer it
+/// did not fill was all zeros, the same subject and event id for everyone.
+fn random_hex(count: usize) -> Result<String, String> {
     let mut bytes = vec![0u8; count];
-    if let Ok(mut random) = std::fs::File::open("/dev/urandom") {
-        let _ = random.read_exact(&mut bytes);
-    }
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut bytes))
+        .map_err(|error| format!("{count} random bytes could not be read from /dev/urandom: {error}; nothing was kept or sent"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// The person's answer and the subject it was given under: none until they answer.
@@ -45,11 +47,14 @@ fn consent() -> Option<(bool, String)> {
     Some((answer["share"].as_bool()?, answer["subject"].as_str()?.to_string()))
 }
 
-/// `PRODUCT sources share --yes | --no`: keep the person's answer; with neither, the question.
+/// `PRODUCT sources share yes | no`: keep the person's answer; alone, the question.
 pub fn share(answer: Option<bool>) -> Result<Value, String> {
     let Some(share) = answer else { return Ok(question()) };
     let path = kept().ok_or_else(|| "neither XDG_CONFIG_HOME nor HOME is set, so the answer has nowhere to be kept; set one and answer again".to_string())?;
-    let subject = consent().map_or_else(|| random_hex(32), |(_, subject)| subject);
+    let subject = match consent() {
+        Some((_, subject)) => subject,
+        None => random_hex(32)?,
+    };
     let kept = json!({"share": share, "subject": subject, "answered_at": occurred_at()});
     path.parent()
         .map_or(Ok(()), std::fs::create_dir_all)
@@ -85,17 +90,18 @@ fn occurred_at() -> String {
     format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest % 3600 / 60, rest % 60)
 }
 
-/// A version-4 UUID (RFC 9562 §5.4).
-fn event_id() -> String {
-    let hex = random_hex(16);
-    let variant = ["8", "9", "a", "b"][usize::from(u8::from_str_radix(&hex[16..17], 16).unwrap_or(0) & 3)];
-    format!("{}-{}-4{}-{variant}{}-{}", &hex[0..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32])
+/// A version-4 UUID (RFC 9562 §5.4), or why no random bytes were read.
+fn event_id() -> Result<String, String> {
+    let hex = random_hex(16)?;
+    let nibble = u8::from_str_radix(&hex[16..17], 16).map_err(|error| format!("the random hex {hex} is not hex: {error}"))?;
+    let variant = ["8", "9", "a", "b"][usize::from(nibble & 3)];
+    Ok(format!("{}-{}-4{}-{variant}{}-{}", &hex[0..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32]))
 }
 
-fn event(subject: &str, adapter: &str, found: bool, counts: &[(&str, usize)], outcome: &str) -> Value {
+fn event(id: &str, subject: &str, adapter: &str, found: bool, counts: &[(&str, usize)], outcome: &str) -> Value {
     let counts: Map<String, Value> = counts.iter().map(|(kind, count)| ((*kind).to_string(), json!(bucket(*count)))).collect();
     json!({
-        "event_id": event_id(),
+        "event_id": id,
         "product_id": PRODUCT,
         "subject_hash": subject,
         "adapter": adapter,
@@ -110,11 +116,11 @@ fn event(subject: &str, adapter: &str, found: bool, counts: &[(&str, usize)], ou
 /// The question the listing asks until it is answered, with exactly what an event holds.
 pub fn question() -> Value {
     match consent() {
-        Some((share, _)) => json!({"share": share, "change_with": format!("{PRODUCT} sources share --yes | --no")}),
+        Some((share, _)) => json!({"share": share, "change_with": format!("{PRODUCT} sources share yes | no")}),
         None => json!({
             "asked": format!("May {PRODUCT} send, for each source it reads, which source it was, whether it was there and how many records it held, rounded, so the sources people keep are read first? No name, path or value is sent; everything works the same either way."),
-            "sends": event(&"0".repeat(64), EXAMPLE, true, &[("records", 12)], "discovered"),
-            "answer_with": format!("{PRODUCT} sources share --yes | --no"),
+            "sends": event("a fresh random version-4 UUID for each event", &"0".repeat(64), EXAMPLE, true, &[("records", 12)], "discovered"),
+            "answer_with": format!("{PRODUCT} sources share yes | no"),
         }),
     }
 }
@@ -130,7 +136,7 @@ pub fn reported(mut answer: Value, adapter: &str, found: bool, counts: &[(&str, 
 
 fn send(adapter: &str, found: bool, counts: &[(&str, usize)], outcome: &str) -> Value {
     let subject = match consent() {
-        None => return json!({"sent": false, "why": format!("not asked yet: {PRODUCT} sources share --yes | --no")}),
+        None => return json!({"sent": false, "why": format!("not asked yet: {PRODUCT} sources share yes | no")}),
         Some((false, _)) => return json!({"sent": false, "why": "you chose not to share"}),
         Some((true, subject)) => subject,
     };
@@ -151,7 +157,11 @@ fn send(adapter: &str, found: bool, counts: &[(&str, usize)], outcome: &str) -> 
         return json!({"sent": false, "why": format!("Stado's resolution names no route: {resolved}")});
     };
     let address = format!("{}/api/integration/onboarding/{PRODUCT}.sources.discovered", route.trim_end_matches('/'));
-    let body = event(&subject, adapter, found, counts, outcome).to_string();
+    let id = match event_id() {
+        Ok(id) => id,
+        Err(why) => return json!({"sent": false, "why": why}),
+    };
+    let body = event(&id, &subject, adapter, found, counts, outcome).to_string();
     // The token is handed to curl on its standard input, never on its command line.
     let config = format!("header = \"Authorization: Bearer {}\"\n", token.trim().replace('\\', "\\\\").replace('"', "\\\""));
     let sent = stado_wait::output_with_input(

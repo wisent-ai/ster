@@ -2,6 +2,13 @@
 
 Part of the [changelog](../../../../CHANGELOG.md).
 
+- Main compiles again: the T5 block's clamp names `half::f16::MAX`, and
+  `half` is now a declared dependency (candle-core does not re-export it);
+  LongCat-Flash's loader passes the config path to the `zero_expert_type`
+  read in its refusal, and a latent scale whose switch cannot be read now
+  refuses the load instead of failing to compile. Stado's updates of the
+  installed ster had failed on these three errors since 66805b5.
+
 - `ster model fixture create` and `ster request model/fixture/create`
   refuse through declared causes of `ster.model.fixture`
   (`docs/guide/models/fixtures.md`, errors page `model-fixture`): each of the

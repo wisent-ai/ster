@@ -120,26 +120,32 @@ pub(in crate::runtime::load::family) fn longcat_flash(
         );
     }
     let identity = whole_or(raw, "zero_expert_num", 0, path)?;
-    if identity > 0 && text(raw, "zero_expert_type", path)?.is_some_and(|kind| kind != "identity") {
-        refused!(
-            Unimplemented,
-            in raw,
-            ["zero_expert_num", "zero_expert_type"],
-            "{} declares zero_expert_type {:?}; Ster implements identity zero experts",
-            path.display(),
-            text(raw, "zero_expert_type")
-        );
+    if identity > 0 {
+        if let Some(kind) = text(raw, "zero_expert_type", path)?.filter(|kind| *kind != "identity")
+        {
+            refused!(
+                Unimplemented,
+                in raw,
+                ["zero_expert_num", "zero_expert_type"],
+                "{} declares zero_expert_type {kind:?}; Ster implements identity zero experts",
+                path.display()
+            );
+        }
     }
     architecture.interleaved_rotary = true;
     architecture.query_key_value_bias = flag(raw, "attention_bias", path)?;
     let hidden = llama.hidden_size as f64;
-    let scale = |key: &str, rank: Option<usize>| match rank {
-        Some(rank) if flag(raw, key, path)? && rank > 0 => (hidden / rank as f64).sqrt(),
-        _ => 1.0,
+    // A scale a config switches on and whose rank it states; a switch that
+    // cannot be read refuses the load instead of reading as off.
+    let scale = |key: &str, rank: Option<usize>| -> Result<f64> {
+        Ok(match rank {
+            Some(rank) if flag(raw, key, path)? && rank > 0 => (hidden / rank as f64).sqrt(),
+            _ => 1.0,
+        })
     };
     architecture.latent_scales = Some((
-        scale("mla_scale_q_lora", latent.query_rank),
-        scale("mla_scale_kv_lora", Some(latent.key_value_rank)),
+        scale("mla_scale_q_lora", latent.query_rank)?,
+        scale("mla_scale_kv_lora", Some(latent.key_value_rank))?,
     ));
     let mut routed = experts(
         raw,

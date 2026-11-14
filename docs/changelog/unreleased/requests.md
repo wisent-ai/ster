@@ -10,6 +10,9 @@ Part of the [changelog](../../../CHANGELOG.md).
   as `questions`, so what a reader sees and `tests/decide/*.sh` assert is
   unchanged; the refusal judgement, example set, reward scorer, `rows-none`
   and Stado location causes say the shape in words.
+  `sources-share-unkept` fills `{why}` instead of `{problem}`, a raw-message
+  name the same wisent-errors refuses outside `observed`; its sentence is
+  unchanged.
 - `ster request` with its standard output closed (`>&-`) or sent to the null
   device is refused before standard input is read, as
   `ster.request.stdout-discarded` on stderr with exit `2`, naming what the

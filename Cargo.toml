@@ -43,6 +43,9 @@ candle-core = "0.11.1"
 candle-nn = "0.11.1"
 candle-transformers = "0.11.1"
 clap = { version = "4.5.53", features = ["derive"] }
+# The f16 bound the T5 block clamps below (`half::f16::MAX`); candle-core
+# depends on it but does not re-export it, so naming it needs it declared.
+half = "2.7"
 hf-hub = "0.4.3"
 minijinja = { version = "2.24", features = ["json", "loop_controls"] }
 rand = "0.9.2"
