@@ -95,7 +95,8 @@ impl Request {
             return Err(refuse(&STATE_EMPTY, &[("state", &self.state.to_string())]));
         }
         if self.questions.is_empty() {
-            return Err(refuse(&QUESTIONS_NONE, &[]));
+            // The empty object it holds is a value of the observed line.
+            return Err(refuse(&QUESTIONS_NONE, &[("questions", "{}")]));
         }
         for (id, question) in &self.questions {
             if id.trim().is_empty() {

@@ -99,9 +99,9 @@ pub static SCORER_REFUSED: Cause = Cause {
     usage: false,
     exit: None,
     failed: "asking the reward scorer {url} for the score of one completion",
-    cause: "the reward scorer {url} answered HTTP {status}, which says the request itself is wrong: it takes another body than {\"prompt\", \"text\"} or another address",
+    cause: "the reward scorer {url} answered HTTP {status}, which says the request itself is wrong: it takes another body than an object of `prompt` and `text` or another address",
     observed: "HTTP {status}; STER_REWARD_BEARER {bearer}; the scorer's body: {body}",
-    remedy: "name in --reward the scorer address that takes {\"prompt\", \"text\"}; the scorer's body says what it expected",
+    remedy: "name in --reward the scorer address that takes an object of `prompt` and `text`; the scorer's body says what it expected",
     test: "tests/tuning/runs/reward.sh::a_scorer_answering_an_error_status_is_refused",
 };
 
@@ -218,7 +218,7 @@ pub static REWARD: Operation = Operation {
     id: "ster.tune.reward",
     entries: &[],
     uses: &[],
-    summary: "resolve --reward to the length reward, an outside scorer posted {prompt, text} over HTTP, or a reward artifact, and score each sampled completion with it",
+    summary: "resolve --reward to the length reward, an outside scorer posted the prompt and text over HTTP, or a reward artifact, and score each sampled completion with it",
     docs: DOCS,
     warnings: &[],
     causes: &[

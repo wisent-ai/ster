@@ -27,7 +27,7 @@ pub static STADO_BIN_MISSING: Cause = Cause {
     failed: "starting `{call}`",
     cause: "STADO_BIN names {stado}, where no file is, and STADO_BIN is the first place Stado says another program finds it (`stado --help`), so PATH and $HOME/.stado/bin are not looked at",
     observed: "STADO_BIN: {stado} ({state})",
-    remedy: "set STADO_BIN to the path of the `stado` program (`command -v stado` prints it when one is on PATH), or unset it so PATH and ${STADO_BIN_DIR:-$HOME/.stado/bin}/stado are looked at",
+    remedy: "set STADO_BIN to the path of the `stado` program (`command -v stado` prints it when one is on PATH), or unset it so PATH and then $STADO_BIN_DIR/stado (or $HOME/.stado/bin/stado when STADO_BIN_DIR is unset or empty) are looked at",
     test: "tests/synthesis/inference.sh::a_stado_bin_naming_nothing_is_refused",
 };
 
@@ -37,7 +37,7 @@ pub static STADO_ABSENT: Cause = Cause {
     usage: false,
     exit: None,
     failed: "starting `{call}`",
-    cause: "no `stado` is at any place Stado says another program finds it (`stado --help`): STADO_BIN is unset, no `stado` is on PATH and none is at ${STADO_BIN_DIR:-$HOME/.stado/bin}/stado, and Stado hands every completion Ster asks to its inference alternatives",
+    cause: "no `stado` is at any place Stado says another program finds it (`stado --help`): STADO_BIN is unset, no `stado` is on PATH and none is at $STADO_BIN_DIR/stado (or $HOME/.stado/bin/stado when STADO_BIN_DIR is unset or empty), and Stado hands every completion Ster asks to its inference alternatives",
     observed: "STADO_BIN: {program}; PATH: {path}; {place}: {state}",
     remedy: "install Stado with its install-stado.sh, which puts it in $STADO_BIN_DIR when that names a directory, else in $HOME/.stado/bin, or set STADO_BIN to the path of `stado`; `stado capabilities call --help` answers once it is found",
     test: "tests/synthesis/inference.sh::a_missing_stado_is_refused",

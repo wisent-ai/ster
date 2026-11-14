@@ -19,8 +19,14 @@ pub(super) struct Row {
 }
 
 /// The refusal of a line for `cause`, with the values its sentences name
-/// beside the line and the path, which the caller adds.
-fn refused<T>(cause: &'static Cause, values: Vec<(&'static str, String)>) -> Result<T, Rejection> {
+/// beside the line and the path, which the caller adds, and the row's shape
+/// and example its fix shows.
+fn refused<T>(
+    cause: &'static Cause,
+    mut values: Vec<(&'static str, String)>,
+) -> Result<T, Rejection> {
+    values.push(("row_fields", causes::ROW_FIELDS.to_owned()));
+    values.push(("row_example", causes::ROW_EXAMPLE.to_owned()));
     Err(Rejection::new(cause, values))
 }
 

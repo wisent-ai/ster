@@ -40,8 +40,8 @@ pub static QUESTIONS_NONE: Cause = Cause {
     exit: None,
     failed: "checking the decision request",
     cause: "it asks no question",
-    observed: "questions: {}",
-    remedy: "add a question under questions, such as {\"<id>\": {\"type\": \"noul\", \"instructions\": \"<text>\"}}",
+    observed: "questions: {questions}",
+    remedy: "add a question under questions: an object keyed by the question's id, holding its `type` (choice, score or noul) and its `instructions`",
     test: "tests/decide/remote/request.sh::a_request_without_questions_is_refused",
 };
 

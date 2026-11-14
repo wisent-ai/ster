@@ -25,20 +25,26 @@ macro_rules! row_cause {
     };
 }
 
+/// The row's shape and an example row: values of the templates below, not
+/// their placeholders, since a template's braces are its placeholders.
+pub const ROW_FIELDS: &str = "{\"context\", \"options\", \"label\"}";
+pub const ROW_EXAMPLE: &str =
+    "{\"context\": \"the sea is flat\", \"options\": [\"calm\", \"rough\"], \"label\": 0}";
+
 row_cause!(NOT_JSON, "row-not-json",
-    "line {line} is not JSON, and every line of the export is one {\"context\", \"options\", \"label\"} object",
+    "line {line} is not JSON, and every line of the export is one {row_fields} object",
     "line {line}: {excerpt}; the JSON reader stopped at column {column}: {error}",
-    "write line {line} as one JSON object on one line, such as {\"context\": \"the sea is flat\", \"options\": [\"calm\", \"rough\"], \"label\": 0}",
+    "write line {line} as one JSON object on one line, such as {row_example}",
     "a_line_that_is_not_json_is_refused");
 row_cause!(NOT_OBJECT, "row-not-object",
     "line {line} is JSON, {found}, where a row is one object holding context, options and label",
     "line {line}: {excerpt}",
-    "write line {line} as one object, such as {\"context\": \"the sea is flat\", \"options\": [\"calm\", \"rough\"], \"label\": 0}",
+    "write line {line} as one object, such as {row_example}",
     "a_line_that_is_not_an_object_is_refused");
 row_cause!(FIELD_MISSING, "row-field-missing",
     "line {line} has no {field}, and a row states its context, its options and the index of the right one",
     "the fields it has: {fields}",
-    "add {field} to line {line}, as in {\"context\": \"the sea is flat\", \"options\": [\"calm\", \"rough\"], \"label\": 0}",
+    "add {field} to line {line}, as in {row_example}",
     "a_row_without_a_field_is_refused");
 row_cause!(CONTEXT_NOT_TEXT, "row-context-not-text",
     "the context of line {line} is {found}, where it is the text the question is asked about",
@@ -96,7 +102,7 @@ pub static ROWS: Operation = Operation {
     id: "ster.decisions.import.rows",
     entries: &[],
     uses: &[],
-    summary: "read one {\"context\", \"options\", \"label\"} line of a JSONL export into one labelled choice, or name why it cannot be one",
+    summary: "read one line of a JSONL export holding context, options and label into one labelled choice, or name why it cannot be one",
     docs: DOCS,
     warnings: &[],
     causes: &[

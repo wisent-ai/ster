@@ -2,6 +2,14 @@
 
 Part of the [changelog](../../../CHANGELOG.md).
 
+- No cause of the failure catalogue holds a brace its renderer would refuse:
+  wisent-errors past the revision Ster pins refuses a template whose `{`
+  opens no placeholder name, which literal JSON and a `${STADO_BIN_DIR:-…}`
+  default are. The JSONL row causes take the row's shape and example as
+  values (`row_fields`, `row_example`) and `questions-none` its empty object
+  as `questions`, so what a reader sees and `tests/decide/*.sh` assert is
+  unchanged; the refusal judgement, example set, reward scorer, `rows-none`
+  and Stado location causes say the shape in words.
 - `ster request` with its standard output closed (`>&-`) or sent to the null
   device is refused before standard input is read, as
   `ster.request.stdout-discarded` on stderr with exit `2`, naming what the

@@ -31,7 +31,7 @@ pub static EMPTY: Cause = Cause {
     failed: "reading example set {label}",
     cause: "example set {label} contains no examples",
     observed: "examples: 0; name: \"{name}\"",
-    remedy: "add at least one {\"prompt\": \"<text>\", \"completion\": \"<text>\"} to its examples",
+    remedy: "add at least one object with a `prompt` and a `completion` text to its examples",
     test: "tests/tuning/runs/examples.sh::an_example_set_without_examples_is_refused",
 };
 
@@ -79,7 +79,7 @@ pub static ROW_UNKNOWN: Cause = Cause {
     failed: "reading example set {label}",
     cause: "row {index} of example set {label} is none of the forms an example row is read in: OpenAI's messages, ShareGPT's conversations, Alpaca's instruction and output, or prompt and completion",
     observed: "row {index}: fields {fields}",
-    remedy: "write row {index} in one of those forms, or the set as {\"examples\": [{\"prompt\": \"<text>\", \"completion\": \"<text>\"}]}",
+    remedy: "write row {index} in one of those forms, or the set as one object whose `examples` list holds objects with a `prompt` and a `completion` text",
     test: "tests/tuning/runs/examples.sh::a_row_of_no_known_form_is_refused",
 };
 

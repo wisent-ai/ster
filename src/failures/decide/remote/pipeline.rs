@@ -62,7 +62,7 @@ pipeline_cause!(ROWS_NONE, "rows-none", Code::Config, false,
     "importing {path}",
     "the file holds no row: every line is blank",
     "path: {path} ({state})",
-    "name the JSONL export with one {\"context\", \"options\", \"label\"} object per line",
+    "name the JSONL export with one object of context, options and label per line",
     "tests/decide/remote/pipeline.sh::an_export_without_rows_is_refused");
 
 /// Labelled decisions from a JSONL export. A row it refuses is
