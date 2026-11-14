@@ -39,9 +39,9 @@ cuda = ["candle-core/cuda", "candle-nn/cuda"]
 anyhow = "1.0.100"
 base64 = "0.22"
 blake2 = "0.10"
-candle-core = "0.11.0"
-candle-nn = "0.11.0"
-candle-transformers = "0.11.0"
+candle-core = "0.11.1"
+candle-nn = "0.11.1"
+candle-transformers = "0.11.1"
 clap = { version = "4.5.53", features = ["derive"] }
 hf-hub = "0.4.3"
 minijinja = { version = "2.24", features = ["json", "loop_controls"] }
