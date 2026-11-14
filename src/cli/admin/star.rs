@@ -34,14 +34,19 @@ pub(super) enum StarCommand {
 /// `star_repository`.
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
-fn request() -> Result<ProductStarRequest, JourneyError> {
+/// The runtime's star request for `step` (`counting a run toward`,
+/// `reading`, ...), or the refusal that stops it.
+fn request(step: &str) -> Result<ProductStarRequest> {
     // The first-use journey once kept its own state in this same file; reading
     // its path moves that state out to first-use.json, so the runtime reads a
-    // journey file of its own. What stops that move is said as the runtime's
-    // storage failure, never skipped.
-    super::onboarding::state_path().map_err(|unmoved| JourneyError::Storage(format!("{unmoved:#}")))?;
-    let product = StarProduct::from_package("ster", "Ster", REPOSITORY)?;
-    ProductStarRequest::new(product)
+    // journey file of its own. What stops that move is refused by the cause
+    // state_path declares for it (an unset HOME, a file it cannot read or
+    // move), never skipped: the runtime's StorageError (wisent-onboarding-client
+    // 0.2.0) names the runtime's own storage, not this file's move.
+    super::onboarding::state_path()?;
+    StarProduct::from_package("ster", "Ster", REPOSITORY)
+        .and_then(ProductStarRequest::new)
+        .map_err(|error| refusal(step, &error))
 }
 
 /// The declared refusal of `step` (`counting a run toward`, `reading`) when
@@ -91,9 +96,8 @@ pub(crate) fn refusal(step: &str, error: &JourneyError) -> anyhow::Error {
 
 /// Count one run that completed: the request when this run makes it.
 pub(crate) fn observed() -> Result<Option<StarRequest>> {
-    request()
-        .and_then(|request| request.observe())
-        .map_err(|error| refusal("counting a run toward", &error))
+    let step = "counting a run toward";
+    request(step)?.observe().map_err(|error| refusal(step, &error))
 }
 
 /// Count one CLI run that completed, when a person reads this terminal. The
@@ -101,14 +105,11 @@ pub(crate) fn observed() -> Result<Option<StarRequest>> {
 /// output keeps only the answer; a request that cannot be kept is said there
 /// too, by its declared cause, and the run's own answer stands.
 pub(super) fn observe() {
-    match request() {
+    match request("counting a run toward") {
         Ok(request) => {
             request.observe_reporting();
         }
-        Err(error) => eprintln!(
-            "ster: this run is not counted toward the GitHub star request: {}",
-            refusal("counting a run toward", &error)
-        ),
+        Err(refused) => eprintln!("ster: this run is not counted toward the GitHub star request: {refused}"),
     }
 }
 
@@ -120,7 +121,7 @@ pub(crate) fn status_document(verb: &str) -> Result<Value> {
         "reset" => "resetting",
         _ => "reading",
     };
-    let request = request().map_err(|error| refusal(step, &error))?;
+    let request = request(step)?;
     let status = match verb {
         "dismiss" => request.dismiss(),
         "reset" => request.reset(),
