@@ -150,7 +150,7 @@ pub fn ablate(
             let updated = remove_direction(&rows, &unit, strength);
             // A projection of the residual stream has as many rows as the
             // stream is wide, checked above, and the stream is never empty.
-            let inputs = updated.first().map_or(0, Vec::len);
+            let inputs = updated.first().map(Vec::len).unwrap_or_default();
             let flat: Vec<f32> = updated.into_iter().flatten().collect();
             let updated = Tensor::from_vec(flat, (unit.len(), inputs), &device)
                 .and_then(|updated| {

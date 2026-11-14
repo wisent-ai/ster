@@ -119,7 +119,7 @@ pub(super) fn run(args: SourcesArgs) -> Result<()> {
         }
         Err(why) => answer["why_not"] = json!(why),
     }
-    let given = answer["pairs"].as_u64().or(answer["examples"].as_u64()).map_or(0, |given| given as usize);
+    let given = answer["pairs"].as_u64().or(answer["examples"].as_u64()).map(|given| given as usize).unwrap_or_default();
     let present = answer["found"] == json!(true);
     super::answer_document(&super::sharing::reported(answer, found.0, present, &[(if found.2 { "pairs" } else { "examples" }, given)], "discovered"))
 }

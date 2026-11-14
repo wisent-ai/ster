@@ -79,7 +79,7 @@ impl Experts {
                         return Err(refuse_candle(
                             &TOKEN_IDS_UNSET,
                             &[
-                                ("given", &ids.map_or(0, <[u32]>::len).to_string()),
+                                ("given", &ids.map(<[u32]>::len).unwrap_or_default().to_string()),
                                 ("tokens", &tokens.to_string()),
                             ],
                         ));
