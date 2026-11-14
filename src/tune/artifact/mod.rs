@@ -6,6 +6,7 @@
 mod ablate;
 mod evaluate;
 mod export;
+mod fit;
 mod merge;
 
 pub use ablate::{AblationReport, ablate};
