@@ -1,0 +1,52 @@
+schemaVersion: 1
+appId: ster
+productId: ster
+owner: Ster maintainers
+repositories:
+  - repository: ster
+    mappings:
+      - paths:
+          - src/cli/onboarding/**
+          - src/workspace/**
+          - src/artifact/**
+          - Cargo.toml
+          - .probierz/ster/journeys/**
+        journeys: [onboarding-first-use]
+surfaces:
+  tui:
+    spec: journeys/
+    journeys: [onboarding-first-use]
+    conditions:
+      TUI_CMD: "{workspace}/ster/target/release/ster"
+journeys:
+  onboarding-first-use:
+    owner: Ster maintainers
+    timeoutMs: 120000
+    description: With state and a workspace of its own, the walkthrough shows its three screens and names `ster onboarding --import-pairs` without completing; a malformed pair set is rejected and completes nothing; importing a real set copies it into the workspace with its pair count and makes it active, which alone completes first use; the same set is unchanged and a different set under the same name is a conflict that keeps the first.
+    value: A researcher starts Ster from contrastive data they already own, without loading a model, and existing work is never replaced.
+    journeyId: first-use
+    journeyVersion: 2026-09-05.1
+    journeyVersionId: 9c2b4e71-6d08-4a3f-8e5c-0b7d1f3a6e29
+    firstSuccessFact: contrastive_pair_set_imported
+    publication:
+      screenId: import_pairs
+      artifactKinds: [trace]
+      minimumEvidence: E2
+      redactionRequired: false
+artifacts:
+  retain:
+    pullRequestDays: 14
+    nightlyDays: 30
+    adhocDays: 7
+  redact: [TOKEN, SECRET, PASSWORD, KEY, COOKIE, AUTH]
+  pii: unlikely
+pullRequestPolicy:
+  minimumEvidence: E2
+  requiredTargets: [tui]
+  requiredJourneys: [onboarding-first-use]
+releasePolicy:
+  minimumEvidence: E2
+  requiredTargets: [tui]
+  requiredJourneys: [onboarding-first-use]
+  requireProtectedArtifacts: false
+  requireSecretScan: true
