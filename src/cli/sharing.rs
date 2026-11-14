@@ -12,7 +12,7 @@
 //! works the same either way, and each answer's `reported` says whether it was sent and
 //! why not.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -138,7 +138,7 @@ fn send(adapter: &str, found: bool, counts: &[(&str, usize)], outcome: &str) -> 
         return json!({"sent": false, "why": format!("{TOKEN} is unset, so there is no credential to report with")});
     };
     let stado = std::env::var("STADO_BIN").unwrap_or_else(|_| "stado".to_string());
-    let resolved = Command::new(&stado).args(["capabilities", "resolve", "onboarding-events", "--consumer", PRODUCT, "--json"]).stdin(Stdio::null()).output();
+    let resolved = stado_wait::output(Command::new(&stado).args(["capabilities", "resolve", "onboarding-events", "--consumer", PRODUCT, "--json"]).stdin(Stdio::null()));
     let resolved: Value = match resolved {
         Ok(output) if output.status.success() => serde_json::from_slice(&output.stdout).unwrap_or(Value::Null),
         Ok(output) => return json!({"sent": false, "why": format!("Stado resolved no onboarding route: {}", String::from_utf8_lossy(&output.stderr).trim())}),
@@ -149,25 +149,15 @@ fn send(adapter: &str, found: bool, counts: &[(&str, usize)], outcome: &str) -> 
     };
     let address = format!("{}/api/integration/onboarding/{PRODUCT}.sources.discovered", route.trim_end_matches('/'));
     let body = event(&subject, adapter, found, counts, outcome).to_string();
-    let curl = Command::new("curl")
-        .args(["--silent", "--show-error", "--fail-with-body", "--config", "-", "--header", "Content-Type: application/json", "--data", &body, &address])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut curl = match curl {
-        Ok(curl) => curl,
-        Err(error) => return json!({"sent": false, "why": format!("curl cannot be run: {error}")}),
-    };
-    if let Some(mut input) = curl.stdin.take() {
-        // The token is handed to curl on its standard input, never on its command line.
-        if let Err(error) = writeln!(input, "header = \"Authorization: Bearer {}\"", token.trim().replace('\\', "\\\\").replace('"', "\\\"")) {
-            return json!({"sent": false, "why": format!("the credential could not be handed to curl: {error}")});
-        }
-    }
-    match curl.wait_with_output() {
+    // The token is handed to curl on its standard input, never on its command line.
+    let config = format!("header = \"Authorization: Bearer {}\"\n", token.trim().replace('\\', "\\\\").replace('"', "\\\""));
+    let sent = stado_wait::output_with_input(
+        Command::new("curl").args(["--silent", "--show-error", "--fail-with-body", "--config", "-", "--header", "Content-Type: application/json", "--data", &body, &address]),
+        config.as_bytes(),
+    );
+    match sent {
         Ok(output) if output.status.success() => json!({"sent": true, "to": provider}),
         Ok(output) => json!({"sent": false, "why": format!("{provider} answered: {}", String::from_utf8_lossy(&output.stdout).trim())}),
-        Err(error) => json!({"sent": false, "why": format!("curl did not finish: {error}")}),
+        Err(error) => json!({"sent": false, "why": format!("curl did not run to its end: {error}")}),
     }
 }
