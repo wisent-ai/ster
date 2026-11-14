@@ -140,7 +140,10 @@ fn send(adapter: &str, found: bool, counts: &[(&str, usize)], outcome: &str) -> 
     let stado = std::env::var("STADO_BIN").unwrap_or_else(|_| "stado".to_string());
     let resolved = stado_wait::output(Command::new(&stado).args(["capabilities", "resolve", "onboarding-events", "--consumer", PRODUCT, "--json"]).stdin(Stdio::null()));
     let resolved: Value = match resolved {
-        Ok(output) if output.status.success() => serde_json::from_slice(&output.stdout).unwrap_or(Value::Null),
+        Ok(output) if output.status.success() => match serde_json::from_slice(&output.stdout) {
+            Ok(resolved) => resolved,
+            Err(error) => return json!({"sent": false, "why": format!("Stado's resolution is not JSON: {error}")}),
+        },
         Ok(output) => return json!({"sent": false, "why": format!("Stado resolved no onboarding route: {}", String::from_utf8_lossy(&output.stderr).trim())}),
         Err(error) => return json!({"sent": false, "why": format!("{stado} cannot be run: {error}")}),
     };
