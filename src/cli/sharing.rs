@@ -34,7 +34,7 @@ fn kept() -> Option<PathBuf> {
 /// `count` random bytes as hex, or why /dev/urandom gave none: a buffer it
 /// did not fill was all zeros, the same subject and event id for everyone.
 fn random_hex(count: usize) -> Result<String, String> {
-    let mut bytes = vec![0u8; count];
+    let mut bytes = vec![u8::MIN; count];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut random| random.read_exact(&mut bytes))
         .map_err(|error| format!("{count} random bytes could not be read from /dev/urandom: {error}; nothing was kept or sent"))?;
@@ -53,7 +53,7 @@ pub fn share(answer: Option<bool>) -> Result<Value, String> {
     let path = kept().ok_or_else(|| "neither XDG_CONFIG_HOME nor HOME is set, so the answer has nowhere to be kept; set one and answer again".to_string())?;
     let subject = match consent() {
         Some((_, subject)) => subject,
-        None => random_hex(32)?,
+        None => random_hex(/* a SHA-256 digest's bytes: https://csrc.nist.gov/pubs/fips/180-4/upd1/final */ 32)?,
     };
     let kept = json!({"share": share, "subject": subject, "answered_at": occurred_at()});
     path.parent()
@@ -64,37 +64,62 @@ pub fn share(answer: Option<bool>) -> Result<Value, String> {
 }
 
 fn bucket(count: usize) -> &'static str {
-    match count {
-        0 => "0",
-        1..=9 => "1-9",
-        10..=99 => "10-99",
-        100..=999 => "100-999",
-        1000..=9999 => "1000-9999",
-        _ => "10000+",
+    // The count buckets Integrations accepts, as echo-web's onboarding store declares
+    // them (COUNT_BUCKETS in src/lib/onboarding/store/writes/sources.ts): none, then
+    // one bucket per count of decimal digits, the last one open.
+    const COUNT_BUCKETS: &[&str] = &["0", "1-9", "10-99", "100-999", "1000-9999", "10000+"];
+    let &[none, .., open] = COUNT_BUCKETS else {
+        unreachable!("COUNT_BUCKETS names the buckets Integrations accepts");
+    };
+    if std::num::NonZeroUsize::new(count).is_none() {
+        return none;
     }
+    let digits = count.to_string().len();
+    let closed = format!("{:0<digits$}-{}", "1", "9".repeat(digits));
+    COUNT_BUCKETS.iter().copied().find(|bucket| *bucket == closed).unwrap_or(open)
 }
 
 /// Seconds since the epoch as an RFC 3339 UTC time (Howard Hinnant's `civil_from_days`).
 fn occurred_at() -> String {
-    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
-    let (days, rest) = ((seconds / 86_400) as i64, seconds % 86_400);
+    // A POSIX day, hour and minute are exactly these many seconds: https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap04.html#tag_04_19
+    const SECONDS_PER_DAY: u64 = 86_400;
+    // https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap04.html#tag_04_19
+    const SECONDS_PER_HOUR: u64 = 3_600;
+    // https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap04.html#tag_04_19
+    const SECONDS_PER_MINUTE: u64 = 60;
+    // A clock before 1970 is said as the epoch itself.
+    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(u64::MIN, |since| since.as_secs());
+    let (days, rest) = ((seconds / SECONDS_PER_DAY) as i64, seconds % SECONDS_PER_DAY);
+    // Hinnant's civil_from_days, each constant his: https://howardhinnant.github.io/date_algorithms.html#civil_from_days
     let z = days + 719_468;
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
     let era = z.div_euclid(146_097);
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
     let doe = z - era * 146_097;
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
     let mp = (5 * doy + 2) / 153;
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
     let day = doy - (153 * mp + 2) / 5 + 1;
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest % 3600 / 60, rest % 60)
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / SECONDS_PER_HOUR, rest % SECONDS_PER_HOUR / SECONDS_PER_MINUTE, rest % SECONDS_PER_MINUTE)
 }
 
 /// A version-4 UUID (RFC 9562 §5.4), or why no random bytes were read.
 fn event_id() -> Result<String, String> {
+    // A UUID is 128 bits, sixteen random bytes: https://www.rfc-editor.org/rfc/rfc9562#section-4
     let hex = random_hex(16)?;
+    // The variant's nibble, read as hexadecimal: https://www.rfc-editor.org/rfc/rfc9562#section-4.1
     let nibble = u8::from_str_radix(&hex[16..17], 16).map_err(|error| format!("the random hex {hex} is not hex: {error}"))?;
+    // Its two high bits are 10: https://www.rfc-editor.org/rfc/rfc9562#section-4.1
     let variant = ["8", "9", "a", "b"][usize::from(nibble & 3)];
+    // The 8-4-4-4-12 layout, version 4: https://www.rfc-editor.org/rfc/rfc9562#section-5.4
     Ok(format!("{}-{}-4{}-{variant}{}-{}", &hex[0..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32]))
 }
 
@@ -119,7 +144,7 @@ pub fn question() -> Value {
         Some((share, _)) => json!({"share": share, "change_with": format!("{PRODUCT} sources share yes | no")}),
         None => json!({
             "asked": format!("May {PRODUCT} send, for each source it reads, which source it was, whether it was there and how many records it held, rounded, so the sources people keep are read first? No name, path or value is sent; everything works the same either way."),
-            "sends": event("a fresh random version-4 UUID for each event", &"0".repeat(64), EXAMPLE, true, &[("records", 12)], "discovered"),
+            "sends": event("a fresh random version-4 UUID for each event", "the SHA-256 digest of a random subject, kept with your answer", EXAMPLE, true, &[("records", usize::MIN)], "discovered"),
             "answer_with": format!("{PRODUCT} sources share yes | no"),
         }),
     }
