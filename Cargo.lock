@@ -2681,14 +2681,13 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stado-wait"
-version = "0.1.0"
-source = "git+https://github.com/wisent-ai/stado#c522d43965039ce1d552141e6193d29602a2f31a"
+version = "0.2.0"
+source = "git+https://github.com/wisent-ai/stado#61a0eb0fec294a8def0dc4c89789aa80ca092c5d"
 dependencies = [
  "chrono",
  "libc",
  "reqwest",
  "sha2",
- "tokio",
 ]
 
 [[package]]
@@ -3715,8 +3714,8 @@ dependencies = [
 
 [[package]]
 name = "wisent-onboarding-client"
-version = "0.1.0"
-source = "git+https://github.com/wisent-ai/echo-web?rev=13f3cabf06b3692c5e6c2e5bc66496845390e745#13f3cabf06b3692c5e6c2e5bc66496845390e745"
+version = "0.2.0"
+source = "git+https://github.com/wisent-ai/echo-web#407fe7a17e46fc52cefc39472591e621ada0a6dc"
 dependencies = [
  "async-trait",
  "reqwest",
