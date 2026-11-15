@@ -85,7 +85,7 @@ impl Inference {
                 *answered = provider.to_owned();
             }
         }
-        let content = printed["answer"]["choices"][0]["message"]["content"].as_str();
+        let content = printed.pointer("/answer/choices/0/message/content").and_then(Value::as_str);
         match content {
             Some(content) => Ok(content.trim().to_owned()),
             None => Err(refuse(
