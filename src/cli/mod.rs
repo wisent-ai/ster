@@ -238,7 +238,7 @@ pub(crate) fn run() -> Result<()> {
 /// never from the arguments, so no value the user typed is sent.
 fn refused_by_clap(error: clap::Error, started: Instant) -> ! {
     use clap::error::ErrorKind;
-    let command = subcommand_words(&std::env::args().skip(1).collect::<Vec<_>>());
+    let command = subcommand_words(&std::env::args().skip(1 /* https://doc.rust-lang.org/std/env/fn.args.html */).collect::<Vec<_>>());
     if telemetry::reports(&command) {
         let telemetry = telemetry::telemetry();
         match error.kind() {
