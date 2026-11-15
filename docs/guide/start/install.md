@@ -12,7 +12,7 @@ Ster ships the two files that make this work — `.wisent-release.json` and
 `release/build.sh` — and Stado reads them:
 
 ```bash
-stado product install ster --surface cli
+# run the ster release installer at stado://releases/ster/<version>/<platform>/install.sh
 stado product status ster --surface cli
 stado product update ster --surface cli
 stado product rollback ster --surface cli

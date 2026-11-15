@@ -219,7 +219,7 @@ Explicit boundaries:
 Install the current release through Stado, which places `ster` on `PATH`:
 
 ```bash
-stado product install --surface cli ster
+# run the ster release installer at stado://releases/ster/<version>/<platform>/install.sh
 ```
 
 From this source checkout, kompilator builds it (no Cargo runs):
