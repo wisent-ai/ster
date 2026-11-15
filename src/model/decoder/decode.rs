@@ -136,10 +136,11 @@ impl SteeringLlama {
                     let mut all = Vec::with_capacity(others.len() + 1);
                     all.push(hidden);
                     all.extend(others);
-                    let mut corrected = layer
+                    let corrected = layer
                         .forward_streams(&all, &inputs, index_pos, index, cache, mask, mode)?;
-                    let first = corrected.remove(0);
-                    rest = Some(corrected);
+                    let mut streams = corrected.into_iter();
+                    let first = streams.next().expect("forward_streams answers one stream per input");
+                    rest = Some(streams.collect());
                     first
                 }
                 (None, Some(held)) => {

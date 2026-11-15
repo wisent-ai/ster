@@ -18,14 +18,14 @@ fn main() -> ExitCode {
     // variant, so every command ends in a declared refusal naming it.
     let result = cli::run().map_err(|error| ster::failures::tensor::settle(error, &cli::shown()));
     let status = match &result {
-        Ok(()) => 0,
+        Ok(()) => ster::failures::SUCCESS_EXIT,
         Err(error) => {
             eprintln!("Error: {error:?}");
             ster::failures::exit_code(error)
         }
     };
     cli::finish(result.as_ref().err(), status);
-    if status == 0 {
+    if status == ster::failures::SUCCESS_EXIT {
         return ExitCode::SUCCESS;
     }
     match u8::try_from(status) {

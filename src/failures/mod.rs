@@ -74,8 +74,13 @@ pub use declared::Declared;
 pub use rejection::{Refused, Rejection, Rejections};
 pub use shape::{excerpt, shape};
 
+/// The status a command that did what it was asked exits with, the one
+/// `exit` reads as success: https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
+pub const SUCCESS_EXIT: i32 = 0;
+
 /// The status a failure that is not a usage refusal and not retryable exits
-/// with, as `ster` has always exited.
+/// with, as `ster` has always exited: the C library's `EXIT_FAILURE` on
+/// every platform ster runs on: https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/stdlib.h.html
 pub const FAILURE_EXIT: i32 = 1;
 
 /// The page that says how a refusal reads, which status it exits with, and

@@ -56,7 +56,7 @@ pub(super) struct FetchArgs {
     #[arg(long)]
     count: usize,
     /// Rows to skip from the start of the split.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t)]
     offset: usize,
     /// Where the labelled decisions are written.
     #[arg(long)]
@@ -138,7 +138,7 @@ pub(super) struct BenchmarkArgs {
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
     /// Option orders each question is shown in; 0 is every cyclic shift.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t)]
     permutations: usize,
     /// Equal-width confidence bins the expected calibration error is
     /// measured over; Ster assumes none, and the document records it.

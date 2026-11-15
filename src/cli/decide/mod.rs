@@ -33,7 +33,7 @@ pub(super) struct ReadArgs {
     /// Option orders each question is shown in. 0 shows every option under
     /// every letter once, which cancels the model's letter preference; 1 is a
     /// single pass with no correction.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t)]
     permutations: usize,
     /// A LoRA adapter trained for this exact model, such as one written by
     /// `ster tune decide`. Ster refuses a mismatch rather than reading the
