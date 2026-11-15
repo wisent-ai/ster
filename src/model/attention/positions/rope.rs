@@ -2,7 +2,7 @@
 //! inference pass, the same arithmetic composed of differentiable ops on a
 //! training pass.
 
-use candle_core::{DType, Tensor};
+use candle_core::{D, DType, Tensor};
 
 use super::super::Pass;
 
@@ -36,12 +36,12 @@ pub(in crate::model) fn apply_rotary(
     interleaved: bool,
 ) -> candle_core::Result<Tensor> {
     let (_, _, _, head_dim) = input.dims4()?;
-    let rotary_dim = 2 * cos.dim(1)?;
+    let rotary_dim = 2 * cos.dim(D::Minus1)?; /* https://arxiv.org/abs/2104.09864 */
     let input = input.to_dtype(DType::F32)?;
     let (rotating, kept) = if rotary_dim < head_dim {
         (
-            input.narrow(3, 0, rotary_dim)?,
-            Some(input.narrow(3, rotary_dim, head_dim - rotary_dim)?),
+            input.narrow(D::Minus1, Default::default(), rotary_dim)?,
+            Some(input.narrow(D::Minus1, rotary_dim, head_dim - rotary_dim)?),
         )
     } else {
         (input, None)
@@ -57,7 +57,7 @@ pub(in crate::model) fn apply_rotary(
         (Pass::Differentiable, true) => rope_interleaved_composed(&rotating, &cos, &sin)?,
     };
     let rotated = match kept {
-        Some(kept) => Tensor::cat(&[&rotated, &kept], 3)?,
+        Some(kept) => Tensor::cat(&[&rotated, &kept], D::Minus1)?,
         None => rotated,
     };
     rotated.to_dtype(weights)
@@ -74,14 +74,14 @@ fn rope_interleaved_composed(
     sin: &Tensor,
 ) -> candle_core::Result<Tensor> {
     let (batch, heads, sequence, head_dim) = input.dims4()?;
-    let pairs = input.reshape((batch, heads, sequence, head_dim / 2, 2))?;
-    let even = pairs.narrow(4, 0, 1)?.squeeze(4)?;
-    let odd = pairs.narrow(4, 1, 1)?.squeeze(4)?;
-    let cos = cos.unsqueeze(0)?.unsqueeze(0)?;
-    let sin = sin.unsqueeze(0)?.unsqueeze(0)?;
+    let pairs = input.reshape((batch, heads, sequence, head_dim / 2, 2))?; /* https://arxiv.org/abs/2104.09864 */
+    let even = pairs.narrow(D::Minus1, Default::default(), 1)?.squeeze(D::Minus1)?; /* https://arxiv.org/abs/2104.09864 */
+    let odd = pairs.narrow(D::Minus1, 1, 1)?.squeeze(D::Minus1)?; /* https://arxiv.org/abs/2104.09864 */
+    let cos = cos.broadcast_left((batch, heads))?;
+    let sin = sin.broadcast_left((batch, heads))?;
     let rotated_even = (even.broadcast_mul(&cos)? - odd.broadcast_mul(&sin)?)?;
     let rotated_odd = (even.broadcast_mul(&sin)? + odd.broadcast_mul(&cos)?)?;
-    Tensor::stack(&[&rotated_even, &rotated_odd], 4)?.reshape((batch, heads, sequence, head_dim))
+    Tensor::stack(&[&rotated_even, &rotated_odd], D::Minus1)?.reshape((batch, heads, sequence, head_dim))
 }
 
 /// The rotary embedding written out of ops that have a backward pass.
@@ -109,16 +109,16 @@ fn rope_interleaved_composed(
 /// the composed result is bit-comparable with the kernel rather than merely
 /// close.
 fn rope_composed(input: &Tensor, cos: &Tensor, sin: &Tensor) -> candle_core::Result<Tensor> {
-    let (_, _, _, head_dim) = input.dims4()?;
-    let half = head_dim / 2;
-    let first = input.narrow(candle_core::D::Minus1, 0, half)?;
-    let second = input.narrow(candle_core::D::Minus1, half, half)?;
-    // `cos` and `sin` arrive as [sequence, d / 2]; two leading unit axes make
-    // them broadcast over batch and head, which is what the kernel's `i_cs`
-    // ignoring `bh_i` does by hand.
-    let cos = cos.unsqueeze(0)?.unsqueeze(0)?;
-    let sin = sin.unsqueeze(0)?.unsqueeze(0)?;
+    let (batch, heads, _, head_dim) = input.dims4()?;
+    let half = head_dim / 2; /* https://arxiv.org/abs/2104.09864 */
+    let first = input.narrow(D::Minus1, Default::default(), half)?;
+    let second = input.narrow(D::Minus1, half, half)?;
+    // `cos` and `sin` arrive as [sequence, d / 2]; batch and head laid on
+    // their left make them broadcast over both, which is what the kernel's
+    // `i_cs` ignoring `bh_i` does by hand.
+    let cos = cos.broadcast_left((batch, heads))?;
+    let sin = sin.broadcast_left((batch, heads))?;
     let rotated_first = (first.broadcast_mul(&cos)? - second.broadcast_mul(&sin)?)?;
     let rotated_second = (first.broadcast_mul(&sin)? + second.broadcast_mul(&cos)?)?;
-    Tensor::cat(&[&rotated_first, &rotated_second], candle_core::D::Minus1)
+    Tensor::cat(&[&rotated_first, &rotated_second], D::Minus1)
 }
