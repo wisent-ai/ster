@@ -220,7 +220,7 @@ impl Cache {
             return Ok(mask.clone());
         }
         let key_len = index_pos + seq_len;
-        let mut values = vec![0u8; seq_len * key_len];
+        let mut values: Vec<u8> = vec![Default::default(); seq_len * key_len];
         for query in 0..seq_len {
             let absolute_query = index_pos + query;
             for key_position in 0..key_len {

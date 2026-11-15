@@ -157,7 +157,7 @@ fn validate_examples(positive: &[Vec<f32>], negative: &[Vec<f32>], step: &str) -
 }
 
 fn mean_difference(positive: &[Vec<f32>], negative: &[Vec<f32>]) -> Vec<f32> {
-    let mut direction = vec![0f32; positive[0].len()];
+    let mut direction: Vec<f32> = vec![Default::default(); positive[0].len()];
     let scale = 1f32 / positive.len() as f32;
     for (pos, neg) in positive.iter().zip(negative) {
         for ((value, pos), neg) in direction.iter_mut().zip(pos).zip(neg) {
@@ -185,7 +185,7 @@ fn pca_direction(positive: &[Vec<f32>], negative: &[Vec<f32>], iterations: usize
         .collect();
     let mut vector = normalize_or_basis(mean.clone());
     for _ in 0..iterations {
-        let mut next = vec![0f32; vector.len()];
+        let mut next: Vec<f32> = vec![Default::default(); vector.len()];
         for row in &centered {
             let projection = dot(row, &vector);
             for (value, component) in next.iter_mut().zip(row) {
@@ -210,10 +210,10 @@ fn logistic_direction(
     l2: f32,
 ) -> Vec<f32> {
     let width = positive[0].len();
-    let mut weights = vec![0f32; width];
+    let mut weights: Vec<f32> = vec![Default::default(); width];
     let count = (positive.len() + negative.len()) as f32;
     for step in 0..iterations {
-        let mut gradient = vec![0f32; width];
+        let mut gradient: Vec<f32> = vec![Default::default(); width];
         for (row, label) in positive
             .iter()
             .map(|row| (row, 1f32))
@@ -234,7 +234,7 @@ fn logistic_direction(
 }
 
 fn mean_rows(rows: &[Vec<f32>]) -> Vec<f32> {
-    let mut mean = vec![0f32; rows[0].len()];
+    let mut mean: Vec<f32> = vec![Default::default(); rows[0].len()];
     let scale = 1f32 / rows.len() as f32;
     for row in rows {
         for (mean, value) in mean.iter_mut().zip(row) {
@@ -271,7 +271,7 @@ fn normalize_or_basis(mut vector: Vec<f32>) -> Vec<f32> {
         }
         vector
     } else {
-        let mut basis = vec![0f32; vector.len()];
+        let mut basis: Vec<f32> = vec![Default::default(); vector.len()];
         basis[0] = 1.0;
         basis
     }

@@ -113,7 +113,7 @@ pub(super) fn question_logits(
         // at that option's place, so a row reads in canonical option order.
         // `labels` holds the spellings of every position below the largest
         // option count, so the range yields one entry per letter shown.
-        let mut canonical = vec![0f32; row.order.len()];
+        let mut canonical: Vec<f32> = vec![Default::default(); row.order.len()];
         let shown = row
             .order
             .iter()

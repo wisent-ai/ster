@@ -71,7 +71,7 @@ impl Experts {
     ) -> candle_core::Result<Tensor> {
         let (tokens, count) = scores.dims2()?;
         let host = scores.to_vec2::<f32>()?;
-        let mut mask = vec![0f32; tokens * count];
+        let mut mask: Vec<f32> = vec![Default::default(); tokens * count];
         for (token, row) in host.iter().enumerate() {
             let chosen: Vec<usize> = match &self.hash {
                 Some(table) => {

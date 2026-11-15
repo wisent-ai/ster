@@ -151,7 +151,7 @@ impl QuestionLogits {
             // A question read in no order holds no score for any option.
             return Vec::new();
         };
-        let mut mean = vec![0f64; first.len()];
+        let mut mean: Vec<f64> = vec![Default::default(); first.len()];
         for row in &self.rows {
             for (slot, value) in mean.iter_mut().zip(log_softmax(row)) {
                 *slot += value / self.rows.len() as f64;

@@ -202,7 +202,7 @@ pub(in crate::model) fn padded_causal_mask(
     chunk_lookback: Option<usize>,
     device: &Device,
 ) -> candle_core::Result<Tensor> {
-    let mut values = vec![0u8; lengths.len() * sequence * sequence];
+    let mut values: Vec<u8> = vec![Default::default(); lengths.len() * sequence * sequence];
     for (row, &length) in lengths.iter().enumerate() {
         let plane = row * sequence * sequence;
         for query in 0..sequence {

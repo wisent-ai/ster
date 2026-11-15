@@ -19,8 +19,8 @@ pub(super) fn sparse_mixer(
     let host = logits.to_vec2::<f32>()?;
     // Per round: an additive mask, zero for an expert kept and minus
     // infinity for one dropped, and the chosen expert marked with a one.
-    let mut dropped = vec![vec![0f32; tokens * count]; rounds];
-    let mut picked = vec![vec![0f32; tokens * count]; rounds];
+    let mut dropped: Vec<Vec<f32>> = vec![vec![Default::default(); tokens * count]; rounds];
+    let mut picked: Vec<Vec<f32>> = vec![vec![Default::default(); tokens * count]; rounds];
     for (token, row) in host.iter().enumerate() {
         let mut taken = vec![false; count];
         for (drop, pick) in dropped.iter_mut().zip(picked.iter_mut()) {
