@@ -84,16 +84,16 @@ impl SkipConnections {
         kept: &mut [Option<Tensor>; 2],
     ) -> candle_core::Result<Tensor> {
         let listed = |set: u128| layer < u128::BITS as usize && set & (1u128 << layer) != 0;
-        for slot in 0..2 {
-            if listed(self.save[slot]) {
-                kept[slot] = Some(hidden.clone());
+        for (save, slot) in self.save.iter().zip(kept.iter_mut()) {
+            if listed(*save) {
+                *slot = Some(hidden.clone());
             }
         }
         let mut hidden = hidden;
         // The reading holds every slot's first save at or before its first
         // blend, so a blending layer finds the slot filled.
-        for slot in 0..2 {
-            if let (true, Some(earlier)) = (listed(self.blend[slot]), &kept[slot]) {
+        for (blend, slot) in self.blend.iter().zip(kept.iter()) {
+            if let (true, Some(earlier)) = (listed(*blend), slot) {
                 hidden = ((earlier * self.weight)? + (hidden * (1.0 - self.weight))?)?;
             }
         }

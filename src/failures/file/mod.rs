@@ -96,6 +96,7 @@ fn described(metadata: &std::fs::Metadata) -> String {
         "{}, {} bytes, mode {:03o}, owner uid {}",
         what(metadata),
         metadata.len(),
+        // The permission bits, S_IRWXU | S_IRWXG | S_IRWXO: https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/sys_stat.h.html
         metadata.mode() & 0o777,
         metadata.uid(),
     )

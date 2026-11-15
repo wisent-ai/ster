@@ -58,30 +58,26 @@ impl Architecture {
         let head_dim = self.head_dim;
         let query = self.attention_width(config.num_attention_heads);
         let key_value = config.num_key_value_heads * head_dim;
-        let attention_offset = match target {
-            Target::Query => Some(0),
-            Target::Key => Some(1),
-            Target::Value => Some(2),
-            _ => None,
-        };
+        let attention_target =
+            matches!(target, Target::Query | Target::Key | Target::Value).then_some(target);
         let intermediate = config.intermediate_size;
-        let placement = match (attention_offset, self.qkv_layout) {
+        let placement = match (attention_target, self.qkv_layout) {
             // Each head's query rows sit before its gate rows.
-            (Some(0), QkvLayout::Separate) if self.output_gate => {
+            (Some(Target::Query), QkvLayout::Separate) if self.output_gate => {
                 let blocks = (0..config.num_attention_heads)
                     .map(|head| (head * 2 * head_dim, head * head_dim, head_dim))
                     .collect();
                 Placement::blocks(in_attention(names.query), blocks)
             }
             (Some(slot), QkvLayout::Separate) => Placement::whole(in_attention(match slot {
-                0 => names.query,
-                1 => names.key,
+                Target::Query => names.query,
+                Target::Key => names.key,
                 _ => names.value,
             })),
             (Some(slot), QkvLayout::Stacked) => {
                 let (start, rows) = match slot {
-                    0 => (0, query),
-                    1 => (query, key_value),
+                    Target::Query => (0, query),
+                    Target::Key => (query, key_value),
                     _ => (query + key_value, key_value),
                 };
                 Placement::blocks(in_attention(names.fused_qkv), vec![(start, 0, rows)])
@@ -95,8 +91,8 @@ impl Architecture {
                 let blocks = (0..groups)
                     .flat_map(|group| {
                         let (first, count, own) = match slot {
-                            0 => (0, per_group, group * per_group),
-                            1 => (per_group, 1, group),
+                            Target::Query => (0, per_group, group * per_group),
+                            Target::Key => (per_group, 1, group),
                             _ => (per_group + 1, 1, group),
                         };
                         (0..count).map(move |head| {
@@ -110,10 +106,12 @@ impl Architecture {
                     .collect();
                 Placement::blocks(in_attention(names.fused_qkv), blocks)
             }
-            (Some(0), QkvLayout::PairedKeyValue) => Placement::whole(in_attention(names.query)),
+            (Some(Target::Query), QkvLayout::PairedKeyValue) => {
+                Placement::whole(in_attention(names.query))
+            }
             (Some(slot), QkvLayout::PairedKeyValue) => {
                 // Each key-value head holds its key rows, then its value rows.
-                let first = if slot == 1 { 0 } else { head_dim };
+                let first = if slot == Target::Key { 0 } else { head_dim };
                 let blocks = (0..config.num_key_value_heads)
                     .map(|head| (head * 2 * head_dim + first, head * head_dim, head_dim))
                     .collect();

@@ -20,8 +20,9 @@ pub(super) fn completion_loss(
     boundary: usize,
     runtime: &Runtime,
 ) -> Result<Tensor> {
+    let reaches = boundary > 0 && boundary < ids.len();
     assert!(
-        boundary > 0 && boundary < ids.len(),
+        reaches,
         "an example reaches the loss with a prompt token and a completion token"
     );
     let start = boundary - 1;

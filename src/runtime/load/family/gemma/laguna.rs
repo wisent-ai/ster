@@ -98,7 +98,8 @@ pub(in crate::runtime::load::family) fn laguna(
             let mut kinds = [None, None];
             for (layer, count) in counts.iter().enumerate() {
                 let count = count.as_u64().map(|count| count as usize);
-                let slot = usize::from(windowed & (1u128 << layer) != 0);
+                let windowed_layer = windowed & (1u128 << layer) != 0;
+                let slot = usize::from(windowed_layer);
                 match (kinds[slot], count) {
                     (_, None) => refused!(
                         Malformed,
@@ -113,7 +114,7 @@ pub(in crate::runtime::load::family) fn laguna(
                         ["num_attention_heads_per_layer", "layer_types"],
                         "{} gives its {} layers more than one head count; Ster gives each attention kind one",
                         path.display(),
-                        if slot == 1 {
+                        if windowed_layer {
                             "sliding-window"
                         } else {
                             "full-attention"
@@ -122,7 +123,8 @@ pub(in crate::runtime::load::family) fn laguna(
                     (_, count) => kinds[slot] = count,
                 }
             }
-            if kinds[1].is_some_and(|count| count != llama.num_attention_heads) {
+            let [full, sliding] = kinds;
+            if sliding.is_some_and(|count| count != llama.num_attention_heads) {
                 refused!(
                     Contradictory,
                     in raw,
@@ -130,10 +132,10 @@ pub(in crate::runtime::load::family) fn laguna(
                     "{} states num_attention_heads {} unlike its sliding-window layers' {:?}",
                     path.display(),
                     llama.num_attention_heads,
-                    kinds[1]
+                    sliding
                 );
             }
-            kinds[0]
+            full
         }
         None => None,
     };

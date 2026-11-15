@@ -154,16 +154,18 @@ impl Runtime {
         let prompt_len = tokens.len();
         let mut cache = self.cache(model, true)?;
         // The first step reads the whole prompt; each later one reads only
-        // the token the step before it sampled, at its position.
-        let (mut context, mut index_pos) = (tokens.clone(), 0);
+        // the token the step before it sampled, at its position: the context
+        // starts where the tokens before it end.
+        let mut context = tokens.clone();
         for _ in 0..options.max_new_tokens {
             let input = Tensor::new(context.as_slice(), &self.device)?.unsqueeze(0)?;
+            let index_pos = tokens.len() - context.len();
             let output = model.forward(&input, index_pos, &mut cache, plan, &[])?;
             // `SteeringLlama::forward` runs `Mode::DECODE`.
             let logits = output.into_logits(Mode::DECODE.readout)?;
             let next = sampler.sample(&logits.squeeze(0)?)?;
             tokens.push(next);
-            (context, index_pos) = (vec![next], tokens.len() - 1);
+            context = vec![next];
             if self.eos_tokens.contains(&next) {
                 break;
             }

@@ -138,7 +138,7 @@ impl Index {
         // is non-empty, which makes the LSH a speed-up rather than a filter: the
         // result is exact-Hamming recall, not approximate recall. Ported as-is.
         if candidates.is_empty() && !self.fingerprints.is_empty() {
-            candidates.extend(0..self.fingerprints.len());
+            candidates.extend(self.fingerprints.iter().enumerate().map(|(index, _)| index));
         }
         // Deviation, deliberate. The Python only asks `any(...)` over an
         // unordered set and never reports which pair collided. The contract here

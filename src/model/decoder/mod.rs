@@ -152,8 +152,9 @@ impl SteeringLlama {
         // its run clamped to `max_position_embeddings`, with no cache and a
         // readout of every position: each of these is a defect of a caller,
         // not of anything a run was given.
+        let filled = batch > 0 && sequence > 0;
         assert!(
-            batch > 0 && sequence > 0,
+            filled,
             "a batched forward needs at least one row of at least one token"
         );
         assert_eq!(
@@ -174,12 +175,10 @@ impl SteeringLlama {
             !matches!(mode.readout, Readout::LastPosition),
             "a batched forward cannot read one last position, because every row ends somewhere else"
         );
-        assert!(
-            lengths
-                .iter()
-                .all(|&length| length > 0 && length <= sequence),
-            "every row of a batch holds tokens and fits its width"
-        );
+        let fitted = lengths
+            .iter()
+            .all(|&length| length > 0 && length <= sequence);
+        assert!(fitted, "every row of a batch holds tokens and fits its width");
         let full = padded_causal_mask(lengths, sequence, None, None, tokens.device())?;
         let windowed = match self.architecture.sliding_window {
             Some(window) if self.architecture.sliding_layers != 0 => Some(padded_causal_mask(

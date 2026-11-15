@@ -21,10 +21,7 @@ impl Kind<'_> for usize {
 impl Kind<'_> for u32 {
     const KIND: &'static str = "a token id, a whole number below 4294967296";
     fn read(value: &Value) -> Option<Self> {
-        match value.as_u64() {
-            Some(whole) if whole <= u64::from(u32::MAX) => Some(whole as u32),
-            _ => None,
-        }
+        value.as_u64().and_then(|whole| u32::try_from(whole).ok())
     }
 }
 

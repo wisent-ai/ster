@@ -104,11 +104,14 @@ impl Attention {
         // Zamba2's per-invocation low-rank terms belong to the base model,
         // so they apply on every route.
         let (query, key, value) = match &self.low_rank {
-            Some(low_rank) => (
-                (query + low_rank[0].forward(hidden)?)?,
-                (key + low_rank[1].forward(hidden)?)?,
-                (value + low_rank[2].forward(hidden)?)?,
-            ),
+            Some(low_rank) => {
+                let [for_query, for_key, for_value] = &**low_rank;
+                (
+                    (query + for_query.forward(hidden)?)?,
+                    (key + for_key.forward(hidden)?)?,
+                    (value + for_value.forward(hidden)?)?,
+                )
+            }
             None => (query, key, value),
         };
         // Falcon-H1 multiplies every key by `key_multiplier`, MiMo-V2 every

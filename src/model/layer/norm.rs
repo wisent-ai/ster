@@ -166,7 +166,7 @@ impl Norm {
     /// scales the whole axis.
     pub fn forward(&self, hidden: &Tensor, pass: Pass) -> candle_core::Result<Tensor> {
         let fused = pass == Pass::Inference
-            && self.weight.rank() == 1
+            && matches!(self.weight.dims(), [_])
             && hidden.is_contiguous()
             && self.groups == 1;
         if fused {
