@@ -231,8 +231,8 @@ fn nll(labelled: &[Labelled], temperature: f64) -> f64 {
 
 /// Every metric at one temperature, the ECE over `ece_bins` equal-width bins.
 pub fn metrics(labelled: &[Labelled], temperature: f64, ece_bins: usize) -> Metrics {
-    let mut bins = vec![(0usize, 0f64, 0f64); ece_bins];
-    let mut correct = 0usize;
+    let mut bins: Vec<(usize, f64, f64)> = vec![Default::default(); ece_bins];
+    let mut correct: usize = Default::default();
     for item in labelled {
         let probabilities = item.logits.probabilities(temperature);
         let winner = argmax(&probabilities);

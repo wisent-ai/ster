@@ -56,7 +56,7 @@ impl Usage {
     /// `input_tokens` is added as each row is read.
     pub fn for_passes(forward_passes: usize) -> Self {
         Self {
-            input_tokens: 0,
+            input_tokens: Default::default(),
             forward_passes,
             output_tokens: GENERATED_TOKENS,
         }
@@ -237,7 +237,7 @@ pub fn argmax(probabilities: &[f64]) -> usize {
     probabilities
         .iter()
         .enumerate()
-        .fold(0, |best, (index, &value)| {
+        .fold(Default::default(), |best: usize, (index, &value)| {
             if value > probabilities[best] {
                 index
             } else {
