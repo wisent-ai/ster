@@ -59,7 +59,7 @@ impl Rejections {
     /// Count `rejection` and give what the report lists for its row.
     pub fn record(&mut self, rejection: &Rejection) -> Refused {
         let error = rejection.refusal();
-        *self.counts.entry(rejection.cause.id).or_insert(0) += 1;
+        *self.counts.entry(rejection.cause.id).or_default() += 1;
         let refused = Refused {
             reason: error.to_string(),
             cause: declared(&error).map_or(Value::Null, super::Declared::summary),

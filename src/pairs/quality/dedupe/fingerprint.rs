@@ -55,7 +55,7 @@ pub fn simhash64(fields: &[&str], options: DedupeOptions) -> u64 {
             continue;
         }
         for (feature, count) in extract_features(field, options) {
-            *features.entry(feature).or_insert(0.0) += count;
+            *features.entry(feature).or_default() += count;
         }
     }
 
@@ -152,12 +152,12 @@ fn word_features(text: &str, word_ngram: usize) -> BTreeMap<String, f64> {
     let mut counts: BTreeMap<String, f64> = BTreeMap::new();
     if word_ngram == 1 {
         for token in tokens {
-            *counts.entry(token.to_string()).or_insert(0.0) += 1.0;
+            *counts.entry(token.to_string()).or_default() += 1.0;
         }
         return counts;
     }
     for window in tokens.windows(word_ngram) {
-        *counts.entry(window.join(" ")).or_insert(0.0) += 1.0;
+        *counts.entry(window.join(" ")).or_default() += 1.0;
     }
     counts
 }
@@ -166,7 +166,7 @@ fn char_features(text: &str, char_ngram: usize) -> BTreeMap<String, f64> {
     let mut counts: BTreeMap<String, f64> = BTreeMap::new();
     if char_ngram == 1 {
         for c in text.chars().filter(|c| *c != ' ') {
-            *counts.entry(c.to_string()).or_insert(0.0) += 1.0;
+            *counts.entry(c.to_string()).or_default() += 1.0;
         }
         return counts;
     }
@@ -179,8 +179,7 @@ fn char_features(text: &str, char_ngram: usize) -> BTreeMap<String, f64> {
         .collect();
     for window in marked.windows(char_ngram) {
         *counts
-            .entry(window.iter().collect::<String>())
-            .or_insert(0.0) += 1.0;
+            .entry(window.iter().collect::<String>()).or_default() += 1.0;
     }
     counts
 }

@@ -148,7 +148,7 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
                 skipped += 1;
                 continue;
             };
-            *label_counts.entry(label.clone()).or_insert(0) += 1;
+            *label_counts.entry(label.clone()).or_default() += 1;
             examples.push(example(options, &names, text, label));
         }
         offset += page_rows.len();
