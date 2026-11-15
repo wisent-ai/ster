@@ -42,22 +42,20 @@ impl Attention {
             Some(slopes) if self.alibi_root => {
                 let keys = attention.dim(candle_core::D::Minus1)?;
                 let first_key = (index_pos + sequence) as f64 - keys as f64;
-                let queries = (Tensor::arange(0u32, sequence as u32, attention.device())?
+                let queries = (Tensor::arange(Default::default(), sequence as u32, attention.device())?
                     .to_dtype(DType::F32)?
                     + index_pos as f64)?
-                    .reshape((1, 1, sequence, 1))?;
-                let key_positions = (Tensor::arange(0u32, keys as u32, attention.device())?
+                    .unsqueeze(candle_core::D::Minus1)?;
+                let key_positions = (Tensor::arange(Default::default(), keys as u32, attention.device())?
                     .to_dtype(DType::F32)?
-                    + first_key)?
-                    .reshape((1, 1, 1, keys))?;
+                    + first_key)?;
                 let distance = queries.broadcast_sub(&key_positions)?.relu()?.sqrt()?;
                 attention.broadcast_sub(&slopes.broadcast_mul(&distance)?)?
             }
             Some(slopes) => {
                 let keys = attention.dim(candle_core::D::Minus1)?;
-                let positions = Tensor::arange(0u32, keys as u32, attention.device())?
-                    .to_dtype(DType::F32)?
-                    .reshape((1, 1, 1, keys))?;
+                let positions = Tensor::arange(Default::default(), keys as u32, attention.device())?
+                    .to_dtype(DType::F32)?;
                 attention.broadcast_add(&slopes.broadcast_mul(&positions)?)?
             }
             None => attention,
@@ -108,7 +106,7 @@ impl Attention {
             Some(sinks) => {
                 let (batch, heads, queries, keys) = attention.dims4()?;
                 let column = sinks.broadcast_as((batch, heads, queries, 1))?;
-                (Tensor::cat(&[&attention, &column], 3)?, Some(keys))
+                (Tensor::cat(&[&attention, &column], candle_core::D::Minus1)?, Some(keys))
             }
             None => (attention, None),
         };
@@ -117,7 +115,7 @@ impl Attention {
             Pass::Differentiable => candle_nn::ops::softmax(&attention, candle_core::D::Minus1)?,
         };
         let attention = match keys {
-            Some(keys) => attention.narrow(3, 0, keys)?,
+            Some(keys) => attention.narrow(candle_core::D::Minus1, Default::default(), keys)?,
             None => attention,
         };
         attention
@@ -128,22 +126,22 @@ impl Attention {
 
 /// The exponent range of ALiBi's geometric slopes: for `n` heads (a power of
 /// two) the slopes are `2^(-span/n)` raised to `1..=n` (Press et al., 2022,
-/// and Transformers' `build_alibi_tensor`).
+/// and Transformers' `build_alibi_tensor`): https://arxiv.org/abs/2108.12409
 pub(crate) const ALIBI_SPAN: f64 = 8.0;
 
 /// ALiBi's slope for each of `heads` heads. A head count that is not a power
 /// of two takes the slopes of the nearest power below, then every other slope
 /// of twice that many, as BLOOM does.
 pub(super) fn alibi_slopes(heads: usize) -> Vec<f32> {
-    let closest = 1usize << heads.ilog2();
+    let closest = 1usize << heads.ilog2(); /* https://arxiv.org/abs/2108.12409 */
     let base = (-ALIBI_SPAN / closest as f64).exp2();
-    let mut slopes: Vec<f32> = (1..=closest)
+    let mut slopes: Vec<f32> = (1..=closest) /* https://arxiv.org/abs/2108.12409 */
         .map(|power| base.powi(power as i32) as f32)
         .collect();
     if closest != heads {
-        let extra = (-ALIBI_SPAN / (2 * closest) as f64).exp2();
+        let extra = (-ALIBI_SPAN / (2 * closest) as f64).exp2(); /* https://arxiv.org/abs/2108.12409 */
         let remaining = closest.min(heads - closest);
-        slopes.extend((0..remaining).map(|index| extra.powi((2 * index + 1) as i32) as f32));
+        slopes.extend((0..remaining).map(|index| extra.powi((2 * index + 1) as i32) as f32)); /* https://arxiv.org/abs/2108.12409 */
     }
     slopes
 }
@@ -209,12 +207,12 @@ pub(in crate::model) fn padded_causal_mask(
             let offset = plane + query * sequence;
             let visible = (query + 1).min(length);
             for slot in values[offset + visible..offset + sequence].iter_mut() {
-                *slot = 1;
+                *slot = u8::from(true);
             }
             if query < length {
                 for key in 0..visible {
                     if super::super::cache::hidden_key(query, key, window, chunk_lookback) {
-                        values[offset + key] = 1;
+                        values[offset + key] = u8::from(true);
                     }
                 }
             }
