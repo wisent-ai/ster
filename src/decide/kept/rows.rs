@@ -92,7 +92,7 @@ pub(super) fn question_logits(
     let (rows, labels) = render_rows(runtime, request, options.permutations)?;
     // `render_rows` checked the request: at least one question, each shown
     // in at least one order, so there is a first row.
-    let first: &[u32] = &rows[0].ids;
+    let first: &[u32] = &rows.first().expect("render_rows refuses a request that renders no row").ids;
     let shared = shared_prefix(first, &rows);
     let suffixes: Vec<&[u32]> = rows.iter().map(|row| &row.ids[shared..]).collect();
     let mut usage = Usage::for_passes(usize::from(shared > 0) + rows.len());

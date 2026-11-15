@@ -104,10 +104,10 @@ pub(in crate::runtime::load::family) fn configure(
                 );
             }
             // The release's keys first, Transformers' after; one when unstated.
-            let read = |keys: [&str; 2]| -> anyhow::Result<f64> {
-                match number(raw, keys[0], path)? {
+            let read = |[release_key, transformers_key]: [&str; 2]| -> anyhow::Result<f64> {
+                match number(raw, release_key, path)? {
                     Some(stated) => Ok(stated),
-                    None => number_or(raw, keys[1], 1.0, path),
+                    None => number_or(raw, transformers_key, 1.0, path),
                 }
             };
             let pair = |alpha: [&str; 2], beta: [&str; 2]| -> anyhow::Result<(f64, f64)> {
