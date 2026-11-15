@@ -61,7 +61,7 @@ pub fn check_holdout(holdout: f64) -> Result<()> {
 /// under any question. Both sides are non-empty when the set has two or more
 /// examples; a fraction that would empty one side is clamped to one example.
 pub fn split(set: &ExampleSet, holdout: f64, seed: u64) -> (ExampleSet, ExampleSet) {
-    let mut order: Vec<usize> = (0..set.examples.len()).collect();
+    let mut order: Vec<usize> = set.examples.iter().enumerate().map(|(index, _)| index).collect();
     order.shuffle(&mut StdRng::seed_from_u64(seed));
     let total = order.len();
     let held = ((total as f64 * holdout).round() as usize)
