@@ -85,7 +85,8 @@ pub fn benchmark(
     let mut input_tokens = 0usize;
     let mut timed = 0f64;
     for (index, example) in set.examples.iter().enumerate() {
-        workflow::progress(format!("benchmarking example {} of {count}", index + 1));
+        let number = index + 1;
+        workflow::progress(format!("benchmarking example {number} of {count}"));
         let request = labelled_request(&example.request, &example.answers);
         let clock = Instant::now();
         let (logits, usage) = question_logits(runtime, &request, options.read)?;

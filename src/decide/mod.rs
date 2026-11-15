@@ -139,7 +139,8 @@ pub fn calibrate(
     let mut labelled = Vec::new();
     let mut shuffled = Vec::new();
     for (index, example) in examples.examples.iter().enumerate() {
-        workflow::progress(format!("reading example {} of {count}", index + 1));
+        let number = index + 1;
+        workflow::progress(format!("reading example {number} of {count}"));
         labelled.extend(labelled_logits(
             runtime,
             example,

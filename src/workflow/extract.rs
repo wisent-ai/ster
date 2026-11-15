@@ -22,9 +22,9 @@ pub fn extract(
 ) -> Result<()> {
     let mut records = Vec::with_capacity(prompts.prompts.len());
     for (index, prompt) in prompts.prompts.iter().enumerate() {
+        let number = index + 1;
         progress(format!(
-            "extracting prompt {}/{}",
-            index + 1,
+            "extracting prompt {number}/{}",
             prompts.prompts.len()
         ));
         let activations = runtime.activations(prompt, layers)?;

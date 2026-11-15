@@ -113,15 +113,15 @@ pub(in crate::runtime::load::family) fn configure(
             for (slot, (kept, blended)) in save.iter().zip(blend).enumerate() {
                 if blended != 0 && (*kept == 0 || kept.trailing_zeros() > blended.trailing_zeros())
                 {
+                    let save_list = slot + 1;
+                    let blend_list = save.len() + save_list;
                     refused!(
                         Contradictory,
                         in raw,
-                        [format!("bskcn_{}", slot + 1), format!("bskcn_{}", slot + 3)],
-                        "{} blends a kept hidden state into layer {} through bskcn_{} before any layer of bskcn_{} keeps one",
+                        [format!("bskcn_{save_list}"), format!("bskcn_{blend_list}")],
+                        "{} blends a kept hidden state into layer {} through bskcn_{blend_list} before any layer of bskcn_{save_list} keeps one",
                         path.display(),
-                        blended.trailing_zeros(),
-                        slot + 3,
-                        slot + 1
+                        blended.trailing_zeros()
                     );
                 }
             }

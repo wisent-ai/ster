@@ -49,7 +49,8 @@ pub(super) fn capture_pairs(
         })
         .collect();
     for (index, pair) in pairs.pairs.iter().enumerate() {
-        progress(format!("reading pair {}/{}", index + 1, pairs.pairs.len()));
+        let number = index + 1;
+        progress(format!("reading pair {number}/{}", pairs.pairs.len()));
         let positive = runtime.activations(&pair.positive, layers)?;
         let negative = runtime.activations(&pair.negative, layers)?;
         for (layer, values) in positive {

@@ -233,7 +233,10 @@ fn plamo(path: &Path, settings: &Value) -> Result<Tokenizer> {
     }
     let rows = vocabulary.len();
     let model = Unigram::from(vocabulary, unknown, true).map_err(|error| {
-        let unknown = unknown.map_or("none".to_owned(), |id| format!("row {}", id + 1));
+        let unknown = unknown.map_or("none".to_owned(), |id| {
+            let row = id + 1;
+            format!("row {row}")
+        });
         refuse(
             &MODEL_UNBUILT,
             &[

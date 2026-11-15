@@ -129,9 +129,9 @@ pub fn synthesize(
             while kept < options.per_option && tried < budget {
                 tried += 1;
                 attempts += 1;
+                let number = kept + 1;
                 workflow::progress(format!(
-                    "writing state {} of {} for question '{id}' option {name} (attempt {tried})",
-                    kept + 1,
+                    "writing state {number} of {} for question '{id}' option {name} (attempt {tried})",
                     options.per_option
                 ));
                 let prompt = writer_prompt(&schema.domain, question, &text);

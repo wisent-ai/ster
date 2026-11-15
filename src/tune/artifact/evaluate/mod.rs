@@ -227,9 +227,9 @@ pub fn evaluate(
                     .map_err(|error| score_failed(&format!("example {index}"), error))?;
                 let tokens = ids.len() - boundary;
                 let loss = -log_likelihood / tokens as f64;
+                let number = index + 1;
                 workflow::progress(format!(
-                    "example {}/{} loss {loss:.4} perplexity {:.3}",
-                    index + 1,
+                    "example {number}/{} loss {loss:.4} perplexity {:.3}",
                     examples.examples.len(),
                     loss.exp()
                 ));
