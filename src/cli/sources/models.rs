@@ -40,7 +40,10 @@ fn cached_models(cache: &Path) -> Result<Vec<String>, String> {
             .map(|revisions| revisions.flatten().any(|revision| revision.path().join("config.json").is_file()))
             .unwrap_or(false);
         if complete {
-            models.push(repo.replacen("--", "/", 1));
+            models.push(match repo.split_once("--") {
+                Some((owner, model)) => format!("{owner}/{model}"),
+                None => repo.to_string(),
+            });
         }
     }
     models.sort();
