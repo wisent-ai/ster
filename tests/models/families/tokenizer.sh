@@ -22,7 +22,7 @@ echo "binary: $BIN" >>"$REPORT"
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 generate() {
   expected=$1
@@ -33,7 +33,7 @@ generate() {
   status=$?
   set -e
   # grep exits 1 when every line was a wait line; any other failure stops the run.
-  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])
+  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/grep.html
   printf '$ ster generate --model %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$model" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "loading $model exited $status, expected $expected: $err"
 }
@@ -105,9 +105,9 @@ a_tokenizer_json_that_does_not_load_is_refused() {
 
 an_unreadable_tokenizer_config_is_refused() {
   plamo closed-config '{}'
-  chmod 000 "$COPY/tokenizer_config.json"
+  chmod 000 "$COPY/tokenizer_config.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   generate 1 "$COPY"
-  chmod 644 "$COPY/tokenizer_config.json"
+  chmod 644 "$COPY/tokenizer_config.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: reading tokenizer config $COPY/tokenizer_config.json: the file cannot be read: this account may not read it; observed: path: $COPY/tokenizer_config.json (a file, 2 bytes, mode 000, owner uid "
   said "the system answered: Permission denied"
   passed an_unreadable_tokenizer_config_is_refused
@@ -123,9 +123,9 @@ a_tokenizer_config_that_is_not_json_is_refused() {
 
 an_unreadable_vocabulary_is_refused() {
   plamo closed-vocabulary
-  chmod 000 "$VOCABULARY"
+  chmod 000 "$VOCABULARY"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   generate 1 "$COPY"
-  chmod 644 "$VOCABULARY"
+  chmod 644 "$VOCABULARY"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: reading vocabulary $VOCABULARY: the file cannot be read: this account may not read it; observed: path: $VOCABULARY (a file, "
   passed an_unreadable_vocabulary_is_refused
 }

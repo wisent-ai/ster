@@ -21,7 +21,7 @@ echo "binary: $BIN" >>"$REPORT"
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 # create EXPECTED DECLARATION OUTPUT: run the command; $err is its stderr.
 create() {
@@ -67,9 +67,9 @@ an_input_that_does_not_exist_is_refused() {
 
 an_unreadable_input_is_refused() {
   inputs closed
-  chmod 000 "$DIR/config.json"
+  chmod 000 "$DIR/config.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   create 1 "$FROM" "$DIR/out"
-  chmod 644 "$DIR/config.json"
+  chmod 644 "$DIR/config.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "reading fixture config $DIR/config.json: the file cannot be read: this account may not read it, or it is no regular file; observed: path: $DIR/config.json (a file, "
   said "mode 000"
   passed an_unreadable_input_is_refused
@@ -207,18 +207,18 @@ an_output_that_exists_is_refused() {
 
 an_output_in_a_closed_directory_is_refused() {
   mkdir -p "$ROOT/closed"
-  chmod 000 "$ROOT/closed"
+  chmod 000 "$ROOT/closed"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   create 1 "$ROOT/base/fixture.json" "$ROOT/closed/out"
-  chmod 755 "$ROOT/closed"
+  chmod 755 "$ROOT/closed"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Ster cannot tell whether $ROOT/closed/out exists: this account may not look inside $ROOT/closed"
   passed an_output_in_a_closed_directory_is_refused
 }
 
 an_output_in_a_read_only_directory_is_refused() {
   mkdir -p "$ROOT/read-only"
-  chmod 555 "$ROOT/read-only"
+  chmod 555 "$ROOT/read-only"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   create 1 "$ROOT/base/fixture.json" "$ROOT/read-only/out"
-  chmod 755 "$ROOT/read-only"
+  chmod 755 "$ROOT/read-only"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "creating fixture output directory $ROOT/read-only/out: this account may not create $ROOT/read-only/out"
   passed an_output_in_a_read_only_directory_is_refused
 }

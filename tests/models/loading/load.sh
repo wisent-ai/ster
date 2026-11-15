@@ -27,7 +27,7 @@ echo "binary: $BIN" >>"$REPORT"
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 generate() {
   expected=$1
@@ -38,7 +38,7 @@ generate() {
   status=$?
   set -e
   # grep exits 1 when every line was a wait line; any other failure stops the run.
-  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])
+  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/grep.html
   printf '$ ster generate --model %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$model" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "loading $model exited $status, expected $expected: $err"
 }
@@ -77,9 +77,9 @@ a_local_path_that_is_no_directory_is_refused() {
 
 an_unreadable_directory_is_refused() {
   copy closed
-  chmod 000 "$COPY"
+  chmod 000 "$COPY"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   generate 1 "$COPY"
-  chmod 755 "$COPY"
+  chmod 755 "$COPY"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: reading the checkpoint directory $COPY: this account may not read it: the file's permission bits or owner keep this account out; observed: path: $COPY (a directory, "
   said ", mode 000, owner uid $(id -u)); the system answered: "
   passed an_unreadable_directory_is_refused
@@ -111,9 +111,9 @@ a_directory_without_weights_is_refused() {
 
 an_unreadable_config_is_refused() {
   copy closed-config
-  chmod 000 "$COPY/config.json"
+  chmod 000 "$COPY/config.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   generate 1 "$COPY"
-  chmod 644 "$COPY/config.json"
+  chmod 644 "$COPY/config.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: reading the model config $COPY/config.json: this account may not read it: the file's permission bits or owner keep this account out; observed: path: $COPY/config.json (a file, "
   passed an_unreadable_config_is_refused
 }

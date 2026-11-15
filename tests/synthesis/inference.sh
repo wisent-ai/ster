@@ -36,7 +36,7 @@ echo "binary: $BIN" >>"$REPORT"
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1
@@ -46,7 +46,7 @@ run() {
   status=$?
   set -e
   # grep exits 1 when every line was a wait line; any other failure stops the run.
-  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])
+  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/grep.html
   printf '$ ster %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$*" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "ster $* exited $status, expected $expected: $err"
   [ ! -e "$OUT" ] || fail "a refused run wrote $OUT"
@@ -89,7 +89,7 @@ synthesize() {
 closed() {
   mkdir -p "$(dirname "$1")"
   : >"$1"
-  chmod 644 "$1"
+  chmod 644 "$1"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
 }
 
 a_missing_stado_is_refused() {
@@ -139,7 +139,7 @@ stado_is_looked_for_in_stados_order() {
 a_stado_whose_interpreter_is_missing_is_refused() {
   mkdir -p "$ROOT/script-path"
   printf '#!%s/no-such-interpreter\n' "$ROOT" >"$ROOT/script-path/stado"
-  chmod 755 "$ROOT/script-path/stado"
+  chmod 755 "$ROOT/script-path/stado"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   synthesize PATH="$ROOT/script-path"
   said "Error: starting \`$ROOT/script-path/stado capabilities call inference --consumer ster --json\`: the system answered that the \`stado\` Ster found through PATH does not exist when Ster started it"
   said "; observed: $ROOT/script-path/stado (a file, "

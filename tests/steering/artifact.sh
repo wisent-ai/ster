@@ -21,7 +21,7 @@ echo "binary: $BIN" >>"$REPORT"
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1
@@ -31,7 +31,7 @@ run() {
   status=$?
   set -e
   # grep exits 1 when every line was a wait line; any other failure stops the run.
-  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])
+  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/grep.html
   printf '$ ster %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$*" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "ster $* exited $status, expected $expected: $err"
 }
@@ -69,9 +69,9 @@ a_missing_artifact_is_refused() {
 
 an_unreadable_artifact_is_refused() {
   rewritten closed '.'
-  chmod 000 "$ARTIFACT"
+  chmod 000 "$ARTIFACT"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   inspect 1
-  chmod 644 "$ARTIFACT"
+  chmod 644 "$ARTIFACT"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: reading the steering artifact $ARTIFACT: this account may not read it: the file's permission bits or owner keep this account out; observed: path: $ARTIFACT (a file, "
   passed an_unreadable_artifact_is_refused
 }

@@ -31,7 +31,7 @@ BASELINES="--repository . --uncatalogued tests/errors/uncatalogued.json --untest
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1

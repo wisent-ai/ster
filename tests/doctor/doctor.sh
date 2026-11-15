@@ -31,7 +31,7 @@ unset DO_NOT_TRACK
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 # run EXPECTED NAME ARGS...: the command's stdout in $ROOT/NAME.out.
 run() {
@@ -72,9 +72,9 @@ run 0 ready doctor --json
 jq -e 'all(.[]; .state != "fails")' "$ROOT/ready.out" >/dev/null || fail "a set-up home still fails: $(cat "$ROOT/ready.out")"
 [ "$(state ready ster.workspace.active)" = works ] || fail "the imported set is not the active one"
 
-chmod 0500 "$ROOT/state"
+chmod 0500 "$ROOT/state"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
 run 1 unwritable doctor --json
-chmod 0700 "$ROOT/state"
+chmod 0700 "$ROOT/state"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
 [ "$(state unwritable ster.telemetry)" = fails ] || fail "an unwritable telemetry directory does not fail ster.telemetry"
 jq -e --arg dir "$ROOT/state" '.[] | select(.operation == "ster.telemetry") | (.detail | contains($dir)) and (.remedy | contains("writable"))' \
   "$ROOT/unwritable.out" >/dev/null || fail "the telemetry failure does not name the directory and its fix: $(cat "$ROOT/unwritable.out")"
@@ -85,7 +85,7 @@ echo '{}' | "$BIN" request doctor >"$ROOT/request.out" 2>"$ROOT/request.err"
 status=$?
 set -e
 echo "ster request doctor -> $status" >>"$REPORT"
-[ "$status" -eq 0 ] || fail "ster request doctor exited $status: $(cat "$ROOT/request.err")"
+[ "$status" -eq 0 ] || fail "ster request doctor exited $status: $(cat "$ROOT/request.err")"  # https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
 jq -s -e '[.[] | select(.type == "result")] | length == 1 and .[0].status == 0 and .[0].json.status == 0 and (.[0].json.findings | length) > 0' \
   "$ROOT/request.out" >/dev/null || fail "ster request doctor does not answer the findings: $(cat "$ROOT/request.out")"
 jq -s -r '.[] | select(.type == "result") | .json.findings | sort_by(.operation) | map(.operation + " " + .state) | .[]' "$ROOT/request.out" >"$ROOT/request.txt"

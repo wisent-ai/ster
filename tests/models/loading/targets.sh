@@ -28,7 +28,7 @@ TRAIN="--rank 2 --alpha 4 --epochs 1 --learning-rate 0.001 --accumulation 1 --wa
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 # sft EXPECTED MODEL TARGETS: train on MODEL with TARGETS, expecting EXPECTED.
 sft() {
@@ -39,7 +39,7 @@ sft() {
   status=$?
   set -e
   # grep exits 1 when every line was a wait line; any other failure stops the run.
-  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])
+  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/grep.html
   printf '$ ster tune sft --model %s --targets %s\nexit: %s\nstderr: %s\n\n' "$2" "$3" "$status" "$err" >>"$REPORT"
   [ "$status" -eq "$1" ] || fail "tune sft on $2 exited $status, expected $1: $err"
   [ ! -e "$OUT" ] || fail "a refused run wrote $OUT"

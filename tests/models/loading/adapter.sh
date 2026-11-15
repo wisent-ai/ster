@@ -28,7 +28,7 @@ TRAIN="--rank 2 --alpha 4 --epochs 1 --learning-rate 0.001 --accumulation 1 --wa
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 step() {
   "$BIN" "$@" >>"$REPORT" 2>&1 </dev/null || fail "ster $* did not complete"
@@ -42,7 +42,7 @@ generate() {
   status=$?
   set -e
   # grep exits 1 when every line was a wait line; any other failure stops the run.
-  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])
+  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/grep.html
   printf '$ ster generate %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$*" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "ster generate $* exited $status, expected $expected: $err"
 }

@@ -39,7 +39,7 @@ run() {
   printf '$ ster %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$*" "$status" "$out" "$err" >>"$REPORT"
   if [ "$status" -ne "$expected" ]; then
     echo "FAIL: $* exited $status, expected $expected: $err" | tee -a "$REPORT" >&2
-    exit 1
+    exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
   fi
 }
 request() {
@@ -48,19 +48,19 @@ request() {
   status=$?
   set -e
   printf '$ ster request vector/score <<< %s\nexit: %s\nstdout: %s\n\n' "$1" "$status" "$out" >>"$REPORT"
-  out=$(printf '%s\n' "$out" | tail -n 1)
+  out=$(printf '%s\n' "$out" | tail -n 1)  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/tail.html
 }
 check() {
   if [ "$2" != "$3" ]; then
     echo "FAIL: $1: got '$2', expected '$3'" | tee -a "$REPORT" >&2
-    exit 1
+    exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
   fi
   echo "ok: $1 = $2" >>"$REPORT"
 }
 refused() {
   case "$err" in
     *"$1"*) echo "ok: refused with: $1" >>"$REPORT" ;;
-    *) echo "FAIL: expected a refusal containing '$1', got: $err" | tee -a "$REPORT" >&2; exit 1 ;;
+    *) echo "FAIL: expected a refusal containing '$1', got: $err" | tee -a "$REPORT" >&2; exit 1 ;;  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
   esac
 }
 

@@ -96,9 +96,9 @@ a_missing_adapter_is_refused() {
 
 an_unreadable_sidecar_is_refused() {
   copied closed
-  chmod 000 "$SIDECAR"
+  chmod 000 "$SIDECAR"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   inspect 1
-  chmod 644 "$SIDECAR"
+  chmod 644 "$SIDECAR"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: reading the adapter's sidecar $SIDECAR: this account may not read it: the file's permission bits or owner keep this account out; observed: path: $SIDECAR (a file, "
   passed an_unreadable_sidecar_is_refused
 }

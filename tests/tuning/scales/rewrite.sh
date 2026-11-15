@@ -189,9 +189,9 @@ an_output_under_a_file_is_refused() {
 
 a_tokenizer_that_cannot_be_copied_is_refused() {
   copy closed-tokenizer
-  chmod 000 "$COPY/tokenizer.json"
+  chmod 000 "$COPY/tokenizer.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   merge 1 "$COPY" "$ADAPTER" "$ROOT/merged-closed"
-  chmod 644 "$COPY/tokenizer.json"
+  chmod 644 "$COPY/tokenizer.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: reading the source checkpoint's file $COPY/tokenizer.json: this account may not read it: the file's permission bits or owner keep this account out; observed: path: $COPY/tokenizer.json (a file, "
   passed a_tokenizer_that_cannot_be_copied_is_refused
 }

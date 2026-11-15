@@ -24,8 +24,8 @@ echo "binary: $BIN" >>"$REPORT"
 MISSING="wisent-ai/ster-no-such-model-$RUN"
 
 fail() {
-  echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  echo "FAIL: $*" | tee -a "$REPORT" >&2  # https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/unistd.h.html
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 
 an_unknown_repository_is_refused() {
@@ -35,7 +35,7 @@ an_unknown_repository_is_refused() {
   status=$?
   set -e
   # grep exits 1 when every line was a wait line; any other failure stops the run.
-  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])
+  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/grep.html
   printf '$ ster generate --model %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$MISSING" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq 1 ] || fail "an unknown repository exited $status, expected 1: $err"
   case "$err" in

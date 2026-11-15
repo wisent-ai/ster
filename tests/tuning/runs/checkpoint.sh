@@ -51,10 +51,10 @@ a_checkpoint_directory_under_a_file_is_refused() {
 
 a_read_only_checkpoint_directory_is_refused() {
   mkdir -p "$ROOT/closed"
-  chmod 555 "$ROOT/closed"
+  chmod 555 "$ROOT/closed"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   # shellcheck disable=SC2086
   tune 1 sft "$SFT" --checkpoint "$ROOT/closed" $DURABLE
-  chmod 755 "$ROOT/closed"
+  chmod 755 "$ROOT/closed"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: creating the checkpoint attempt $ROOT/closed/.step-3-"
   said ".partial: this account may not change $ROOT/closed or $ROOT/closed/.step-3-"
   said "observed: path: $ROOT/closed/.step-3-"
@@ -66,11 +66,11 @@ a_read_only_checkpoint_directory_is_refused() {
 a_predecessor_that_cannot_be_removed_is_refused() {
   mkdir -p "$ROOT/kept/step-0-old/locked"
   : >"$ROOT/kept/step-0-old/locked/file"
-  chmod 555 "$ROOT/kept/step-0-old/locked"
+  chmod 555 "$ROOT/kept/step-0-old/locked"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   printf 'step-0-old' >"$ROOT/kept/latest"
   # shellcheck disable=SC2086
   tune 1 sft "$SFT" --checkpoint "$ROOT/kept" $DURABLE
-  chmod 755 "$ROOT/kept/step-0-old/locked"
+  chmod 755 "$ROOT/kept/step-0-old/locked"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: removing the checkpoint latest named before $ROOT/kept/step-0-old: this account may not change $ROOT/kept or $ROOT/kept/step-0-old: their permission bits or owner keep this account out"
   said "; checkpoint $ROOT/kept/step-3-"
   said " is written and named in latest, so --resume continues from it; the one it replaced is still there; the system answered: "

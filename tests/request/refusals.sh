@@ -22,17 +22,17 @@ echo "revision: $(git --no-optional-locks rev-parse HEAD)$(git --no-optional-loc
 echo "binary: $BIN" >>"$REPORT"
 
 fail() {
-  echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  echo "FAIL: $*" | tee -a "$REPORT" >&2  # https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/unistd.h.html
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 # request OPERATION BODY: the body on stdin; $result is the last event.
 request() {
   set +e
-  out=$(printf '%s' "$2" | "$BIN" request "$1" 2>"$ROOT/stderr")
+  out=$(printf '%s' "$2" | "$BIN" request "$1" 2>"$ROOT/stderr")  # https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/unistd.h.html
   status=$?
   set -e
   printf '$ ster request %s <<< %s\nexit: %s\nstdout: %s\n\n' "$1" "$2" "$status" "$out" >>"$REPORT"
-  result=$(printf '%s\n' "$out" | tail -n 1)
+  result=$(printf '%s\n' "$out" | tail -n 1)  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/tail.html
 }
 # refused ID PHRASE: the request ended in status 2 with cause ID and PHRASE
 # in its sentence.
@@ -85,11 +85,11 @@ a_field_without_its_partner_is_refused() {
 # and the request is refused (status 2) with the directory's state.
 a_body_from_a_directory_is_refused() {
   set +e
-  out=$("$BIN" request errors/list <"$ROOT" 2>"$ROOT/stderr")
+  out=$("$BIN" request errors/list <"$ROOT" 2>"$ROOT/stderr")  # https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/unistd.h.html
   status=$?
   set -e
   printf '$ ster request errors/list < %s\nexit: %s\nstdout: %s\n\n' "$ROOT" "$status" "$out" >>"$REPORT"
-  result=$(printf '%s\n' "$out" | tail -n 1)
+  result=$(printf '%s\n' "$out" | tail -n 1)  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/tail.html
   refused body-directory "reading the body of request errors/list from standard input: standard input is a directory, not a stream of the body"
   case "$(echo "$result" | jq -r .json.error)" in
     *"observed: standard input: a directory, "*"error kind IsADirectory"*) ;;
@@ -104,8 +104,8 @@ a_standard_output_nobody_reads_is_refused() {
   for redirect in closed null; do
     set +e
     case $redirect in
-      closed) printf '{}' | "$BIN" request errors/list >&- 2>"$ROOT/stderr" ;;
-      null) printf '{}' | "$BIN" request errors/list >/dev/null 2>"$ROOT/stderr" ;;
+      closed) printf '{}' | "$BIN" request errors/list >&- 2>"$ROOT/stderr" ;;  # https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/unistd.h.html
+      null) printf '{}' | "$BIN" request errors/list >/dev/null 2>"$ROOT/stderr" ;;  # https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/unistd.h.html
     esac
     status=$?
     set -e

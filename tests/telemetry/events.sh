@@ -15,7 +15,7 @@ BIN=${STER:-.build/kompilator/debug/ster}
 case "$BIN" in /*) ;; *) BIN="$PWD/$BIN" ;; esac
 LANDING=${STER_TEST_LANDING:-$PWD/../ster-landing}
 [ -f "$LANDING/src/cli/check-telemetry-events.mjs" ] ||
-  { echo "FAIL: $LANDING holds no src/cli/check-telemetry-events.mjs: set STER_TEST_LANDING to the ster-landing checkout" >&2; exit 1; }
+  { echo "FAIL: $LANDING holds no src/cli/check-telemetry-events.mjs: set STER_TEST_LANDING to the ster-landing checkout" >&2; exit 1; }  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 RUN="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ROOT="$PWD/target/real-tests/events/$RUN"
 REPORT="$ROOT/report.txt"
@@ -25,11 +25,11 @@ echo "binary: $BIN" >>"$REPORT"
 echo "landing: $LANDING at $(git -C "$LANDING" rev-parse HEAD)" >>"$REPORT"
 "$BIN" telemetry events >"$ROOT/events.json"
 jq -e 'length > 0 and all(.[]; (.name | length > 0) and (.consent == "errors" or .consent == "usage") and (.properties | length > 0))' \
-  "$ROOT/events.json" >/dev/null || { echo "FAIL: ster telemetry events is not a list of named events with a consent and properties" | tee -a "$REPORT" >&2; exit 1; }
+  "$ROOT/events.json" >/dev/null || { echo "FAIL: ster telemetry events is not a list of named events with a consent and properties" | tee -a "$REPORT" >&2; exit 1; }  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 if node "$LANDING/src/cli/check-telemetry-events.mjs" --ster "$BIN" >>"$REPORT" 2>&1; then
   echo "PASS" >>"$REPORT"
   echo "PASS: $REPORT"
 else
   echo "FAIL: the privacy page and ster telemetry events disagree: $(tail -n 8 "$REPORT")" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 fi

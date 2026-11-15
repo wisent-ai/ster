@@ -35,7 +35,7 @@ unset STADO_INFERENCE_ORDER STADO_ATTESTATIONS STADO_CAPABILITIES_RECORD STADO_C
 
 fail() {
   echo "FAIL: $1" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1
@@ -45,7 +45,7 @@ run() {
   status=$?
   set -e
   # grep exits 1 when every line was a wait line; any other failure stops the run.
-  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])
+  err=$(grep -v '^czekam\|^koniec czekania' "$ROOT/stderr" || [ $? -eq 1 ])  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/grep.html
   printf '$ ster %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$*" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "ster $* exited $status, expected $expected: $err"
 }
@@ -97,7 +97,7 @@ every_kept_request_answered_writes_the_set() {
     out=$("$BIN" $SYNTH --output "$ROOT/served.json" 2>"$ROOT/stderr" </dev/null)
     status=$?
     set -e
-    [ "$status" -eq 0 ] && break
+    [ "$status" -eq 0 ] && break  # https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
   done
   printf '$ ster %s (round %s, %s statements)\nexit: %s\nstdout: %s\n\n' "$SYNTH" "$round" "$answered" "$status" "$out" >>"$REPORT"
   contains "the report names attestation as the generator" "$out" "attestation:wisent-backend/chat/primary"

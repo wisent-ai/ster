@@ -27,7 +27,7 @@ trap 'chmod -R u+w "$ROOT" 2>/dev/null || true' EXIT
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1
@@ -91,12 +91,12 @@ a_state_that_is_not_json_is_refused() {
 
 a_state_directory_this_account_may_not_write_is_refused() {
   mkdir -p "$ROOT/closed-state"
-  chmod 555 "$ROOT/closed-state"
+  chmod 555 "$ROOT/closed-state"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   set +e
   XDG_STATE_HOME="$ROOT/closed-state" "$BIN" onboarding >"$ROOT/stdout" 2>"$ROOT/stderr" </dev/null
   status=$?
   set -e
-  chmod 755 "$ROOT/closed-state"
+  chmod 755 "$ROOT/closed-state"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   err=$(cat "$ROOT/stderr")
   printf '$ XDG_STATE_HOME=%s ster onboarding\nexit: %s\nstderr: %s\n\n' "$ROOT/closed-state" "$status" "$err" >>"$REPORT"
   [ "$status" -eq 1 ] || fail "a read-only state directory exited $status, expected 1: $err"

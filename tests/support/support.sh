@@ -44,7 +44,7 @@ ORIGIN=${STER_TEST_SUPPORT_AGENT:-${STER_TEST_SUPPORT%%/v1/*}}
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1
@@ -105,7 +105,8 @@ request=$(printf '{}' | "$BIN" request support/status 2>"$ROOT/stderr")
 request_status=$?
 set -e
 printf '$ ster request support/status\nexit: %s\nstdout: %s\n\n' "$request_status" "$request" >>"$REPORT"
-[ "$request_status" -eq 0 ] || fail "ster request support/status exited $request_status: $(cat "$ROOT/stderr")"
+[ "$request_status" -eq 0 ] || fail "ster request support/status exited $request_status: $(cat "$ROOT/stderr")"  # https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
+# https://pubs.opengroup.org/onlinepubs/9799919799/utilities/tail.html
 printf '%s' "$request" | tail -n 1 | jq -e --arg id "$ID" '.status == 0 and any(.json.reports[]; .id == $id)' >/dev/null \
   || fail "ster request support/status does not answer the report: $request"
 passed "the agent's reply is what support status and request support/status show"

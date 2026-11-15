@@ -21,7 +21,7 @@ echo "binary: $BIN" >>"$REPORT"
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1
@@ -31,7 +31,7 @@ run() {
   status=$?
   set -e
   # grep exits 1 when every line was a wait line; any other failure stops the run.
-  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])
+  err=$(grep -v '^czekam\|^koniec czekania\|^blad czekania' "$ROOT/stderr" || [ $? -eq 1 ])  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/grep.html
   printf '$ ster %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' "$*" "$status" "$out" "$err" >>"$REPORT"
   [ "$status" -eq "$expected" ] || fail "ster $* exited $status, expected $expected: $err"
 }
@@ -72,12 +72,12 @@ an_unknown_mode_is_refused() {
 an_unreadable_template_is_refused() {
   templated closed '.'
   printf '{{ messages[0].content }}' >"$COPY/chat_template.jinja"
-  chmod 000 "$COPY/chat_template.jinja"
+  chmod 000 "$COPY/chat_template.jinja"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   generate 1 "$COPY"
   said "Error: reading chat template $COPY/chat_template.jinja: the file cannot be read: this account may not read it; observed: path: $COPY/chat_template.jinja (a file, "
   said "mode 000"
   generate 0 "$COPY" --chat-template off
-  chmod 644 "$COPY/chat_template.jinja"
+  chmod 644 "$COPY/chat_template.jinja"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   passed an_unreadable_template_is_refused
 }
 

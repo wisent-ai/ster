@@ -34,7 +34,7 @@ trap 'chmod -R u+w "$ROOT" 2>/dev/null || true' EXIT
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 # run STATUS ARGS...: run ster with ARGS (after $PREFIX, and reading $STDIN,
 # when set), record it, and require exit STATUS.
@@ -124,9 +124,9 @@ a_read_only_workspace_is_refused_and_the_import_undone() {
   fresh
   run 0 workspace import "$SRC/calm.json"
   before=$(cat "$WS/workspace.json")
-  chmod 555 "$WS"
+  chmod 555 "$WS"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   run 1 workspace import "$SRC/other.json" --name second
-  chmod 755 "$WS"
+  chmod 755 "$WS"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "importing $SRC/other.json as second was undone: $WS/pairs/second.json was removed"
   said "creating the draft of the Ster workspace $WS/workspace.json."
   said ".tmp: this account may not change $WS or $WS/workspace.json."
@@ -228,9 +228,9 @@ selecting_the_active_set_is_refused() {
 a_copy_that_cannot_be_deleted_keeps_the_set() {
   fresh
   run 0 workspace import "$SRC/calm.json"
-  chmod 555 "$WS/pairs"
+  chmod 555 "$WS/pairs"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   run 1 workspace remove calm
-  chmod 755 "$WS/pairs"
+  chmod 755 "$WS/pairs"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "removing the copy of pair set calm $WS/pairs/calm.json: this account may not change $WS/pairs or $WS/pairs/calm.json: their permission bits or owner keep this account out; observed: path: $WS/pairs/calm.json (a file, "
   said "; the workspace still holds calm; nothing was changed; the system answered: "
   said "; fix: give this account write access to $WS/pairs (\`chmod u+w $WS/pairs\` as its owner), or name a path in a directory it may write"

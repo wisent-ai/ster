@@ -45,7 +45,7 @@ printf 'question,good,bad\n\377\376 caf\351,yes,no\n' >"$ROOT/latin.csv"
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1

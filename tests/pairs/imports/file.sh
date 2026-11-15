@@ -28,7 +28,7 @@ trap 'chmod -R u+w "$ROOT" 2>/dev/null || true' EXIT
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1
@@ -68,9 +68,9 @@ a_missing_pair_set_is_refused() {
 
 a_pair_set_this_account_may_not_read_is_refused() {
   printf '{"trait_name": "calm", "pairs": [{"positive": "Still.", "negative": "Loud."}]}' >"$ROOT/closed.json"
-  chmod 000 "$ROOT/closed.json"
+  chmod 000 "$ROOT/closed.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   inspect 1 "$ROOT/closed.json"
-  chmod 644 "$ROOT/closed.json"
+  chmod 644 "$ROOT/closed.json"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "reading the pair set $ROOT/closed.json: this account may not read it: the file's permission bits or owner keep this account out; observed: path: $ROOT/closed.json (a file, "
   said ", mode 000, owner uid $(id -u)); the system answered: "
   said "; fix: give this account read access to $ROOT/closed.json (\`chmod u+r $ROOT/closed.json\` as its owner), or name a copy it may read"
@@ -148,9 +148,9 @@ a_set_under_a_file_is_refused() {
 
 a_set_in_a_read_only_directory_is_refused() {
   mkdir -p "$ROOT/read-only"
-  chmod 555 "$ROOT/read-only"
+  chmod 555 "$ROOT/read-only"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   run 1 pairs add --pairs "$ROOT/read-only/set.json" --positive "Still." --negative "Loud."
-  chmod 755 "$ROOT/read-only"
+  chmod 755 "$ROOT/read-only"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "opening for writing the pair set $ROOT/read-only/set.json: this account may not change $ROOT/read-only or $ROOT/read-only/set.json: their permission bits or owner keep this account out; observed: path: $ROOT/read-only/set.json (absent); directory $ROOT/read-only (a directory, "
   said ", mode 555, owner uid $(id -u)); nothing was written, and a set already there is unchanged; the system answered: "
   said "; fix: give this account write access to $ROOT/read-only (\`chmod u+w $ROOT/read-only\` as its owner), or name a path in a directory it may write"

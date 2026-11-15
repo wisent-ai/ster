@@ -43,7 +43,7 @@ unset WISENT_TELEMETRY_COLLECTOR_URL DO_NOT_TRACK
 
 fail() {
   echo "FAIL: $*" | tee -a "$REPORT" >&2
-  exit 1
+  exit 1  # https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
 }
 run() {
   expected=$1
@@ -98,7 +98,8 @@ request=$(printf '{}' | "$BIN" request telemetry/show 2>"$ROOT/stderr")
 request_status=$?
 set -e
 printf '$ ster request telemetry/show\nexit: %s\nstdout: %s\n\n' "$request_status" "$request" >>"$REPORT"
-[ "$request_status" -eq 0 ] || fail "ster request telemetry/show exited $request_status: $(cat "$ROOT/stderr")"
+[ "$request_status" -eq 0 ] || fail "ster request telemetry/show exited $request_status: $(cat "$ROOT/stderr")"  # https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
+# https://pubs.opengroup.org/onlinepubs/9799919799/utilities/tail.html
 printf '%s' "$request" | tail -n 1 | jq -e --arg event "$EVENT_ID" \
   '.status == 0 and (.json.events | length == 1) and .json.events[0].eventId == $event' >/dev/null \
   || fail "ster request telemetry/show does not answer the waiting event as {\"events\": [...]}: $request"
@@ -114,7 +115,7 @@ echo_status=$?
 set -e
 printf '$ echo-cli failures groups --app ster-cli --days 1 --installation %s\nexit: %s\nstdout: %s\nstderr: %s\n\n' \
   "$INSTALLATION" "$echo_status" "$groups" "$(cat "$ROOT/echo-stderr")" >>"$REPORT"
-[ "$echo_status" -eq 0 ] || fail "Echo's failure groups could not be read: $(cat "$ROOT/echo-stderr")"
+[ "$echo_status" -eq 0 ] || fail "Echo's failure groups could not be read: $(cat "$ROOT/echo-stderr")"  # https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
 printf '%s' "$groups" | jq -e --arg event "$EVENT_ID" --arg point "$POINT" '
   any(.groups[]; .failure_point == $point and .cause_id == "pair-set-missing" and .installations == 1
     and .example.event_id == $event)' >/dev/null \

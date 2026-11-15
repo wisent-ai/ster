@@ -79,9 +79,9 @@ a_calibration_under_a_file_is_refused() {
 
 a_calibration_in_a_read_only_directory_is_refused() {
   mkdir -p "$ROOT/closed"
-  chmod 555 "$ROOT/closed"
+  chmod 555 "$ROOT/closed"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   run 1 $CALIBRATE --output "$ROOT/closed/calibration.json"
-  chmod 755 "$ROOT/closed"
+  chmod 755 "$ROOT/closed"  # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/chmod.html
   said "Error: writing the calibration $ROOT/closed/calibration.json: this account may not change $ROOT/closed or $ROOT/closed/calibration.json: their permission bits or owner keep this account out; observed: path: $ROOT/closed/calibration.json (absent); directory $ROOT/closed (a directory, "
   [ ! -e "$ROOT/closed/calibration.json" ] || fail "a calibration was written into the read-only directory"
   passed a_calibration_in_a_read_only_directory_is_refused
