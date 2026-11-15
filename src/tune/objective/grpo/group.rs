@@ -109,7 +109,10 @@ pub(super) fn sample_group(
     let mean = rewards.iter().sum::<f64>() / count;
     let variance = rewards
         .iter()
-        .map(|value| (value - mean).powi(2))
+        .map(|value| {
+            let off = value - mean;
+            off * off
+        })
         .sum::<f64>()
         / count;
     if !mean.is_finite() || !variance.is_finite() {
