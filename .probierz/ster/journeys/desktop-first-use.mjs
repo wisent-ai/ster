@@ -18,6 +18,7 @@ function required(name) {
   const value = process.env[name]?.trim();
   if (!value) {
     process.stderr.write(`${name} is not set: run this journey through \`probierz run desktop:cua --app ster\`\n`);
+    // https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
     process.exit(2);
   }
   return value;
@@ -27,6 +28,7 @@ const { openApp, holds, freshOnboarding } = await import(pathToFileURL(join(requ
 const executable = required('CUA_APP_EXECUTABLE');
 const journey = JSON.parse(readFileSync(join(required('WISENT_WORKSPACE'), 'ster-desktop/Sources/SterDesktop/Resources/ster-desktop-first-use.json'), 'utf8'));
 const titles = journey.screens.map((screen) => screen.presentation.title);
+const [firstTitle, ...laterTitles] = titles;
 const own = join(required('PROBIERZ_ARTIFACTS'), 'ster-desktop');
 const env = { XDG_DATA_HOME: join(own, 'data'), XDG_STATE_HOME: join(own, 'state') };
 for (const directory of Object.values(env)) mkdirSync(directory, { recursive: true });
@@ -43,9 +45,9 @@ const broken = [];
 try {
   let app = await openApp({ executable, env });
   try {
-    await app.shows(titles[0], 60000);
+    await app.shows(firstTitle, 60000);
     app.screen('walkthrough');
-    for (const title of titles.slice(1)) {
+    for (const title of laterTitles) {
       await app.click('Continue', { exact: true });
       await app.shows(title, 15000);
     }
@@ -69,7 +71,7 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 5000));
     const reopened = app.snapshot();
     app.screen('reopened');
-    if (reopened.tree.includes(titles[0]) && reopened.tree.includes('Continue')) broken.push('the walkthrough opens again after the import');
+    if (reopened.tree.includes(firstTitle) && reopened.tree.includes('Continue')) broken.push('the walkthrough opens again after the import');
   } finally {
     app.close();
   }

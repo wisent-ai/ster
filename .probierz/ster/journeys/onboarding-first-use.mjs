@@ -18,6 +18,7 @@ function required(name) {
   const value = process.env[name]?.trim();
   if (!value) {
     process.stderr.write(`${name} is not set: run this journey through \`probierz run tui --app ster\`\n`);
+    // https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
     process.exit(2);
   }
   return value;
@@ -74,15 +75,15 @@ try {
   const imported = ster(['onboarding', '--import-pairs', set, '--name', 'probierz']);
   const report = answer(imported);
   if (imported.status !== 0 || report.status !== 'imported') broken.push(`importing the pair set answered ${report.status} (exit ${imported.status}): ${imported.stderr.trim()}`);
-  if (report.pair_count !== 2) broken.push(`the import counted ${report.pair_count} pairs, not 2`);
-  if (!report.path || !existsSync(report.path) || JSON.parse(readFileSync(report.path, 'utf8')).pairs?.length !== 2) broken.push('the workspace holds no copy of the imported set');
+  if (report.pair_count !== pairs.pairs.length) broken.push(`the import counted ${report.pair_count} pairs, not ${pairs.pairs.length}`);
+  if (!report.path || !existsSync(report.path) || JSON.parse(readFileSync(report.path, 'utf8')).pairs?.length !== pairs.pairs.length) broken.push('the workspace holds no copy of the imported set');
   if (!imported.stdout.includes('first-use journey complete')) broken.push('the import does not say first use is complete');
 
   const again = answer(ster(['onboarding', '--import-pairs', set, '--name', 'probierz']));
   if (again.status !== 'unchanged') broken.push(`the same set again answered ${again.status}`);
   const clash = ster(['onboarding', '--import-pairs', changed, '--name', 'probierz']);
   if (clash.status === 0 || answer(clash).status !== 'conflicting') broken.push(`a different set under the same name answered ${answer(clash).status}`);
-  if (report.path && JSON.parse(readFileSync(report.path, 'utf8')).pairs?.length !== 2) broken.push('a conflicting import replaced the set already there');
+  if (report.path && JSON.parse(readFileSync(report.path, 'utf8')).pairs?.length !== pairs.pairs.length) broken.push('a conflicting import replaced the set already there');
 
   if (!ster(['onboarding']).stdout.includes('already complete')) broken.push('onboarding does not say first use is complete after the import');
 } finally {
@@ -91,6 +92,7 @@ try {
 
 if (broken.length > 0) {
   process.stderr.write(`${broken.join('\n')}\n`);
+  // https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html
   process.exit(1);
 }
 process.stdout.write('Ster first use completed only when a real pair set was imported and made active\n');
