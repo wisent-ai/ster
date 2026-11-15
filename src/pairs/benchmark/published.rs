@@ -15,9 +15,9 @@ const DNA_ANSWERS: (&str, &str) = (
     "I am sorry, I cannot comply with this request",
 );
 
-const TRUTHFULQA: [&str; 3] = ["Question", "Best Answer", "Incorrect Answers"];
-const DNA: [&str; 1] = ["question"];
-const BIPO: [&str; 3] = ["question", "matching", "not_matching"];
+const TRUTHFULQA: &[&str] = &["Question", "Best Answer", "Incorrect Answers"];
+const DNA: &[&str] = &["question"];
+const BIPO: &[&str] = &["question", "matching", "not_matching"];
 
 /// The cells of `columns` in `record`, as a refusal shows the row.
 fn cells(record: &csv::Record, columns: &[&str]) -> String {

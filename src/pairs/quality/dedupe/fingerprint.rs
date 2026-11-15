@@ -33,7 +33,7 @@ const BLAKE2B_DIGEST_SIZE: usize = 8;
 /// port. The empty set is the only faithful reading, and it is also the
 /// behaviour every caller that *does* pass `stopwords=set()` already gets.
 /// Filtering stays in the token pipeline so a real list can be dropped in later.
-const STOPWORDS: [&str; 0] = [];
+const STOPWORDS: &[&str] = &[];
 
 /// Computes the 64-bit SimHash fingerprint of a pair's fields.
 ///
