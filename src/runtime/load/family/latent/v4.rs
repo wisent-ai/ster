@@ -111,7 +111,7 @@ pub(in crate::runtime::load::family) fn deepseek_v4(
             kinds.len()
         );
     }
-    let (mut sparse_layers, mut heavy_layers) = (0u128, 0u128);
+    let (mut sparse_layers, mut heavy_layers): (u128, u128) = Default::default();
     for (layer, kind) in kinds.iter().take(layers).enumerate() {
         match kind.as_str() {
             "sliding_attention" => {}

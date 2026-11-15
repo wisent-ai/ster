@@ -101,7 +101,7 @@ pub(in crate::runtime::load::family) fn configure(
                     pattern.chars().count()
                 );
             }
-            let (mut mamba, mut feed_forward, mut routed_layers) = (0u128, 0u128, 0u128);
+            let (mut mamba, mut feed_forward, mut routed_layers): (u128, u128, u128) = Default::default();
             for (layer, kind) in pattern.chars().enumerate() {
                 match kind {
                     'M' => mamba |= 1u128 << layer,
