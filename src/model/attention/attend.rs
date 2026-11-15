@@ -206,15 +206,10 @@ pub(in crate::model) fn padded_causal_mask(
         for query in 0..sequence {
             let offset = plane + query * sequence;
             let visible = (query + 1).min(length);
-            for slot in values[offset + visible..offset + sequence].iter_mut() {
-                *slot = u8::from(true);
-            }
-            if query < length {
-                for key in 0..visible {
-                    if super::super::cache::hidden_key(query, key, window, chunk_lookback) {
-                        values[offset + key] = u8::from(true);
-                    }
-                }
+            for (key, slot) in values[offset..offset + sequence].iter_mut().enumerate() {
+                let hidden = key >= visible
+                    || (query < length && super::super::cache::hidden_key(query, key, window, chunk_lookback));
+                *slot = u8::from(hidden);
             }
         }
     }
