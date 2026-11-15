@@ -112,13 +112,13 @@ pub(in crate::runtime::load::family) fn configure(
                 inner,
                 state,
                 kernel,
-                step_rank: 0,
+                step_rank: Default::default(),
                 projection_bias: flag(raw, "mamba_proj_bias", path)?,
                 convolution_bias: flag_or(raw, "mamba_conv_bias", true, path)?,
                 parameter_norm: ParameterNorm::None,
                 // The scan runs inside every layer's parallel block, never
                 // as a layer of its own.
-                layers: 0,
+                layers: Default::default(),
                 feed_forward: true,
                 structured: Some(heads),
             });

@@ -75,7 +75,7 @@ pub(in crate::runtime::load) fn fill_llama_keys(
     // which no DeciLM layer reads.
     if model_type == "nemotron-nas" && raw.get("intermediate_size").is_none_or(Value::is_null) {
         let hidden = whole_or(raw, "hidden_size", 0, path)?;
-        let mut widest = 0;
+        let mut widest: usize = Default::default();
         for (layer, block) in list(raw, "block_configs", path)?.into_iter().flatten().enumerate() {
             if let Some(ffn) = block.get("ffn") {
                 let name = format!("block_configs[{layer}].ffn");

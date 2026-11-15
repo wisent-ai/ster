@@ -156,7 +156,7 @@ pub(in crate::runtime::load::family) fn configure(
                 inner,
                 state,
                 kernel,
-                step_rank: 0,
+                step_rank: Default::default(),
                 projection_bias: flag(raw, "use_bias", path)?,
                 convolution_bias: flag_or(raw, "use_conv_bias", true, path)?,
                 parameter_norm: ParameterNorm::None,

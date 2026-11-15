@@ -198,11 +198,11 @@ pub(in crate::runtime::load::family) fn k2_horizon(
             selection_bias: biased.then_some("self_attn.v_router.bias"),
             routed_scale: routed.routed_scale,
             swiglu_limit: None,
-            identity_experts: 0,
+            identity_experts: Default::default(),
             average_shared: false,
             weight_input: false,
             latent: None,
-            hash_layers: 0,
+            hash_layers: Default::default(),
             routed_activation: None,
         });
     }

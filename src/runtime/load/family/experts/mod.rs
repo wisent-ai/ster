@@ -60,11 +60,11 @@ pub(in crate::runtime::load::family) fn experts(
         selection_bias: None,
         routed_scale: None,
         swiglu_limit: None,
-        identity_experts: 0,
+        identity_experts: Default::default(),
         average_shared: false,
         weight_input: false,
         latent: None,
-        hash_layers: 0,
+        hash_layers: Default::default(),
         routed_activation: None,
     })
 }

@@ -235,7 +235,7 @@ fn added_tokens(
 fn byte_spelling() -> Vec<char> {
     // https://github.com/openai/gpt-2/blob/master/src/encoder.py
     let printable = |byte: u8| matches!(byte, b'!'..=b'~' | 0xA1..=0xAC | 0xAE..=0xFF);
-    let mut moved = 0u32;
+    let mut moved: u32 = Default::default();
     (0..=u8::MAX)
         .map(|byte| {
             if printable(byte) {

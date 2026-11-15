@@ -18,7 +18,7 @@ use crate::runtime::load::family::read::{list, stated, text, whole_or};
 pub(in crate::runtime::load::family) fn step3p5_keys(raw: &mut Value, path: &Path) -> Result<()> {
     // Candle's parse refuses an absent layer count by name after this.
     let layers = whole_or(raw, "num_hidden_layers", 0, path)?;
-    let mut first_full = 0;
+    let mut first_full: usize = Default::default();
     for (layer, kind) in list(raw, "layer_types", path)?.into_iter().flatten().enumerate() {
         if kind.as_str() == Some("full_attention") {
             first_full = layer;

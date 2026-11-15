@@ -89,7 +89,7 @@ pub fn evaluate_direction(
             ],
         ));
     }
-    let mut correct = 0usize;
+    let mut correct: usize = Default::default();
     let mut margin = 0f32;
     for (pos, neg) in positive.iter().zip(negative) {
         let pair_margin = dot(pos, direction) - dot(neg, direction);

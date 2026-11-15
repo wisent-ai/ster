@@ -69,8 +69,8 @@ pub fn fetch(options: &FetchOptions) -> Result<(ExampleSet, FetchReport)> {
     let agent = ureq::AgentBuilder::new().build();
     let mut names: Vec<String> = Vec::new();
     let mut examples = Vec::new();
-    let mut rows = 0usize;
-    let mut skipped = 0usize;
+    let mut rows: usize = Default::default();
+    let mut skipped: usize = Default::default();
     let mut label_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut offset = options.offset;
     while rows < options.count {

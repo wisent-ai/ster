@@ -58,7 +58,7 @@ pub(in crate::runtime::load::family) fn llama4_temperature(
         (Some(beta), Some(interval)) if interval > 0 => Some(QueryTemperature {
             beta,
             interval,
-            shift: 0,
+            shift: Default::default(),
             layers: every_layer(layers, path)?,
         }),
         (Some(_), _) => refused!(

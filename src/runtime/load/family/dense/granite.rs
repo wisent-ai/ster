@@ -176,7 +176,7 @@ pub(in crate::runtime::load::family) fn granite_hybrid(
         inner: heads.heads * heads.head_dim,
         state,
         kernel,
-        step_rank: 0,
+        step_rank: Default::default(),
         projection_bias: flag(raw, "mamba_proj_bias", path)?,
         convolution_bias: flag_or(raw, "mamba_conv_bias", true, path)?,
         parameter_norm: ParameterNorm::None,

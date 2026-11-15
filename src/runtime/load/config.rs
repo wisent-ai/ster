@@ -41,7 +41,7 @@ fn finite_literals(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     let mut output: Option<Vec<u8>> = None;
     let mut in_string = false;
     let mut escaped = false;
-    let mut index = 0;
+    let mut index: usize = Default::default();
     while index < bytes.len() {
         let byte = bytes[index];
         if in_string {

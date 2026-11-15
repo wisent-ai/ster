@@ -110,7 +110,7 @@ pub fn merge(
     let mut tensors = read_tensors(base, model, &device)?;
 
     let scale = artifact.alpha / artifact.rank as f64;
-    let mut merged = 0usize;
+    let mut merged: usize = Default::default();
     let mut dtype: Option<DType> = None;
     for &layer in &artifact.layers {
         for &target in &artifact.targets {

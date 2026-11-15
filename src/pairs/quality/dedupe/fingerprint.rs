@@ -74,7 +74,7 @@ pub fn simhash64(fields: &[&str], options: DedupeOptions) -> u64 {
     // Note the consequence of `>=`: a text with no features yields all-zero
     // accumulators and therefore an all-ones fingerprint, not zero. That is what
     // the Python does, and it keeps featureless texts colliding with each other.
-    let mut fingerprint = 0u64;
+    let mut fingerprint: u64 = Default::default();
     for (bit, accumulator) in accumulators.iter().enumerate() {
         if *accumulator >= 0.0 {
             fingerprint |= 1u64 << bit;

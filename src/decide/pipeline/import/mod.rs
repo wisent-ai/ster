@@ -49,7 +49,7 @@ pub fn import_jsonl(
     let mut examples = Vec::new();
     let mut rejected = Vec::new();
     let mut rejections = Rejections::default();
-    let mut rows = 0usize;
+    let mut rows: usize = Default::default();
     let shown = path.display().to_string();
     // Each line on its own through wisent-formats' JSON Lines reader, so a line
     // that does not read is one rejected row, not the end of the export.

@@ -159,7 +159,7 @@ impl NgramEmbeddings {
                 let mut ids = Vec::with_capacity(batch * sequence);
                 for context in &contexts {
                     let start = context.len() - sequence;
-                    let mut run_start = 0;
+                    let mut run_start: usize = Default::default();
                     for (position, token) in context.iter().enumerate() {
                         if position >= start {
                             let mut id = u64::from(*token);

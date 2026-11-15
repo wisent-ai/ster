@@ -57,7 +57,7 @@ impl ExampleSet {
         if self.examples.is_empty() {
             return Err(refuse(&EXAMPLES_NONE, &[("source", source)]));
         }
-        let mut labelled = 0usize;
+        let mut labelled: usize = Default::default();
         for (index, example) in self.examples.iter().enumerate() {
             // The request's own declared refusal, told which example it is in.
             example.request.validate().map_err(|error| {

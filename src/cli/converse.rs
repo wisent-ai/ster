@@ -93,8 +93,8 @@ pub(super) fn run(args: ConverseArgs) -> Result<()> {
         file::write::refusal("creating", role, &args.output, "no conversation was played", &error)
     })?;
     let mut output = BufWriter::new(file);
-    let mut draw = 0u64;
-    let mut turns_played = 0usize;
+    let mut draw: u64 = Default::default();
+    let mut turns_played: usize = Default::default();
     let total = prompts.prompts.len();
     for (index, prompt) in prompts.prompts.iter().enumerate() {
         let played = tune::rollout(

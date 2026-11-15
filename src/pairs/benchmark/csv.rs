@@ -109,7 +109,7 @@ fn rows(text: &str, path: &str, benchmark: &str) -> Result<Vec<Vec<String>>> {
     // The line being read and the line the open quote was opened on, both
     // counted from one, so a refusal names where to look.
     let mut line = 1usize;
-    let mut opened = 0usize;
+    let mut opened: usize = Default::default();
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {
         if character == '\n' {

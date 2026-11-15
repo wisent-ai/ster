@@ -61,9 +61,9 @@ pub fn compute(texts: &[String]) -> Scores {
     let fingerprints: Vec<u64> = token_sets.iter().map(|tokens| simhash64(tokens)).collect();
 
     let mut jaccard_total = 0.0f64;
-    let mut distance_total = 0u64;
+    let mut distance_total: u64 = Default::default();
     let mut min_distance = SIMHASH_BIT_WIDTH;
-    let mut comparisons = 0u64;
+    let mut comparisons: u64 = Default::default();
     for left in 0..sample.len() {
         for right in (left + 1)..sample.len() {
             jaccard_total += jaccard(&token_sets[left], &token_sets[right]);
@@ -87,7 +87,7 @@ pub fn compute(texts: &[String]) -> Scores {
 
 /// Unique n-grams over total n-grams, pooled across every text.
 fn distinct_n(texts: &[String], n: usize) -> f64 {
-    let mut total = 0usize;
+    let mut total: usize = Default::default();
     let mut unique: HashSet<Vec<String>> = HashSet::new();
     for text in texts {
         // `windows` yields nothing when the text is shorter than `n`, which is
@@ -194,7 +194,7 @@ fn simhash64(tokens: &[String]) -> u64 {
             }
         }
     }
-    let mut fingerprint = 0u64;
+    let mut fingerprint: u64 = Default::default();
     for (bit, accumulator) in accumulators.iter().enumerate() {
         if *accumulator >= 0 {
             fingerprint |= 1u64 << bit;

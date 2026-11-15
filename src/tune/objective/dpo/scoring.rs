@@ -48,7 +48,7 @@ pub(super) fn reference_scores(
         "scoring {total} pairs under the frozen reference model"
     ));
     let device = runtime.device();
-    let mut scored = 0usize;
+    let mut scored: usize = Default::default();
     // Batched on the same knob the training loop uses, in input order: the
     // reference is a constant and nothing here is shuffled, so the only thing
     // a group decides is how many rows share a kernel launch.
