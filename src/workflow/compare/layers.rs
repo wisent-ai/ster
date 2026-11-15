@@ -20,11 +20,11 @@ pub(super) fn compared_layers(
         .map(|artifact| artifact.vectors.iter().map(|vector| vector.layer).collect())
         .collect();
     let common: BTreeSet<usize> = carried
-        .iter()
-        .skip(1)
-        .fold(carried[0].clone(), |common, layers| {
-            common.intersection(layers).copied().collect()
-        });
+        .split_first()
+        .map(|(first, rest)| {
+            rest.iter().fold(first.clone(), |common, layers| common.intersection(layers).copied().collect())
+        })
+        .unwrap_or_default();
     let shown = |layers: &BTreeSet<usize>| {
         let listed: Vec<String> = layers.iter().map(usize::to_string).collect();
         if listed.is_empty() { "none".to_owned() } else { listed.join(", ") }

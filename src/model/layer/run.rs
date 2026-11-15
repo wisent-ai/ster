@@ -274,8 +274,10 @@ impl DecoderLayer {
             let added = per_layer
                 .norm
                 .forward(&per_layer.projection.forward(&gated)?, mode.pass)?;
-            for stream in corrected.iter_mut().skip(1) {
-                *stream = (&*stream + &added)?;
+            if let Some((_, later)) = corrected.split_first_mut() {
+                for stream in later {
+                    *stream = (&*stream + &added)?;
+                }
             }
         }
         Ok(corrected)
