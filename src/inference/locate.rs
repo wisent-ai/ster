@@ -1,27 +1,20 @@
-//! Where Ster finds the `stado` program it hands completions to, in the order
+//! Where Ster finds the `stado` program it hands completions to: the order
 //! Stado states for every program that runs it (`stado --help`, the README's
-//! "Where another program finds Stado", stado-rs/src/binary/location.rs at
-//! https://github.com/wisent-ai/stado):
+//! "Where another program finds Stado"), followed by `stado_program::find`:
 //!
 //! 1. the path in `STADO_BIN`, when it is set;
 //! 2. else `stado` on `PATH`;
 //! 3. else `${STADO_BIN_DIR:-$HOME/.stado/bin}/stado`, where install-stado.sh
 //!    and `stado product install stado --surface cli` place it.
 //!
-//! An empty variable counts as unset, as Stado says of `STADO_BIN_DIR`. How a
-//! lookup or a start fails is `ster.inference`'s (src/failures/inference.rs).
+//! An empty variable counts as unset. How a lookup or a start fails is
+//! `ster.inference`'s (src/failures/inference.rs).
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::failures::{file, inference as causes, refuse};
+use stado_program::{FoundBy, Unfound};
 
-/// The variable holding the path of Stado's program (Stado's place 1).
-const PROGRAM: &str = "STADO_BIN";
-/// The directory install-stado.sh installs into when it is set (place 3).
-const BIN_DIR: &str = "STADO_BIN_DIR";
-/// Where Stado installs under `HOME` when `STADO_BIN_DIR` is unset (place 3).
-const INSTALLED: &str = ".stado/bin";
+use crate::failures::{file, inference as causes, refuse};
 
 /// The `stado` found, and which of Stado's places it was found through.
 pub(super) struct Found {
@@ -29,9 +22,14 @@ pub(super) struct Found {
     pub through: &'static str,
 }
 
-/// The value of `name`, or `None` when it is unset or empty.
-fn set(name: &str) -> Option<OsString> {
-    std::env::var_os(name).filter(|value| !value.is_empty())
+/// A place of Stado's order, as a refusal names it.
+fn through(by: FoundBy) -> &'static str {
+    match by {
+        FoundBy::StadoBin => "STADO_BIN",
+        FoundBy::Path => "PATH",
+        FoundBy::StadoBinDir => "STADO_BIN_DIR",
+        FoundBy::Home => "$HOME/.stado/bin",
+    }
 }
 
 /// The value of `name` as a refusal shows it, `unset` when it has none.
@@ -43,53 +41,29 @@ fn shown(name: &str) -> String {
     }
 }
 
-/// Stado's place 3, with the place it came from, or `None` when neither
-/// `STADO_BIN_DIR` nor `HOME` is set.
-fn installed() -> Option<(PathBuf, &'static str)> {
-    if let Some(directory) = set(BIN_DIR) {
-        return Some((PathBuf::from(directory).join("stado"), "STADO_BIN_DIR"));
-    }
-    set("HOME").map(|home| (PathBuf::from(home).join(INSTALLED).join("stado"), "$HOME/.stado/bin"))
-}
-
-/// The `stado` Stado's stated order finds: `STADO_BIN`, else `PATH`, else
-/// `${STADO_BIN_DIR:-$HOME/.stado/bin}/stado`. A `STADO_BIN` naming no file
-/// is refused rather than passed over: it is the one place a caller names.
+/// The `stado` Stado's stated order finds. A `STADO_BIN` naming no file is
+/// refused rather than passed over: it is the one place a caller names.
 pub(super) fn program() -> anyhow::Result<Found> {
-    if let Some(named) = set(PROGRAM) {
-        let path = PathBuf::from(named);
-        if path.is_file() {
-            return Ok(Found { path, through: PROGRAM });
-        }
-        return Err(refuse(
+    match stado_program::find() {
+        Ok(found) if found.by == FoundBy::StadoBin && !found.path.is_file() => Err(refuse(
             &causes::STADO_BIN_MISSING,
             &[
                 ("call", &format!("stado {}", super::CALL)),
-                ("stado", &path.display().to_string()),
-                ("state", &file::state(&path)),
+                ("stado", &found.path.display().to_string()),
+                ("state", &file::state(&found.path)),
             ],
-        ));
-    }
-    let on_path = set("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|directory| directory.join("stado"))
-            .find(|candidate| candidate.is_file())
-    });
-    if let Some(path) = on_path {
-        return Ok(Found { path, through: "PATH" });
-    }
-    match installed() {
-        Some((path, through)) if path.is_file() => Ok(Found { path, through }),
-        _ => Err(absent()),
+        )),
+        Ok(found) => Ok(Found { path: found.path, through: through(found.by) }),
+        Err(unfound) => Err(absent(&unfound)),
     }
 }
 
 /// The refusal of a `stado` found at none of Stado's three places.
-fn absent() -> anyhow::Error {
-    let (place, state) = match installed() {
-        Some((path, through)) => (
-            format!("{} (from {through})", path.display()),
-            file::state(&path),
+fn absent(unfound: &Unfound) -> anyhow::Error {
+    let (place, state) = match &unfound.looked_at {
+        Some((path, by)) => (
+            format!("{} (from {})", path.display(), through(*by)),
+            file::state(path),
         ),
         None => (
             "${STADO_BIN_DIR:-$HOME/.stado/bin}/stado".to_owned(),
@@ -100,7 +74,7 @@ fn absent() -> anyhow::Error {
         &causes::STADO_ABSENT,
         &[
             ("call", &format!("stado {}", super::CALL)),
-            ("program", &shown(PROGRAM)),
+            ("program", &shown("STADO_BIN")),
             ("path", &shown("PATH")),
             ("place", &place),
             ("state", &state),
@@ -150,7 +124,7 @@ const FIRST_LINE: usize = 256;
 /// else it is otherwise.
 fn interpreter(path: &Path) -> String {
     use std::io::Read;
-    let mut head = [0u8; FIRST_LINE];
+    let mut head: [u8; FIRST_LINE] = [Default::default(); FIRST_LINE];
     let read = std::fs::File::open(path).and_then(|mut opened| opened.read(&mut head));
     let length = match read {
         Ok(length) => length,
