@@ -6,7 +6,8 @@
 //! 1. the path in `STADO_BIN`, when it is set;
 //! 2. else `stado` on `PATH`;
 //! 3. else `${STADO_BIN_DIR:-$HOME/.stado/bin}/stado`, where install-stado.sh
-//!    and `stado product install stado --surface cli` place it.
+//!    and the stado release installer at
+//!    `stado://releases/stado/<version>/<platform>/install.sh` place it.
 //!
 //! An empty variable counts as unset, as Stado says of `STADO_BIN_DIR`. How a
 //! lookup or a start fails is `ster.inference`'s (src/failures/inference.rs).
