@@ -110,10 +110,8 @@ fn norm(values: &[f32]) -> f64 {
 pub fn parse_layers(value: &str, count: usize) -> Result<Vec<usize>> {
     let counted = count != usize::MAX;
     let model_layers = if counted {
-        format!(
-            "the model has {count} layers, 0 to {}",
-            count.saturating_sub(1)
-        )
+        let last = count.saturating_sub(1);
+        format!("the model has {count} layers, 0 to {last}")
     } else {
         "the model's layers are counted once its weights are mapped".to_owned()
     };

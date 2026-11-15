@@ -170,7 +170,7 @@ impl Runtime {
         // Every caller hands ids an encode produced, and encoding refuses a
         // text the tokenizer turns into no tokens.
         if ids.is_empty() {
-            return Err(empty_rows(empty, &[0]));
+            return Err(empty_rows(empty, &[ids.len()]));
         }
         let model = self.model.causal(WHOLE_SEQUENCE)?;
         let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;

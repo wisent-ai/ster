@@ -136,7 +136,7 @@ impl Validate for PairsSaveRequest {
                 "entries",
                 "pair",
                 1,
-                0,
+                self.entries.len(),
                 "`ster pairs add`'s --positive and --negative",
             ));
         }

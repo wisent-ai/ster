@@ -105,7 +105,7 @@ impl Runtime {
             .iter()
             .copied()
             .max()
-            .filter(|_| !lengths.contains(&0))
+            .filter(|_| rows.iter().all(|row| !row.is_empty()))
         else {
             return Err(crate::failures::refuse(
                 &crate::failures::model::decoder::ROWS_EMPTY,

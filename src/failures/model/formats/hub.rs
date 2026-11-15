@@ -41,7 +41,9 @@ fn cache() -> (String, String) {
 /// that names this request wrong.
 fn answered(status: u16) -> &'static wisent_errors::Cause {
     match status {
+        // https://www.rfc-editor.org/rfc/rfc6585.html#section-4
         429 => &checkpoint::HUB_LIMITED,
+        // https://www.rfc-editor.org/rfc/rfc9110.html#status.5xx
         500..=599 => &checkpoint::HUB_FAILING,
         _ => &checkpoint::HUB_REFUSED,
     }
@@ -65,6 +67,7 @@ pub fn repository_refusal(
     };
     let what = format!("the file list of {model} at revision {revision}");
     let cause = match status(&error) {
+        // https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5
         Some(401 | 403 | 404) => &checkpoint::REPOSITORY_UNKNOWN,
         Some(code) => answered(code),
         None => &checkpoint::HUB_UNREACHABLE,

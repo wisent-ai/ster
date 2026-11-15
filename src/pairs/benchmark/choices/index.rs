@@ -39,15 +39,18 @@ pub(super) fn index_of(
     // An index too large for this machine is past the choices too.
     match usize::try_from(stated) {
         Ok(index) if index < choices.len() => Ok(index),
-        _ => refused(
-            &causes::ANSWER_INDEX_OUTSIDE,
-            vec![
-                ("index", stated.to_string()),
-                ("count", choices.len().to_string()),
-                ("last", (choices.len() - 1).to_string()),
-                ("pointer", pointer.to_owned()),
-                ("choices", shown),
-            ],
-        ),
+        _ => {
+            let last = choices.len() - 1;
+            refused(
+                &causes::ANSWER_INDEX_OUTSIDE,
+                vec![
+                    ("index", stated.to_string()),
+                    ("count", choices.len().to_string()),
+                    ("last", last.to_string()),
+                    ("pointer", pointer.to_owned()),
+                    ("choices", shown),
+                ],
+            )
+        }
     }
 }

@@ -71,7 +71,9 @@ pub(super) fn read_page(
                 _ => body,
             };
             let cause = match status {
+                // https://www.rfc-editor.org/rfc/rfc6585.html#section-4
                 429 => &causes::SERVER_LIMITED,
+                // https://www.rfc-editor.org/rfc/rfc9110.html#status.5xx
                 500..=599 => &causes::SERVER_FAILING,
                 _ => &causes::SERVER_REFUSED,
             };
@@ -166,7 +168,7 @@ pub(super) fn class_names(page: &Value, options: &FetchOptions) -> Result<Vec<St
         ("most", &MAX_OPTIONS.to_string()),
         ("classes", &names.join(", ")),
     ];
-    if names.len() < 2 {
+    if matches!(names.as_slice(), [] | [_]) {
         return Err(refuse(&causes::CLASSES_TOO_FEW, &values));
     }
     if names.len() > MAX_OPTIONS {

@@ -102,10 +102,12 @@ pub fn rollout(
             ("user", prompt.to_owned()),
             ("assistant", completion.text.clone()),
         ];
+        // The one turn is the transcript's last entry; every other precedes it.
+        let before = Vec::from([transcript.len() - 1]);
         return Ok(Rollout {
             turns: vec![completion],
             transcript,
-            before: vec![1],
+            before,
         });
     };
 

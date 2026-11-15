@@ -120,7 +120,7 @@ fn checked(context: &str, options: &[String], label: u64, shown: String) -> Resu
         return refused(&causes::CONTEXT_BLANK, vec![("context", format!("{context:?}"))]);
     }
     let count = options.len().to_string();
-    if options.len() < 2 {
+    if matches!(options, [] | [_]) {
         return refused(&causes::OPTIONS_FEW, vec![("count", count), ("options", shown)]);
     }
     if options.len() > MAX_OPTIONS {
@@ -152,14 +152,17 @@ fn checked(context: &str, options: &[String], label: u64, shown: String) -> Resu
     // A label too large for this machine's indices is past the options too.
     match usize::try_from(label) {
         Ok(index) if index < options.len() => Ok(index),
-        _ => refused(
-            &causes::LABEL_OUTSIDE,
-            vec![
-                ("label", label.to_string()),
-                ("count", count),
-                ("last", (options.len() - 1).to_string()),
-                ("options", shown),
-            ],
-        ),
+        _ => {
+            let last = options.len() - 1;
+            refused(
+                &causes::LABEL_OUTSIDE,
+                vec![
+                    ("label", label.to_string()),
+                    ("count", count),
+                    ("last", last.to_string()),
+                    ("options", shown),
+                ],
+            )
+        }
     }
 }

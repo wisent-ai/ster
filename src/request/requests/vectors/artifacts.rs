@@ -47,7 +47,7 @@ impl Validate for CompareRequest {
         for (index, artifact) in self.artifacts.iter().enumerate() {
             require(artifact, "vector/compare", &format!("artifacts[{index}]"), ARTIFACT, ARGUMENT)?;
         }
-        if self.artifacts.len() < 2 {
+        if matches!(self.artifacts.as_slice(), [] | [_]) {
             return Err(too_few(
                 "vector/compare",
                 "artifacts",
@@ -116,7 +116,14 @@ impl Validate for CurveRequest {
         self.model.check("vector/curve")?;
         require(&self.pairs, "vector/curve", "pairs", PAIRS, "--pairs")?;
         if self.sizes.is_empty() {
-            return Err(too_few("vector/curve", "sizes", "size to fit on", 1, 0, "--sizes"));
+            return Err(too_few(
+                "vector/curve",
+                "sizes",
+                "size to fit on",
+                1,
+                self.sizes.len(),
+                "--sizes",
+            ));
         }
         Ok(())
     }

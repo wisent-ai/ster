@@ -99,7 +99,7 @@ pub(crate) fn encode_pairs(
             ("chosen", &pair.positive, &chosen),
             ("rejected", &pair.negative, &rejected),
         ] {
-            if ids.len() < 2 {
+            if matches!(ids.as_slice(), [] | [_]) {
                 return Err(refuse(
                     &SIDE_UNPREDICTABLE,
                     &[

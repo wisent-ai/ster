@@ -116,7 +116,7 @@ impl Request {
             };
             let count = question.option_count();
             let (count_text, max_text) = (count.to_string(), MAX_OPTIONS.to_string());
-            let values: [(&str, &str); 5] = [
+            let values = [
                 ("kind", kind),
                 ("id", id.as_str()),
                 ("unit", unit),

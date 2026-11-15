@@ -163,7 +163,7 @@ impl Artifact {
 fn check_factor(name: &str, tensor: &Tensor, axis: usize, expected: usize) -> Result<()> {
     let dims = tensor.dims();
     let shape = format!("{dims:?}");
-    if dims.len() != 2 {
+    if !matches!(dims, [_, _]) {
         return Err(refuse(
             &TENSOR_SHAPE,
             &[

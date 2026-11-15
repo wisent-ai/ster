@@ -207,7 +207,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
         let left = left_behind(&temporary);
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             let error_text = error.to_string();
-            let values: [(&str, &str); 6] = [
+            let values: &[(&str, &str)] = &[
                 ("source", &shown),
                 ("id", &id),
                 ("path", &destination_shown),
@@ -215,7 +215,7 @@ pub fn import_pair_set(source: &Path, requested_name: Option<&str>) -> Result<Im
                 ("error", &error_text),
                 ("left", &left),
             ];
-            let refusal = refuse(&import::DESTINATION_APPEARED, &values);
+            let refusal = refuse(&import::DESTINATION_APPEARED, values);
             return conflicting(destination.as_path(), refusal);
         }
         if error.kind() == std::io::ErrorKind::Unsupported {

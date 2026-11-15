@@ -116,7 +116,10 @@ pub fn create(declaration: &Path, output: &Path) -> Result<FixtureReport> {
         write("tokenizer", &tokenizer, &input.tokenizer_bytes)?;
         let checkpoint = output.join("model.safetensors");
         owned_files.push(checkpoint.clone());
-        let bytes: usize = tensors.values().map(|tensor| tensor.elem_count() * 4).sum();
+        let bytes: usize = tensors
+            .values()
+            .map(|tensor| tensor.elem_count() * tensor.dtype().size_in_bytes())
+            .sum();
         candle_core::safetensors::save(&tensors, &checkpoint).map_err(|error| {
             // The system's own answer when the write itself failed, so its
             // kind (a full disk, a refused directory) reaches the refusal.

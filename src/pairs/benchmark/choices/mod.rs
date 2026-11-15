@@ -150,7 +150,7 @@ pub(super) fn pair_of(
         &causes::CHOICE_NOT_TEXT,
     )?;
     let shown_choices = excerpt(&format!("{choices:?}"));
-    if choices.len() < 2 {
+    if matches!(choices.as_slice(), [] | [_]) {
         return refused(
             &causes::CHOICES_FEW,
             vec![

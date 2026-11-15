@@ -88,7 +88,7 @@ impl Preflight<'_> {
         if self.accumulation == 0 {
             return refused(&ACCUMULATION_NONE, "0");
         }
-        if self.batch == Some(0) {
+        if self.batch.is_some_and(|batch| batch == 0) {
             return refused(&BATCH_NONE, "0");
         }
         if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {

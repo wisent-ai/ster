@@ -72,9 +72,9 @@ fn prepare(declaration: &Path) -> Result<(String, Verification)> {
         values.extend_from_slice(extra);
         refuse(cause, &values)
     };
-    if input.model_tokens.is_empty() {
+    let Some(first_token) = input.model_tokens.first() else {
         return Err(at(&causes::MODEL_TOKENS_NONE, &[]));
-    }
+    };
     if input.unknown_token.is_empty() {
         return Err(at(&causes::UNKNOWN_BLANK, &[]));
     }
@@ -84,7 +84,7 @@ fn prepare(declaration: &Path) -> Result<(String, Verification)> {
     }
     let unknown = input.unknown_token.as_str();
     if !input.model_tokens.iter().any(|token| token.content == unknown) {
-        let first = format!("\"{}\"", input.model_tokens[0].content);
+        let first = format!("\"{}\"", first_token.content);
         return Err(at(&causes::UNKNOWN_UNDECLARED, &[("unknown", unknown), ("first", &first)]));
     }
     // Positions are the model's ids: every content once, none empty, every

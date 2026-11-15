@@ -23,11 +23,12 @@ pub fn nothing_fits(
     lengths: impl IntoIterator<Item = usize>,
     limit: usize,
 ) -> anyhow::Error {
-    let (count, shortest) = lengths
+    let mut count: usize = Default::default();
+    let shortest = lengths
         .into_iter()
-        .fold((0usize, usize::MAX), |(count, shortest), length| {
-            (count + 1, shortest.min(length))
-        });
+        .inspect(|_| count += 1)
+        .min()
+        .unwrap_or(usize::MAX);
     refuse(
         &NOTHING_FITS,
         &[

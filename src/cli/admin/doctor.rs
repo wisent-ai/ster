@@ -138,9 +138,10 @@ fn support() -> Result<String, Failure> {
 
 fn replies() -> Result<String, Failure> {
     let reports = super::telemetry::telemetry().reports()?;
-    Ok(match reports.len() {
-        0 => "no report was filed from here".to_owned(),
-        filed => format!("the replies to {filed} report(s) filed from here were read back"),
+    Ok(if reports.is_empty() {
+        "no report was filed from here".to_owned()
+    } else {
+        format!("the replies to {} report(s) filed from here were read back", reports.len())
     })
 }
 

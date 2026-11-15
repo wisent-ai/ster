@@ -109,8 +109,11 @@ impl Scorer {
             Err(ureq::Error::Status(status, response)) => {
                 let body = response.into_string().map_err(unreadable)?;
                 let cause = match status {
+                    // https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5
                     401 | 403 => &SCORER_UNAUTHORIZED,
+                    // https://www.rfc-editor.org/rfc/rfc6585.html#section-4
                     429 => &SCORER_LIMITED,
+                    // https://www.rfc-editor.org/rfc/rfc9110.html#status.5xx
                     500..=599 => &SCORER_FAILING,
                     _ => &SCORER_REFUSED,
                 };

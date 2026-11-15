@@ -84,7 +84,7 @@ pub fn check_counts(named: &[String], clusters: NonZeroUsize) -> Result<()> {
         ("labels", labels.as_str()),
         ("clusters", asked.as_str()),
     ];
-    if named.len() < 2 {
+    if matches!(named, [] | [_]) {
         return Err(refuse(&causes::ARTIFACTS_FEW, &values));
     }
     if clusters.get() > named.len() {

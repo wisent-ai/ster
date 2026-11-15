@@ -183,12 +183,12 @@ impl Runtime {
     /// single token cannot be read from one position, which is a refusal
     /// rather than a guess.
     pub fn label_tokens(&self, label: &str) -> Result<Vec<u32>> {
-        let mut ids = Vec::with_capacity(3);
         let spellings = [
             label.to_owned(),
             format!("\u{2581}{label}"),
             format!("\u{0120}{label}"),
         ];
+        let mut ids = Vec::with_capacity(spellings.len());
         for spelling in &spellings {
             if let Some(id) = self.tokenizer.token_to_id(spelling)
                 && !ids.contains(&id)
