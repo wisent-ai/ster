@@ -52,13 +52,13 @@ pub(super) fn strftime_now(format: String) -> Result<Value, Error> {
             )
         })?
         .as_secs() as i64;
-    let days = seconds.div_euclid(86_400);
-    let time = seconds.rem_euclid(86_400);
+    let days = seconds.div_euclid(86_400); /* https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap04.html#tag_04_19 */
+    let time = seconds.rem_euclid(86_400); /* https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap04.html#tag_04_19 */
     let (year, month, day) = civil_from_days(days);
-    let (hour, minute, second) = (time / 3600, (time % 3600) / 60, time % 60);
-    let weekday = (days + 4).rem_euclid(7) as usize;
-    let year_day = days - days_from_civil(year, 1, 1) + 1;
-    const MONTHS: [&str; 12] = [
+    let (hour, minute, second) = (time / 3600, (time % 3600) / 60, time % 60); /* https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap04.html#tag_04_19 */
+    let weekday = (days + 4).rem_euclid(7) as usize; /* https://howardhinnant.github.io/date_algorithms.html */
+    let year_day = days - days_from_civil(year, 1, 1) + 1; /* https://pubs.opengroup.org/onlinepubs/9799919799/functions/strftime.html */
+    const MONTHS: &[&str] = &[
         "January",
         "February",
         "March",
@@ -72,7 +72,7 @@ pub(super) fn strftime_now(format: String) -> Result<Value, Error> {
         "November",
         "December",
     ];
-    const DAYS: [&str; 7] = [
+    const DAYS: &[&str] = &[
         "Sunday",
         "Monday",
         "Tuesday",
@@ -81,7 +81,7 @@ pub(super) fn strftime_now(format: String) -> Result<Value, Error> {
         "Friday",
         "Saturday",
     ];
-    let mut out = String::with_capacity(format.len() + 8);
+    let mut out = String::with_capacity(format.len());
     let mut chars = format.chars();
     while let Some(character) = chars.next() {
         if character != '%' {
@@ -104,15 +104,15 @@ pub(super) fn strftime_now(format: String) -> Result<Value, Error> {
         match directive {
             '%' => out.push('%'),
             'Y' => out.push_str(&year.to_string()),
-            'y' => out.push_str(&two(year.rem_euclid(100) as i64, pad)),
+            'y' => out.push_str(&two(year.rem_euclid(100) as i64, pad)), /* https://pubs.opengroup.org/onlinepubs/9799919799/functions/strftime.html */
             'm' => out.push_str(&two(month as i64, pad)),
             'd' | 'e' => out.push_str(&two(day as i64, pad)),
             'H' => out.push_str(&two(hour, pad)),
             'M' => out.push_str(&two(minute, pad)),
             'S' => out.push_str(&two(second, pad)),
-            'b' | 'h' => out.push_str(&MONTHS[month as usize - 1][..3]),
+            'b' | 'h' => out.push_str(&MONTHS[month as usize - 1][..3]), /* https://pubs.opengroup.org/onlinepubs/9799919799/functions/strftime.html */
             'B' => out.push_str(MONTHS[month as usize - 1]),
-            'a' => out.push_str(&DAYS[weekday][..3]),
+            'a' => out.push_str(&DAYS[weekday][..3]), /* https://pubs.opengroup.org/onlinepubs/9799919799/functions/strftime.html */
             'A' => out.push_str(DAYS[weekday]),
             'j' => out.push_str(&format!("{year_day:03}")),
             other => {
@@ -136,12 +136,13 @@ fn two(value: i64, pad: bool) -> String {
 
 // The calendar arithmetic below counts years in 400-year eras of 146 097 days, starting each year in
 // March so the leap day falls last; 719 468 days separate 0000-03-01 from the Unix epoch.
-const DAYS_PER_ERA: i64 = 146_097;
-const YEARS_PER_ERA: i64 = 400;
-const EPOCH_OFFSET_DAYS: i64 = 719_468;
-const MARCH: i64 = 3;
-const MONTHS_PER_YEAR: i64 = 12;
-const MONTHS_FROM_MARCH_TO_DECEMBER: i64 = 10;
+// https://howardhinnant.github.io/date_algorithms.html
+const DAYS_PER_ERA: i64 = 146_097; /* https://howardhinnant.github.io/date_algorithms.html */
+const YEARS_PER_ERA: i64 = 400; /* https://howardhinnant.github.io/date_algorithms.html */
+const EPOCH_OFFSET_DAYS: i64 = 719_468; /* https://howardhinnant.github.io/date_algorithms.html */
+const MARCH: i64 = 3; /* https://howardhinnant.github.io/date_algorithms.html */
+const MONTHS_PER_YEAR: i64 = 12; /* https://howardhinnant.github.io/date_algorithms.html */
+const MONTHS_FROM_MARCH_TO_DECEMBER: i64 = 10; /* https://howardhinnant.github.io/date_algorithms.html */
 
 /// Days since 1970-01-01 to a civil date, and back. Howard Hinnant's
 /// algorithm, exact for every year this will ever be handed.
@@ -153,36 +154,36 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
         shifted - (DAYS_PER_ERA - 1)
     } / DAYS_PER_ERA;
     let day_of_era = shifted - era * DAYS_PER_ERA;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 /* https://howardhinnant.github.io/date_algorithms.html */
         - day_of_era / (DAYS_PER_ERA - 1))
-        / 365;
+        / 365; /* https://howardhinnant.github.io/date_algorithms.html */
     let year = year_of_era + era * YEARS_PER_ERA;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100); /* https://howardhinnant.github.io/date_algorithms.html */
+    let shifted_month = (5 * day_of_year + 2) / 153; /* https://howardhinnant.github.io/date_algorithms.html */
+    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32; /* https://howardhinnant.github.io/date_algorithms.html */
     let month = if shifted_month < MONTHS_FROM_MARCH_TO_DECEMBER {
         shifted_month + MARCH
     } else {
         shifted_month - (MONTHS_PER_YEAR - MARCH)
     } as u32;
-    (if month <= 2 { year + 1 } else { year }, month, day)
+    (if month <= 2 { year + 1 } else { year }, month, day) /* https://howardhinnant.github.io/date_algorithms.html */
 }
 
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
+    let year = if month <= 2 { year - 1 } else { year }; /* https://howardhinnant.github.io/date_algorithms.html */
     let era = if year >= 0 {
         year
     } else {
         year - (YEARS_PER_ERA - 1)
     } / YEARS_PER_ERA;
     let year_of_era = year - era * YEARS_PER_ERA;
-    let shifted_month = if month > 2 {
+    let shifted_month = if month > 2 { /* https://howardhinnant.github.io/date_algorithms.html */
         month as i64 - MARCH
     } else {
         month as i64 + (MONTHS_PER_YEAR - MARCH)
     };
-    let day_of_year = (153 * shifted_month + 2) / 5 + day as i64 - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let day_of_year = (153 * shifted_month + 2) / 5 + day as i64 - 1; /* https://howardhinnant.github.io/date_algorithms.html */
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year; /* https://howardhinnant.github.io/date_algorithms.html */
     era * DAYS_PER_ERA + day_of_era - EPOCH_OFFSET_DAYS
 }
 
