@@ -68,7 +68,7 @@ pub(in crate::runtime::load::family) fn step3p5(
         .get("rope_scaling")
         .is_some_and(|scaling| !scaling.is_null());
     let full_only = list(raw, "yarn_only_types", path)?
-        .is_some_and(|kinds| kinds.len() == 1 && kinds[0].as_str() == Some("full_attention"));
+        .is_some_and(|kinds| matches!(kinds, [only] if only.as_str() == Some("full_attention")));
     if scaled && !full_only {
         refused!(
             Unimplemented,
