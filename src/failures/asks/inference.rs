@@ -1,5 +1,5 @@
 //! How a completion Ster asks of Stado's inference alternatives fails
-//! (src/inference.rs): the route it names, starting Stado, and what Stado
+//! (src/inference/mod.rs): the route it names, starting Stado, and what Stado
 //! answers. Writing a pair set with a hosted route uses it.
 
 use wisent_errors::{Cause, Code, Operation};

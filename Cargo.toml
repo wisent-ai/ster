@@ -58,10 +58,14 @@ serde_json = "1.0.145"
 # repository without a revision, as the onboarding runtime declares it, so
 # Cargo.lock holds one stado-wait.
 stado-wait = { git = "https://github.com/wisent-ai/stado", package = "stado-wait", default-features = false }
-# The GitHub star request every Wisent product makes (`ster star`). Declared
-# by repository and version, never by revision: 0.2.0 is the first release
-# that requires stado-wait 0.2.0, the oldest a product's lock may hold.
-wisent-onboarding-client = { git = "https://github.com/wisent-ai/echo-web", version = "0.2.0", package = "wisent-onboarding-client" }
+# The GitHub star request every Wisent product makes (`ster star`) and the
+# consented report of the sources `ster sources` saw. Declared by repository
+# and version, never by revision: 0.3.1 is the first release that carries
+# SourcesSharing (0.2.1) and finds Stado in the order stado-program states.
+# Neither uses IntegrationTransport, the one export the client's integration
+# feature adds (with reqwest, url and stado-wait's http), so the feature
+# stays off.
+wisent-onboarding-client = { git = "https://github.com/wisent-ai/echo-web", version = "0.3.1", package = "wisent-onboarding-client", default-features = false }
 tokenizers = "0.22.1"
 unicode-normalization = "0.1"
 ureq = "2.12"

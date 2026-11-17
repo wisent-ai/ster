@@ -25,7 +25,7 @@ pub(in super::super) struct ParityArgs {
     input: PathBuf,
     /// Dtype the base weights are mapped at: f32, f16, or bf16. The states
     /// are compared in F32 either way; this is the width Ster computed them
-    /// in. bf16 needs --device metal.
+    /// in. bf16 needs --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
 }

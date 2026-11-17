@@ -71,10 +71,12 @@ pub struct SynthesizeOptions {
     pub per_option: usize,
     /// Extra attempts allowed per state before giving up on an option.
     pub retry_multiplier: usize,
-    /// Sampling temperature of the writer, as the caller stated it.
-    pub temperature: f64,
-    /// The writer's token budget for one state, as the caller stated it.
-    pub max_tokens: usize,
+    /// Sampling temperature of the writer, as the caller stated it; none,
+    /// the answering alternative's own.
+    pub temperature: Option<f64>,
+    /// The writer's token budget for one state, as the caller stated it;
+    /// none, the answering alternative's own.
+    pub max_tokens: Option<usize>,
 }
 
 impl SynthesizeOptions {
@@ -101,9 +103,10 @@ pub struct SynthesizeReport {
     pub kept: usize,
     pub rejected_empty: usize,
     pub rejected_duplicates: usize,
-    /// The sampling the states were written with, as the caller stated it.
-    pub temperature: f64,
-    pub max_tokens: usize,
+    /// The sampling the states were written with, as the caller stated it
+    /// (null where the alternative's own applied).
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<usize>,
 }
 
 /// Writes `per_option` states for every option of every question through

@@ -13,9 +13,9 @@ exporting states sit beside it:
 
 ```text
 ster vector train --model <MODEL> --pairs <PAIRS> --output <OUTPUT>
-                  [--revision <REVISION>] [--device cpu] [--layers all]
-                  [--method caa|pca|logistic] [--chat-template auto|off]
-                  [--precision f32|f16|bf16]
+                  [--revision <REVISION>] [--device cpu|metal|cuda|cuda:N] [--layers all]
+                  [--method caa|pca|logistic|random] [--seed <S>]
+                  [--chat-template auto|off] [--precision f32|f16|bf16]
 ster vector optimize --model <MODEL> --pairs <PAIRS> --output <OUTPUT> --holdout <FRACTION>
                      [--revision <REVISION>] [--device cpu] [--layers all]
                      [--chat-template auto|off] [--precision f32|f16|bf16]
@@ -51,7 +51,20 @@ ster extract --model <MODEL> --input <INPUT> --output <OUTPUT>
 `--layers` takes `all`, a comma list, or a half-open range such as `8..16`,
 exactly as it does under `ster tune`, and `--method` names the estimator
 `vector train` fits: contrastive activation addition, the leading principal
-direction, or a logistic probe. `--chat-template` and `--precision` are on
+direction, or a logistic probe. `--method random --seed <S>` fits nothing: it
+is the control a fitted direction is measured against, one direction per
+layer drawn from a standard normal stream seeded by `S` (layer after layer,
+so one seed and one layer give one direction whichever other layers are
+named) and normalized to unit length exactly as every fitted direction is,
+so a strength means the same on it. It is written as a normal artifact
+(`method: "random"`, the seed under `metadata.seed`) and scored on the pairs
+like any other, so its `train_accuracy` is the chance level a fitted one has
+to beat. `random` without `--seed`, and `--seed` with any other method, are
+refused before anything is read (exit 2); `vector curve` and the request
+bodies take no seed, so `random` is refused there. `--device` takes `cpu`,
+`metal`, `cuda` (the first GPU) or `cuda:N` (the GPU at `N`, counted from 0
+as the driver lists the devices this process sees), on every command that
+loads a model. `--chat-template` and `--precision` are on
 every one of these commands except `vector inspect` and `vector compare`,
 which load no model. Each command prints a pretty JSON document on stdout,
 and each is also an operation of `ster request`: `ster request vector/train`,
@@ -99,6 +112,12 @@ and its negation at equal strengths cancel to the unsteered answer, and one
 vector named twice at a strength steers as it does once at twice that
 strength; every artifact passes the checks a single one does, and strengths
 that are all zero are refused, since such a mix would steer nothing.
+
+The same `--vector`/`--strength` pairs, read and checked the same way, steer
+a multiple-choice read: `ster decide` answers a request and `ster decisions
+benchmark` scores a labelled set with the sum added at every position the
+model reads, so a direction's effect on accuracy is measured without
+generating text ([decisions](decisions.md#steered-decisions)).
 
 `ster generate --prompts <SET> --output <FILE>` answers a whole prompt set
 (`{"prompts": ["…"]}`, as [`docs/examples/prompts.json`](../examples/prompts.json)) with

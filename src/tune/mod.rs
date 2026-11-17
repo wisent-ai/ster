@@ -31,7 +31,8 @@
 //!
 //! The four objectives live in `objective`, the two operations that read or
 //! rewrite a trained adapter live in `artifact`, and what more than one of
-//! them needs is here and in `preflight`, `examples` and `batch`.
+//! them needs is here and in `preflight`, `examples`, `batch` and `run`, the
+//! last the steps of a training loop that do not depend on its objective.
 
 mod artifact;
 mod batch;
@@ -41,6 +42,7 @@ mod examples;
 mod imported;
 mod objective;
 mod preflight;
+mod run;
 
 pub use artifact::{
     AblationReport, EvaluateOptions, EvaluateReport, EvaluatedExample, ExportReport, MergeReport,

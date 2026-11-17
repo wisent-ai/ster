@@ -47,13 +47,9 @@ use std::path::Path;
 
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{ParamsAdamW, VarMap};
+use candle_nn::VarMap;
 
-use super::super::{
-    checkpoint::{Position, optimizer::AdamW},
-    preflight::Trainable,
-    schedule,
-};
+use super::super::{checkpoint::Position, preflight::Trainable, run};
 use crate::{
     failures::amend,
     runtime::Runtime,
@@ -112,26 +108,21 @@ pub fn grpo(
     let usable = fitting_prompts(runtime, prompts, max_new_tokens, limit)?;
 
     let fingerprint = options.fingerprint(requested_reward, user.map(|(_, model)| model));
-    let mut optimizer = AdamW::over(
-        varmap,
-        ParamsAdamW {
-            lr: options.learning_rate,
-            ..Default::default()
-        },
-    )?;
-    let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
     // Every draw gets its own seed, advanced from the operator's and counted in
     // `running.draw`: a fixed seed would draw one completion `--group` times
     // over, and a group with no variety has no baseline.
-    let mut running: Running = match &resumed {
-        Some(position) => position.running(SUBJECT)?,
-        None => Running::default(),
-    };
+    let (mut optimizer, resumed, mut running) = run::start::<Running>(
+        varmap,
+        options.learning_rate,
+        &options.durable,
+        &fingerprint,
+        SUBJECT,
+    )?;
     let mut checkpoints = Vec::new();
     let steps: Vec<&[usize]> = usable.chunks(options.accumulation).collect();
     let total_steps = steps.len() * options.iterations;
 
-    for (iteration, _) in std::iter::repeat_n((), options.iterations).enumerate() {
+    for iteration in 0..options.iterations {
         let (mut rest, mut totals) = match &resumed {
             Some(position) if position.pass > iteration => continue,
             Some(position) if position.pass == iteration => (
@@ -143,12 +134,12 @@ pub fn grpo(
 
         while let Some((group_slots, after)) = rest.split_first() {
             rest = after;
-            optimizer.set_learning_rate(schedule(
+            run::schedule_step(
+                &mut optimizer,
                 options.learning_rate,
-                optimizer.rates.len(),
                 total_steps,
                 options.warmup_steps,
-            ));
+            );
             let mut summed: Option<Tensor> = None;
             let mut losses = Vec::with_capacity(group_slots.len());
             for &index in group_slots.iter() {
@@ -200,18 +191,16 @@ pub fn grpo(
                 totals.mean_reward(),
                 totals.mean_kl()
             ));
-            if options.durable.due(step) {
-                running.totals = (&totals).into();
-                let within = steps.len() - rest.len();
-                let position = Position {
-                    pass: iteration,
-                    step,
-                    within,
-                    running: crate::json::value(&running),
-                };
-                options.durable.save(&optimizer, &fingerprint, &position)?;
-                checkpoints.push(step);
-            }
+            running.totals = (&totals).into();
+            run::keep(
+                &options.durable,
+                &optimizer,
+                &fingerprint,
+                iteration,
+                steps.len() - rest.len(),
+                &running,
+                &mut checkpoints,
+            )?;
         }
 
         let done = running.history.len() + 1;

@@ -1,5 +1,5 @@
 //! How rewriting a checkpoint with a trained adapter fails
-//! (src/tune/artifact/merge.rs, export.rs, merge/checkpoint.rs): fitting
+//! (src/tune/artifact/merge/mod.rs, export.rs, merge/checkpoint.rs): fitting
 //! the adapter to the checkpoint it names, and reading and writing the
 //! checkpoint directory a merge or an ablation produces.
 

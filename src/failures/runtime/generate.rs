@@ -71,6 +71,18 @@ pub static STRENGTHS_UNPAIRED: Cause = Cause {
     test: "tests/runtime/generate.sh::a_vector_without_its_strength_is_refused",
 };
 
+/// Pairing every --vector with its --strength and reading each artifact, as
+/// every command that steers takes them.
+pub static VECTORS: Operation = Operation {
+    id: "ster.runtime.vectors",
+    entries: &[],
+    uses: &[&ARTIFACT],
+    summary: "pair every --vector with the --strength in its place and read each steering artifact, before any weight is mapped",
+    docs: DOCS,
+    warnings: &[],
+    causes: &[&STRENGTHS_UNPAIRED],
+};
+
 pub static SYSTEM_EMPTY: Cause = Cause {
     id: "system-empty",
     code: Code::Config,
@@ -88,12 +100,9 @@ pub static SYSTEM_EMPTY: Cause = Cause {
 pub static COMMAND: Operation = Operation {
     id: "ster.generate",
     entries: &["ster generate", "ster request generate"],
-    uses: &[&ARTIFACT, &PROMPTS, &LOAD, &ENCODE, &GENERATE, &FILE],
+    uses: &[&VECTORS, &PROMPTS, &LOAD, &ENCODE, &GENERATE, &FILE],
     summary: "read every steering artifact and the system turn before any weight, load the model with its adapter when one is named, and sample a continuation of each prompt",
     docs: DOCS,
     warnings: &[],
-    causes: &[
-        &STRENGTHS_UNPAIRED,
-        &SYSTEM_EMPTY,
-    ],
+    causes: &[&SYSTEM_EMPTY],
 };

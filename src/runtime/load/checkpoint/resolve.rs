@@ -9,7 +9,7 @@ use std::{
 use anyhow::Result;
 use hf_hub::{
     Repo, RepoType,
-    api::sync::{Api, ApiRepo},
+    api::sync::{ApiBuilder, ApiRepo},
 };
 
 use crate::{
@@ -81,7 +81,10 @@ impl Checkpoint {
                 layout,
             });
         }
-        let api = Api::new().map_err(|error| {
+        // The cache follows HF_HOME and the endpoint HF_ENDPOINT, as the Hub's
+        // own clients read them, so a job keeps the weights it downloads in
+        // the directory it names.
+        let api = ApiBuilder::from_env().build().map_err(|error| {
             let hf_home = std::env::var_os("HF_HOME").map_or_else(
                 || "unset, so the cache is ~/.cache/huggingface".to_owned(),
                 |home| home.to_string_lossy().into_owned(),

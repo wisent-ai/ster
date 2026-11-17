@@ -44,12 +44,13 @@ pub(super) struct SynthesizeArgs {
     /// Immutable Hugging Face revision; defaults to main.
     #[arg(long)]
     revision: Option<String>,
-    /// Runtime device: cpu, metal, or cuda; an unknown one is a usage error.
+    /// Runtime device: cpu, metal, cuda (the first GPU) or cuda:N (the GPU
+    /// at N, counted from 0); an unknown one is a usage error.
     #[arg(long, default_value = "cpu", value_parser = DeviceChoice::parse)]
     device: DeviceChoice,
     /// Dtype the local generator's base weights are mapped at: f32, f16,
     /// or bf16. Ignored by --generator brama, which loads no weights.
-    /// bf16 needs --device metal.
+    /// bf16 needs --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
     /// auto asks the local generator through the model's own chat

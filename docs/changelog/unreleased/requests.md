@@ -2,6 +2,38 @@
 
 Part of the [changelog](../../../CHANGELOG.md).
 
+- The desktop first-use journey (`.probierz/ster/journeys/desktop-first-use.mjs`)
+  sets no clock of its own. The walkthrough's screens are awaited with the
+  Probierz toolkit's own wait (`shows` and `gone` on Probierz main), where it
+  named 60000 and 15000 ms nobody decided. After the malformed pair set is
+  chosen, the journey no longer sleeps 5 s before looking: it waits for
+  whichever answer the app gives, the walkthrough's refusal `while importing
+  the first pair set: …` or an `Imported: …` line, and an import is reported
+  as `a malformed pair set was imported`. The
+  reopening check, which slept 5 s and then looked for the walkthrough, is
+  removed with its promise in `.probierz/ster.yaml`: a finished first use
+  shows nothing, so no answer of the app marks when that look could be made.
+  The journey's `timeoutMs: 240000` is removed from `.probierz/ster.yaml`:
+  Probierz requires none and reads none
+  (`probierz-rs/src/manifest/validate/journeys.rs`). Written and read, not
+  run here.
+- Ster compiles again: every report handed to `ster::json::value`, which
+  takes a borrow, is borrowed (`ster vector evaluate`, `curve`, `project`,
+  `score` and the `vector/*`, `decide`, `calibrate`, `model/*/create` and
+  `workspace/*` requests); `workflow::check_counts` is exported for the
+  `vector compare` command and request that refuse their counts before any
+  artifact is read; and the request jobs see `JobOutcome`, which
+  `workspace/import` answers with. The release manifest's quality gate on
+  every platform, `error-pages`, runs `kompilator test --test error-pages`
+  with the `private-sources` input, which compiles the library and the
+  `ster` binary (darwin-arm64 with `metal`, as its release builds) before
+  checking every error page against the catalogue, so a tree that does not
+  compile is refused before it lands.
+- `ster doctor`'s `ster.errors` remedy and the install guide name the ster
+  release installer at `stado://releases/ster/<version>/<platform>/install.sh`,
+  which places `ster` in `~/.local/bin`, instead of the retired `stado product
+  install` and the nonexistent `stado product update`; updating is running the
+  installer of the newer version.
 - No cause of the failure catalogue holds a brace its renderer would refuse:
   wisent-errors past the revision Ster pins refuses a template whose `{`
   opens no placeholder name, which literal JSON and a `${STADO_BIN_DIR:-…}`
@@ -11,8 +43,11 @@ Part of the [changelog](../../../CHANGELOG.md).
   unchanged; the refusal judgement, example set, reward scorer, `rows-none`
   and Stado location causes say the shape in words.
   `sources-share-unkept` fills `{why}` instead of `{problem}`, a raw-message
-  name the same wisent-errors refuses outside `observed`; its sentence is
-  unchanged.
+  name the same wisent-errors refuses outside `observed`, and says in words
+  why the answer was not kept (it, or the random id kept beside it, could
+  not be made in the configuration directory), with what the system said
+  moved into `observed` as `the answer was not kept: {why}`: the same
+  wisent-errors refuses a cause that is only the text it wraps.
 - `ster request` with its standard output closed (`>&-`) or sent to the null
   device is refused before standard input is read, as
   `ster.request.stdout-discarded` on stderr with exit `2`, naming what the
@@ -101,3 +136,33 @@ Part of the [changelog](../../../CHANGELOG.md).
   --no-optional-locks`, so recording whether the checkout is dirty never
   takes its `index.lock` or rewrites its index while the operator works in
   it.
+
+- `ster --version` names the commit it was built from, `ster <version>
+  (revision <commit>)`, read from WISENT_SOURCE_COMMIT, which every Stado
+  build sets (`build.rs`); a build without it says `revision unknown`.
+  Before, it named only the package version, so whether a repair was
+  installed could not be read from the binary. Written and read, not built
+  or run here.
+
+- Ster compiles against wisent-onboarding-client 0.2.0, whose journey
+  storage failure is a typed `StorageError`: the star request no longer
+  wraps a first-use state that cannot be moved out of its file as the
+  runtime's storage failure, and says Ster's own declared refusal for it
+  instead (`src/cli/admin/star.rs`). Written and read, not built or run
+  here.
+
+- `ster sources` reports what it saw through wisent-onboarding-client's
+  `SourcesSharing`, declared once in `src/cli/sharing.rs`; Ster's own copy of
+  the consent file, the event, the Stado route and the curl transport is
+  gone. The client is declared by version, 0.3.1, the first release that
+  carries `SourcesSharing` and finds Stado in the order stado-program
+  states, with its `integration` feature off. A non-UTF-8
+  WISENT_SOURCE_COMMIT stops the build by name instead of reading as an
+  unknown revision. Written and read, not built or run here.
+
+- Ster compiles against the wisent-errors it locks: `Telemetry::spawn_flush`
+  answers the failure it has already said on stderr, so the end of every
+  command (`src/cli/admin/telemetry.rs`) takes it as a statement instead of
+  as the value of a `match` whose other arm prints. The release gates'
+  `error-pages` build refused this on main. Written and read, not built or
+  run here.

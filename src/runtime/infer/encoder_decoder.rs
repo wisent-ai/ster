@@ -100,18 +100,21 @@ impl Runtime {
     /// by one of `suffixes`. T5's encoder attends in both directions, so a
     /// suffix changes how every prefix token is encoded, and each source is
     /// encoded whole rather than continuing a shared prefix's state.
+    /// `steering`, when given, is added where a direction is read on this
+    /// model: the decoder state at its start token.
     pub(super) fn next_token_logits_encoder_decoder(
         &self,
         model: &t5::Model,
         prefix: &[u32],
         suffixes: &[&[u32]],
+        steering: Option<&SteeringPlan>,
     ) -> Result<Vec<Vec<f32>>> {
         suffixes
             .iter()
             .map(|suffix| {
                 let source: Vec<u32> = prefix.iter().chain(suffix.iter()).copied().collect();
                 let logits = self
-                    .first_decoder_step(model, &source, None, &[])?
+                    .first_decoder_step(model, &source, steering, &[])?
                     .into_logits(Mode::DECODE.readout)?;
                 Ok(logits.squeeze(0)?.to_vec1::<f32>()?)
             })

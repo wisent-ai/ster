@@ -1,5 +1,5 @@
 //! How steering a loaded model with an artifact fails
-//! (src/runtime/infer/steer.rs), and the layer every artifact and every
+//! (src/runtime/infer/steering/steer.rs), and the layer every artifact and every
 //! single-layer read names (src/runtime/mod.rs).
 
 use wisent_errors::{Cause, Code, Operation};

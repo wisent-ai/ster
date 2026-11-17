@@ -9,6 +9,7 @@ use super::{
     calibration::RAW_TEMPERATURE,
     prompt::LABELS,
     request::{Question, text_of},
+    rows::Steered,
 };
 
 /// The confidence of a distribution with nothing to be uncertain between: a
@@ -80,6 +81,10 @@ pub struct Response {
     /// Per-order detail for every question, present under `--explain`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explain: Option<BTreeMap<String, Explanation>>,
+    /// The steering artifacts the model was read under, each with its
+    /// strength; absent from an unsteered decision.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steering: Vec<Steered>,
     pub usage: Usage,
 }
 

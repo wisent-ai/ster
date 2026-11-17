@@ -260,4 +260,4 @@ struct Job<'a> {
 
 mod job;
 
-use job::{request_document, run_decoded_job};
+use job::{JobOutcome, request_document, run_decoded_job};

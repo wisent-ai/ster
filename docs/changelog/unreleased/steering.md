@@ -2,6 +2,13 @@
 
 Part of the [changelog](../../../CHANGELOG.md).
 
+- `ster.star.journey-storage` no longer gives every storage failure of the
+  star request the directory-permission remedy. wisent-onboarding-client
+  0.2.0 answers a typed `StorageError` (no state directory, no USER, a file
+  it cannot read, write, lock or set aside, a poisoned lock and more), whose
+  sentence names its reason and its fix; the cause now quotes it and defers
+  to it, and `tests/onboarding/star.sh` asserts that. Not built or run here.
+
 - Every steering workflow declares how it fails
   (`docs/guide/errors/workflow.md`): choosing `--layers`
   (`ster.vector.layers`: a bound or layer that is not a number, a range of
@@ -54,3 +61,15 @@ Part of the [changelog](../../../CHANGELOG.md).
   refusals of `tests/steering/score.sh`, and `tests/tuning/objectives.sh`'s
   one-turn conversation; `tests/tuning/provenance.mjs` asserts the declared
   sidecar refusals.
+- `ster vector train --method random --seed <S>` writes a control direction:
+  one standard-normal vector per layer from a stream seeded by `S`, read
+  layer after layer, normalized to unit length as every fitted direction is
+  and scored on the pairs like one, in the same artifact schema
+  (`method: "random"`, `metadata.seed`). `random` without `--seed` is
+  `ster.vector.direction.seed-missing` and `--seed` with a fitted method
+  `seed-unused`, both refused before the pairs are read; `vector curve` and
+  the request bodies take no seed. `TrainingMethod` moved to
+  `src/representation/estimator.rs` with `check_seed`, and
+  `train_direction` and `workflow::train` take the seed.
+  `tests/steering/vectors/layers.sh` provokes both causes and checks that a
+  seed draws its directions again.

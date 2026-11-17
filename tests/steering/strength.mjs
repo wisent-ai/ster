@@ -7,9 +7,9 @@ import { createCheckpoint, nativeInteger } from '../qualification/inputs.mjs';
 await qualify('steering/strength', async run => {
     const { model, config, declaration, declarationBytes } = await createCheckpoint(run, 'checkpoint');
     // Empty/additive identity and unit probability/unique selection boundaries:
-    // https://ster.wisent.com/docs/steering
+    // https://ster.wisent.com/docs/concept-intervention
     const zero = 0;
-    // https://ster.wisent.com/docs/steering
+    // https://ster.wisent.com/docs/concept-intervention
     const unit = 1;
     const raw = run.input('STER_TEST_STRENGTHS');
     const strengths = raw.split(',').map(value => {

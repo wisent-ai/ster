@@ -22,6 +22,62 @@ use super::super::ModelArgs;
 /// What the answers file is called in a refusal of it.
 const ANSWERS: &str = "the answers";
 
+/// The steering flags `ster generate`, `ster decide` and `ster decisions
+/// benchmark` share: any number of steering artifacts, each at its own
+/// strength, summed into one plan.
+#[derive(Debug, clap::Args)]
+pub(in crate::cli) struct SteeringArgs {
+    /// Steering artifact to add to the residual stream; repeat it to steer
+    /// several traits at once, each with the --strength in the same place.
+    #[arg(long)]
+    pub(in crate::cli) vector: Vec<PathBuf>,
+    /// Scale on the --vector in the same place; one per --vector, which it
+    /// belongs to, and Ster assumes none.
+    #[arg(long, requires = "vector")]
+    strength: Vec<f64>,
+}
+
+impl SteeringArgs {
+    /// Every artifact named, once each --vector is checked to have its
+    /// --strength. A caller reads them before a single weight is mapped, so
+    /// the wrong file is refused before the checkpoint is paid for.
+    pub(in crate::cli) fn artifacts(&self) -> Result<Vec<SteeringArtifact>> {
+        if self.vector.len() != self.strength.len() {
+            return Err(refuse(
+                &STRENGTHS_UNPAIRED,
+                &[
+                    ("vectors", &self.vector.len().to_string()),
+                    ("strengths", &self.strength.len().to_string()),
+                ],
+            ));
+        }
+        self.vector
+            .iter()
+            .map(|path| SteeringArtifact::load(path))
+            .collect()
+    }
+
+    /// Each of `artifacts`, read by [`SteeringArgs::artifacts`], with the
+    /// --strength in its place.
+    pub(in crate::cli) fn parts<'a>(
+        &self,
+        artifacts: &'a [SteeringArtifact],
+    ) -> Vec<(&'a SteeringArtifact, f64)> {
+        artifacts
+            .iter()
+            .zip(self.strength.iter().copied())
+            .collect()
+    }
+
+    /// Says, for each artifact, where its provenance differs from the loaded
+    /// `runtime`'s.
+    pub(in crate::cli) fn warn_on_provenance(&self, runtime: &Runtime) {
+        for path in &self.vector {
+            tune::warn_on_provenance(path, "direction", runtime);
+        }
+    }
+}
+
 /// `ster generate`
 #[derive(Debug, clap::Args)]
 pub(in crate::cli) struct GenerateArgs {
@@ -43,10 +99,8 @@ pub(in crate::cli) struct GenerateArgs {
     /// template absent or `--chat-template off` it is refused.
     #[arg(long)]
     system: Option<PathBuf>,
-    /// Steering artifact to add during generation; repeat it to steer
-    /// several traits at once, each with the --strength in the same place.
-    #[arg(long)]
-    vector: Vec<PathBuf>,
+    #[command(flatten)]
+    steering: SteeringArgs,
     /// Frozen LoRA adapter artifact to load the model with. It must have
     /// been trained for this exact model: Ster refuses a mismatch rather
     /// than steering the wrong residual stream.
@@ -60,13 +114,9 @@ pub(in crate::cli) struct GenerateArgs {
     chat_template: ChatChoice,
     /// Dtype the base weights are mapped at: f32, f16, or bf16. Half
     /// precision holds a checkpoint in half the memory; a steering vector
-    /// is cast to it on the way in. bf16 needs --device metal.
+    /// is cast to it on the way in. bf16 needs --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
-    /// Scale on the --vector in the same place; one per --vector, which it
-    /// belongs to, and Ster assumes none.
-    #[arg(long, requires = "vector")]
-    strength: Vec<f64>,
     #[arg(long)]
     max_new_tokens: usize,
     /// Zero selects deterministic argmax generation.
@@ -86,39 +136,24 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
         prompts,
         output,
         system,
-        vector,
+        steering,
         adapter,
         chat_template,
         precision,
-        strength,
         max_new_tokens,
         temperature,
         top_p,
         seed,
     } = args;
-    // How the flags pair up is checked before any file is read.
-    if vector.len() != strength.len() {
-        return Err(refuse(
-            &STRENGTHS_UNPAIRED,
-            &[
-                ("vectors", &vector.len().to_string()),
-                ("strengths", &strength.len().to_string()),
-            ],
-        ));
-    }
     // Both documents are read before a single weight is mapped, so
     // the two halves of the wrong-document refusal cost the same. An
     // adapter was already refused this early because it is attached
     // during the load; a steering vector was not, and handing one the
     // wrong file paid for a full checkpoint load before being told.
     // `Reward::parse` resolves its source ahead of the policy load for
-    // this reason and says so.
-    let artifacts = vector
-        .iter()
-        .map(|path| SteeringArtifact::load(path))
-        .collect::<Result<Vec<_>>>()?;
-    let parts: Vec<(&SteeringArtifact, f64)> =
-        artifacts.iter().zip(strength.iter().copied()).collect();
+    // this reason and says so. How the flags pair up is checked first.
+    let artifacts = steering.artifacts()?;
+    let parts = steering.parts(&artifacts);
     // The system turn is read here for the same reason: an unreadable or
     // empty file is refused before the checkpoint is paid for.
     let system = match system.as_deref() {
@@ -159,9 +194,7 @@ pub(in crate::cli) fn generate(args: GenerateArgs) -> Result<()> {
         None => model.load_at(precision)?,
     };
     runtime.set_chat_template(chat_template)?;
-    for path in &vector {
-        tune::warn_on_provenance(path, "direction", &runtime);
-    }
+    steering.warn_on_provenance(&runtime);
     let options = GenerationOptions {
         max_new_tokens,
         temperature,

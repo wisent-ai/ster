@@ -122,12 +122,49 @@ fn texts<'a>(
     Ok(texts)
 }
 
+/// One multiple-choice row as its pointers locate it: the question, every
+/// choice in the row's order, and the position of the correct one.
+pub struct Choice<'a> {
+    pub question: &'a str,
+    pub choices: Vec<&'a str>,
+    pub correct: usize,
+}
+
 /// One row's pair, or why the row cannot become one.
 pub(super) fn pair_of(
     row: &Value,
     fields: &ChoiceFields,
     rng: &mut StdRng,
 ) -> Result<ContrastivePair, Rejection> {
+    let Choice {
+        question,
+        choices,
+        correct,
+    } = choice_of(row, fields)?;
+    let positive = choices[correct];
+    let incorrect: Vec<&str> = choices
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != correct)
+        .map(|(_, choice)| *choice)
+        .collect();
+    // `choice_of` required two or more choices, so another one is there.
+    let Some(negative) = incorrect.choose(rng) else {
+        return refused(
+            &causes::CHOICES_FEW,
+            vec![
+                ("count", choices.len().to_string()),
+                ("pointer", fields.choices.clone()),
+                ("choices", excerpt(&format!("{choices:?}"))),
+            ],
+        );
+    };
+    Ok(pair(question, positive, negative))
+}
+
+/// `row`'s question, choices and correct choice, read where `fields` says
+/// each sits, or why the row has none (`ster.pairs.import.rows`).
+pub fn choice_of<'a>(row: &'a Value, fields: &ChoiceFields) -> Result<Choice<'a>, Rejection> {
     let stated = row.pointer(&fields.question);
     let Some(question) = stated
         .and_then(Value::as_str)
@@ -250,25 +287,11 @@ pub(super) fn pair_of(
             }
         }
     };
-    let positive = choices[correct];
-    let incorrect: Vec<&str> = choices
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| *index != correct)
-        .map(|(_, choice)| *choice)
-        .collect();
-    // Two or more choices were required above, so another one is there.
-    let Some(negative) = incorrect.choose(rng) else {
-        return refused(
-            &causes::CHOICES_FEW,
-            vec![
-                ("count", choices.len().to_string()),
-                ("pointer", fields.choices.clone()),
-                ("choices", shown_choices),
-            ],
-        );
-    };
-    Ok(pair(question, positive, negative))
+    Ok(Choice {
+        question,
+        choices,
+        correct,
+    })
 }
 
 mod index;

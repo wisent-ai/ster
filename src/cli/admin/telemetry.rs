@@ -197,7 +197,12 @@ pub(crate) fn finish(started: &Started, error: Option<&anyhow::Error>, status: i
     }
     telemetry.command(&started.command, status, started.at.elapsed());
     match std::env::current_exe() {
-        Ok(program) => telemetry.spawn_flush(&program, &["telemetry", "flush"]),
+        Ok(program) => {
+            // discarded: spawn_flush has already said a sender that could not
+            // start on stderr, and the command ending here shows no state of
+            // its own to show it in.
+            let _ = telemetry.spawn_flush(&program, &["telemetry", "flush"]);
+        }
         Err(error) => eprintln!(
             "ster: {}",
             ster::failures::refuse(

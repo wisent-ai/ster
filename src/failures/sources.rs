@@ -27,8 +27,8 @@ pub static SHARE_UNKEPT: Cause = Cause {
     usage: false,
     exit: None,
     failed: "keeping whether discoveries report their counts",
-    cause: "{why}",
-    observed: "the answer was not kept",
+    cause: "the answer, or the random id kept beside it, could not be made in the configuration directory",
+    observed: "the answer was not kept: {why}",
     remedy: "set XDG_CONFIG_HOME to a directory this user can write, then answer again",
     test: "tests/sources/sources.sh::an_answer_to_sharing_that_cannot_be_kept_is_refused",
 };

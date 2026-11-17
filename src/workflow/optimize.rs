@@ -142,6 +142,8 @@ pub fn optimize(
                 &layer.negative[..split],
                 method,
                 layer_index,
+                // Every candidate is fitted from the pairs; none is drawn.
+                None,
             )?;
             let (accuracy, margin) = evaluate_direction(
                 &layer.positive[split..],
@@ -181,7 +183,13 @@ pub fn optimize(
     let selected = captured
         .get(&layer_index)
         .expect("selected layer is captured");
-    let direction = train_direction(&selected.positive, &selected.negative, method, layer_index)?;
+    let direction = train_direction(
+        &selected.positive,
+        &selected.negative,
+        method,
+        layer_index,
+        None,
+    )?;
     let (accuracy, margin) = evaluate_direction(
         &selected.positive,
         &selected.negative,

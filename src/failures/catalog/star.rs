@@ -1,9 +1,14 @@
-//! How the GitHub star request fails (src/cli/star.rs): the `star-request`
+//! How the GitHub star request fails (src/cli/admin/star.rs): the `star-request`
 //! journey the shared onboarding runtime (`wisent-onboarding-client`) runs
 //! and keeps in `$XDG_STATE_HOME/ster/onboarding.json`, read by `ster star`
 //! and `ster request star/*`, and counted after a run of a model completes.
-//! The runtime answers one of four kinds of `JourneyError`, each a sentence;
-//! the kind decides the cause and the sentence is quoted.
+//! The runtime answers one of four kinds of `JourneyError`; the kind decides
+//! the cause and its sentence is quoted. `Storage` carries the runtime's
+//! typed `StorageError` (wisent-onboarding-client 0.2.0), whose own sentence
+//! names the one reason among many (no state directory, no USER, a file it
+//! cannot read, write, lock or set aside, a state that is no journey, a
+//! poisoned lock) and the fix for it, so the cause defers to that sentence
+//! instead of giving one directory-permission remedy to all of them.
 
 use wisent_errors::{Cause, Code, Operation};
 
@@ -18,9 +23,9 @@ pub static STORAGE: Cause = Cause {
     usage: false,
     exit: None,
     failed: STEP,
-    cause: "the onboarding runtime could not keep the request's journey state: its file or directory cannot be created, opened, locked, read or written by this account, it holds no journey state, or neither XDG_STATE_HOME nor HOME names where it lives",
+    cause: "the onboarding runtime could not keep the request's journey state, for the reason its answer below names",
     observed: "{file} ({state}); its directory {directory} ({directory_state}); XDG_STATE_HOME {xdg}; HOME {home}; USER {user}; the runtime answered: {said}",
-    remedy: "give this account write access to {directory}, or set XDG_STATE_HOME to a directory it may write; `ster star reset` sets aside a file that holds no journey state",
+    remedy: "do what the runtime's answer names for its reason; a file that holds no journey state is set aside by `ster star reset`",
     test: "tests/onboarding/star.sh::a_state_directory_that_cannot_be_made_is_refused",
 };
 

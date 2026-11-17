@@ -7,20 +7,30 @@ use anyhow::Result;
 
 use crate::{
     artifact::{LayerVector, PairSet, SteeringArtifact},
-    representation::{TrainingMethod, evaluate_direction, train_direction},
+    representation::{TrainingMethod, check_seed, evaluate_direction, train_direction},
     runtime::Runtime,
 };
 
 use super::progress;
 
+/// One direction per layer of `layers`, fitted by `method` on both sides of
+/// every pair, or, for `random`, drawn with `seed` and scored on them; a seed
+/// is kept in the artifact's metadata. A seed `method` does not draw with,
+/// and `random` without one, are refused before any pair is read.
 pub fn train(
     runtime: &Runtime,
     pairs: &PairSet,
     layers: &[usize],
     method: TrainingMethod,
+    seed: Option<u64>,
 ) -> Result<SteeringArtifact> {
+    check_seed(method, seed)?;
     let captured = capture_pairs(runtime, pairs, layers)?;
-    artifact_from_captured(runtime, pairs, &captured, method, layers)
+    let mut artifact = artifact_from_captured(runtime, pairs, &captured, method, layers, seed)?;
+    if let Some(seed) = seed {
+        artifact.metadata.insert("seed".to_owned(), seed.to_string());
+    }
+    Ok(artifact)
 }
 
 #[derive(Debug, Clone)]
@@ -77,13 +87,15 @@ fn artifact_from_captured(
     captured: &CapturedPairs,
     method: TrainingMethod,
     layers: &[usize],
+    seed: Option<u64>,
 ) -> Result<SteeringArtifact> {
     let mut vectors = Vec::with_capacity(layers.len());
     for &layer_index in layers {
         let layer = captured
             .get(&layer_index)
             .expect("requested layer is captured");
-        let direction = train_direction(&layer.positive, &layer.negative, method, layer_index)?;
+        let (positive, negative) = (&layer.positive, &layer.negative);
+        let direction = train_direction(positive, negative, method, layer_index, seed)?;
         let (accuracy, margin) =
             evaluate_direction(&layer.positive, &layer.negative, &direction, layer_index)?;
         vectors.push(LayerVector {

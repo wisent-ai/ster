@@ -66,19 +66,26 @@ impl Inference {
 
     /// One buffered completion: the assistant text, trimmed.
     ///
-    /// The request carries exactly `model`, `messages`, `max_tokens` and
-    /// `temperature`, an OpenAI chat-completions request every inference
-    /// alternative takes; the bounds on `max_tokens` and `temperature` are the
-    /// answering alternative's, and its refusal reaches the reader in Stado's
-    /// words. `top_p` and the seed do not travel: no alternative takes them.
-    pub fn complete(&self, prompt: &str, max_tokens: usize, temperature: f64) -> Result<String> {
-        let body = json!({
+    /// The request carries `model`, `messages` and, when the caller states
+    /// them, `max_tokens` and `temperature`, an OpenAI chat-completions
+    /// request every inference alternative takes; both fields are optional
+    /// there (<https://platform.openai.com/docs/api-reference/chat/create>),
+    /// so one left out is the answering alternative's own. The bounds on
+    /// them are the answering alternative's, and its refusal reaches the
+    /// reader in Stado's words. `top_p` and the seed do not travel: no
+    /// alternative takes them.
+    pub fn complete(&self, prompt: &str, max_tokens: Option<usize>, temperature: Option<f64>) -> Result<String> {
+        let mut body = json!({
             "model": self.model,
             "messages": [{ "role": "user", "content": prompt }],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        })
-        .to_string();
+        });
+        if let Some(max_tokens) = max_tokens {
+            body["max_tokens"] = json!(max_tokens);
+        }
+        if let Some(temperature) = temperature {
+            body["temperature"] = json!(temperature);
+        }
+        let body = body.to_string();
         let printed = self.call(&body)?;
         if let Some(provider) = printed["resolution"]["provider"].as_str() {
             if let Ok(mut answered) = self.provider.lock() {

@@ -55,3 +55,38 @@ Part of the [changelog](../../../CHANGELOG.md).
   refused is refused with its first line's cause and fix and the count per
   cause, where it was `rows-rejected` quoting the first sentence (removed).
   `tests/decide/import-rows.sh` provokes each cause.
+- `ster decide` and `ster decisions benchmark` take `--vector <ARTIFACT>
+  --strength <S>`, repeated, with `ster generate`'s meaning and checks: the
+  steering plan is added at every position of the decision pass (the shared
+  state and every question's rows, `Runtime::next_token_logits_after`'s new
+  `steering` argument). A steered response names its artifacts and strengths
+  under `steering`. `decisions benchmark` now lists every labelled question
+  under `rows` (example, question, options, gold, and a `base` read of the
+  predicted option, whether it is correct and every option's probability);
+  with a vector it reads each question steered as well, adds a `steered`
+  read to every row and a `steered` block with its metrics, per-type scores,
+  and the questions it turned right (`improved`) and wrong (`worsened`).
+  `--vector` without its `--strength` is `ster.runtime.vectors`'s
+  `strengths-unpaired`, which `ster.decide` and `ster.decisions.benchmark`
+  use with `ster.runtime.steer`. `tests/decide/steering.sh` provokes it and
+  checks both reads.
+- `ster decisions fetch` reads multiple-choice datasets whose options differ
+  per row (ARC, MMLU, TruthfulQA MC1, HellaSwag) with `--question`,
+  `--choices`, `--answer`, `--answer-form` and `--labels`, read and checked
+  as `ster pairs import --benchmark choices` reads them (the shared
+  `ster.pairs.import.fields` and `ster.pairs.import.rows`); `--text-field`
+  and `--label-field` are now needed only without them. A refused row is
+  listed under `report.refused` with its cause, `label_counts` counts the
+  correct choice's position, and a split with no row from `--offset` is
+  `ster.decisions.fetch.rows-none` (in `tests/errors/untested.json`: only the
+  server produces it). `tests/decide/remote/fetch.sh` provokes the row-flag
+  refusals before the server is asked.
+- `ster decisions synthesize` takes `--temperature` and `--max-tokens` only
+  when the caller states them: the chat request then carries no
+  `temperature` or `max_tokens`, the answering alternative's own apply (both
+  fields are optional in the chat completions request), and the report
+  records null for one left out. Written and read; nothing was built or run.
+- `ster decisions fetch` takes `--count` only to read fewer rows: without it
+  every row of the split from `--offset` is read, page by page, until the
+  datasets server answers a short page; the report's `requested` is null, and
+  `count-none`'s remedy says to leave the flag out.

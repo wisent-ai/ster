@@ -102,10 +102,17 @@ impl Runtime {
     /// An empty prefix is allowed and means every suffix is a whole prompt;
     /// an empty suffix is not, since there would be no position of its own
     /// to read.
+    ///
+    /// `steering`, when given, is added to the residual stream at every
+    /// position of the prefix and of each suffix, exactly as sampling adds it
+    /// to the prompt and to every token it draws (`ster generate --vector`),
+    /// so a steered decision reads the distribution a steered answer would
+    /// start from. `None` is the unsteered read.
     pub fn next_token_logits_after(
         &self,
         prefix: &[u32],
         suffixes: &[&[u32]],
+        steering: Option<&SteeringPlan>,
     ) -> Result<Vec<Vec<f32>>> {
         // Every caller encodes each suffix through a path that refuses a
         // text the tokenizer turns into no tokens.
@@ -116,13 +123,13 @@ impl Runtime {
         let model = match &self.model {
             Network::Causal(model) => model,
             Network::EncoderDecoder(model) => {
-                return self.next_token_logits_encoder_decoder(model, prefix, suffixes);
+                return self.next_token_logits_encoder_decoder(model, prefix, suffixes, steering);
             }
         };
         let mut shared = self.cache(model, true)?;
         if !prefix.is_empty() {
             let input = Tensor::new(prefix, &self.device)?.unsqueeze(0)?;
-            model.forward(&input, 0, &mut shared, None, &[])?;
+            model.forward(&input, 0, &mut shared, steering, &[])?;
         }
         suffixes
             .iter()
@@ -130,7 +137,7 @@ impl Runtime {
                 let mut cache = shared.clone();
                 let input = Tensor::new(*suffix, &self.device)?.unsqueeze(0)?;
                 let logits = model
-                    .forward(&input, prefix.len(), &mut cache, None, &[])?
+                    .forward(&input, prefix.len(), &mut cache, steering, &[])?
                     .into_logits(Mode::DECODE.readout)?;
                 Ok(logits.squeeze(0)?.to_vec1::<f32>()?)
             })

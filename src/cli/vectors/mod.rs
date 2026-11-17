@@ -23,7 +23,7 @@ mod project;
 mod strength;
 
 pub(super) use extract::{ExtractArgs, extract};
-pub(super) use generate::{GenerateArgs, generate};
+pub(super) use generate::{GenerateArgs, SteeringArgs, generate};
 pub(super) use parity::{ParityArgs, parity};
 
 use super::{ModelArgs, resolve_pairs};
@@ -87,10 +87,16 @@ pub(super) struct TrainArgs {
     /// Comma-separated layers, half-open ranges such as 8..16, or all.
     #[arg(long, default_value = "all")]
     layers: String,
-    /// Direction training method: caa, pca, or logistic. Parsed by clap,
-    /// so a typo is a usage error before a checkpoint is loaded.
+    /// Direction training method: caa, pca, logistic, or random (a seeded
+    /// unit vector per layer, the control a fitted direction is measured
+    /// against; it needs --seed). Parsed by clap, so a typo is a usage
+    /// error before a checkpoint is loaded.
     #[arg(long, default_value = "caa", value_parser = TrainingMethod::parse)]
     method: TrainingMethod,
+    /// The seed --method random draws its directions with; refused with any
+    /// other method, which fits its direction from the pairs.
+    #[arg(long)]
+    seed: Option<u64>,
     /// auto reads every pair through the model's own chat template when
     /// it publishes one, off reads it as raw text. A direction is fitted
     /// in whatever space the pairs were read in and added in whatever
@@ -101,7 +107,7 @@ pub(super) struct TrainArgs {
     /// Dtype the base weights are mapped at: f32, f16, or bf16. A
     /// direction is fitted in whatever space the prompts were read in, so
     /// two artifacts trained at different precisions are not
-    /// interchangeable. bf16 needs --device metal.
+    /// interchangeable. bf16 needs --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
 }
@@ -123,7 +129,7 @@ pub(super) struct OptimizeArgs {
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
     chat_template: ChatChoice,
     /// Dtype the base weights are mapped at: f32, f16, or bf16. bf16 needs
-    /// --device metal.
+    /// --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
     /// Fraction of the pairs held out to rank candidates on, above zero and
@@ -185,9 +191,12 @@ pub(super) fn train(args: TrainArgs) -> Result<()> {
         output,
         layers,
         method,
+        seed,
         chat_template,
         precision,
     } = args;
+    // The seed reads no model and no pair, so it is refused first.
+    ster::representation::check_seed(method, seed)?;
     let pairs = resolve_pairs(pairs)?;
     // The pair set is read before the weights, so a set that cannot be read
     // is refused before the checkpoint is paid for.
@@ -195,7 +204,7 @@ pub(super) fn train(args: TrainArgs) -> Result<()> {
     let mut runtime = model.load_at(precision)?;
     let chat = runtime.set_chat_template(chat_template)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
-    let artifact = workflow::train(&runtime, &pair_set, &layers, method)?;
+    let artifact = workflow::train(&runtime, &pair_set, &layers, method, seed)?;
     artifact.save(&output)?;
     let mut summary = workflow::artifact_summary(&artifact);
     chat.annotate(&mut summary)?;
@@ -247,17 +256,17 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
     // finally be checked. Same helper the tune half uses.
     tune::warn_on_provenance(&vector, "direction", &runtime);
     let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
-    let mut report = ster::json::value(report);
+    let mut report = ster::json::value(&report);
     if let Some(options) = strength {
         let selection = tune::strengths(&runtime, &pair_set, &artifact, &options)?;
-        // `json::value(report)` of `#[derive(Serialize)] pub struct
+        // `json::value(&report)` of `#[derive(Serialize)] pub struct
         // EvaluationReport`, a struct with named fields, is an object.
         report
             .as_object_mut()
             .expect("an evaluation report is a struct with named fields")
             .insert(
                 "strength".to_owned(),
-                ster::json::value(selection),
+                ster::json::value(&selection),
             );
     }
     chat.annotate(&mut report)?;

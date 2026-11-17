@@ -30,7 +30,7 @@ pub(in super::super) struct ExtractArgs {
     chat_template: ChatChoice,
     /// Dtype the base weights are mapped at: f32, f16, or bf16. The
     /// exported activations are F32 either way; this is the width they
-    /// were computed in. bf16 needs --device metal.
+    /// were computed in. bf16 needs --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
 }

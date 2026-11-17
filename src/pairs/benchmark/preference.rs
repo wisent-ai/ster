@@ -1,5 +1,5 @@
 //! `--benchmark preference` (IMP-STER-06 DPO, 01 Hugging Face preference
-//! datasets, 19 Preferences): rows of `prompt`, `chosen` and `rejected`, the
+//! datasets): rows of `prompt`, `chosen` and `rejected`, the
 //! shape TRL's DPO trainer and the Hugging Face preference datasets publish,
 //! as JSON Lines or a JSON list. The chosen answer is the positive side and
 //! the rejected one the negative, both asked the row's prompt, as every
