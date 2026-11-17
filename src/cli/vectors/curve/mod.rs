@@ -65,7 +65,7 @@ pub(in crate::cli) fn curve(args: CurveArgs) -> Result<()> {
     let chat = runtime.set_chat_template(chat_template)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
     let report = workflow::curve(&runtime, &pair_set, &layers, method, holdout, &sizes)?;
-    let mut report = ster::json::value(report);
+    let mut report = ster::json::value(&report);
     chat.annotate(&mut report)?;
     super::super::answer(&report)
 }

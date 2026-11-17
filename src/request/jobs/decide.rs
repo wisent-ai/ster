@@ -41,7 +41,7 @@ pub(in crate::request) fn decide_job(request: DecideRequest) -> Result<Value> {
         options,
         calibration.as_ref().map(|(path, _)| *path),
     )?;
-    Ok(ster::json::value(response))
+    Ok(ster::json::value(&response))
 }
 
 pub(in crate::request) fn calibrate_job(request: CalibrateRequest) -> Result<Value> {
@@ -55,5 +55,5 @@ pub(in crate::request) fn calibrate_job(request: CalibrateRequest) -> Result<Val
     };
     let calibration = decide::calibrate(&runtime, &examples, options, request.ece_bins)?;
     calibration.save(Path::new(&request.output))?;
-    Ok(ster::json::value(calibration))
+    Ok(ster::json::value(&calibration))
 }

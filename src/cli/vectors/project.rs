@@ -72,8 +72,9 @@ pub(in crate::cli) fn project(args: ProjectArgs) -> Result<()> {
         strength,
         components,
     };
-    let mut report =
-        ster::json::value(workflow::project(&runtime, &pair_set, &artifact, &options)?);
+    let mut report = ster::json::value(&workflow::project(
+        &runtime, &pair_set, &artifact, &options,
+    )?);
     chat.annotate(&mut report)?;
     super::super::answer(&report)
 }
@@ -156,7 +157,7 @@ pub(in crate::cli) fn score(args: ScoreArgs) -> Result<()> {
     let mut runtime = model.load_at(precision)?;
     let chat = runtime.set_chat_template(chat_template)?;
     tune::warn_on_provenance(&vector, "direction", &runtime);
-    let mut report = ster::json::value(workflow::score(&runtime, &artifact, &text, layer)?);
+    let mut report = ster::json::value(&workflow::score(&runtime, &artifact, &text, layer)?);
     chat.annotate(&mut report)?;
     super::super::answer(&report)
 }

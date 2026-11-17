@@ -2,6 +2,14 @@
 
 Part of the [changelog](../../../CHANGELOG.md).
 
+- The `ster` binary compiles again. The pair-set and workspace jobs import
+  `JobOutcome` from `request::job`, where 287c0d172 moved it; `ster::workflow`
+  exports `check_counts`, which `ster vector compare` and
+  `ster request vector/compare` call before any artifact is read; every
+  report handed to `ster::json::value` is passed by reference, as 5d8538542
+  declared it; and the end of a reporting command drops the failure
+  `spawn_flush` hands back, which it has already said on stderr. Stado's
+  release of 6e317f6 refused on these errors.
 - No cause of the failure catalogue holds a brace its renderer would refuse:
   wisent-errors past the revision Ster pins refuses a template whose `{`
   opens no placeholder name, which literal JSON and a `${STADO_BIN_DIR:-…}`

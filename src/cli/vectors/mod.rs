@@ -247,18 +247,15 @@ pub(super) fn evaluate(args: EvaluateArgs) -> Result<()> {
     // finally be checked. Same helper the tune half uses.
     tune::warn_on_provenance(&vector, "direction", &runtime);
     let report = workflow::evaluate(&runtime, &pair_set, &artifact)?;
-    let mut report = ster::json::value(report);
+    let mut report = ster::json::value(&report);
     if let Some(options) = strength {
         let selection = tune::strengths(&runtime, &pair_set, &artifact, &options)?;
-        // `json::value(report)` of `#[derive(Serialize)] pub struct
+        // `json::value(&report)` of `#[derive(Serialize)] pub struct
         // EvaluationReport`, a struct with named fields, is an object.
         report
             .as_object_mut()
             .expect("an evaluation report is a struct with named fields")
-            .insert(
-                "strength".to_owned(),
-                ster::json::value(selection),
-            );
+            .insert("strength".to_owned(), ster::json::value(&selection));
     }
     chat.annotate(&mut report)?;
     super::answer(&report)?;

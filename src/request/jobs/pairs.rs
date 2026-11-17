@@ -12,7 +12,7 @@ use ster::{
     pairs::{self, InspectOptions, SynthesisOptions, quality::dedupe::DedupeOptions},
 };
 
-use super::super::JobOutcome;
+use super::super::job::JobOutcome;
 use super::super::requests::{
     PairsImportRequest, PairsInspectRequest, PairsMergeRequest, PairsSaveRequest,
     PairsSynthesizeRequest, WorkspaceImportPairsRequest, WorkspacePairSetRequest,
@@ -46,19 +46,19 @@ pub(in crate::request) fn workspace_import_pairs_job(
 
 /// The same answer as `ster workspace show`.
 pub(in crate::request) fn workspace_show_job(_request: WorkspaceShowRequest) -> Result<Value> {
-    Ok(ster::json::value(ster::workspace::summary()?))
+    Ok(ster::json::value(&ster::workspace::summary()?))
 }
 
 /// The same operation as `ster workspace select`.
 pub(in crate::request) fn workspace_select_job(request: WorkspacePairSetRequest) -> Result<Value> {
-    Ok(ster::json::value(ster::workspace::select_pair_set(
+    Ok(ster::json::value(&ster::workspace::select_pair_set(
         &request.id,
     )?))
 }
 
 /// The same operation as `ster workspace remove`.
 pub(in crate::request) fn workspace_remove_job(request: WorkspacePairSetRequest) -> Result<Value> {
-    Ok(ster::json::value(ster::workspace::remove_pair_set(
+    Ok(ster::json::value(&ster::workspace::remove_pair_set(
         &request.id,
     )?))
 }

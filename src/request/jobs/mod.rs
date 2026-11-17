@@ -89,7 +89,7 @@ pub(in crate::request) fn evaluate_job(request: EvaluateRequest) -> Result<Value
         report
             .as_object_mut()
             .expect("an evaluation report is a struct with named fields")
-            .insert("strength".to_owned(), ster::json::value(selection));
+            .insert("strength".to_owned(), ster::json::value(&selection));
     }
     chat.annotate(&mut report)?;
     Ok(report)
@@ -155,7 +155,7 @@ pub(in crate::request) fn extract_job(request: ExtractRequest) -> Result<Value> 
 
 pub(in crate::request) fn parity_job(request: ParityRequest) -> Result<Value> {
     let runtime = request.model.load_runtime_at(request.precision)?;
-    Ok(ster::json::value(workflow::parity(
+    Ok(ster::json::value(&workflow::parity(
         &runtime,
         Path::new(&request.input),
     )?))
@@ -179,7 +179,7 @@ pub(in crate::request) fn compare_job(request: CompareRequest) -> Result<Value> 
         layers: request.layers,
         clusters: request.clusters,
     };
-    Ok(ster::json::value(workflow::compare(&artifacts, &options)?))
+    Ok(ster::json::value(&workflow::compare(&artifacts, &options)?))
 }
 
 /// Mirrors `ster vector project`: the same reads, the same projection, and
@@ -195,8 +195,9 @@ pub(in crate::request) fn project_job(request: ProjectRequest) -> Result<Value> 
         strength: request.strength,
         components: request.components,
     };
-    let mut report =
-        ster::json::value(workflow::project(&runtime, &pair_set, &artifact, &options)?);
+    let mut report = ster::json::value(&workflow::project(
+        &runtime, &pair_set, &artifact, &options,
+    )?);
     chat.annotate(&mut report)?;
     Ok(report)
 }
@@ -209,7 +210,7 @@ pub(in crate::request) fn score_job(request: ScoreRequest) -> Result<Value> {
     let mut runtime = request.model.load_runtime_at(request.precision)?;
     let chat = runtime.set_chat_template(request.chat_template)?;
     tune_lib::warn_on_provenance(Path::new(&request.vector), "direction", &runtime);
-    let mut report = ster::json::value(workflow::score(
+    let mut report = ster::json::value(&workflow::score(
         &runtime,
         &artifact,
         &request.text,
@@ -235,7 +236,7 @@ pub(in crate::request) fn curve_job(request: CurveRequest) -> Result<Value> {
         request.holdout,
         &request.sizes,
     )?;
-    let mut report = ster::json::value(report);
+    let mut report = ster::json::value(&report);
     chat.annotate(&mut report)?;
     Ok(report)
 }
@@ -250,5 +251,5 @@ pub(in crate::request) fn ablate_job(request: AblateRequest) -> Result<Value> {
         request.strength,
         Path::new(&request.output),
     )?;
-    Ok(ster::json::value(report))
+    Ok(ster::json::value(&report))
 }
