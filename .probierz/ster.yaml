@@ -24,6 +24,18 @@ repositories:
           - Sources/SterDesktop/App/Import/**
           - Package.swift
         journeys: [desktop-first-use]
+  - repository: wisent-desktop-update
+    mappings:
+      - paths: ["Sources/**", Package.swift, Package.resolved]
+        journeys: [desktop-first-use]
+  - repository: wisent-errors
+    mappings:
+      - paths: ["catalogue/**", "codegen/**", "schema/**", "rust/**", "swift/**", "js/**", Cargo.toml, Package.swift, package.json]
+        journeys: [desktop-first-use, onboarding-first-use]
+  - repository: wisent-formats
+    mappings:
+      - paths: ["rust/**", "swift/**", "js/**", "wasm/**", "capi/**", Cargo.toml, Package.swift, package.json]
+        journeys: [desktop-first-use, onboarding-first-use]
 surfaces:
   tui:
     spec: journeys/
@@ -39,8 +51,7 @@ surfaces:
 journeys:
   desktop-first-use:
     owner: Ster maintainers
-    timeoutMs: 240000
-    description: With its onboarding cleared from the app's defaults and restored afterwards, and a workspace of its own, Ster Desktop's three-screen walkthrough refuses a malformed pair set chosen in the open panel without finishing, and finishes only when a real pair set is imported and made active; reopened, the walkthrough is gone.
+    description: With its onboarding cleared from the app's defaults and restored afterwards, and a workspace of its own, Ster Desktop's three-screen walkthrough refuses a malformed pair set chosen in the open panel without finishing, and finishes only when a real pair set is imported and made active.
     value: A researcher brings their own contrastive data into the desktop app, validated before anything is written.
     journeyId: first-use
     journeyVersion: 2026-09-05.1
@@ -53,7 +64,6 @@ journeys:
       redactionRequired: false
   onboarding-first-use:
     owner: Ster maintainers
-    timeoutMs: 120000
     description: With state and a workspace of its own, the walkthrough shows its three screens and names `ster onboarding --import-pairs` without completing; a malformed pair set is rejected and completes nothing; importing a real set copies it into the workspace with its pair count and makes it active, which alone completes first use; the same set is unchanged and a different set under the same name is a conflict that keeps the first.
     value: A researcher starts Ster from contrastive data they already own, without loading a model, and existing work is never replaced.
     journeyId: first-use

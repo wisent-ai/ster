@@ -259,11 +259,72 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/pairs/imports/import-rows.sh::a_preference_row_without_a_side_is_skipped`
 
+## `ster.pairs.import.fields`
+
+check the JSON pointers --question, --choices, --answer and --labels and the --answer-form that locate the parts of a multiple-choice row, before any row is read
+
+Started through: run only by the functionalities that use it. Uses: none. Failure catalogue `ster.pairs.import.fields`: 5 declared cause(s) of its own.
+
+<a id="ster-pairs-import-fields-choice-field-missing"></a>
+
+### `ster.pairs.import.fields.choice-field-missing`
+
+- **What failed:** reading the row flags of --benchmark {benchmark}
+- **Cause:** multiple-choice rows need {flag}: --question, --choices, --answer and --answer-form name where each part of a row sits
+- **Observed state shown:** given: {given}
+- **Fix:** add {flag}: a JSON pointer to that part of a row, or for --answer-form the form the answer takes (index, label or text)
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/pairs/imports/import.sh::a_missing_row_flag_is_refused`
+
+<a id="ster-pairs-import-fields-answer-form-unknown"></a>
+
+### `ster.pairs.import.fields.answer-form-unknown`
+
+- **What failed:** reading the row flags of --benchmark {benchmark}
+- **Cause:** unknown answer form {form}: choose index, label or text
+- **Observed state shown:** --answer-form {form}
+- **Fix:** give --answer-form index (a position counted from 0), label (one of --labels) or text (the choice itself)
+- **Code:** `not_found`, exit 2; retrying unchanged will not help
+- **Test:** `tests/pairs/imports/import.sh::an_unknown_answer_form_is_refused`
+
+<a id="ster-pairs-import-fields-pointer-invalid"></a>
+
+### `ster.pairs.import.fields.pointer-invalid`
+
+- **What failed:** reading the row flags of --benchmark {benchmark}
+- **Cause:** {flag} {pointer} is not a JSON pointer, which starts with / (for example /question or /choices/text)
+- **Observed state shown:** {flag} {pointer}
+- **Fix:** write {flag} as a JSON pointer (RFC 6901) from the row's root, e.g. /question
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/pairs/imports/import.sh::a_pointer_without_its_slash_is_refused`
+
+<a id="ster-pairs-import-fields-labels-missing"></a>
+
+### `ster.pairs.import.fields.labels-missing`
+
+- **What failed:** reading the row flags of --benchmark {benchmark}
+- **Cause:** --answer-form label needs --labels, the list of labels the answer names
+- **Observed state shown:** --answer-form label without --labels; the answer is read at {answer} and the choices at {choices}
+- **Fix:** add --labels with the pointer to the row's labels, aligned with its choices, e.g. /choices/label
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/pairs/imports/import.sh::label_form_without_labels_is_refused`
+
+<a id="ster-pairs-import-fields-labels-not-applicable"></a>
+
+### `ster.pairs.import.fields.labels-not-applicable`
+
+- **What failed:** reading the row flags of --benchmark {benchmark}
+- **Cause:** --labels applies only to --answer-form label
+- **Observed state shown:** --answer-form {form} with --labels {labels}
+- **Fix:** leave --labels out, or read the answer as a label with --answer-form label
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/pairs/imports/import.sh::labels_with_another_answer_form_are_refused`
+
 ## `ster.pairs.import`
 
 write a pair set from a TruthfulQA, Do-Not-Answer, LiveCodeBench or BiPO export, or from multiple-choice rows whose parts the caller locates; a row that cannot become a pair is reported under its cause, never repaired
 
-Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.pairs.import.rows`, `ster.pairs.export`, `ster.pairs.file`. Failure catalogue `ster.pairs.import`: 13 declared cause(s) of its own.
+Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.pairs.import.fields`, `ster.pairs.import.rows`, `ster.pairs.export`, `ster.pairs.file`. Failure catalogue `ster.pairs.import`: 8 declared cause(s) of its own.
 
 <a id="ster-pairs-import-benchmark-unknown"></a>
 
@@ -297,61 +358,6 @@ Started through: `ster pairs import`, `ster request pairs/import`. Uses: `ster.p
 - **Fix:** name each part's JSON pointer and the answer's form, e.g. --question /question --choices /choices/text --answer /answerKey --answer-form label --labels /choices/label
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/pairs/imports/import.sh::choices_without_row_flags_are_refused`
-
-<a id="ster-pairs-import-choice-field-missing"></a>
-
-### `ster.pairs.import.choice-field-missing`
-
-- **What failed:** reading the row flags of --benchmark {benchmark}
-- **Cause:** multiple-choice rows need {flag}: --question, --choices, --answer and --answer-form name where each part of a row sits
-- **Observed state shown:** given: {given}
-- **Fix:** add {flag}: a JSON pointer to that part of a row, or for --answer-form the form the answer takes (index, label or text)
-- **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/imports/import.sh::a_missing_row_flag_is_refused`
-
-<a id="ster-pairs-import-answer-form-unknown"></a>
-
-### `ster.pairs.import.answer-form-unknown`
-
-- **What failed:** reading the row flags of --benchmark {benchmark}
-- **Cause:** unknown answer form {form}: choose index, label or text
-- **Observed state shown:** --answer-form {form}
-- **Fix:** give --answer-form index (a position counted from 0), label (one of --labels) or text (the choice itself)
-- **Code:** `not_found`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/imports/import.sh::an_unknown_answer_form_is_refused`
-
-<a id="ster-pairs-import-pointer-invalid"></a>
-
-### `ster.pairs.import.pointer-invalid`
-
-- **What failed:** reading the row flags of --benchmark {benchmark}
-- **Cause:** {flag} {pointer} is not a JSON pointer, which starts with / (for example /question or /choices/text)
-- **Observed state shown:** {flag} {pointer}
-- **Fix:** write {flag} as a JSON pointer (RFC 6901) from the row's root, e.g. /question
-- **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/imports/import.sh::a_pointer_without_its_slash_is_refused`
-
-<a id="ster-pairs-import-labels-missing"></a>
-
-### `ster.pairs.import.labels-missing`
-
-- **What failed:** reading the row flags of --benchmark {benchmark}
-- **Cause:** --answer-form label needs --labels, the list of labels the answer names
-- **Observed state shown:** --answer-form label without --labels; the answer is read at {answer} and the choices at {choices}
-- **Fix:** add --labels with the pointer to the row's labels, aligned with its choices, e.g. /choices/label
-- **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/imports/import.sh::label_form_without_labels_is_refused`
-
-<a id="ster-pairs-import-labels-not-applicable"></a>
-
-### `ster.pairs.import.labels-not-applicable`
-
-- **What failed:** reading the row flags of --benchmark {benchmark}
-- **Cause:** --labels applies only to --answer-form label
-- **Observed state shown:** --answer-form {form} with --labels {labels}
-- **Fix:** leave --labels out, or read the answer as a label with --answer-form label
-- **Code:** `config`, exit 2; retrying unchanged will not help
-- **Test:** `tests/pairs/imports/import.sh::labels_with_another_answer_form_are_refused`
 
 <a id="ster-pairs-import-examples-missing"></a>
 

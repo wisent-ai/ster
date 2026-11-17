@@ -169,11 +169,30 @@ pub static NO_PAIRS: Cause = Cause {
     test: "tests/pairs/imports/import.sh::an_export_without_a_usable_row_is_refused",
 };
 
+/// Where a multiple-choice row holds its parts: the row flags `ster pairs
+/// import --benchmark choices` and `ster decisions fetch --choices` read,
+/// checked before any row is.
+pub static FIELDS: Operation = Operation {
+    id: "ster.pairs.import.fields",
+    entries: &[],
+    uses: &[],
+    summary: "check the JSON pointers --question, --choices, --answer and --labels and the --answer-form that locate the parts of a multiple-choice row, before any row is read",
+    docs: DOCS,
+    warnings: &[],
+    causes: &[
+        &CHOICE_FIELD_MISSING,
+        &ANSWER_FORM_UNKNOWN,
+        &POINTER_INVALID,
+        &LABELS_MISSING,
+        &LABELS_NOT_APPLICABLE,
+    ],
+};
+
 /// A pair set read from a benchmark export.
 pub static IMPORT: Operation = Operation {
     id: "ster.pairs.import",
     entries: &["ster pairs import", "ster request pairs/import"],
-    uses: &[&ROWS, &EXPORT, &FILE],
+    uses: &[&FIELDS, &ROWS, &EXPORT, &FILE],
     summary: "write a pair set from a TruthfulQA, Do-Not-Answer, LiveCodeBench or BiPO export, or from multiple-choice rows whose parts the caller locates; a row that cannot become a pair is reported under its cause, never repaired",
     docs: DOCS,
     warnings: &[],
@@ -181,11 +200,6 @@ pub static IMPORT: Operation = Operation {
         &BENCHMARK_UNKNOWN,
         &CHOICE_FIELDS_NOT_APPLICABLE,
         &CHOICE_FIELDS_MISSING,
-        &CHOICE_FIELD_MISSING,
-        &ANSWER_FORM_UNKNOWN,
-        &POINTER_INVALID,
-        &LABELS_MISSING,
-        &LABELS_NOT_APPLICABLE,
         &EXAMPLES_MISSING,
         &EXAMPLES_NOT_APPLICABLE,
         &COUNT_ZERO,

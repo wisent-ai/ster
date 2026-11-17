@@ -43,12 +43,12 @@ pub use answer::{Answer, Explanation, Order, QuestionLogits, Response, Usage};
 pub use calibration::{Calibration, Labelled, Metrics, RAW_TEMPERATURE};
 pub use examples::{Example, ExampleSet};
 pub use pipeline::{
-    Benchmark, BenchmarkOptions, FetchOptions, FetchReport, ImportReport, Latency, Schema,
-    SynthesizeOptions, SynthesizeReport, TypeMetrics, benchmark, check_holdout, check_question,
-    fetch, import_jsonl, split, synthesize,
+    Benchmark, BenchmarkOptions, FetchColumns, FetchOptions, FetchReport, ImportReport, Latency,
+    QuestionRow, Reading, Schema, SteeredReport, SynthesizeOptions, SynthesizeReport, TypeMetrics,
+    benchmark, check_holdout, check_question, fetch, import_jsonl, split, synthesize,
 };
 pub use request::{MAX_OPTIONS, NoulCriteria, Question, ROLE as REQUEST_ROLE, Request};
-pub use rows::{Row, render_rows};
+pub use rows::{Row, Steered, Steering, render_rows};
 
 use rows::question_logits;
 
@@ -63,15 +63,22 @@ pub struct Options {
     pub explain: bool,
 }
 
-/// Answer every question in `request`.
+/// Answer every question in `request`, with `steering` added to the model's
+/// residual stream when given.
 pub fn decide(
     runtime: &Runtime,
     request: &Request,
     options: Options,
     calibration: Option<&str>,
+    steering: Option<&Steering>,
 ) -> Result<Response> {
     request.validate()?;
-    let (logits, usage) = question_logits(runtime, request, options)?;
+    let plan = steering.map(|steering| &steering.plan);
+    let steered = match steering {
+        Some(steering) => steering.vectors.clone(),
+        None => Vec::new(),
+    };
+    let (logits, usage) = question_logits(runtime, request, options, plan)?;
     let explain = options.explain.then(|| {
         request
             .questions
@@ -104,6 +111,7 @@ pub fn decide(
         permutations: options.permutations,
         answers,
         explain,
+        steering: steered,
         usage,
     })
 }
@@ -210,7 +218,8 @@ fn labelled_logits(
         model: None,
         questions: example.request.questions.clone(),
     };
-    let (logits, _) = question_logits(runtime, &request, options)?;
+    // A temperature is fitted on the model as it is: nothing is steered.
+    let (logits, _) = question_logits(runtime, &request, options, None)?;
     Ok(request
         .questions
         .iter()

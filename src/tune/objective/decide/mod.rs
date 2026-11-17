@@ -35,17 +35,12 @@ mod rows;
 
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{ParamsAdamW, VarMap};
+use candle_nn::VarMap;
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 pub use options::{DecideOptions, DecideReport};
 
-use super::super::{
-    batch,
-    checkpoint::{Position, optimizer::AdamW},
-    preflight::Trainable,
-    schedule,
-};
+use super::super::{batch, checkpoint::Position, preflight::Trainable, run};
 use crate::{decide::ExampleSet, runtime::Runtime, workflow};
 use options::{Running, SUBJECT};
 use rows::{Rows, decision_loss, training_rows};
@@ -75,18 +70,13 @@ pub fn decide(
     } = training_rows(runtime, examples, options.permutations, limit)?;
 
     let fingerprint = options.fingerprint();
-    let mut optimizer = AdamW::over(
+    let (mut optimizer, resumed, mut running) = run::start::<Running>(
         varmap,
-        ParamsAdamW {
-            lr: options.learning_rate,
-            ..Default::default()
-        },
+        options.learning_rate,
+        &options.durable,
+        &fingerprint,
+        SUBJECT,
     )?;
-    let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
-    let mut running: Running = match &resumed {
-        Some(position) => position.running(SUBJECT)?,
-        None => Running::default(),
-    };
     let mut checkpoints = Vec::new();
 
     let lengths: Vec<usize> = rows.iter().map(|row| row.ids.len()).collect();
@@ -95,7 +85,7 @@ pub fn decide(
         batch::steps_per_epoch(rows.len(), options.batch, options.accumulation) * options.epochs;
     let mut order: Vec<usize> = rows.iter().enumerate().map(|(slot, _)| slot).collect();
 
-    for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
+    for epoch in 0..options.epochs {
         // Reseeded per epoch so a run is reproducible from `seed` alone; a
         // resumed run replays the shuffles of the epochs it skips.
         let mut rng = StdRng::seed_from_u64(options.seed + epoch as u64);
@@ -112,12 +102,12 @@ pub fn decide(
         };
 
         for plan in remaining {
-            optimizer.set_learning_rate(schedule(
+            run::schedule_step(
+                &mut optimizer,
                 options.learning_rate,
-                optimizer.rates.len(),
                 total_steps,
                 options.warmup_steps,
-            ));
+            );
             let mut summed: Option<Tensor> = None;
             let mut losses: Vec<f64> = Vec::with_capacity(plan.units);
             for forward in &plan.forwards {
@@ -160,16 +150,15 @@ pub fn decide(
                 options.epochs,
                 rows.len()
             ));
-            if options.durable.due(step) {
-                let position = Position {
-                    pass: epoch,
-                    step,
-                    within: running.epoch_units.len(),
-                    running: crate::json::value(&running),
-                };
-                options.durable.save(&optimizer, &fingerprint, &position)?;
-                checkpoints.push(step);
-            }
+            run::keep(
+                &options.durable,
+                &optimizer,
+                &fingerprint,
+                epoch,
+                running.epoch_units.len(),
+                &running,
+                &mut checkpoints,
+            )?;
         }
 
         if running.epoch_units.is_empty() {

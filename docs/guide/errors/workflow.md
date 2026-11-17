@@ -117,20 +117,42 @@ Started through: run only by the functionalities that use it. Uses: `ster.file`.
 
 ## `ster.vector.direction`
 
-fit a unit direction on one layer's reads of the pairs' positive and negative sides by caa, pca or logistic, and score a direction by how it orders them
+fit a unit direction on one layer's reads of the pairs' positive and negative sides by caa, pca or logistic, or draw a seeded random one at their width, and score a direction by how it orders them
 
-Started through: run only by the functionalities that use it. Uses: none. Failure catalogue `ster.vector.direction`: 7 declared cause(s) of its own.
+Started through: run only by the functionalities that use it. Uses: none. Failure catalogue `ster.vector.direction`: 9 declared cause(s) of its own.
 
 <a id="ster-vector-direction-method-unknown"></a>
 
 ### `ster.vector.direction.method-unknown`
 
 - **What failed:** choosing the direction estimator --method {value}
-- **Cause:** unknown training method "{value}": Ster fits a direction by contrastive activation addition (caa), the leading principal direction (pca) or a logistic probe (logistic), and by nothing else
-- **Observed state shown:** --method (a request's method) "{value}"; expected caa, pca, or logistic
-- **Fix:** give --method caa, pca or logistic
+- **Cause:** unknown training method "{value}": Ster fits a direction by contrastive activation addition (caa), the leading principal direction (pca) or a logistic probe (logistic), or draws a seeded control direction (random), and by nothing else
+- **Observed state shown:** --method (a request's method) "{value}"; expected caa, pca, logistic, or random
+- **Fix:** give --method caa, pca, logistic or random
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/steering/vectors/layers.sh::an_unknown_method_is_refused`
+
+<a id="ster-vector-direction-seed-missing"></a>
+
+### `ster.vector.direction.seed-missing`
+
+- **What failed:** drawing a random direction
+- **Cause:** --method random draws its direction from a seed, and none was given; Ster assumes no seed
+- **Observed state shown:** --method random without --seed (a request and ster vector curve take no seed)
+- **Fix:** give ster vector train --method random a --seed, such as --seed 1, or fit the direction with caa, pca or logistic
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/steering/vectors/layers.sh::a_random_method_without_a_seed_is_refused`
+
+<a id="ster-vector-direction-seed-unused"></a>
+
+### `ster.vector.direction.seed-unused`
+
+- **What failed:** choosing the direction estimator --method {method}
+- **Cause:** --seed {seed} is read only by --method random, and {method} fits its direction from the pairs with no seed
+- **Observed state shown:** --method {method} --seed {seed}
+- **Fix:** leave --seed out, or draw a control direction with --method random --seed {seed}
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/steering/vectors/layers.sh::a_seed_for_a_fitted_method_is_refused`
 
 <a id="ster-vector-direction-examples-unequal"></a>
 

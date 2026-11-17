@@ -19,11 +19,13 @@ use crate::failures::{decide::pipeline as causes, refuse};
 mod benchmark;
 mod fetch;
 mod import;
+mod questions;
 mod synthesize;
 
-pub use benchmark::{Benchmark, BenchmarkOptions, Latency, TypeMetrics, benchmark};
-pub use fetch::{FetchOptions, FetchReport, fetch};
+pub use benchmark::{Benchmark, BenchmarkOptions, Latency, SteeredReport, TypeMetrics, benchmark};
+pub use fetch::{FetchColumns, FetchOptions, FetchReport, fetch};
 pub use import::{ImportReport, import_jsonl};
+pub use questions::{QuestionRow, Reading};
 pub use synthesize::{Schema, SynthesizeOptions, SynthesizeReport, synthesize};
 
 /// Refuses the one question a `source` ("fetched", "imported") set asks

@@ -34,7 +34,7 @@ pub(super) fn principal(centred: &[Vec<f64>], count: usize) -> Components {
     let total: f64 = gram.iter().enumerate().map(|(index, row)| row[index]).sum();
     let mut axes = Vec::with_capacity(count);
     let mut variances = Vec::with_capacity(count);
-    for _ in std::iter::repeat_n((), count) {
+    for _ in 0..count {
         let Some(start) = gram
             .iter()
             .enumerate()

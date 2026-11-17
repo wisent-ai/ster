@@ -46,9 +46,9 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 
 ## `ster.decisions.fetch`
 
-read a split's rows from the Hugging Face datasets server and turn its text column and class-label column into one labelled choice question per row
+read a split's rows from the Hugging Face datasets server and turn its text column and class-label column, or each row's own question, choices and answer, into one labelled choice question per row
 
-Started through: `ster decisions fetch`. Uses: `ster.decisions.question`, `ster.file`. Failure catalogue `ster.decisions.fetch`: 17 declared cause(s) of its own.
+Started through: `ster decisions fetch`. Uses: `ster.decisions.question`, `ster.pairs.import.fields`, `ster.pairs.import.rows`, `ster.decide.request`, `ster.file`. Failure catalogue `ster.decisions.fetch`: 18 declared cause(s) of its own.
 
 <a id="ster-decisions-fetch-count-none"></a>
 
@@ -57,7 +57,7 @@ Started through: `ster decisions fetch`. Uses: `ster.decisions.question`, `ster.
 - **What failed:** checking the fetch settings
 - **Cause:** --count 0 asks for no row, so no labelled decision could be written
 - **Observed state shown:** --count 0
-- **Fix:** give --count the number of rows to read, 1 or more
+- **Fix:** leave --count out to read every row of the split from --offset
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/decide/remote/fetch.sh::a_count_of_zero_is_refused`
 
@@ -236,6 +236,17 @@ Started through: `ster decisions fetch`. Uses: `ster.decisions.question`, `ster.
 - **Fix:** fetch from another --offset or --split, or name the columns that hold the text and the label
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/decide/remote/fetch.sh::rows_without_a_known_label_are_refused`
+
+<a id="ster-decisions-fetch-rows-none"></a>
+
+### `ster.decisions.fetch.rows-none`
+
+- **What failed:** reading rows from {first} of {dataset}
+- **Cause:** the split {split} holds no row from offset {first}, so there is no multiple-choice row to turn into a labelled decision
+- **Observed state shown:** rows read: 0; --split {split}; --offset {first}
+- **Fix:** fetch from a lower --offset, or name a --split that holds rows
+- **Code:** `config`, exit 1; retrying unchanged will not help
+- **Test:** `tests/decide/remote/fetch.sh::a_split_without_rows_from_the_offset_is_refused`
 
 ## `ster.decisions.import.rows`
 
@@ -483,6 +494,17 @@ Started through: `ster decisions split`. Uses: `ster.decide.examples`, `ster.fil
 
 ## `ster.decisions.benchmark`
 
-answer every labelled question of a set with a model, score accuracy, likelihood and calibration per question type, and write the report
+answer every labelled question of a set with a model, unsteered and, when steering artifacts are named, steered, score accuracy, likelihood and calibration per question type, list every question's gold, prediction and option probabilities, and write the report
 
-Started through: `ster decisions benchmark`. Uses: `ster.decide.calibrate`, `ster.decide.examples`, `ster.decide.calibration`, `ster.model.load`, `ster.file`. Failure catalogue `ster.decisions.benchmark`: 0 declared cause(s) of its own.
+Started through: `ster decisions benchmark`. Uses: `ster.decide.calibrate`, `ster.decide.examples`, `ster.decide.calibration`, `ster.runtime.vectors`, `ster.model.load`, `ster.runtime.steer`, `ster.file`. Failure catalogue `ster.decisions.benchmark`: 1 declared cause(s) of its own.
+
+<a id="ster-decisions-benchmark-prediction-unnamed"></a>
+
+### `ster.decisions.benchmark.prediction-unnamed`
+
+- **What failed:** reading question '{question}' of example {example}
+- **Cause:** the model's probabilities put the most mass on option {picked}, and the question names {count} option(s), so that option names no answer
+- **Observed state shown:** picked option: {picked}; options: {count}; probabilities: {probabilities}
+- **Fix:** report this to Ster's maintainers with the example set and model: the read gave a probability for an option the question does not have
+- **Code:** `refused`, exit 1; retrying unchanged will not help
+- **Test:** `tests/decide/steering.sh::a_prediction_outside_the_options_is_refused`

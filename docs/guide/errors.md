@@ -50,12 +50,12 @@ its report on both surfaces.
 | [errors/model-fixture.md](errors/model-fixture.md) | `ster.model.fixture` |
 | [errors/model-load.md](errors/model-load.md) | `ster.model.tokenizer`, `ster.model.load`, `ster.model.adapters` |
 | [errors/onboarding.md](errors/onboarding.md) | `ster.onboarding` |
-| [errors/pairs.md](errors/pairs.md) | `ster.pairs.file`, `.index`, `.side`, `.add`, `.remove`, `.edit`, `.save`, `.merge`, `.dedupe`, `.inspect` |
-| [errors/pairs-import.md](errors/pairs-import.md) | `ster.pairs.import`, `.import.rows` |
+| [errors/pairs.md](errors/pairs.md) | `ster.pairs.file`, `.index`, `.side`, `.add`, `.remove`, `.edit`, `.save`, `.merge`, `.output`, `.split`, `.sample`, `.dedupe`, `.inspect` |
+| [errors/pairs-import.md](errors/pairs-import.md) | `ster.pairs.import`, `.import.rows`, `.import.fields` |
 | [errors/pairs-export.md](errors/pairs-export.md) | `ster.pairs.export` |
 | [errors/pairs-synthesize.md](errors/pairs-synthesize.md) | `ster.pairs.synthesize` |
 | [errors/request.md](errors/request.md) | `ster.request` |
-| [errors/runtime.md](errors/runtime.md) | `ster.runtime.device`, `.encode`, `.layers`, `.steer`, `.generate`; `ster.generate` |
+| [errors/runtime.md](errors/runtime.md) | `ster.runtime.device`, `.encode`, `.layers`, `.steer`, `.generate`, `.vectors`; `ster.generate` |
 | [errors/sources.md](errors/sources.md) | `ster.sources` |
 | [errors/steering.md](errors/steering.md) | `ster.steering.artifact` |
 | [errors/support.md](errors/support.md) | `ster.support` |

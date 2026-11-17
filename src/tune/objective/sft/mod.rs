@@ -23,18 +23,14 @@ mod options;
 
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{ParamsAdamW, VarMap};
+use candle_nn::VarMap;
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 pub use options::{SftOptions, SftReport};
 
 use super::super::{
-    batch,
-    checkpoint::{Position, optimizer::AdamW},
-    encode::encode_examples,
-    examples::ExampleSet,
-    preflight::Trainable,
-    schedule,
+    batch, checkpoint::Position, encode::encode_examples, examples::ExampleSet,
+    preflight::Trainable, run,
 };
 use crate::{runtime::Runtime, workflow};
 use options::{Running, SUBJECT};
@@ -65,18 +61,13 @@ pub fn sft(
     let encoded = encode_examples(runtime, examples, limit, "train on")?;
 
     let fingerprint = options.fingerprint();
-    let mut optimizer = AdamW::over(
+    let (mut optimizer, resumed, mut running) = run::start::<Running>(
         varmap,
-        ParamsAdamW {
-            lr: options.learning_rate,
-            ..Default::default()
-        },
+        options.learning_rate,
+        &options.durable,
+        &fingerprint,
+        SUBJECT,
     )?;
-    let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
-    let mut running: Running = match &resumed {
-        Some(position) => position.running(SUBJECT)?,
-        None => Running::default(),
-    };
     let mut checkpoints = Vec::new();
 
     let lengths: Vec<usize> = encoded.iter().map(|(_, ids, _)| ids.len()).collect();
@@ -85,7 +76,7 @@ pub fn sft(
         batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
     let mut order: Vec<usize> = encoded.iter().enumerate().map(|(slot, _)| slot).collect();
 
-    for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
+    for epoch in 0..options.epochs {
         // Reseeded per epoch rather than carried across epochs so that a run
         // is reproducible from `seed` alone; a resumed run replays the
         // shuffles of the epochs it skips, because each one shuffles the
@@ -104,12 +95,12 @@ pub fn sft(
         };
 
         for plan in remaining {
-            optimizer.set_learning_rate(schedule(
+            run::schedule_step(
+                &mut optimizer,
                 options.learning_rate,
-                optimizer.rates.len(),
                 total_steps,
                 options.warmup_steps,
-            ));
+            );
             // `batch` examples per forward, `accumulation` forwards per
             // optimizer step, each forward right-padded with a mask that hides
             // the future and the filler. The per-example loss is divided by the
@@ -166,16 +157,15 @@ pub fn sft(
                 options.epochs,
                 encoded.len()
             ));
-            if options.durable.due(step) {
-                let position = Position {
-                    pass: epoch,
-                    step,
-                    within: running.epoch_units.len(),
-                    running: crate::json::value(&running),
-                };
-                options.durable.save(&optimizer, &fingerprint, &position)?;
-                checkpoints.push(step);
-            }
+            run::keep(
+                &options.durable,
+                &optimizer,
+                &fingerprint,
+                epoch,
+                running.epoch_units.len(),
+                &running,
+                &mut checkpoints,
+            )?;
         }
 
         if running.epoch_units.is_empty() {

@@ -14,6 +14,7 @@ use ster::{
 
 use super::resolve_pairs;
 
+mod draw;
 mod edit;
 mod import;
 mod merge;
@@ -71,11 +72,18 @@ pub(super) enum PairsCommand {
     },
     /// Generate a contrastive pair set locally or with a hosted model.
     Synthesize(synthesize::SynthesizeArgs),
-    /// Write a pair set from a TruthfulQA, Do-Not-Answer or LiveCodeBench export.
+    /// Write a pair set from a published benchmark export: TruthfulQA,
+    /// Do-Not-Answer, LiveCodeBench, a BiPO behaviour CSV, multiple-choice
+    /// rows or preference rows.
     Import(import::ImportArgs),
     /// Write one pair set out of several, every pair of each in order, for
     /// a direction fitted across all of them.
     Merge(merge::MergeArgs),
+    /// Part a set into a training set and a held-out set by a seeded
+    /// shuffle, for a protocol run over several seeds.
+    Split(draw::SplitArgs),
+    /// Draw a number of pairs out of a set by a seeded shuffle.
+    Sample(draw::SampleArgs),
 }
 
 /// The `ster pairs` arms. Each one does the work and prints one pretty JSON
@@ -103,6 +111,8 @@ pub(super) fn run(command: PairsCommand) -> Result<()> {
         }
         PairsCommand::Import(args) => import::run(args)?,
         PairsCommand::Merge(args) => merge::run(args)?,
+        PairsCommand::Split(args) => draw::split(args)?,
+        PairsCommand::Sample(args) => draw::sample(args)?,
         PairsCommand::Add {
             pairs: file,
             positive,

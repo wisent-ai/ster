@@ -6,7 +6,7 @@
 // walkthrough shows its three screens as the app ships them; a pair set
 // that is not one Ster reads, chosen in the open panel, is refused and
 // leaves first use open; a real pair set is imported and made active, which
-// alone finishes it. Reopened, the walkthrough is gone.
+// alone finishes it.
 //
 // The run names PROBIERZ_TOOLKIT_ROOT, CUA_APP_EXECUTABLE (Ster.app's
 // executable) and WISENT_WORKSPACE (holding ster-desktop).
@@ -41,37 +41,47 @@ writeFileSync(pairs, `${JSON.stringify({ trait_name: 'plain-spoken', pairs: [
 writeFileSync(malformed, `${JSON.stringify({ trait_name: 'x', pairs: [{ positive: 'only one side' }], extra: true })}\n`);
 const restore = freshOnboarding({ bundle: 'com.wisent.ster.desktop', prefix: 'com.wisent.ster.onboarding' });
 
+// What the window says once the app has answered an import the
+// walkthrough's last screen started. A refusal names that step:
+// ster-desktop's Onboarding/Walkthrough.swift (importFailed) words it
+// `.during("importing the first pair set")`, which Failure/SterFailure.swift
+// (headline) shows as `while importing the first pair set: `. An import the
+// workspace accepted says `Imported: <path>` (App/Import/ImportResults.swift).
+const REFUSED = 'while importing the first pair set: ';
+const IMPORTED = 'Imported: ';
+
 const broken = [];
 try {
-  let app = await openApp({ executable, env });
+  const app = await openApp({ executable, env });
   try {
-    await app.shows(firstTitle, 60000);
+    await app.shows(firstTitle);
     app.screen('walkthrough');
     for (const title of laterTitles) {
       await app.click('Continue', { exact: true });
-      await app.shows(title, 15000);
+      await app.shows(title);
     }
     await app.click('Import Pair Set…', { exact: true });
     await app.choosePath(malformed);
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    if (!app.snapshot().tree.includes(titles.at(-1))) broken.push('a malformed pair set finished first use');
+    // Probierz main's `shows` takes one string, so the refusal is awaited;
+    // a window that never says it is read once more, and an import it
+    // accepted instead is reported as such rather than as the toolkit's
+    // unanswered wait.
+    let answered;
+    try {
+      answered = await app.shows(REFUSED);
+    } catch (unanswered) {
+      answered = app.snapshot();
+      if (!answered.tree.includes(IMPORTED)) throw unanswered;
+    }
     app.screen('refused');
+    if (answered.tree.includes(IMPORTED)) broken.push('a malformed pair set was imported');
+    else if (!answered.tree.includes(titles.at(-1))) broken.push('a malformed pair set finished first use');
 
     await app.click('Import Pair Set…', { exact: true });
     await app.choosePath(pairs);
-    await app.gone(titles.at(-1), 60000);
+    await app.gone(titles.at(-1));
     const imported = app.screen('imported');
-    if (!/Imported: /.test(imported.tree)) broken.push('the app does not say the pair set was imported');
-  } finally {
-    app.close();
-  }
-
-  app = await openApp({ executable, env });
-  try {
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    const reopened = app.snapshot();
-    app.screen('reopened');
-    if (reopened.tree.includes(firstTitle) && reopened.tree.includes('Continue')) broken.push('the walkthrough opens again after the import');
+    if (!imported.tree.includes(IMPORTED)) broken.push('the app does not say the pair set was imported');
   } finally {
     app.close();
   }

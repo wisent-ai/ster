@@ -2,7 +2,7 @@
 
 Every declared way reading, checking and writing a pair-set file fails (the
 layer every command that takes a pair set uses), and how adding, removing,
-editing, saving, merging and inspecting a set fail. Importing a benchmark
+editing, saving, merging, splitting, sampling and inspecting a set fail. Importing a benchmark
 export is on [pairs-import.md](pairs-import.md) and reading the export on
 [pairs-export.md](pairs-export.md). How a refusal reads and which status it
 exits with is on [How Ster fails](../errors.md).
@@ -147,6 +147,57 @@ Started through: `ster pairs merge`, `ster request pairs/merge`. Uses: `ster.pai
 - **Fix:** give --trait the name of the trait every merged set expresses
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/pairs/merge.sh::a_blank_trait_is_refused_before_any_set_is_read`
+
+## `ster.pairs.output`
+
+check, before any set is read, that the path a drawn pair set is written to holds no file, so a set already there is never replaced
+
+Started through: run only by the functionalities that use it. Uses: none. Failure catalogue `ster.pairs.output`: 1 declared cause(s) of its own.
+
+<a id="ster-pairs-output-output-exists"></a>
+
+### `ster.pairs.output.output-exists`
+
+- **What failed:** choosing --{flag} {path}
+- **Cause:** {path} already holds a file, and a drawn pair set is written only where none is; nothing was written
+- **Observed state shown:** --{flag} {path} ({state})
+- **Fix:** give --{flag} a path where no file is, or move {path} away first
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/pairs/draw.sh::an_output_that_exists_is_refused`
+
+## `ster.pairs.split`
+
+part a pair set into a training set and a held-out set by a shuffle the seed fixes, each side keeping the set's order, and write both
+
+Started through: `ster pairs split`. Uses: `ster.pairs.output`, `ster.vector.holdout`, `ster.pairs.file`. Failure catalogue `ster.pairs.split`: 1 declared cause(s) of its own.
+
+<a id="ster-pairs-split-outputs-same"></a>
+
+### `ster.pairs.split.outputs-same`
+
+- **What failed:** choosing where pairs split writes
+- **Cause:** --train and --test both name {path}, and the two sides are two files
+- **Observed state shown:** --train {path} --test {path}
+- **Fix:** give --train and --test two different paths
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/pairs/draw.sh::one_path_for_both_sides_is_refused`
+
+## `ster.pairs.sample`
+
+draw a number of pairs out of a pair set by a shuffle the seed fixes, keeping the set's order, and write them
+
+Started through: `ster pairs sample`. Uses: `ster.pairs.output`, `ster.pairs.file`. Failure catalogue `ster.pairs.sample`: 1 declared cause(s) of its own.
+
+<a id="ster-pairs-sample-count-outside"></a>
+
+### `ster.pairs.sample.count-outside`
+
+- **What failed:** drawing {count} pairs from {path}
+- **Cause:** --count {count} is not between 1 and the {total} pair(s) the set holds, and a sample repeats no pair
+- **Observed state shown:** --count {count}; {path} holds {total} pair(s)
+- **Fix:** give --count a number from 1 to {total}
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/pairs/draw.sh::a_count_past_the_set_is_refused`
 
 ## `ster.pairs.dedupe`
 

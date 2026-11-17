@@ -68,8 +68,10 @@ pub fn run(reset: bool, import_pairs: Option<&Path>, name: Option<&str>) -> Resu
         render(screen);
         let Some(next) = screen.next() else {
             save_state(&state)?;
+            // The journey is about data a person already owns; one who owns
+            // none is told the two commands that write a pair set.
             println!(
-                "\nFirst-use progress saved; import an existing pair set with the command shown above."
+                "\nFirst-use progress saved; import an existing pair set with the command shown above.\nNo pair set yet? `ster pairs add --pairs FILE --positive TEXT --negative TEXT` writes one pair by pair, and `ster pairs synthesize` generates one; import the file it writes the same way."
             );
             return Ok(());
         };

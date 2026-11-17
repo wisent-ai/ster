@@ -1,10 +1,13 @@
-//! How `ster decisions fetch` fails (src/decide/pipeline/fetch.rs): asking the
+//! How `ster decisions fetch` fails (src/decide/pipeline/fetch/mod.rs): asking the
 //! Hugging Face datasets server for a split's rows, reading its pages, and
-//! turning a text column and a class-label column into labelled decisions.
+//! turning a text column and a class-label column, or each row's own question
+//! and choices, into labelled decisions.
 
 use wisent_errors::{Cause, Code, Operation};
 
 use super::super::file::FILE;
+use super::super::pairs::{import::FIELDS, rows::ROWS};
+use super::REQUEST;
 use super::pipeline::QUESTION;
 
 /// docs/guide/errors/decide-pipeline.md, where this functionality is listed.
@@ -30,7 +33,7 @@ fetch_cause!(COUNT_NONE, "count-none", Code::Config, true,
     "checking the fetch settings",
     "--count 0 asks for no row, so no labelled decision could be written",
     "--count 0",
-    "give --count the number of rows to read, 1 or more",
+    "leave --count out to read every row of the split from --offset",
     "a_count_of_zero_is_refused");
 fetch_cause!(SERVER_UNREACHABLE, "server-unreachable", Code::InfraDown, false,
     "asking the datasets server for rows of {dataset}",
@@ -128,19 +131,28 @@ fetch_cause!(NONE_KEPT, "none-kept", Code::Config, false,
     "rows read: {rows}; skipped: {skipped}; classes: {classes}",
     "fetch from another --offset or --split, or name the columns that hold the text and the label",
     "rows_without_a_known_label_are_refused");
+fetch_cause!(ROWS_NONE, "rows-none", Code::Config, false,
+    "reading rows from {first} of {dataset}",
+    "the split {split} holds no row from offset {first}, so there is no multiple-choice row to turn into a labelled decision",
+    "rows read: 0; --split {split}; --offset {first}",
+    "fetch from a lower --offset, or name a --split that holds rows",
+    "a_split_without_rows_from_the_offset_is_refused");
 
-/// Labelled decisions from a Hugging Face classification dataset.
+/// Labelled decisions from a Hugging Face classification or multiple-choice
+/// dataset. A multiple-choice row it refuses is `ster.pairs.import.rows`'s
+/// cause, or `ster.decide.request`'s for more choices than letters, in the
+/// report and, when no row is kept, in the refusal.
 pub static FETCH: Operation = Operation {
     id: "ster.decisions.fetch",
     entries: &["ster decisions fetch"],
-    uses: &[&QUESTION, &FILE],
-    summary: "read a split's rows from the Hugging Face datasets server and turn its text column and class-label column into one labelled choice question per row",
+    uses: &[&QUESTION, &FIELDS, &ROWS, &REQUEST, &FILE],
+    summary: "read a split's rows from the Hugging Face datasets server and turn its text column and class-label column, or each row's own question, choices and answer, into one labelled choice question per row",
     docs: DOCS,
     warnings: &[],
     causes: &[
         &COUNT_NONE, &SERVER_UNREACHABLE, &SERVER_REFUSED, &SERVER_LIMITED, &SERVER_FAILING,
         &PAGE_UNREAD, &PAGE_NOT_JSON, &PAGE_ROWLESS, &PAGE_FEATURELESS, &LABEL_ABSENT,
         &LABEL_NOT_CLASS, &CLASS_NOT_TEXT, &CLASSES_TOO_FEW, &CLASSES_TOO_MANY, &TEXT_ABSENT,
-        &TEXT_MISTYPED, &NONE_KEPT,
+        &TEXT_MISTYPED, &NONE_KEPT, &ROWS_NONE,
     ],
 };

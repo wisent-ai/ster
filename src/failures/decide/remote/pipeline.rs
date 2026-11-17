@@ -9,6 +9,7 @@ use wisent_errors::{Cause, Code, Operation};
 use super::super::file::FILE;
 use super::super::inference::INFERENCE;
 use super::super::model::weights::LOAD;
+use super::super::runtime::{generate::VECTORS, steer::STEER};
 use super::rows::ROWS;
 use super::{CALIBRATE, CALIBRATION, EXAMPLES, REQUEST};
 
@@ -138,13 +139,21 @@ pub static SPLIT: Operation = Operation {
     causes: &[&HOLDOUT_OUTSIDE],
 };
 
-/// A model measured on a labelled set.
+pipeline_cause!(PREDICTION_UNNAMED, "prediction-unnamed", Code::Refused, false,
+    "reading question '{question}' of example {example}",
+    "the model's probabilities put the most mass on option {picked}, and the question names {count} option(s), so that option names no answer",
+    "picked option: {picked}; options: {count}; probabilities: {probabilities}",
+    "report this to Ster's maintainers with the example set and model: the read gave a probability for an option the question does not have",
+    "tests/decide/steering.sh::a_prediction_outside_the_options_is_refused");
+
+/// A model measured on a labelled set, and under steering artifacts when
+/// named.
 pub static BENCHMARK: Operation = Operation {
     id: "ster.decisions.benchmark",
     entries: &["ster decisions benchmark"],
-    uses: &[&CALIBRATE, &EXAMPLES, &CALIBRATION, &LOAD, &FILE],
-    summary: "answer every labelled question of a set with a model, score accuracy, likelihood and calibration per question type, and write the report",
+    uses: &[&CALIBRATE, &EXAMPLES, &CALIBRATION, &VECTORS, &LOAD, &STEER, &FILE],
+    summary: "answer every labelled question of a set with a model, unsteered and, when steering artifacts are named, steered, score accuracy, likelihood and calibration per question type, list every question's gold, prediction and option probabilities, and write the report",
     docs: DOCS,
     warnings: &[],
-    causes: &[],
+    causes: &[&PREDICTION_UNNAMED],
 };

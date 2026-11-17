@@ -38,15 +38,15 @@
 
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{ParamsAdamW, VarMap};
+use candle_nn::VarMap;
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 use super::super::{
     batch,
-    checkpoint::{Position, optimizer::AdamW},
+    checkpoint::Position,
     encode::{encode_pairs, pair_set_label},
     preflight::Trainable,
-    schedule,
+    run,
 };
 use crate::{artifact::PairSet, runtime::Runtime, workflow};
 
@@ -91,18 +91,13 @@ pub fn dpo(
     reference_scores(runtime, &mut encoded, options.batch)?;
 
     let fingerprint = options.fingerprint();
-    let mut optimizer = AdamW::over(
+    let (mut optimizer, resumed, mut running) = run::start::<Running>(
         varmap,
-        ParamsAdamW {
-            lr: options.learning_rate,
-            ..Default::default()
-        },
+        options.learning_rate,
+        &options.durable,
+        &fingerprint,
+        SUBJECT,
     )?;
-    let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
-    let mut running: Running = match &resumed {
-        Some(position) => position.running(SUBJECT)?,
-        None => Running::default(),
-    };
     let mut checkpoints = Vec::new();
 
     // A pair's two sides go through the same forward, so the width its rows
@@ -121,7 +116,7 @@ pub fn dpo(
         beta: options.beta,
     };
 
-    for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
+    for epoch in 0..options.epochs {
         // Reseeded per epoch, exactly as supervised fine-tuning is; a resumed
         // run replays the shuffles of the epochs it skips.
         let mut rng = StdRng::seed_from_u64(options.seed + epoch as u64);
@@ -139,12 +134,12 @@ pub fn dpo(
         let mut summary = Summary::from(&running.epoch);
 
         for plan in remaining {
-            optimizer.set_learning_rate(schedule(
+            run::schedule_step(
+                &mut optimizer,
                 options.learning_rate,
-                optimizer.rates.len(),
                 total_steps,
                 options.warmup_steps,
-            ));
+            );
             // `batch` pairs per forward — the chosen side then the rejected
             // one, right-padded to a common width and masked so neither side
             // reads the other's filler — and `accumulation` forwards per
@@ -208,16 +203,15 @@ pub fn dpo(
                 encoded.len(),
                 summary.accuracy()
             ));
-            if options.durable.due(step) {
-                let position = Position {
-                    pass: epoch,
-                    step,
-                    within: running.steps.len(),
-                    running: crate::json::value(&running),
-                };
-                options.durable.save(&optimizer, &fingerprint, &position)?;
-                checkpoints.push(step);
-            }
+            run::keep(
+                &options.durable,
+                &optimizer,
+                &fingerprint,
+                epoch,
+                running.steps.len(),
+                &running,
+                &mut checkpoints,
+            )?;
         }
 
         running.finished.push(Totals::from(&summary));

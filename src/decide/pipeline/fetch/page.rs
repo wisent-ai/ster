@@ -118,9 +118,12 @@ pub(super) fn read_page(
     })
 }
 
-/// The class names of the label column, from the page's feature list.
-pub(super) fn class_names(page: &Value, options: &FetchOptions) -> Result<Vec<String>> {
-    let label = options.label_field.as_str();
+/// The class names of the label column `label`, from the page's feature list.
+pub(super) fn class_names(
+    page: &Value,
+    options: &FetchOptions,
+    label: &str,
+) -> Result<Vec<String>> {
     let dataset = options.dataset.as_str();
     let Some(features) = page["features"].as_array() else {
         return Err(refuse(

@@ -10,7 +10,25 @@
   "platforms": {
     "darwin-arm64": {
       "runner_platform": "darwin-arm64",
-      "quality": [],
+      "quality": [
+        {
+          "name": "error-pages",
+          "kind": "test",
+          "argv": [
+            "kompilator",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--features",
+            "metal",
+            "--test",
+            "error-pages"
+          ],
+          "inputs": [
+            "private-sources"
+          ]
+        }
+      ],
       "build": {
         "argv": [
           "bash",
@@ -25,7 +43,23 @@
     },
     "linux-amd64": {
       "runner_platform": "linux-amd64",
-      "quality": [],
+      "quality": [
+        {
+          "name": "error-pages",
+          "kind": "test",
+          "argv": [
+            "kompilator",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--test",
+            "error-pages"
+          ],
+          "inputs": [
+            "private-sources"
+          ]
+        }
+      ],
       "build": {
         "argv": [
           "bash",
@@ -37,6 +71,68 @@
         "release/ster-linux-amd64.tar.gz": "release/ster-linux-amd64.tar.gz",
         "release/ster-linux-amd64.tar.gz.sha256": "release/ster-linux-amd64.tar.gz.sha256"
       }
+    },
+    "linux-amd64-cuda-hopper": {
+      "runner_platform": "linux-amd64",
+      "quality": [
+        {
+          "name": "error-pages",
+          "kind": "test",
+          "argv": [
+            "kompilator",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--test",
+            "error-pages"
+          ],
+          "inputs": [
+            "private-sources"
+          ]
+        }
+      ],
+      "build": {
+        "argv": [
+          "bash",
+          "release/build.sh"
+        ]
+      },
+      "stage": {
+        "release/ster": "bin/ster",
+        "release/ster-linux-amd64-cuda-hopper.tar.gz": "release/ster-linux-amd64-cuda-hopper.tar.gz",
+        "release/ster-linux-amd64-cuda-hopper.tar.gz.sha256": "release/ster-linux-amd64-cuda-hopper.tar.gz.sha256"
+      }
+    },
+    "linux-amd64-cuda-blackwell": {
+      "runner_platform": "linux-amd64",
+      "quality": [
+        {
+          "name": "error-pages",
+          "kind": "test",
+          "argv": [
+            "kompilator",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--test",
+            "error-pages"
+          ],
+          "inputs": [
+            "private-sources"
+          ]
+        }
+      ],
+      "build": {
+        "argv": [
+          "bash",
+          "release/build.sh"
+        ]
+      },
+      "stage": {
+        "release/ster": "bin/ster",
+        "release/ster-linux-amd64-cuda-blackwell.tar.gz": "release/ster-linux-amd64-cuda-blackwell.tar.gz",
+        "release/ster-linux-amd64-cuda-blackwell.tar.gz.sha256": "release/ster-linux-amd64-cuda-blackwell.tar.gz.sha256"
+      }
     }
   },
   "promotion": {
@@ -46,10 +142,10 @@
     "reconcile": false
   },
   "inputs": {
-    "private-cargo-sources": {
-      "uri": "stado://sources/ster/dependencies/private-cargo-sources/sha256/92255b8b50e88117eff20a0840bea29a6c8fe1ed78f15ff161668e287e6cc9fe/source.tar.gz",
-      "sha256": "92255b8b50e88117eff20a0840bea29a6c8fe1ed78f15ff161668e287e6cc9fe",
-      "mount": "private-cargo-sources",
+    "private-sources": {
+      "uri": "stado://sources/ster/dependencies/private-sources/sha256/a39a6ffcfd95106fbf36447cbba03c2b81c05c88b1be2b34dfb65160b6d55361/source.tar.gz",
+      "sha256": "a39a6ffcfd95106fbf36447cbba03c2b81c05c88b1be2b34dfb65160b6d55361",
+      "mount": "private-sources",
       "extract": true
     }
   },

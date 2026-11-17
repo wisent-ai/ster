@@ -59,3 +59,35 @@ Part of the [changelog](../../../../CHANGELOG.md).
   (`ster.model.decoder.rows-empty`, `activations-unrequested`,
   `positions-unkept`), where they stopped the run on an assertion.
 - `--precision bf16 --device cpu` names the model it would have read.
+- A Hugging Face `--model` downloads into `$HF_HOME/hub` when `HF_HOME` is
+  set, and from `HF_ENDPOINT` when that is: the hub client is built from the
+  environment (`ApiBuilder::from_env`) instead of hf-hub's bare `Api::new`,
+  which always wrote to `~/.cache/huggingface/hub`. A Stado job that names
+  its own `HF_HOME` keeps its downloads inside its own directory.
+- The release declares two CUDA platforms, each the same build with the
+  `cuda` feature for one compute capability: `linux-amd64-cuda-hopper`
+  (9.0: H100, H200, GH200) and `linux-amd64-cuda-blackwell` (12.0: GeForce
+  RTX 50 series, RTX PRO Blackwell). Candle's kernel build compiles for one
+  arch-specific target (`compute_90a`, `compute_120a`), whose code NVIDIA
+  documents as neither forward nor backward compatible, so each binary runs
+  on its own capability only; B200/GB200 (10.0), B300/GB300 (10.3) and GB10
+  (12.1) are served by neither. Each build refuses when the builder's `nvcc`
+  does not list its `compute_90` or `compute_120`, instead of falling back
+  to another capability, and when the builder names no host compiler in
+  `NVCC_CCBIN` or one nvcc does not accept (`tests/release/cuda.sh`); it
+  needs `nvcc` on the builder and the CUDA runtime where it starts.
+  Installing either needs Stado's release installer to read the GPU's
+  compute capability, a change still in Stado's queue (Known and
+  scheduled): this release is queued after it. `linux-amd64` stays
+  CPU-only, and `darwin-arm64` is now built with `metal`, so the Mac release
+  computes on the GPU with `--device metal`.
+- `--device cuda:N` opens the CUDA device at ordinal `N`, as the driver
+  counts the devices the process sees; `cuda` stays the first. It is read
+  wherever `--device` is (every command that loads a model, `pairs
+  synthesize --generator local`, and the request bodies' `device`). An
+  ordinal that is no whole number is `ster.runtime.device.ordinal-invalid`
+  (exit 2), provoked by `tests/runtime/device.sh`.
+- `--vector` without its `--strength` is declared by `ster.runtime.vectors`,
+  which `ster generate`, `ster decide` and `ster decisions benchmark` use;
+  its sentence is unchanged, its anchor is now
+  `ster-runtime-vectors-strengths-unpaired`.

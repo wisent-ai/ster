@@ -10,7 +10,7 @@ await qualify('steering/mixed', async run => {
     const prompt = JSON.parse(declarationBytes).verification.prompt;
     const strength = Number(run.input('STER_TEST_STRENGTH'));
     // Additive identity and zero-based final layer are mathematical/native boundaries:
-    // https://ster.wisent.com/docs/steering
+    // https://ster.wisent.com/docs/concept-intervention
     const zeroStrength = 0;
     assert.ok(Number.isFinite(strength) && strength !== zeroStrength, 'qualification needs an explicit finite nonzero steering strength');
     const doubledStrength = strength + strength;

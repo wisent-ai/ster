@@ -64,9 +64,9 @@ Started through: `ster star status`, `ster star dismiss`, `ster star reset`, `st
 ### `ster.star.journey-storage`
 
 - **What failed:** {step} the GitHub star request kept in {file}
-- **Cause:** the onboarding runtime could not keep the request's journey state: its file or directory cannot be created, opened, locked, read or written by this account, it holds no journey state, or neither XDG_STATE_HOME nor HOME names where it lives
+- **Cause:** the onboarding runtime could not keep the request's journey state, for the reason its answer below names
 - **Observed state shown:** {file} ({state}); its directory {directory} ({directory_state}); XDG_STATE_HOME {xdg}; HOME {home}; USER {user}; the runtime answered: {said}
-- **Fix:** give this account write access to {directory}, or set XDG_STATE_HOME to a directory it may write; `ster star reset` sets aside a file that holds no journey state
+- **Fix:** do what the runtime's answer names for its reason; a file that holds no journey state is set aside by `ster star reset`
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/onboarding/star.sh::a_state_directory_that_cannot_be_made_is_refused`
 

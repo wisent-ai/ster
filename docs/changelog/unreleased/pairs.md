@@ -4,8 +4,10 @@ Part of the [changelog](../../../CHANGELOG.md).
 
 - `ster sources [--all]` lists the data other tools keep that Ster reads, one
   adapter each: example sets for `tune sft --examples` (IMP-STER-03 OpenAI,
-  04 ShareGPT, 05 Alpaca) and preference rows for `pairs import --benchmark
-  preference` (01 Hugging Face, 06 DPO, 19 Preferences). `ster sources
+  04 ShareGPT, 05 Alpaca), preference rows for `pairs import --benchmark
+  preference` (01 Hugging Face, 06 DPO) and the pair set Preferences exports
+  (19: `trait_name` and `pairs` of `positive` and `negative`), which `ster
+  workspace import` or `--pairs` reads as it is. `ster sources
   discover <adapter> --path <file>` reads a file as that command would and says
   how many examples or pairs it gives, and how many rows give none, writing
   nothing; an adapter Ster does not have is refused
@@ -128,3 +130,18 @@ Part of the [changelog](../../../CHANGELOG.md).
   exports (`ster decisions import`, each line still read on its own so a line
   that does not read is one rejected row). The refusals and their values are
   unchanged.
+- `ster pairs split --pairs <SET> --holdout <FRACTION> --seed <S> --train
+  <OUT> --test <OUT>` and `ster pairs sample --pairs <SET> --count <N> --seed
+  <S> --output <OUT>` draw seeded sets out of one with the generator every
+  seeded order in Ster uses (`StdRng::seed_from_u64`), each drawn set in the
+  source's order under its trait. An output where a file is
+  (`ster.pairs.output.output-exists`) and one path for both sides
+  (`ster.pairs.split.outputs-same`) are refused before the set is read, a
+  count outside 1 to the set's pairs is `ster.pairs.sample.count-outside`,
+  and the fraction is checked by `ster.vector.holdout`, as `vector optimize`
+  checks it. `tests/pairs/draw.sh` provokes each and checks both draws are
+  the seed's.
+- `--question`, `--choices`, `--answer`, `--answer-form` and `--labels` are
+  checked by their own functionality, `ster.pairs.import.fields`, which
+  `ster pairs import` and `ster decisions fetch` both use; its five causes
+  moved there from `ster.pairs.import` with their sentences unchanged.

@@ -61,7 +61,7 @@ effect.
 `bf16` on the `cpu` device is refused, at load, before a weight is mapped:
 
 ```text
-bf16 has no CPU matmul kernel in this Candle build; use --precision f16 for half precision on cpu, or --device metal for bf16
+bf16 has no CPU matmul kernel in this Candle build; use --precision f16 for half precision on cpu, or --device metal or --device cuda for bf16
 ```
 
 That is a fact about Candle rather than a policy. `cpu_backend`'s matmul accepts
@@ -70,7 +70,7 @@ else, so a bf16 CPU run does not run slowly — it downloads and maps the whole
 checkpoint and then dies at the first projection. `f16` on the CPU is real half
 arithmetic on an Apple-silicon class machine: `gemm` selects a native
 `neonfp16` microkernel on aarch64 when the hardware reports the `fp16` feature.
-On `metal` all three work.
+On `metal` and `cuda` all three work.
 
 Measured on `TinyLlama/TinyLlama-1.1B-Chat-v1.0`, CPU, revision
 `fe8a4ea1ffedaf415f4da2f062534de366a451e6`, scoring the eight checked-in

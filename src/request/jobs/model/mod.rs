@@ -10,11 +10,11 @@ use super::super::requests::ModelCreateRequest;
 pub(in crate::request) fn fixture_create_job(request: ModelCreateRequest) -> Result<Value> {
     let report =
         ster::fixture::create(Path::new(&request.declaration), Path::new(&request.output))?;
-    Ok(ster::json::value(report))
+    Ok(ster::json::value(&report))
 }
 
 pub(in crate::request) fn tokenizer_create_job(request: ModelCreateRequest) -> Result<Value> {
     let report =
         ster::tokenizer::create(Path::new(&request.declaration), Path::new(&request.output))?;
-    Ok(ster::json::value(report))
+    Ok(ster::json::value(&report))
 }

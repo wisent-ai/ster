@@ -1,7 +1,7 @@
 //! How reading and writing a calibration artifact fails
 //! (src/decide/calibration.rs), and how reading and checking the labelled
 //! examples a calibration is fitted on fails (`ExampleSet` in
-//! src/decide/examples.rs). A file that cannot be read or written, or is not
+//! src/decide/kept/examples.rs). A file that cannot be read or written, or is not
 //! JSON of its form, is the `ster.file` layer's cause.
 
 use wisent_errors::{Cause, Code};

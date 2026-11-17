@@ -100,7 +100,7 @@ fn errors() -> Result<String, Failure> {
                 "the failure catalogue this build carries does not hold together: {}",
                 problems.join("; ")
             ))
-            .remedy("install a released ster: `stado product update ster --surface cli`"))
+            .remedy("install a released ster with the ster release installer at `stado://releases/ster/<version>/<platform>/install.sh`, which places it in ~/.local/bin"))
     }
 }
 

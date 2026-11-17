@@ -106,6 +106,15 @@ impl BaseLoad {
                 )
             }
             Layout::Transformers | Layout::Mistral => {
+                // SAFETY: the safetensors files are mapped read-only and their
+                // bytes are read as tensors for as long as the builder lives.
+                // That is sound only while no process truncates or rewrites
+                // them: a Hub download is a content-addressed blob in the
+                // cache that nothing writes once it is complete, and a local
+                // directory is the user's to leave alone while Ster runs.
+                // This process only reads them. A file cut short under the
+                // mapping ends the process with SIGBUS; one rewritten in place
+                // gives the model whatever bytes are there now.
                 let mapped = unsafe {
                     VarBuilder::from_mmaped_safetensors(&self.weights, self.dtype, &self.device)
                 }
