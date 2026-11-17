@@ -55,8 +55,8 @@ impl Generator<'_> {
             }
             Self::Inference(writer) => writer.complete(
                 prompt,
-                options.generation.max_new_tokens,
-                options.generation.temperature,
+                Some(options.generation.max_new_tokens),
+                Some(options.generation.temperature),
             )?,
         };
         Ok(text.trim().to_owned())

@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::failures::{
     refuse,
-    runtime::device::{BF16_ON_CPU, DEVICE_UNKNOWN, PRECISION_UNKNOWN},
+    runtime::device::{BF16_ON_CPU, DEVICE_UNKNOWN, ORDINAL_INVALID, PRECISION_UNKNOWN},
 };
 
 /// The refusal of `device`, which this binary was built without.
@@ -28,6 +28,9 @@ fn unopened(device: &str, error: candle_core::Error) -> anyhow::Error {
     )
 }
 
+/// What `--device` writes before a CUDA device's ordinal: `cuda:1`.
+const CUDA_ORDINAL: &str = "cuda:";
+
 /// A request body names it as the same word `--device` takes; an unknown one
 /// is refused while the body is read, with the sentence `parse` writes.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -35,7 +38,10 @@ fn unopened(device: &str, error: candle_core::Error) -> anyhow::Error {
 pub enum DeviceChoice {
     Cpu,
     Metal,
-    Cuda,
+    /// A CUDA device by its ordinal as the driver counts the devices it
+    /// shows this process (`CUDA_VISIBLE_DEVICES` filters and renumbers
+    /// them): `cuda` is the first, `cuda:N` the one at N counted from zero.
+    Cuda(usize),
 }
 
 impl DeviceChoice {
@@ -43,8 +49,11 @@ impl DeviceChoice {
         match value {
             "cpu" => Ok(Self::Cpu),
             "metal" => Ok(Self::Metal),
-            "cuda" => Ok(Self::Cuda),
-            _ => Err(refuse(&DEVICE_UNKNOWN, &[("value", &format!("{value:?}"))])),
+            "cuda" => Ok(Self::Cuda(Default::default())),
+            _ => match value.strip_prefix(CUDA_ORDINAL) {
+                Some(ordinal) => cuda(value, ordinal),
+                None => Err(refuse(&DEVICE_UNKNOWN, &[("value", &format!("{value:?}"))])),
+            },
         }
     }
 
@@ -61,17 +70,37 @@ impl DeviceChoice {
                     Err(unbuilt("metal"))
                 }
             }
-            Self::Cuda => {
+            Self::Cuda(ordinal) => {
                 #[cfg(feature = "cuda")]
                 {
-                    Device::new_cuda(0).map_err(|error| unopened("cuda", error))
+                    let device = format!("{CUDA_ORDINAL}{ordinal}");
+                    Device::new_cuda(ordinal).map_err(|error| unopened(&device, error))
                 }
                 #[cfg(not(feature = "cuda"))]
                 {
+                    // Without the backend no ordinal is opened; the refusal
+                    // names the feature the build lacks.
+                    let _ = ordinal;
                     Err(unbuilt("cuda"))
                 }
             }
         }
+    }
+}
+
+/// The CUDA device `value` names by `ordinal`, the text after `cuda:`, or
+/// the refusal of an ordinal that is no whole number.
+fn cuda(value: &str, ordinal: &str) -> Result<DeviceChoice> {
+    match ordinal.parse::<usize>() {
+        Ok(index) => Ok(DeviceChoice::Cuda(index)),
+        Err(error) => Err(refuse(
+            &ORDINAL_INVALID,
+            &[
+                ("value", &format!("{value:?}")),
+                ("ordinal", &format!("{ordinal:?}")),
+                ("error", &error.to_string()),
+            ],
+        )),
     }
 }
 

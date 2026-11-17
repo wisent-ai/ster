@@ -70,7 +70,7 @@ pub(crate) struct RewardArgs {
     batch_size: usize,
     /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
     /// The adapters and the scalar head stay in f32. bf16 needs
-    /// --device metal.
+    /// --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     #[serde(default = "input::default_precision")]
     precision: Precision,

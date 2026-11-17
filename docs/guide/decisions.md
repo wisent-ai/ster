@@ -7,16 +7,17 @@ has its own page beside this one.
 
 ```text
 ster decide --model <MODEL> --request <REQUEST>
-            [--revision <REVISION>] [--device cpu] [--chat-template auto|off]
-            [--precision f32|f16|bf16] [--permutations 0]
+            [--revision <REVISION>] [--device cpu|metal|cuda|cuda:N]
+            [--chat-template auto|off] [--precision f32|f16|bf16] [--permutations 0]
             [--calibration <CALIBRATION>] [--output <OUTPUT>] [--explain]
+            [--vector <ARTIFACT> --strength <S>]...
 ```
 
 It prints a pretty JSON document on stdout and is also the operation
-`ster request decide`, whose JSON body on stdin carries every flag above as a
-camelCase field, with the request document itself inline under `request`
-rather than as a path, because the desktop composes it
-([desktop requests](desktop-requests.md)).
+`ster request decide`, whose JSON body on stdin carries every flag above but
+`--vector` and `--strength` as a camelCase field, with the request document
+itself inline under `request` rather than as a path, because the desktop
+composes it ([desktop requests](desktop-requests.md)).
 
 ## What a decision is
 
@@ -185,6 +186,30 @@ gives `returns` 0.78 in the order where it wears `B`, and 0.11 and 0.08 in the
 other two; the averaged answer is 0.34 / 0.32 / 0.34 with confidence 0.0002,
 which is the honest result for a model that has not read the message.
 
+## Steered decisions
+
+`--vector <ARTIFACT> --strength <S>`, repeated as `ster generate` takes it,
+reads every question with the steering artifacts added to the residual
+stream: at each layer any artifact carries, the sum of each vector times its
+strength is added at every position the model reads — the shared state and
+every rendering of every question — exactly as generation adds it to a
+prompt. The answer is the steered model's distribution over the same
+letters, and the response names what it was read under:
+
+```json
+"steering": [{ "vector": "calm.ster.json", "trait_name": "calm", "strength": 4.0 }]
+```
+
+An unsteered response carries no `steering` field. Every artifact is read
+before the checkpoint loads; one `--vector` without its `--strength` is
+refused (`ster.runtime.vectors.strengths-unpaired`, exit 2), and an artifact
+fitted for another model or width, a strength that is not finite and
+strengths that are all zero are refused as `ster generate` refuses them
+([errors/runtime.md](errors/runtime.md)). `ster decisions benchmark` takes
+the same flags; see [training a decision model](#training-a-decision-model).
+A calibration is fitted on the unsteered model, so a temperature applied to
+a steered read is the one the unsteered model earned.
+
 ## Refusals
 
 Every refusal is a declared cause listed with its fix and its test on
@@ -237,6 +262,32 @@ and writing the one labelled-decision document `ster calibrate` already reads:
   `skipped`; a text column a row lacks, a text cell that is not a string, a
   page without `rows`, or a label column without string class names is
   refused by name.
+
+  A multiple-choice dataset, whose options differ from row to row (ARC,
+  MMLU, TruthfulQA MC1, HellaSwag), is read instead of `--text-field` and
+  `--label-field` with the row flags `ster pairs import --benchmark choices`
+  takes, each a JSON pointer into the row and checked the same way before
+  any row is asked for: `--question` (the state), `--choices` (the
+  options), `--answer` and `--answer-form index|label|text`, with `--labels`
+  for `label`:
+
+  ```text
+  ster decisions fetch --dataset allenai/ai2_arc --config ARC-Challenge --split test \
+    --question /question --choices /choices/text --answer /answerKey \
+    --answer-form label --labels /choices/label \
+    --question-id answer --instructions "Which answer is correct?" --count 500 --output arc.json
+  ```
+
+  Each row becomes one choice question whose options are its choices (two
+  of the same text are one option) and whose label is its correct choice.
+  A row that cannot become one is listed under `report.refused` with its
+  `row`, its `reason` and its `cause` of `ster.pairs.import.rows` (or
+  `ster.decide.request.options-too-many` for more than 26 choices), and
+  `label_counts` counts the position of the correct choice among the row's,
+  from 0, so an answer key that favours one position is visible. A fetch
+  whose every row is refused is refused with the first refused row's cause;
+  a split with no row from `--offset` with `rows-none`. The two kinds of
+  flags exclude each other (a usage error, exit 2).
 - `ster decisions import` reads a JSONL file of `context`, `options` and
   `label` rows; the question's id and wording are the caller's. A line that
   cannot become a labelled decision is listed under `report.rejected` with
@@ -249,14 +300,39 @@ and writing the one labelled-decision document `ster calibrate` already reads:
   many lines were refused under each cause.
 - `ster decisions synthesize` writes labelled decisions with a hosted model
   through Stado's inference alternatives from a schema — a domain and the
-  questions — one label per state by construction. `--per-option`,
-  `--retry-multiplier`,
-  `--temperature` and `--max-tokens` are required; the report records the
-  temperature and token budget the states were written with.
+  questions — one label per state by construction. `--per-option` and
+  `--retry-multiplier` are required; `--temperature` and `--max-tokens` are
+  sent when given, and without them the answering alternative's own apply;
+  the report records the temperature and token budget stated (null for one
+  left out).
 - `ster decisions split` holds out a seeded fraction of examples, both
   `--holdout` and `--seed` stated by the caller; `ster tune decide` trains
   LoRA adapters on the training side; `ster decisions benchmark` measures the
   base model and the adapter on the held-out side over the stated
   `--ece-bins`.
+
+`ster decisions benchmark` writes, beside its aggregate `metrics`,
+`control` and `by_type`, one entry of `rows` per labelled question: the
+`example` it belongs to (from 0), the `question` id, its `options` as a
+label names them (a choice's option names, a score's levels, a noul's `true`
+and `false`), the `gold` label, and a `base` read holding the `predicted`
+option, whether it is `correct` and the `probabilities` of every option in
+the order of `options`. With `--vector <ARTIFACT> --strength <S>` (repeated,
+as `ster decide` takes them) every question is read a second time under the
+steering artifacts: each row gains a `steered` read, and the report a
+`steered` block with the `vectors` and strengths, its own `metrics` and
+`by_type`, and how many questions the steering turned from wrong to right
+(`improved`) and from right to wrong (`worsened`). One run therefore gives
+base accuracy (`metrics.accuracy`), steered accuracy
+(`steered.metrics.accuracy`) and both counts on the same rows; latency, input
+tokens and the shuffled-state control are the unsteered read's.
+
+```text
+ster decisions benchmark --model <MODEL> --examples <HELD_OUT> --ece-bins <N> --output <REPORT>
+                         [--adapter <ADAPTER>] [--calibration <CALIBRATION>]
+                         [--chat-template auto|off] [--precision f32|f16|bf16]
+                         [--permutations 0] [--device cpu|metal|cuda|cuda:N]
+                         [--vector <ARTIFACT> --strength <S>]...
+```
 
 Each has its own page on the documentation site under CLI commands.

@@ -40,11 +40,11 @@
     },
     {
       "id": "every-steering-artifact-records", "claim": "Every steering artifact records product and schema identity, model revision, trait, method, hidden width, layer-indexed directions, training accuracy, and projection margin.",
-      "evidence": "README.md#Artifact contract"
+      "evidence": "src/artifact/steering.rs:18-30,65-68"
     },
     {
       "id": "ster-refuses-artifacts-with", "claim": "Ster refuses artifacts with the wrong product, schema, model, or vector width instead of applying them to the wrong residual stream.",
-      "evidence": "README.md#Artifact contract"
+      "evidence": "src/artifact/steering.rs:130-160; src/runtime/infer/steering/steer.rs:114"
     },
     {
       "id": "ster-owns-its-llama", "claim": "Ster owns its Llama decoder loop so it can capture a residual state after a selected block and add a direction before the next block.",

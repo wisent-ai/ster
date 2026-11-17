@@ -11,10 +11,22 @@ pub static DEVICE_UNKNOWN: Cause = Cause {
     usage: true,
     exit: None,
     failed: "reading the device",
-    cause: "unknown device {value}; expected cpu, metal, or cuda",
+    cause: "unknown device {value}; expected cpu, metal, cuda, or cuda:N",
     observed: "--device {value}",
-    remedy: "give --device cpu, metal or cuda",
+    remedy: "give --device cpu, metal, cuda (the first GPU) or cuda:N (the GPU at N, counted from 0)",
     test: "tests/runtime/device.sh::an_unknown_device_is_refused",
+};
+
+pub static ORDINAL_INVALID: Cause = Cause {
+    id: "ordinal-invalid",
+    code: Code::Config,
+    usage: true,
+    exit: None,
+    failed: "reading the device",
+    cause: "--device {value} names no CUDA device: the ordinal after cuda: is {ordinal}, which is no whole number counted from 0",
+    observed: "--device {value}; reading {ordinal} as a number: {error}",
+    remedy: "give --device cuda:N with N the GPU's index as the driver counts them (nvidia-smi lists them), such as cuda:1, or cuda for the first",
+    test: "tests/runtime/device.sh::a_cuda_ordinal_that_is_no_number_is_refused",
 };
 
 pub static DEVICE_UNBUILT: Cause = Cause {
@@ -61,7 +73,7 @@ pub static BF16_ON_CPU: Cause = Cause {
     failed: "mapping the weights of {model} at bf16 on the cpu",
     cause: "bf16 has no CPU matmul kernel in this Candle build, so the run would load the whole checkpoint and then fail at its first projection",
     observed: "--precision bf16 --device cpu (cpu is the device when --device is left out); nothing of {model} was read",
-    remedy: "use --precision f16 for half precision on cpu, or --device metal for bf16",
+    remedy: "use --precision f16 for half precision on cpu, or --device metal or --device cuda for bf16",
     test: "tests/runtime/device.sh::bf16_on_the_cpu_is_refused",
 };
 
@@ -75,6 +87,7 @@ pub static DEVICE: Operation = Operation {
     warnings: &[],
     causes: &[
         &DEVICE_UNKNOWN,
+        &ORDINAL_INVALID,
         &DEVICE_UNBUILT,
         &DEVICE_UNOPENED,
         &PRECISION_UNKNOWN,

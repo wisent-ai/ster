@@ -95,7 +95,7 @@ pub(crate) struct EvaluateArgs {
     batch_size: usize,
     /// Dtype the frozen base weights are mapped at: f32, f16, or bf16.
     /// A score is only comparable with another score taken at the same
-    /// precision. bf16 needs --device metal.
+    /// precision. bf16 needs --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     #[serde(default = "input::default_precision")]
     precision: Precision,

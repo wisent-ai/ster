@@ -1,7 +1,8 @@
 #!/bin/sh
 # Real test of `ster sources` (`ster.sources`), through the built binary: the listing
-# names every adapter, a ShareGPT file and a DPO file are discovered with what each gives,
-# and an adapter Ster does not have is refused with its declared sentence and exit status.
+# names every adapter, a ShareGPT file, a DPO file and a Preferences pair set are
+# discovered with what each gives, and an adapter Ster does not have is refused with its
+# declared sentence and exit status.
 #
 # Usage: tests/sources/sources.sh   (STER selects the binary, default .build/kompilator/debug/ster)
 set -eu
@@ -64,6 +65,20 @@ a_dpo_file_is_discovered_with_its_pairs() {
   passed a_dpo_file_is_discovered_with_its_pairs
 }
 
+a_preferences_pair_set_is_discovered_with_its_pairs() {
+  # Preferences exports a Ster pair set, not preference rows.
+  printf '%s\n' '{"trait_name": "arena/helpful", "pairs": [{"positive": "Hello.", "negative": "Go away."}, {"positive": "Sure.", "negative": "No."}]}' >"$ROOT/preferences.pairs.json"
+  run 0 sources discover IMP-STER-19 --path "$ROOT/preferences.pairs.json"
+  [ "$(printf '%s' "$out" | jq .pairs)" = 2 ] || fail "the Preferences pair set did not give two pairs: $out"
+  printf '%s' "$out" | jq -e '.read_by | contains("ster workspace import")' >/dev/null \
+    || fail "the Preferences pair set is not directed to ster workspace import: $out"
+  printf '%s\n' '{"prompt": "Greet.", "chosen": "Hello.", "rejected": "Go away."}' >"$ROOT/preferences.rows.jsonl"
+  run 0 sources discover IMP-STER-19 --path "$ROOT/preferences.rows.jsonl"
+  [ "$(printf '%s' "$out" | jq .found)" = false ] || fail "preference rows were taken for a Preferences pair set: $out"
+  [ "$(printf '%s' "$out" | jq -r '.why_not | type')" = string ] || fail "preference rows as IMP-STER-19 gave no reason: $out"
+  passed a_preferences_pair_set_is_discovered_with_its_pairs
+}
+
 an_unknown_adapter_is_refused() {
   run 2 sources discover IMP-STER-99 --path "$ROOT/dpo.jsonl"
   said "Error: discovering $ROOT/dpo.jsonl as IMP-STER-99: IMP-STER-99 is not an adapter of ster"
@@ -85,6 +100,7 @@ an_answer_to_sharing_that_cannot_be_kept_is_refused() {
 the_listing_names_every_adapter
 a_sharegpt_file_is_discovered_with_its_examples
 a_dpo_file_is_discovered_with_its_pairs
+a_preferences_pair_set_is_discovered_with_its_pairs
 an_unknown_adapter_is_refused
 an_answer_to_sharing_that_cannot_be_kept_is_refused
 

@@ -7,6 +7,7 @@ use wisent_errors::{Cause, Code, Operation};
 
 use super::file::FILE;
 use super::model::weights::LOAD;
+use super::runtime::{generate::VECTORS, steer::STEER};
 
 pub mod calibration;
 #[path = "remote/fetch.rs"]
@@ -114,12 +115,12 @@ pub static EXAMPLES: Operation = Operation {
     ],
 };
 
-/// Answering every question of one request.
+/// Answering every question of one request, steered when artifacts are named.
 pub static DECIDE: Operation = Operation {
     id: "ster.decide",
     entries: &["ster decide", "ster request decide"],
-    uses: &[&REQUEST, &CALIBRATION, &LOAD, &FILE],
-    summary: "answer every typed question of a decision request with the probability the model puts on each option",
+    uses: &[&REQUEST, &CALIBRATION, &VECTORS, &LOAD, &STEER, &FILE],
+    summary: "answer every typed question of a decision request with the probability the model puts on each option, with steering artifacts added to the residual stream when named",
     docs: DOCS,
     warnings: &[],
     causes: &[&QUESTION_TOO_LONG, &LETTER_OUTSIDE],

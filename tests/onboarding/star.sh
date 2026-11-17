@@ -22,6 +22,9 @@ a_state_directory_that_cannot_be_made_is_refused() {
   said "dismissing the GitHub star request kept in $ROOT/blocker/ster/onboarding.json"
   said "XDG_STATE_HOME $ROOT/blocker"
   said "the runtime answered: storage unavailable"
+  # The runtime's typed StorageError names its own reason and fix, which the
+  # refusal quotes and defers to instead of a remedy of its own.
+  said "do what the runtime's answer names for its reason"
   set +e
   out=$(printf '{}' | XDG_STATE_HOME="$ROOT/blocker" "$BIN" request star/dismiss 2>/dev/null | tail -n 1)
   set -e

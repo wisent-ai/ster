@@ -10,10 +10,10 @@ use std::{
 use anyhow::Result;
 use ster::{
     ChatChoice, DecideOptions, Precision,
-    decide::{self, Calibration, ExampleSet, RAW_TEMPERATURE, Request},
+    decide::{self, Calibration, ExampleSet, RAW_TEMPERATURE, Request, Steering},
 };
 
-use super::ModelArgs;
+use super::{ModelArgs, vectors::SteeringArgs};
 
 /// The flags every decision run shares with a calibration run.
 #[derive(Debug, clap::Args)]
@@ -27,7 +27,7 @@ pub(super) struct ReadArgs {
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
     chat_template: ChatChoice,
     /// Dtype the base weights are mapped at: f32, f16, or bf16. bf16 needs
-    /// --device metal.
+    /// --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
     /// Option orders each question is shown in. 0 shows every option under
@@ -62,6 +62,10 @@ pub(super) struct DecideArgs {
     /// content or the letter decided it.
     #[arg(long)]
     explain: bool,
+    /// Read every question with these steering artifacts added to the
+    /// residual stream, as `ster generate --vector --strength` adds them.
+    #[command(flatten)]
+    steering: SteeringArgs,
 }
 
 /// `ster calibrate`
@@ -89,15 +93,18 @@ pub(super) fn decide(args: DecideArgs) -> Result<()> {
         calibration,
         output,
         explain,
+        steering,
     } = args;
-    // Both documents are read before a single weight is mapped, so a bad
-    // request or a calibration for another model is refused in milliseconds
-    // rather than after a full checkpoint load.
+    // Every document is read before a single weight is mapped, so a bad
+    // request, a calibration for another model or a file that is no
+    // steering artifact is refused in milliseconds rather than after a full
+    // checkpoint load.
     let request = load_request(&request)?;
     let calibration = calibration
         .as_deref()
         .map(|path| Calibration::load(path).map(|document| (path, document)))
         .transpose()?;
+    let artifacts = steering.artifacts()?;
     let (mut runtime, mut options) = read.load()?;
     if let Some((path, document)) = &calibration {
         document.check_model(path, &runtime.model_id)?;
@@ -105,6 +112,8 @@ pub(super) fn decide(args: DecideArgs) -> Result<()> {
     }
     options.explain = explain;
     runtime.set_chat_template(read.chat_template)?;
+    steering.warn_on_provenance(&runtime);
+    let steered = Steering::new(&runtime, &steering.vector, &steering.parts(&artifacts))?;
     let response = decide::decide(
         &runtime,
         &request,
@@ -113,6 +122,7 @@ pub(super) fn decide(args: DecideArgs) -> Result<()> {
             .as_ref()
             .map(|(path, _)| path.to_string_lossy())
             .as_deref(),
+        steered.as_ref(),
     )?;
     // The answer is printed first, so a --output the disk refuses does not
     // lose a decision the model already made.

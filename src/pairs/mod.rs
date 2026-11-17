@@ -23,11 +23,13 @@
 pub mod benchmark;
 pub mod quality;
 
+mod draw;
 mod generator;
 mod inspect;
 mod merge;
 mod synthesis;
 
+pub use draw::{Drawn, SampleReport, SplitReport, check_output, check_sides, sample, split};
 pub use generator::Generator;
 pub use inspect::{EntryReport, InspectOptions, SetReport, inspect};
 pub use merge::{MergeReport, MergedSource, merge};

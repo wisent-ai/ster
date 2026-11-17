@@ -40,7 +40,7 @@ pub(in crate::cli) struct CurveArgs {
     #[arg(long, default_value = "auto", value_parser = ChatChoice::parse)]
     chat_template: ChatChoice,
     /// Dtype the base weights are mapped at: f32, f16, or bf16. bf16 needs
-    /// --device metal.
+    /// --device metal or cuda.
     #[arg(long, default_value = "f32", value_parser = Precision::parse)]
     precision: Precision,
 }
@@ -58,14 +58,16 @@ pub(in crate::cli) fn curve(args: CurveArgs) -> Result<()> {
     } = args;
     let pairs = resolve_pairs(pairs)?;
     let pair_set = PairSet::load(&pairs)?;
-    // The holdout and the sizes read no model, so both are refused before
-    // the checkpoint is paid for.
+    // The holdout, the sizes and the method read no model, so each is
+    // refused before the checkpoint is paid for; a curve takes no seed, so
+    // `random` is refused here.
     workflow::check_sizes(&pair_set, holdout, &sizes, method)?;
+    ster::representation::check_seed(method, None)?;
     let mut runtime = model.load_at(precision)?;
     let chat = runtime.set_chat_template(chat_template)?;
     let layers = parse_layers(&layers, runtime.layer_count())?;
     let report = workflow::curve(&runtime, &pair_set, &layers, method, holdout, &sizes)?;
-    let mut report = ster::json::value(report);
+    let mut report = ster::json::value(&report);
     chat.annotate(&mut report)?;
     super::super::answer(&report)
 }

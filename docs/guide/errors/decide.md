@@ -125,9 +125,9 @@ Started through: run only by the functionalities that use it. Uses: `ster.file`.
 
 ## `ster.decide`
 
-answer every typed question of a decision request with the probability the model puts on each option
+answer every typed question of a decision request with the probability the model puts on each option, with steering artifacts added to the residual stream when named
 
-Started through: `ster decide`, `ster request decide`. Uses: `ster.decide.request`, `ster.decide.calibration`, `ster.model.load`, `ster.file`. Failure catalogue `ster.decide`: 2 declared cause(s) of its own.
+Started through: `ster decide`, `ster request decide`. Uses: `ster.decide.request`, `ster.decide.calibration`, `ster.runtime.vectors`, `ster.model.load`, `ster.runtime.steer`, `ster.file`. Failure catalogue `ster.decide`: 2 declared cause(s) of its own.
 
 <a id="ster-decide-question-too-long"></a>
 

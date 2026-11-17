@@ -35,8 +35,8 @@ Started through: `ster sources`, `ster sources discover`, `ster sources share`. 
 ### `ster.sources.sources-share-unkept`
 
 - **What failed:** keeping whether discoveries report their counts
-- **Cause:** {why}
-- **Observed state shown:** the answer was not kept
+- **Cause:** the answer, or the random id kept beside it, could not be made in the configuration directory
+- **Observed state shown:** the answer was not kept: {why}
 - **Fix:** set XDG_CONFIG_HOME to a directory this user can write, then answer again
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/sources/sources.sh::an_answer_to_sharing_that_cannot_be_kept_is_refused`

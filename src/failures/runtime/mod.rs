@@ -19,5 +19,6 @@ pub(super) static OPERATIONS: &[&Operation] = &[
     &steer::LAYERS,
     &steer::STEER,
     &generate::GENERATE,
+    &generate::VECTORS,
     &generate::COMMAND,
 ];

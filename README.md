@@ -28,7 +28,7 @@ The product is **Ster**. Wisent is the company that builds it.
 
 ## Current product contract
 
-Ster 0.14 provides one binary and one library crate. Both use the same versioned
+Ster 0.15 provides one binary and one library crate. Both use the same versioned
 JSON artifacts and native Candle runtime.
 
 Included now:
@@ -143,15 +143,19 @@ Included now:
   projection of a mixture of experts, the key, value and bottlenecked query
   of latent attention, anything on a state-space model) are refused before
   any adapter is built;
-- CPU execution, with compile-time Metal and CUDA backends;
+- CPU execution, with compile-time Metal and CUDA backends, any one GPU of a
+  host chosen with `--device cuda:N` (plain `cuda` is the first);
 - pair-set authoring and inspection for duplicates, length balance and
-  diversity, with no model loaded;
+  diversity, with no model loaded, and seeded splits and samples of a set
+  (`ster pairs split --holdout --seed`, `ster pairs sample --count --seed`)
+  for protocols run over several seeds;
 - synthetic pair generation from a trait description, written either by the
   local runtime or by a hosted model Stado's inference alternatives answer,
   with every answer judged for a refusal by the model that wrote it;
 - last-token hidden-state extraction from any selected transformer layer;
 - contrastive activation addition (`caa`), principal-direction (`pca`), and
-  logistic-probe training;
+  logistic-probe training, and seeded random control directions
+  (`--method random --seed`) normalized exactly as the fitted ones;
 - holdout selection across method and layer, published as the scored candidate
   table the choice was made on;
 - artifact evaluation by pair-ordering accuracy and projection margin;
@@ -171,10 +175,16 @@ Included now:
   or a yes/no — read from the next-token distribution over answer letters
   after one cached pass over the state, every option shown under every
   letter so the model's letter preference cancels, in TypeSafe's System One
-  request and answer shapes;
+  request and answer shapes, steered by any number of steering artifacts
+  when `--vector`/`--strength` are given;
 - temperature calibration of those decisions on labelled examples, reported
   with negative log-likelihood, expected calibration error, accuracy, and a
   shuffled-state control;
+- multiple-choice benchmarks of a model, with or without steering, on
+  labelled sets fetched from classification or per-row multiple-choice
+  datasets (ARC, MMLU, HellaSwag): per-question gold, prediction and option
+  probabilities, base and steered accuracy, and the questions steering
+  turned right and wrong;
 
 Explicit boundaries:
 
@@ -210,7 +220,7 @@ Explicit boundaries:
   need a run on a bigger machine, you start Ster on that machine yourself.
 - Release delivery is the one thing another product does do for Ster: Stado
   installs the built binary from the `.wisent-release.json` this repository
-  ships. See [Installing through Stado](#installing-through-stado).
+  ships. See [Installing through the release installer](docs/guide/start/install.md#installing-through-the-release-installer).
 - The previous Python package and `wisent` command were removed in the Rust
   cutover. Python namespace compatibility is not part of the Ster contract.
 

@@ -17,18 +17,29 @@ differs from it.
 
 read --device and --precision and open the device the weights are mapped on, at the dtype it can multiply in
 
-Started through: run only by the functionalities that use it. Uses: none. Failure catalogue `ster.runtime.device`: 5 declared cause(s) of its own.
+Started through: run only by the functionalities that use it. Uses: none. Failure catalogue `ster.runtime.device`: 6 declared cause(s) of its own.
 
 <a id="ster-runtime-device-device-unknown"></a>
 
 ### `ster.runtime.device.device-unknown`
 
 - **What failed:** reading the device
-- **Cause:** unknown device {value}; expected cpu, metal, or cuda
+- **Cause:** unknown device {value}; expected cpu, metal, cuda, or cuda:N
 - **Observed state shown:** --device {value}
-- **Fix:** give --device cpu, metal or cuda
+- **Fix:** give --device cpu, metal, cuda (the first GPU) or cuda:N (the GPU at N, counted from 0)
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/runtime/device.sh::an_unknown_device_is_refused`
+
+<a id="ster-runtime-device-ordinal-invalid"></a>
+
+### `ster.runtime.device.ordinal-invalid`
+
+- **What failed:** reading the device
+- **Cause:** --device {value} names no CUDA device: the ordinal after cuda: is {ordinal}, which is no whole number counted from 0
+- **Observed state shown:** --device {value}; reading {ordinal} as a number: {error}
+- **Fix:** give --device cuda:N with N the GPU's index as the driver counts them (nvidia-smi lists them), such as cuda:1, or cuda for the first
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/runtime/device.sh::a_cuda_ordinal_that_is_no_number_is_refused`
 
 <a id="ster-runtime-device-device-unbuilt"></a>
 
@@ -70,7 +81,7 @@ Started through: run only by the functionalities that use it. Uses: none. Failur
 - **What failed:** mapping the weights of {model} at bf16 on the cpu
 - **Cause:** bf16 has no CPU matmul kernel in this Candle build, so the run would load the whole checkpoint and then fail at its first projection
 - **Observed state shown:** --precision bf16 --device cpu (cpu is the device when --device is left out); nothing of {model} was read
-- **Fix:** use --precision f16 for half precision on cpu, or --device metal for bf16
+- **Fix:** use --precision f16 for half precision on cpu, or --device metal or --device cuda for bf16
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/runtime/device.sh::bf16_on_the_cpu_is_refused`
 
@@ -263,15 +274,15 @@ Started through: run only by the functionalities that use it. Uses: `ster.runtim
 - **Code:** `config`, exit 1; retrying unchanged will not help
 - **Test:** `tests/runtime/generate.sh::tokens_the_tokenizer_cannot_spell_are_refused`
 
-## `ster.generate`
+## `ster.runtime.vectors`
 
-read every steering artifact and the system turn before any weight, load the model with its adapter when one is named, and sample a continuation of each prompt
+pair every --vector with the --strength in its place and read each steering artifact, before any weight is mapped
 
-Started through: `ster generate`, `ster request generate`. Uses: `ster.steering.artifact`, `ster.prompts`, `ster.model.load`, `ster.runtime.encode`, `ster.runtime.generate`, `ster.file`. Failure catalogue `ster.generate`: 2 declared cause(s) of its own.
+Started through: run only by the functionalities that use it. Uses: `ster.steering.artifact`. Failure catalogue `ster.runtime.vectors`: 1 declared cause(s) of its own.
 
-<a id="ster-generate-strengths-unpaired"></a>
+<a id="ster-runtime-vectors-strengths-unpaired"></a>
 
-### `ster.generate.strengths-unpaired`
+### `ster.runtime.vectors.strengths-unpaired`
 
 - **What failed:** pairing each --vector with its --strength
 - **Cause:** every --vector needs its own --strength, and this run gave {vectors} vector(s) and {strengths} strength(s); Ster assumes no steering scale
@@ -279,6 +290,12 @@ Started through: `ster generate`, `ster request generate`. Uses: `ster.steering.
 - **Fix:** give one --strength after each --vector, in the same order
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/runtime/generate.sh::a_vector_without_its_strength_is_refused`
+
+## `ster.generate`
+
+read every steering artifact and the system turn before any weight, load the model with its adapter when one is named, and sample a continuation of each prompt
+
+Started through: `ster generate`, `ster request generate`. Uses: `ster.runtime.vectors`, `ster.prompts`, `ster.model.load`, `ster.runtime.encode`, `ster.runtime.generate`, `ster.file`. Failure catalogue `ster.generate`: 1 declared cause(s) of its own.
 
 <a id="ster-generate-system-empty"></a>
 

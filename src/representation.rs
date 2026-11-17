@@ -1,56 +1,27 @@
 //! Fitting one layer's steering direction on the reads of the pairs' two
-//! sides, and scoring a direction by how it orders them. How each fails is
-//! `ster.vector.direction` (src/failures/workflow/direction.rs).
+//! sides, or drawing a random one as a control, and scoring a direction by
+//! how it orders them. How each fails is `ster.vector.direction`
+//! (src/failures/workflow/direction.rs).
 
 use anyhow::Result;
-use serde::Deserialize;
 use wisent_errors::Cause;
 
 use crate::failures::{refuse, workflow::direction as causes};
 
-/// A request body names it as the same word `--method` takes; an unknown one
-/// is refused while the body is read, with the sentence `parse` writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(try_from = "String")]
-pub enum TrainingMethod {
-    Caa,
-    Pca,
-    Logistic,
-}
+mod estimator;
 
-impl TrainingMethod {
-    pub fn parse(value: &str) -> Result<Self> {
-        match value {
-            "caa" => Ok(Self::Caa),
-            "pca" => Ok(Self::Pca),
-            "logistic" => Ok(Self::Logistic),
-            _ => Err(refuse(&causes::METHOD_UNKNOWN, &[("value", value)])),
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Caa => "caa",
-            Self::Pca => "pca",
-            Self::Logistic => "logistic",
-        }
-    }
-}
-
-impl TryFrom<String> for TrainingMethod {
-    type Error = anyhow::Error;
-    fn try_from(value: String) -> Result<Self> {
-        Self::parse(&value)
-    }
-}
+pub use estimator::{TrainingMethod, check_seed};
 
 /// The unit direction `method` fits at `layer` on the reads of the pairs'
-/// positive and negative sides.
+/// positive and negative sides, or, for `random`, draws with `seed` at the
+/// pairs' width. Every method's direction is normalized the same way, so a
+/// strength means the same on all of them.
 pub fn train_direction(
     positive: &[Vec<f32>],
     negative: &[Vec<f32>],
     method: TrainingMethod,
     layer: usize,
+    seed: Option<u64>,
 ) -> Result<Vec<f32>> {
     let step = format!(
         "fitting {} at layer {layer} on {} pairs",
@@ -58,10 +29,12 @@ pub fn train_direction(
         positive.len()
     );
     validate_examples(positive, negative, &step)?;
+    check_seed(method, seed)?;
     let direction = match method {
         TrainingMethod::Caa => mean_difference(positive, negative),
         TrainingMethod::Pca => pca_direction(positive, negative, 64),
         TrainingMethod::Logistic => logistic_direction(positive, negative, 300, 0.1, 1e-4),
+        TrainingMethod::Random => estimator::random_direction(positive[0].len(), seed, layer)?,
     };
     normalize(direction, &step, positive.len())
 }

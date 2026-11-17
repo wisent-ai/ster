@@ -83,6 +83,9 @@ pub fn curve(
                 &read.negative[..size],
                 method,
                 layer,
+                // A curve takes no seed, so `random` is refused here as
+                // `seed-missing`; it is a control for `vector train`.
+                None,
             )?;
             let (accuracy, margin) = evaluate_direction(
                 &read.positive[split..],

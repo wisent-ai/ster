@@ -43,6 +43,12 @@ impl StoredNames {
     /// mapping before it has already read these files, and a refusal is the
     /// caller's `safetensors-unmappable`.
     pub(super) fn read(weights: &[PathBuf]) -> candle_core::Result<Self> {
+        // SAFETY: the same files `BaseLoad::builder` has just mapped, under the
+        // same invariant: nothing truncates or rewrites them while mapped (a
+        // Hub blob is never written once complete, a local directory is the
+        // user's to leave alone). Only the headers' tensor names are read,
+        // and the mapping is dropped when this returns; a file cut short
+        // under it ends the process with SIGBUS.
         let files = unsafe { MmapedSafetensors::multi(weights) }?;
         let stored = files
             .tensors()

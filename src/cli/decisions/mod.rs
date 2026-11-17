@@ -9,58 +9,26 @@ use clap::Subcommand;
 use serde_json::json;
 use ster::{
     ChatChoice, DecideOptions, Precision, RAW_TEMPERATURE, Runtime,
-    decide::{self, Calibration, ExampleSet, FetchOptions, Schema, SynthesizeOptions},
+    decide::{self, Calibration, ExampleSet, Schema, Steering, SynthesizeOptions},
     inference::Inference,
 };
 
-use super::ModelArgs;
+use super::{ModelArgs, vectors::SteeringArgs};
+
+mod fetch;
 
 #[derive(Debug, Subcommand)]
 pub(super) enum DecisionsCommand {
-    /// Read a Hugging Face classification dataset into labelled decisions.
-    Fetch(FetchArgs),
+    /// Read a Hugging Face classification or multiple-choice dataset into labelled decisions.
+    Fetch(fetch::FetchArgs),
     /// Read a JSONL file of {"context", "options", "label"} rows into labelled decisions.
     Import(ImportArgs),
     /// Write labelled decisions with a hosted model through Stado's inference alternatives, one label per state by construction.
     Synthesize(SynthesizeArgs),
     /// Split labelled decisions into a training set and a held-out set.
     Split(SplitArgs),
-    /// Measure a model, with or without an adapter, on held-out labelled decisions.
+    /// Measure a model, with or without an adapter or steering artifacts, on held-out labelled decisions.
     Benchmark(BenchmarkArgs),
-}
-
-#[derive(Debug, clap::Args)]
-pub(super) struct FetchArgs {
-    /// Dataset id on the Hub, such as fancyzhx/ag_news.
-    #[arg(long)]
-    dataset: String,
-    /// The dataset configuration on the Hub; none is assumed.
-    #[arg(long)]
-    config: String,
-    /// The split read, such as train or test; none is assumed.
-    #[arg(long)]
-    split: String,
-    /// The column holding the text each row is about.
-    #[arg(long)]
-    text_field: String,
-    /// The class-label column; its class names become the options.
-    #[arg(long)]
-    label_field: String,
-    /// The id the one question is asked under.
-    #[arg(long)]
-    question_id: String,
-    /// The question asked about every text.
-    #[arg(long)]
-    instructions: String,
-    /// Rows to read.
-    #[arg(long)]
-    count: usize,
-    /// Rows to skip from the start of the split.
-    #[arg(long, default_value_t)]
-    offset: usize,
-    /// Where the labelled decisions are written.
-    #[arg(long)]
-    output: PathBuf,
 }
 
 #[derive(Debug, clap::Args)]
@@ -92,12 +60,12 @@ pub(super) struct SynthesizeArgs {
     /// Attempts allowed per state before an option is given up on; Ster assumes none.
     #[arg(long)]
     retry_multiplier: usize,
-    /// Sampling temperature of the writer; above zero, or every attempt replays one state.
+    /// Sampling temperature of the writer; above zero, or every attempt replays one state. Without it the answering alternative's own applies.
     #[arg(long)]
-    temperature: f64,
-    /// The writer's token budget for one state.
+    temperature: Option<f64>,
+    /// The writer's token budget for one state; without it the answering alternative's own applies.
     #[arg(long)]
-    max_tokens: usize,
+    max_tokens: Option<usize>,
     #[arg(long)]
     output: PathBuf,
 }
@@ -147,11 +115,15 @@ pub(super) struct BenchmarkArgs {
     /// Where the benchmark document is written.
     #[arg(long)]
     output: PathBuf,
+    /// Read every question a second time with these steering artifacts
+    /// added, and report both reads and how many questions they changed.
+    #[command(flatten)]
+    steering: SteeringArgs,
 }
 
 pub(super) fn run(command: DecisionsCommand) -> Result<()> {
     match command {
-        DecisionsCommand::Fetch(args) => fetch(args),
+        DecisionsCommand::Fetch(args) => fetch::fetch(args),
         DecisionsCommand::Import(args) => import(args),
         DecisionsCommand::Synthesize(args) => synthesize(args),
         DecisionsCommand::Split(args) => split(args),
@@ -178,24 +150,6 @@ fn write(path: &Path, role: &str, set: &impl serde::Serialize) -> Result<()> {
             error,
         )
     })
-}
-
-fn fetch(args: FetchArgs) -> Result<()> {
-    let options = FetchOptions {
-        dataset: args.dataset,
-        config: args.config,
-        split: args.split,
-        text_field: args.text_field,
-        label_field: args.label_field,
-        question_id: args.question_id,
-        instructions: args.instructions,
-        count: args.count,
-        offset: args.offset,
-    };
-    let (set, report) = decide::fetch(&options)?;
-    write(&args.output, "the labelled decisions", &set)?;
-    super::answer(&json!({"path": args.output.display().to_string(), "report": report}))?;
-    Ok(())
 }
 
 fn import(args: ImportArgs) -> Result<()> {
@@ -246,6 +200,8 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
         .as_deref()
         .map(|path| Calibration::load(path).map(|document| (path, document)))
         .transpose()?;
+    // Every steering artifact is read before a weight is mapped too.
+    let artifacts = args.steering.artifacts()?;
     let precision = args.precision;
     let device = args.model.device;
     let mut runtime = match args.adapter.as_deref() {
@@ -273,6 +229,8 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
         read.temperature = document.temperature;
     }
     runtime.set_chat_template(args.chat_template)?;
+    args.steering.warn_on_provenance(&runtime);
+    let parts = args.steering.parts(&artifacts);
     let options = decide::BenchmarkOptions {
         read,
         calibration: calibration
@@ -283,6 +241,7 @@ fn benchmark(args: BenchmarkArgs) -> Result<()> {
             .as_deref()
             .map(|path| path.to_string_lossy().into_owned()),
         ece_bins: args.ece_bins,
+        steering: Steering::new(&runtime, &args.steering.vector, &parts)?,
     };
     let report = decide::benchmark(&runtime, &set, &options)?;
     // The report is printed first, so an output the disk refuses does not

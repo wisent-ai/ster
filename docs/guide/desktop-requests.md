@@ -113,7 +113,7 @@ for its own settings:
   count, line, column and the parser's reason. An unknown `device`,
   `precision`, `chatTemplate` or `method` is `body-shape` whose reason is the
   CLI's own sentence, for example
-  `unknown device "tpu"; expected cpu, metal, or cuda at line <L> column <C>`.
+  `unknown device "tpu"; expected cpu, metal, cuda, or cuda:N at line <L> column <C>`.
 - `field-blank`: a field the operation needs, absent or blank, named with
   what it holds and the CLI flag that takes it:
   `checking the decide request: decide requires a model (a Hugging Face Hub id or a checkpoint directory): the request's model field is absent or blank`.

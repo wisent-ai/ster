@@ -21,8 +21,8 @@ impl Durable {
         fingerprint: &BTreeMap<String, Value>,
         position: &Position,
     ) -> Result<()> {
-        // Every caller runs `if options.durable.due(step)` first, and `due`
-        // is `self.checkpoint.as_ref().is_some_and(..)`.
+        // Its one caller, `run::keep`, returns before it unless
+        // `durable.due(step)`, and `due` is `self.checkpoint.as_ref().is_some_and(..)`.
         let (directory, _) = self
             .checkpoint
             .as_ref()

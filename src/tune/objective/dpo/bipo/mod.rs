@@ -32,7 +32,7 @@ use std::sync::PoisonError;
 
 use anyhow::Result;
 use candle_core::{DType, Tensor, Var};
-use candle_nn::{ParamsAdamW, VarMap};
+use candle_nn::VarMap;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 use options::SUBJECT;
@@ -40,9 +40,9 @@ pub use options::{BipoOptions, BipoReport};
 
 use super::super::super::{
     batch,
-    checkpoint::{Position, optimizer::AdamW},
+    checkpoint::Position,
     encode::{encode_pairs, pair_set_label},
-    schedule,
+    run,
 };
 use super::options::{Running, Totals};
 use super::scoring::{Preference, Scored, Summary, reference_scores, step_loss};
@@ -89,18 +89,13 @@ pub fn bipo(
         .unwrap_or_else(PoisonError::into_inner)
         .insert(VECTOR.to_owned(), vector.clone());
     let fingerprint = options.fingerprint();
-    let mut optimizer = AdamW::over(
+    let (mut optimizer, resumed, mut running) = run::start::<Running>(
         &varmap,
-        ParamsAdamW {
-            lr: options.learning_rate,
-            ..Default::default()
-        },
+        options.learning_rate,
+        &options.durable,
+        &fingerprint,
+        SUBJECT,
     )?;
-    let resumed = options.durable.load(&mut optimizer, &fingerprint)?;
-    let mut running: Running = match &resumed {
-        Some(position) => position.running(SUBJECT)?,
-        None => Running::default(),
-    };
     let mut checkpoints = Vec::new();
 
     let lengths: Vec<usize> = encoded
@@ -112,7 +107,7 @@ pub fn bipo(
         batch::steps_per_epoch(encoded.len(), options.batch, options.accumulation) * options.epochs;
     let mut order: Vec<usize> = encoded.iter().enumerate().map(|(slot, _)| slot).collect();
 
-    for (epoch, _) in std::iter::repeat_n((), options.epochs).enumerate() {
+    for epoch in 0..options.epochs {
         // Reseeded per epoch, as dpo is, so a run is reproducible from `seed`
         // alone; the same generator draws each forward's direction.
         let mut rng = StdRng::seed_from_u64(options.seed + epoch as u64);
@@ -139,12 +134,12 @@ pub fn bipo(
         let mut summary = Summary::from(&running.epoch);
 
         for plan in remaining {
-            optimizer.set_learning_rate(schedule(
+            run::schedule_step(
+                &mut optimizer,
                 options.learning_rate,
-                optimizer.rates.len(),
                 total_steps,
                 options.warmup_steps,
-            ));
+            );
             let mut summed: Option<Tensor> = None;
             let mut pair_losses: Vec<f64> = Vec::with_capacity(plan.units);
             for forward in &plan.forwards {
@@ -215,16 +210,15 @@ pub fn bipo(
                 options.epochs,
                 summary.accuracy()
             ));
-            if options.durable.due(step) {
-                let position = Position {
-                    pass: epoch,
-                    step,
-                    within: running.steps.len(),
-                    running: crate::json::value(&running),
-                };
-                options.durable.save(&optimizer, &fingerprint, &position)?;
-                checkpoints.push(step);
-            }
+            run::keep(
+                &options.durable,
+                &optimizer,
+                &fingerprint,
+                epoch,
+                running.steps.len(),
+                &running,
+                &mut checkpoints,
+            )?;
         }
         running.finished.push(Totals::from(&summary));
     }

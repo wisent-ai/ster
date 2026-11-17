@@ -1,9 +1,10 @@
 //! Turning a decision request into the token sequences the model reads, and
 //! reading the answer-letter logits back from one pass over them.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::Result;
+use serde::Serialize;
 
 use super::{
     Options,
@@ -13,12 +14,59 @@ use super::{
 };
 use crate::{
     Runtime,
+    artifact::SteeringArtifact,
     failures::{
         decide::{LETTER_OUTSIDE, QUESTION_TOO_LONG},
         refuse,
     },
+    model::SteeringPlan,
     workflow,
 };
+
+/// One steering artifact a decision run reads the model under, as the
+/// documents it writes record it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Steered {
+    /// The artifact's path, as the caller named it.
+    pub vector: String,
+    pub trait_name: String,
+    pub strength: f64,
+}
+
+/// The steering artifacts a decision run adds to the residual stream, each at
+/// its own strength, and the one plan they sum to: what `ster generate
+/// --vector --strength` adds while sampling, added here at every position of
+/// every question's rows.
+#[derive(Debug, Clone)]
+pub struct Steering {
+    pub plan: SteeringPlan,
+    pub vectors: Vec<Steered>,
+}
+
+impl Steering {
+    /// The steering `parts` add to `runtime`, each artifact named by the path
+    /// at its place in `paths`; `None` for no parts. Every artifact passes
+    /// the checks `ster generate` applies (`Runtime::steering_plan_mixed`).
+    pub fn new(
+        runtime: &Runtime,
+        paths: &[PathBuf],
+        parts: &[(&SteeringArtifact, f64)],
+    ) -> Result<Option<Self>> {
+        let Some(plan) = runtime.steering_plan_mixed(parts)? else {
+            return Ok(None);
+        };
+        let vectors = paths
+            .iter()
+            .zip(parts)
+            .map(|(path, (artifact, strength))| Steered {
+                vector: path.display().to_string(),
+                trait_name: artifact.trait_name.clone(),
+                strength: *strength,
+            })
+            .collect();
+        Ok(Some(Self { plan, vectors }))
+    }
+}
 
 /// One sequence the model reads: which question, which option order, and the
 /// tokens.
@@ -84,10 +132,15 @@ pub fn render_rows(
 /// answer prompt. The shared run is found on the tokens rather than the text,
 /// because a tokenizer may merge across the point where the texts diverge
 /// and a prefix cut by characters could then end mid-token.
+///
+/// `steering`, when given, is added to the residual stream of every one of
+/// those passes, the shared run's and each row's; `None` reads the model as
+/// it is.
 pub(super) fn question_logits(
     runtime: &Runtime,
     request: &Request,
     options: Options,
+    steering: Option<&SteeringPlan>,
 ) -> Result<(Vec<QuestionLogits>, Usage)> {
     let (rows, labels) = render_rows(runtime, request, options.permutations)?;
     // `render_rows` checked the request: at least one question, each shown
@@ -102,7 +155,7 @@ pub(super) fn question_logits(
         rows.len(),
         usage.input_tokens - shared
     ));
-    let distributions = runtime.next_token_logits_after(&first[..shared], &suffixes)?;
+    let distributions = runtime.next_token_logits_after(&first[..shared], &suffixes, steering)?;
     let mut logits: Vec<QuestionLogits> = request
         .questions
         .iter()

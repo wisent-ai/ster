@@ -7,8 +7,9 @@ on [pair sets in the workspace](pair-sets/workspace.md).
 
 
 
-`ster pairs` owns the file the training and evaluation commands read. It has
-five subcommands:
+`ster pairs` owns the file the training and evaluation commands read. These
+subcommands write and audit it (`merge`, `split` and `sample`, below, draw
+sets out of others):
 
 ```text
 ster pairs inspect --pairs <FILE> --dedupe-bits <BITS> --dedupe-bands <BANDS>
@@ -76,13 +77,42 @@ with exit 2 and before any set is read.
 Through `ster request pairs/merge` the body is
 `{"sources": [...], "traitName": "…", "output": "…"}`.
 
+`ster pairs split` and `ster pairs sample` draw seeded sets out of one, for a
+protocol run over several seeds — a direction fitted on one side and scored
+on the other, or a pair-count curve over samples, repeated for each seed:
+
+```text
+ster pairs split --pairs <SET> --holdout <FRACTION> --seed <S> --train <OUT> --test <OUT>
+ster pairs sample --pairs <SET> --count <N> --seed <S> --output <OUT>
+```
+
+Both shuffle the set's pairs with the generator every seeded order in Ster is
+drawn with (`StdRng::seed_from_u64`, as `decisions split` and `pairs import
+--count` draw), so one set and one seed give the same pairs on every run and
+machine. `split` holds out the first `--holdout` fraction of that shuffle,
+rounded to whole pairs, as `--test`, and writes the rest as `--train`;
+`sample` writes the first `--count`. Every drawn set keeps the source's
+trait name and lists its pairs in the source's order, and the answer names
+each file with its pair count, the source's pair count and the seed. Ster
+assumes no fraction, count or seed. An output where a file already is, and
+one path for both sides, are refused before the set is read (exit 2, nothing
+written); a fraction outside zero and one, or one that leaves a side
+without a pair, is refused as `ster vector optimize` refuses it, and a count
+outside 1 to the set's pairs with `--count <N> is not between 1 and the <M>
+pair(s) the set holds` (both exit 2).
+
 A pair set can also arrive from another product, and exactly one produces them:
 Preferences, Wisent's pairwise voting tool. Every choice in one of its text
 categories is already a contrastive pair, so its exporter writes a document
-`--pairs` accepts unchanged, and `ster-pairs` is the only format it will emit:
+`--pairs` accepts unchanged — `{"trait_name": …, "pairs": [{"positive": …,
+"negative": …}]}`, not preference rows — and `ster-pairs` is the only format it
+will emit. Import it into the workspace with `ster workspace import`, or name it
+with `--pairs`; `ster sources discover IMP-STER-19 --path pairs.json` says how
+many pairs it gives without writing anything:
 
 ```bash
 preferences export --arena wisent --category tagline --format ster-pairs > pairs.json
+ster workspace import pairs.json
 ster vector train --model meta-llama/Llama-3.2-1B --pairs pairs.json --output taste.ster.json
 ```
 
@@ -149,7 +179,7 @@ fails](errors/pairs-import.md). Every row is read unless `--count` keeps fewer.
 
 `--benchmark preference` reads preference rows — `prompt`, `chosen` and
 `rejected`, the shape TRL's DPO trainer and the Hugging Face preference
-datasets publish, and what the Preferences product exports — as JSON Lines or
+datasets publish — as JSON Lines or
 one JSON list. The chosen answer is the positive side and the rejected one the
 negative, both asked the row's prompt. A side given in the conversational form
 (a list of `{"role", "content"}` messages) is its last message's content, and

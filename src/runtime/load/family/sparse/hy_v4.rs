@@ -118,7 +118,7 @@ pub(in crate::runtime::load::family) fn hy_v4(
             Some(stated) => stated,
             None => HY_V4_STREAMS,
         };
-        if std::num::NonZeroUsize::new(streams).is_none() {
+        if streams == 0 {
             refused!(
                 OutOfRange,
                 in raw,
