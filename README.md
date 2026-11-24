@@ -274,11 +274,19 @@ Ster is pre-1.0; artifact schema changes and supported-model expansion follow it
 
 ## Import
 
-The import plan's adapters for Ster: IMP-STER-01 to 20, listed by `ster sources
-[--all]` (example sets read by `tune sft --examples`, preference rows by
-`pairs import --benchmark preference`, checkpoints by `--model`, the rest named
-with why) and read one file at a time by `ster sources discover <adapter>
---path <file>`; `ster doctor --check import-sources` names what waits
+Ster's import adapters, each named for the source it reads, are listed by `ster
+sources [--all]`: example sets read by `tune sft --examples` (`openai-fine-tuning`,
+`sharegpt`, `alpaca`), preference rows read by `pairs import --benchmark
+preference` (`hugging-face-preferences`, `dpo`, `preferences-comparisons`),
+checkpoints read by `--model` (`transformers-checkpoint`, `gguf`,
+`hugging-face-cache`), and the rest named with why (`parquet-or-arrow`,
+`repeng`, `steering-vectors`, `transformerlens`, `nnsight`, `sae-lens`,
+`mlx-model`, `pytorch-checkpoint`, `peft-lora-adapter`, `mlx-lora-adapter`,
+`evaluator-verdicts`). `ster sources discover <adapter> --path <file>` reads
+one file at a time; an adapter named by the import plan's requirement number it
+was first listed under is refused naming its name
+(`ster.sources.sources-adapter-renamed`). `ster doctor --check import-sources`
+names what waits
 outside. `ster sources share yes | no` answers, once, whether each discovery
 reports `ster.sources.discovered` (the adapter, whether the file is that source,
 its examples or pairs rounded into buckets, under a random subject; never a

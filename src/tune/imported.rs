@@ -2,12 +2,12 @@
 //! finds a JSON list or JSON Lines instead of `{"examples": [...]}`. Each row's
 //! form is read from the fields its format declares:
 //!
-//! - OpenAI's fine-tuning JSONL (IMP-STER-03): `messages`, each with a `role`
+//! - OpenAI's fine-tuning JSONL (`openai-fine-tuning`): `messages`, each with a `role`
 //!   (`system`, `user`, `assistant`) and its `content`; the legacy rows of
 //!   `prompt` and `completion` are an example as they stand.
-//! - ShareGPT (04): `conversations`, each turn's `from` (`system`, `human`,
+//! - ShareGPT (`sharegpt`): `conversations`, each turn's `from` (`system`, `human`,
 //!   `gpt`) and its `value`.
-//! - Alpaca (05): `instruction`, an optional `input` and `output`; the prompt is
+//! - Alpaca (`alpaca`): `instruction`, an optional `input` and `output`; the prompt is
 //!   the instruction followed, after a blank line, by the input when the row has
 //!   one, since an Alpaca row states both as the request.
 //!
