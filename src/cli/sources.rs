@@ -1,11 +1,13 @@
 //! `ster sources [--all] | ster sources discover <adapter> --path <file>`: the data other
-//! tools keep that Ster reads, one adapter each (`IMP-STER-<NN>`), under the import
-//! guidelines' contract. An example set another trainer published (03 OpenAI, 04 ShareGPT,
-//! 05 Alpaca) is read by `tune sft --examples`; preference rows (01 Hugging Face, 06 DPO, 19
-//! Preferences) by `pairs import --benchmark preference`, which writes a pair set. `discover`
-//! reads a file as that command would and says how many examples or pairs it gives, or why
-//! it is not that source; nothing is written, so the writing verbs are those commands. The
-//! model checkpoints `--model` loads (12, 13, 16) are in `models`.
+//! tools keep that Ster reads, one adapter each, named for the source it reads, under the
+//! import guidelines' contract. An example set another trainer published
+//! (`openai-fine-tuning`, `sharegpt`, `alpaca`) is read by `tune sft --examples`; preference
+//! rows (`hugging-face-preferences`, `dpo`, `preferences-comparisons`) by `pairs import
+//! --benchmark preference`, which writes a pair set. `discover` reads a file as that command
+//! would and says how many examples or pairs it gives, or why it is not that source; nothing
+//! is written, so the writing verbs are those commands. The model checkpoints `--model`
+//! loads are in `models`. An adapter named by the import plan's requirement number it was
+//! once listed under is refused, naming the adapter's name.
 
 mod models;
 mod named;
@@ -15,7 +17,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
-use ster::failures::{refuse, sources::{ADAPTER_UNKNOWN, SHARE_UNKEPT}};
+use ster::failures::{refuse, sources::{ADAPTER_RENAMED, ADAPTER_UNKNOWN, SHARE_UNKEPT}};
 
 #[derive(Debug, Args)]
 pub(super) struct SourcesArgs {
@@ -42,23 +44,48 @@ enum SourcesCommand {
     },
 }
 
-/// Each adapter: its id, its source and whether it is preference rows (else an example set).
+/// Each adapter: its name, its source and whether it is preference rows (else an example set).
 const ADAPTERS: &[(&str, &str, bool)] = &[
-    ("IMP-STER-01", "a Hugging Face preference dataset (prompt, chosen, rejected)", true),
-    ("IMP-STER-03", "OpenAI's fine-tuning JSONL (messages, or prompt and completion)", false),
-    ("IMP-STER-04", "ShareGPT conversations", false),
-    ("IMP-STER-05", "Alpaca (instruction, input, output)", false),
-    ("IMP-STER-06", "DPO rows (prompt, chosen, rejected), as TRL's DPO trainer reads them", true),
-    ("IMP-STER-19", "Preferences' exported comparisons (prompt, chosen, rejected)", true),
+    ("hugging-face-preferences", "a Hugging Face preference dataset (prompt, chosen, rejected)", true),
+    ("openai-fine-tuning", "OpenAI's fine-tuning JSONL (messages, or prompt and completion)", false),
+    ("sharegpt", "ShareGPT conversations", false),
+    ("alpaca", "Alpaca (instruction, input, output)", false),
+    ("dpo", "DPO rows (prompt, chosen, rejected), as TRL's DPO trainer reads them", true),
+    ("preferences-comparisons", "Preferences' exported comparisons (prompt, chosen, rejected)", true),
 ];
 
-fn row(&(id, source, preference): &(&str, &str, bool)) -> Value {
+/// The import plan's requirement number each adapter was listed under before adapters had
+/// names, and the adapter's name: `discover` refuses the number, naming the name.
+const RETIRED: &[(&str, &str)] = &[
+    ("IMP-STER-01", "hugging-face-preferences"),
+    ("IMP-STER-02", "parquet-or-arrow"),
+    ("IMP-STER-03", "openai-fine-tuning"),
+    ("IMP-STER-04", "sharegpt"),
+    ("IMP-STER-05", "alpaca"),
+    ("IMP-STER-06", "dpo"),
+    ("IMP-STER-07", "repeng"),
+    ("IMP-STER-08", "steering-vectors"),
+    ("IMP-STER-09", "transformerlens"),
+    ("IMP-STER-10", "nnsight"),
+    ("IMP-STER-11", "sae-lens"),
+    ("IMP-STER-12", "transformers-checkpoint"),
+    ("IMP-STER-13", "gguf"),
+    ("IMP-STER-14", "mlx-model"),
+    ("IMP-STER-15", "pytorch-checkpoint"),
+    ("IMP-STER-16", "hugging-face-cache"),
+    ("IMP-STER-17", "peft-lora-adapter"),
+    ("IMP-STER-18", "mlx-lora-adapter"),
+    ("IMP-STER-19", "preferences-comparisons"),
+    ("IMP-STER-20", "wisent-evaluators"),
+];
+
+fn row(&(name, source, preference): &(&str, &str, bool)) -> Value {
     let read_by = if preference {
         "ster pairs import --benchmark preference <file> …"
     } else {
         "ster tune sft --examples <file> …"
     };
-    json!({"adapter": id, "source": source, "kind": "E", "read_by": read_by, "found": false})
+    json!({"adapter": name, "source": source, "kind": "E", "read_by": read_by, "found": false})
 }
 
 /// The pairs preference rows give and how many rows give none: a JSON list, else JSON Lines.
@@ -89,18 +116,21 @@ pub(super) fn run(args: SourcesArgs) -> Result<()> {
         return super::answer_document(&json!({"adapters": adapters, "all": args.all, "sharing": super::sharing::question()}));
     };
     let shown = path.display().to_string();
-    if let Some(model) = models::MODELS.iter().find(|(id, _)| *id == adapter) {
+    if let Some(model) = models::MODELS.iter().find(|(name, _)| *name == adapter) {
         return super::answer_document(&models::discover(model, &path));
     }
-    if let Some(listed) = named::NAMED.iter().find(|(id, ..)| *id == adapter) {
+    if let Some(listed) = named::NAMED.iter().find(|(name, ..)| *name == adapter) {
         return super::answer_document(&named::row(listed));
     }
-    let Some(found) = ADAPTERS.iter().find(|(id, ..)| *id == adapter) else {
+    let Some(found) = ADAPTERS.iter().find(|(name, ..)| *name == adapter) else {
+        if let Some((number, name)) = RETIRED.iter().find(|(number, _)| number.eq_ignore_ascii_case(&adapter)) {
+            return Err(refuse(&ADAPTER_RENAMED, &[("adapter", &adapter), ("path", &shown), ("number", number), ("name", name)]));
+        }
         let known: Vec<&str> = ADAPTERS
             .iter()
-            .map(|(id, ..)| *id)
-            .chain(models::MODELS.iter().map(|(id, _)| *id))
-            .chain(named::NAMED.iter().map(|(id, ..)| *id))
+            .map(|(name, ..)| *name)
+            .chain(models::MODELS.iter().map(|(name, _)| *name))
+            .chain(named::NAMED.iter().map(|(name, ..)| *name))
             .collect();
         return Err(refuse(&ADAPTER_UNKNOWN, &[("adapter", &adapter), ("path", &shown), ("known", &known.join(", "))]));
     };
@@ -143,7 +173,7 @@ pub(super) fn doctor(check: DoctorCheck) -> Result<()> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/huggingface/hub")));
     let in_place: Vec<Value> = cache
         .filter(|cache| cache.is_dir())
-        .and_then(|cache| models::MODELS.iter().find(|(id, _)| *id == "IMP-STER-16").map(|model| models::discover(model, &cache)))
+        .and_then(|cache| models::MODELS.iter().find(|(name, _)| *name == models::CACHE).map(|model| models::discover(model, &cache)))
         .into_iter()
         .collect();
     super::answer_document(&json!({

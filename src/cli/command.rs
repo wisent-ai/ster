@@ -36,8 +36,8 @@ pub(super) enum Command {
     /// each as {"messages": [...]}: the rollout tune grpo --turns trains on,
     /// with no gradient.
     Converse(ConverseArgs),
-    /// List the data other tools keep that Ster reads, one adapter each
-    /// (IMP-STER-<NN>), or say how many examples or pairs one file gives.
+    /// List the data other tools keep that Ster reads, one adapter each,
+    /// named for its source, or say how many examples or pairs one file gives.
     Sources(SourcesArgs),
     /// Import existing contrastive data during first use, or replay the walkthrough.
     Onboarding(OnboardingArgs),

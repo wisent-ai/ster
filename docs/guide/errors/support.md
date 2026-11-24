@@ -14,4 +14,15 @@ Everything below the marker is
 
 file a report with Ster's support from this installation and read the replies
 
-Started through: `ster support report`, `ster support status`, `ster request support/report`, `ster request support/status`. Uses: `wisent-errors.support.report`, `wisent-errors.support.status`. Failure catalogue `ster.support`: 0 declared cause(s) of its own.
+Started through: `ster support report`, `ster support status`, `ster request support/report`, `ster request support/status`. Uses: `wisent-errors.support.report`, `wisent-errors.support.status`. Failure catalogue `ster.support`: 1 declared cause(s) of its own.
+
+<a id="ster-support-envelope-undeclared"></a>
+
+### `ster.support.envelope-undeclared`
+
+- **What failed:** {step}
+- **Cause:** wisent-errors' support client handed back a refusal naming no cause its functionalities declare, so its id, exit status and fix are unknown here
+- **Observed state shown:** failure point {point}, code {code}, cause {named}: {detail}; its fix: {remedy}
+- **Fix:** follow the fix it gives; build Ster against the wisent-errors revision whose support client declares that cause
+- **Code:** `config`, exit 1; retrying unchanged will not help
+- **Test:** `tests/support/support.sh::an_envelope_naming_no_declared_cause_is_refused`
