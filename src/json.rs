@@ -15,8 +15,8 @@ use serde_json::Value;
 /// What every expect below rests on, quoted from the module comment.
 const PLAIN: &str = "src/ holds no `impl Serialize` and no map keyed by anything but a string or an integer";
 
-/// `value` as a JSON value.
-pub fn value<T: Serialize + ?Sized>(value: &T) -> Value {
+/// `value`, owned or borrowed, as a JSON value.
+pub fn value<T: Serialize>(value: T) -> Value {
     serde_json::to_value(value).expect(PLAIN)
 }
 

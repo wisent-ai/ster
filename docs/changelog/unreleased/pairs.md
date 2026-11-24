@@ -3,23 +3,32 @@
 Part of the [changelog](../../../CHANGELOG.md).
 
 - `ster sources [--all]` lists the data other tools keep that Ster reads, one
-  adapter each: example sets for `tune sft --examples` (IMP-STER-03 OpenAI,
-  04 ShareGPT, 05 Alpaca) and preference rows for `pairs import --benchmark
-  preference` (01 Hugging Face, 06 DPO, 19 Preferences). `ster sources
-  discover <adapter> --path <file>` reads a file as that command would and says
-  how many examples or pairs it gives, and how many rows give none, writing
-  nothing; an adapter Ster does not have is refused
-  (`ster.sources.sources-adapter-unknown`). `tests/sources/sources.sh`
-  provokes it. The model checkpoints `--model` loads are listed too: a
-  Transformers directory (12), a GGUF file beside its base model's config and
-  tokenizer (13) and the Hugging Face hub cache (16). `discover` resolves a
-  directory as `--model` does, saying how many weight files it has or why it
-  is not that adapter's, and lists the Hub ids a hub cache directory keeps.
-  Parquet or Arrow files, other steering libraries' vectors (repeng,
-  steering-vectors, TransformerLens, nnsight, SAE Lens), MLX and PyTorch
-  weights, PEFT and MLX LoRA adapters and wisent-evaluators' judgments (02,
-  07–11, 14, 15, 17, 18, 20) are listed as sources no command reads, each with
-  why and what to do; `discover` of one answers that row.
+  adapter each, named for its source: example sets for `tune sft --examples`
+  (`openai-fine-tuning`, `sharegpt`, `alpaca`) and preference rows for `pairs
+  import --benchmark preference` (`hugging-face-preferences`, `dpo`,
+  `preferences-comparisons`). `ster sources discover <adapter> --path <file>`
+  reads a file as that command would and says how many examples or pairs it
+  gives, and how many rows give none, writing nothing; an adapter Ster does
+  not have is refused (`ster.sources.sources-adapter-unknown`). The model
+  checkpoints `--model` loads are listed too: a Transformers directory
+  (`transformers-checkpoint`), a GGUF file beside its base model's config and
+  tokenizer (`gguf`) and the Hugging Face hub cache (`hugging-face-cache`).
+  `discover` resolves a directory as `--model` does, saying how many weight
+  files it has or why it is not that adapter's, and lists the Hub ids a hub
+  cache directory keeps. Parquet or Arrow files (`parquet-or-arrow`), other
+  steering libraries' vectors (`repeng`, `steering-vectors`,
+  `transformerlens`, `nnsight`, `sae-lens`), MLX and PyTorch weights
+  (`mlx-model`, `pytorch-checkpoint`), PEFT and MLX LoRA adapters
+  (`peft-lora-adapter`, `mlx-lora-adapter`) and wisent-evaluators' judgments
+  (`evaluator-verdicts`) are listed as sources no command reads, each with why
+  and what to do; `discover` of one answers that row. Each listing row, each
+  discovery's `adapter` and each `ster.sources.discovered` event names the
+  adapter by these names. An adapter named by the import plan's requirement
+  number it was first listed under (`IMP-STER-06`, in any case) is refused
+  naming its name (`ster.sources.sources-adapter-renamed`, exit `2`); no
+  number is accepted. `tests/sources/discover.sh` provokes both refusals, and
+  `tests/sources/listing.sh` and `tests/sources/share.sh` test the listing and
+  the sharing answer, each in a scratch home and configuration of its own.
 
 - Every refusal of the workspace and of a pair-set file is a declared cause
   (wisent-errors): it says what failed, why, the state observed and the fix,
@@ -104,7 +113,7 @@ Part of the [changelog](../../../CHANGELOG.md).
   reported as `problem <n>`, where it was `(no question_id)`.
   `tests/pairs/import-rows.sh` provokes each cause.
 - `ster pairs import --benchmark preference` writes a pair set from preference
-  rows (IMP-STER-06, 01, 19): `prompt`, `chosen` and `rejected` as TRL's DPO
+  rows (`dpo`, `hugging-face-preferences`, `preferences-comparisons`): `prompt`, `chosen` and `rejected` as TRL's DPO
   trainer and the Hugging Face preference datasets publish them, as strings
   or in the conversational message form; the chosen answer is the positive
   side. A row without text on a side is skipped as
@@ -119,7 +128,7 @@ Part of the [changelog](../../../CHANGELOG.md).
   Integrations with `STER_STADO_INTEGRATION_TOKEN`; `ster sources` asks with
   exactly that event until then, each discovery answers `reported`, and an
   answer that cannot be written is `ster.sources.sources-share-unkept`
-  (`tests/sources/sources.sh`).
+  (`tests/sources/share.sh`).
 - JSON Lines is read by wisent-formats' one JSON Lines reader, which Zrodlo
   shares, in place of Ster's four copies: example sets for `tune sft
   --examples`, preference rows `ster sources discover` reads, multiple-choice

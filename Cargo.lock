@@ -2596,6 +2596,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2680,14 +2686,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "stado-program"
+version = "0.1.0"
+source = "git+https://github.com/wisent-ai/stado#4248f7e8651c69fe1882d1c11d4e817ca988b40a"
+
+[[package]]
 name = "stado-wait"
-version = "0.2.0"
-source = "git+https://github.com/wisent-ai/stado#61a0eb0fec294a8def0dc4c89789aa80ca092c5d"
+version = "0.2.3"
+source = "git+https://github.com/wisent-ai/stado#4248f7e8651c69fe1882d1c11d4e817ca988b40a"
 dependencies = [
  "chrono",
  "libc",
  "reqwest",
- "sha2",
 ]
 
 [[package]]
@@ -3251,6 +3261,7 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 
@@ -3714,14 +3725,15 @@ dependencies = [
 
 [[package]]
 name = "wisent-onboarding-client"
-version = "0.2.0"
-source = "git+https://github.com/wisent-ai/echo-web#407fe7a17e46fc52cefc39472591e621ada0a6dc"
+version = "0.3.7"
+source = "git+https://github.com/wisent-ai/echo-web#4a9bf09034e45e2151faed317e231c7c3e4e34b3"
 dependencies = [
  "async-trait",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "stado-program",
  "stado-wait",
  "thiserror 2.0.20",
  "time",
