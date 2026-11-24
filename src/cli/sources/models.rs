@@ -1,6 +1,7 @@
 //! The model checkpoints Ster loads, as sources: a Transformers checkpoint directory
-//! (IMP-STER-12), a llama.cpp GGUF file beside its base model's config and tokenizer (13)
-//! and the Hugging Face hub cache (16). Each is read by `--model` of every command that
+//! (`transformers-checkpoint`), a llama.cpp GGUF file beside its base model's config and
+//! tokenizer (`gguf`) and the Hugging Face hub cache (`hugging-face-cache`). Each is read by
+//! `--model` of every command that
 //! loads a model, which takes a local directory or a Hub id, reusing the files the cache
 //! already holds for that id. `discover` resolves a directory as `--model` does, reading
 //! its files' names only, or lists the models a hub cache keeps; nothing is written.
@@ -11,20 +12,23 @@ use serde_json::{Value, json};
 use ster::runtime::{Checkpoint, Layout};
 
 pub(super) const MODELS: &[(&str, &str)] = &[
-    ("IMP-STER-12", "a Transformers checkpoint directory (config.json, its tokenizer, *.safetensors)"),
-    ("IMP-STER-13", "a llama.cpp GGUF file beside its base model's config.json and tokenizer"),
-    ("IMP-STER-16", "the models the Hugging Face hub cache keeps (~/.cache/huggingface/hub)"),
+    ("transformers-checkpoint", "a Transformers checkpoint directory (config.json, its tokenizer, *.safetensors)"),
+    (GGUF, "a llama.cpp GGUF file beside its base model's config.json and tokenizer"),
+    (CACHE, "the models the Hugging Face hub cache keeps (~/.cache/huggingface/hub)"),
 ];
 
-const CACHE: &str = "IMP-STER-16";
+/// The adapter that lists the models a Hugging Face hub cache directory keeps.
+pub(super) const CACHE: &str = "hugging-face-cache";
+/// The adapter that resolves a directory holding a GGUF file.
+const GGUF: &str = "gguf";
 
-pub(super) fn row(&(id, source): &(&str, &str)) -> Value {
-    let read_by = if id == CACHE {
+pub(super) fn row(&(name, source): &(&str, &str)) -> Value {
+    let read_by = if name == CACHE {
         "--model <org/name> of any command that loads a model, reusing the files the cache holds"
     } else {
         "--model <directory> of any command that loads a model"
     };
-    json!({"adapter": id, "source": source, "kind": "F", "read_by": read_by, "found": false})
+    json!({"adapter": name, "source": source, "kind": "F", "read_by": read_by, "found": false})
 }
 
 /// The Hub ids a hub cache directory keeps (`models--<org>--<name>`) whose snapshot holds
@@ -71,7 +75,7 @@ pub(super) fn discover(found: &(&str, &str), path: &Path) -> Value {
     let shown = path.display().to_string();
     match Checkpoint::resolve(&shown, None) {
         Ok(checkpoint) => {
-            let wanted = if found.0 == "IMP-STER-13" { Layout::Gguf } else { Layout::Transformers };
+            let wanted = if found.0 == GGUF { Layout::Gguf } else { Layout::Transformers };
             let is_wanted = checkpoint.layout == wanted || (wanted == Layout::Transformers && checkpoint.layout == Layout::Mistral);
             if is_wanted {
                 answer["found"] = json!(true);
