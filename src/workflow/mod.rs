@@ -24,7 +24,7 @@ mod parity;
 mod project;
 mod train;
 
-pub use compare::{CompareOptions, ComparisonReport, compare};
+pub use compare::{CompareOptions, ComparisonReport, check_counts, compare};
 pub use curve::{CurvePoint, CurveReport, Enough, check_sizes, curve};
 pub use evaluate::{EvaluationReport, LayerEvaluation, evaluate};
 pub use extract::{PromptSet, extract};

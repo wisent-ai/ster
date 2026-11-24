@@ -1,10 +1,11 @@
 # How listing Ster's sources fails
 
 Every declared way `ster sources` fails: it lists the data other tools keep
-that Ster reads, one adapter each, and reads one file as its adapter's
-command would. A file that is not that source is answered with why, so the
-refusals are an adapter Ster does not have and an answer to `sources share`
-that cannot be kept. How a refusal reads and which status it exits with is on
+that Ster reads, one adapter each, named for its source, and reads one file as
+its adapter's command would. A file that is not that source is answered with
+why, so the refusals are an adapter Ster does not have, an adapter named by the
+import plan's requirement number it was first listed under, and an answer to
+`sources share` that cannot be kept. How a refusal reads and which status it exits with is on
 [How Ster fails](../errors.md).
 
 Everything below the marker is
@@ -15,9 +16,9 @@ differs from it.
 <!-- generated: ster errors list --markdown -->
 ## `ster.sources`
 
-list the data other tools keep that Ster reads, one adapter each (IMP-STER-<NN>), and say how many examples or pairs one file gives
+list the data other tools keep that Ster reads, one adapter each, named for its source, and say how many examples or pairs one file gives
 
-Started through: `ster sources`, `ster sources discover`, `ster sources share`. Uses: none. Failure catalogue `ster.sources`: 2 declared cause(s) of its own.
+Started through: `ster sources`, `ster sources discover`, `ster sources share`. Uses: none. Failure catalogue `ster.sources`: 3 declared cause(s) of its own.
 
 <a id="ster-sources-sources-adapter-unknown"></a>
 
@@ -29,6 +30,17 @@ Started through: `ster sources`, `ster sources discover`, `ster sources share`. 
 - **Fix:** name one of the adapters `ster sources` lists
 - **Code:** `config`, exit 2; retrying unchanged will not help
 - **Test:** `tests/sources/sources.sh::an_unknown_adapter_is_refused`
+
+<a id="ster-sources-sources-adapter-renamed"></a>
+
+### `ster.sources.sources-adapter-renamed`
+
+- **What failed:** discovering {path} as {adapter}
+- **Cause:** {adapter} is the import plan's requirement number of an adapter, and ster's adapters are named, not numbered
+- **Observed state shown:** {number} stands for the adapter named {name}
+- **Fix:** name it {name}: `ster sources discover {name} --path {path}`
+- **Code:** `config`, exit 2; retrying unchanged will not help
+- **Test:** `tests/sources/sources.sh::an_adapter_named_by_its_requirement_number_is_refused_naming_its_name`
 
 <a id="ster-sources-sources-share-unkept"></a>
 
