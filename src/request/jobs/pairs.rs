@@ -12,7 +12,7 @@ use ster::{
     pairs::{self, InspectOptions, SynthesisOptions, quality::dedupe::DedupeOptions},
 };
 
-use super::super::JobOutcome;
+use super::super::job::JobOutcome;
 use super::super::requests::{
     PairsImportRequest, PairsInspectRequest, PairsMergeRequest, PairsSaveRequest,
     PairsSynthesizeRequest, WorkspaceImportPairsRequest, WorkspacePairSetRequest,

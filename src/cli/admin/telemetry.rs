@@ -197,7 +197,11 @@ pub(crate) fn finish(started: &Started, error: Option<&anyhow::Error>, status: i
     }
     telemetry.command(&started.command, status, started.at.elapsed());
     match std::env::current_exe() {
-        Ok(program) => telemetry.spawn_flush(&program, &["telemetry", "flush"]),
+        // A flush that cannot start is said on standard error by spawn_flush
+        // itself, and its events stay queued for the next run's flush.
+        Ok(program) => {
+            telemetry.spawn_flush(&program, &["telemetry", "flush"]);
+        }
         Err(error) => eprintln!(
             "ster: {}",
             ster::failures::refuse(
