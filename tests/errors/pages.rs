@@ -20,7 +20,9 @@ fn every_error_page_is_its_catalogue_rendered() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let catalogue = operations();
     let mut pages: Vec<&str> = Vec::new();
-    for operation in &catalogue {
+    // The functionalities Ster uses from wisent-errors are documented on
+    // wisent-errors' own pages; each of Ster's own names a page here.
+    for operation in catalogue.iter().filter(|operation| operation.id.starts_with("ster.")) {
         let page = operation.docs.strip_prefix(BLOB).unwrap_or_else(|| {
             panic!(
                 "{} names its page as {}, which is not a page of this repository",

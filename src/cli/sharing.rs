@@ -21,7 +21,7 @@ use serde_json::{json, Map, Value};
 const PRODUCT: &str = "ster";
 const TOKEN: &str = "STER_STADO_INTEGRATION_TOKEN";
 /// The adapter the question's example event names.
-const EXAMPLE: &str = "IMP-STER-06";
+const EXAMPLE: &str = "dpo";
 
 fn kept() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
