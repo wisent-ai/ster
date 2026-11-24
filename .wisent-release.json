@@ -53,5 +53,43 @@
       "extract": true
     }
   },
-  "deliveries": []
+  "deliveries": [
+    {
+      "name": "staging",
+      "platform": "darwin-arm64",
+      "argv": [
+        "stado",
+        "release",
+        "stage"
+      ],
+      "required": true,
+      "secret_env": {}
+    },
+    {
+      "name": "staging-linux-amd64",
+      "platform": "linux-amd64",
+      "argv": [
+        "stado",
+        "release",
+        "stage"
+      ],
+      "required": true,
+      "secret_env": {}
+    }
+  ],
+  "staging": {
+    "install": [
+      "sh",
+      "release/staging-install.sh"
+    ],
+    "journeys": [
+      {
+        "name": "release",
+        "argv": [
+          "sh",
+          "tests/staging/update.sh"
+        ]
+      }
+    ]
+  }
 }
